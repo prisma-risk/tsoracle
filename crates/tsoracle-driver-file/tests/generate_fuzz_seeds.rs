@@ -48,6 +48,10 @@ fn generate_record_roundtrip_seeds() {
     // harness reads via from_le_bytes to drive encode/decode roundtrips.
     write_seed(target, "seed_u64_zero", &0u64.to_le_bytes());
     write_seed(target, "seed_u64_one", &1u64.to_le_bytes());
-    write_seed(target, "seed_u64_typical", &1_700_000_000_000u64.to_le_bytes());
+    write_seed(
+        target,
+        "seed_u64_typical",
+        &1_700_000_000_000u64.to_le_bytes(),
+    );
     write_seed(target, "seed_u64_max", &u64::MAX.to_le_bytes());
 }
