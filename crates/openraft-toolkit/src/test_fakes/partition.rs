@@ -27,7 +27,7 @@ impl<NodeId> PartitionController<NodeId>
 where
     NodeId: Eq + Hash + Copy,
 {
-    /// Build a controller with no blocks (every reachable).
+    /// Build a controller with no blocks (everything reachable).
     pub fn new() -> Self {
         Self {
             isolated: RwLock::new(HashSet::new()),
