@@ -31,3 +31,10 @@ declare_raft_types_ext! {
         AppDataResponse = TestAppliedState,
         SnapshotData    = std::io::Cursor<Vec<u8>>,
 }
+
+/// Concrete `LeaderId` / `CommittedLeaderId` type used by `TestTypeConfig`.
+///
+/// `declare_raft_types_ext!` pins `LeaderId = leader_id_adv::LeaderId<Term, NodeId>`;
+/// matching the macro's choice keeps test type-hints aligned with the macro's defaults.
+#[allow(dead_code)]
+pub type TestLeaderId = openraft::impls::leader_id_adv::LeaderId<u64, u64>;

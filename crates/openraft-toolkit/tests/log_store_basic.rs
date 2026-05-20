@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
+use openraft::storage::{RaftLogReader, RaftLogStorage};
+use openraft::{LogId, Vote};
 use openraft_toolkit::{Flat, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 
 mod common;
-use common::TestTypeConfig;
+use common::{TestLeaderId, TestTypeConfig};
 
 const LOG_CF: &str = "raft_log";
 const META_CF: &str = "raft_meta";
@@ -43,4 +45,49 @@ fn open_fails_when_log_cf_missing() {
     assert!(
         matches!(err, openraft_toolkit::RocksdbLogStoreError::MissingColumnFamily(ref s) if s == LOG_CF)
     );
+}
+
+#[tokio::test]
+async fn save_and_read_vote_roundtrips() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+
+    let vote: Vote<TestLeaderId> = Vote::new_committed(7, 3);
+    store.save_vote(&vote).await.unwrap();
+    let got = store.read_vote().await.unwrap();
+    assert_eq!(got, Some(vote));
+}
+
+#[tokio::test]
+async fn empty_store_log_state_is_empty() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+
+    let state = store.get_log_state().await.unwrap();
+    assert!(state.last_purged_log_id.is_none());
+    assert!(state.last_log_id.is_none());
+}
+
+#[tokio::test]
+async fn save_and_read_committed_roundtrips() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+
+    assert!(store.read_committed().await.unwrap().is_none());
+
+    let log_id: LogId<TestLeaderId> = LogId::new(
+        TestLeaderId {
+            term: 7,
+            node_id: 3,
+        },
+        2,
+    );
+    store.save_committed(Some(log_id)).await.unwrap();
+    assert_eq!(store.read_committed().await.unwrap(), Some(log_id));
 }

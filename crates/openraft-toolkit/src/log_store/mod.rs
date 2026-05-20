@@ -1,7 +1,6 @@
 //! RocksDB-backed `RaftLogStorage` implementation.
 
 pub mod key_space;
-#[allow(dead_code)]
 mod meta;
 
 pub use key_space::{Flat, GroupPrefixed, KeySpace, MetaLabel};
@@ -20,11 +19,26 @@ pub enum RocksdbLogStoreError {
 }
 
 use std::fmt;
+use std::fmt::Debug;
+use std::io;
 use std::marker::PhantomData;
+use std::ops::Bound;
+use std::ops::RangeBounds;
 use std::sync::Arc;
 
+use openraft::LogIdOptionExt;
+use openraft::OptionalSend;
+use openraft::RaftLogReader;
 use openraft::RaftTypeConfig;
-use rocksdb::{BoundColumnFamily, DB};
+use openraft::entry::RaftEntry;
+use openraft::storage::IOFlushed;
+use openraft::storage::LogState;
+use openraft::storage::RaftLogStorage;
+use openraft::type_config::alias::LogIdOf;
+use openraft::type_config::alias::VoteOf;
+use rocksdb::{BoundColumnFamily, DB, IteratorMode, WriteBatch, WriteOptions};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// RocksDB-backed `RaftLogStorage` implementation.
 ///
@@ -34,6 +48,11 @@ use rocksdb::{BoundColumnFamily, DB};
 ///   [`GroupPrefixed`] for multi-group deployments that multiplex N raft
 ///   instances onto shared column families.
 ///
+/// `Arc<DB>` is `Clone`, so the store can be cloned cheaply to satisfy
+/// `RaftLogStorage::LogReader = Self`. All rocksdb operations take `&DB`, so
+/// the `&mut self` on storage methods is purely a trait shape — no internal
+/// locking required.
+///
 /// Construct via [`RocksdbLogStore::open`], which validates that the two
 /// column-family names you pass already exist on the database.
 pub struct RocksdbLogStore<C, K>
@@ -41,7 +60,6 @@ where
     C: RaftTypeConfig,
     K: KeySpace,
 {
-    #[allow(dead_code)]
     db: Arc<DB>,
     log_cf: String,
     meta_cf: String,
@@ -78,18 +96,38 @@ where
         })
     }
 
-    #[allow(dead_code)]
     pub(super) fn log_cf_handle(&self) -> Arc<BoundColumnFamily<'_>> {
         self.db
             .cf_handle(&self.log_cf)
             .expect("log CF was validated at open")
     }
 
-    #[allow(dead_code)]
     pub(super) fn meta_cf_handle(&self) -> Arc<BoundColumnFamily<'_>> {
         self.db
             .cf_handle(&self.meta_cf)
             .expect("meta CF was validated at open")
+    }
+
+    fn write_sync_opts() -> WriteOptions {
+        let mut wo = WriteOptions::default();
+        wo.set_sync(true);
+        wo
+    }
+}
+
+impl<C, K> Clone for RocksdbLogStore<C, K>
+where
+    C: RaftTypeConfig,
+    K: KeySpace,
+{
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+            log_cf: self.log_cf.clone(),
+            meta_cf: self.meta_cf.clone(),
+            keys: self.keys.clone(),
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -104,5 +142,242 @@ where
             .field("meta_cf", &self.meta_cf)
             .field("keys", &self.keys)
             .finish()
+    }
+}
+
+fn range_boundary<RB: RangeBounds<u64>>(range: RB) -> (u64, u64) {
+    let start = match range.start_bound() {
+        Bound::Included(&n) => n,
+        Bound::Excluded(&n) => n.saturating_add(1),
+        Bound::Unbounded => 0,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(&n) => n.saturating_add(1),
+        Bound::Excluded(&n) => n,
+        Bound::Unbounded => u64::MAX,
+    };
+    (start, end)
+}
+
+fn bincode_encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
+    bincode::serialize(value).map_err(io::Error::other)
+}
+
+fn bincode_decode<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
+    bincode::deserialize(bytes).map_err(io::Error::other)
+}
+
+impl<C, K> RocksdbLogStore<C, K>
+where
+    C: RaftTypeConfig,
+    K: KeySpace,
+    C::Entry: Serialize + DeserializeOwned,
+{
+    /// Scan the log CF in reverse and return the highest-index `LogId`, or
+    /// `None` if the log range is empty. The full log id (not just the index)
+    /// is read out of the encoded `Entry`'s `log_id` field.
+    fn last_log_id_in_cf(&self) -> io::Result<Option<LogIdOf<C>>> {
+        let cf = self.log_cf_handle();
+        let (_lo, hi) = self.keys.log_range();
+        // Seek to the last key that is `<= hi` and walk backwards from there.
+        let mut it = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&hi, rocksdb::Direction::Reverse));
+        let Some(item) = it.next() else {
+            return Ok(None);
+        };
+        let (_k, v) = item.map_err(io::Error::other)?;
+        let entry: C::Entry = bincode_decode(&v)?;
+        Ok(Some(entry.log_id()))
+    }
+}
+
+impl<C, K> RaftLogReader<C> for RocksdbLogStore<C, K>
+where
+    C: RaftTypeConfig,
+    K: KeySpace,
+    C::Entry: Serialize + DeserializeOwned,
+{
+    async fn try_get_log_entries<RB>(&mut self, range: RB) -> Result<Vec<C::Entry>, io::Error>
+    where
+        RB: RangeBounds<u64> + Clone + Debug + OptionalSend,
+    {
+        let (start, end) = range_boundary(range);
+        if start >= end {
+            return Ok(Vec::new());
+        }
+
+        let cf = self.log_cf_handle();
+        let start_key = self.keys.log_key(start);
+        let end_key = self.keys.log_key(end);
+        let it = self.db.iterator_cf(
+            &cf,
+            IteratorMode::From(&start_key, rocksdb::Direction::Forward),
+        );
+
+        let mut out = Vec::new();
+        for item in it {
+            let (k, v) = item.map_err(io::Error::other)?;
+            // Stop as soon as we cross `end` (exclusive) or leave the keyspace
+            // range — `GroupPrefixed` shares its CF with other groups so the
+            // iterator can walk into the next group's bytes if we don't break.
+            if &*k >= end_key.as_slice() {
+                break;
+            }
+            let entry: C::Entry = bincode_decode(&v)?;
+            out.push(entry);
+        }
+        Ok(out)
+    }
+
+    async fn read_vote(&mut self) -> Result<Option<VoteOf<C>>, io::Error> {
+        let cf = self.meta_cf_handle();
+        meta::read::<VoteOf<C>, K>(&self.db, &cf, &self.keys, MetaLabel::Vote)
+            .map_err(io::Error::other)
+    }
+}
+
+impl<C, K> RaftLogStorage<C> for RocksdbLogStore<C, K>
+where
+    C: RaftTypeConfig,
+    K: KeySpace,
+    C::Entry: Serialize + DeserializeOwned,
+{
+    type LogReader = Self;
+
+    async fn get_log_reader(&mut self) -> Self::LogReader {
+        self.clone()
+    }
+
+    async fn get_log_state(&mut self) -> Result<LogState<C>, io::Error> {
+        let cf_meta = self.meta_cf_handle();
+        let last_purged_log_id: Option<LogIdOf<C>> =
+            meta::read::<LogIdOf<C>, K>(&self.db, &cf_meta, &self.keys, MetaLabel::LastPurged)
+                .map_err(io::Error::other)?;
+
+        let last_in_log = self.last_log_id_in_cf()?;
+        let last_log_id = last_in_log.or_else(|| last_purged_log_id.clone());
+
+        Ok(LogState {
+            last_purged_log_id,
+            last_log_id,
+        })
+    }
+
+    async fn save_vote(&mut self, vote: &VoteOf<C>) -> Result<(), io::Error> {
+        let cf_meta = self.meta_cf_handle();
+        let mut batch = WriteBatch::default();
+        meta::put::<VoteOf<C>, K>(&mut batch, &cf_meta, &self.keys, MetaLabel::Vote, vote)
+            .map_err(io::Error::other)?;
+        let wo = Self::write_sync_opts();
+        self.db.write_opt(batch, &wo).map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    async fn save_committed(&mut self, committed: Option<LogIdOf<C>>) -> Result<(), io::Error> {
+        let cf_meta = self.meta_cf_handle();
+        let mut batch = WriteBatch::default();
+        match committed {
+            Some(committed) => meta::put::<LogIdOf<C>, K>(
+                &mut batch,
+                &cf_meta,
+                &self.keys,
+                MetaLabel::Committed,
+                &committed,
+            )
+            .map_err(io::Error::other)?,
+            None => meta::delete::<K>(&mut batch, &cf_meta, &self.keys, MetaLabel::Committed),
+        }
+        // No fsync: persisting the committed id is optional per the openraft
+        // contract. The next append's sync flushes this record along with the
+        // batch.
+        self.db.write(batch).map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    async fn read_committed(&mut self) -> Result<Option<LogIdOf<C>>, io::Error> {
+        let cf_meta = self.meta_cf_handle();
+        meta::read::<LogIdOf<C>, K>(&self.db, &cf_meta, &self.keys, MetaLabel::Committed)
+            .map_err(io::Error::other)
+    }
+
+    async fn append<I>(&mut self, entries: I, callback: IOFlushed<C>) -> Result<(), io::Error>
+    where
+        I: IntoIterator<Item = C::Entry> + OptionalSend,
+        I::IntoIter: OptionalSend,
+    {
+        let cf_log = self.log_cf_handle();
+        let mut batch = WriteBatch::default();
+        for entry in entries {
+            let (_leader, idx) = entry.log_id_parts();
+            let key = self.keys.log_key(idx);
+            let value = bincode_encode(&entry)?;
+            batch.put_cf(&cf_log, &key, &value);
+        }
+
+        let wo = Self::write_sync_opts();
+        let result = self.db.write_opt(batch, &wo).map_err(io::Error::other);
+
+        match &result {
+            Ok(()) => callback.io_completed(Ok(())),
+            Err(e) => callback.io_completed(Err(io::Error::other(e.to_string()))),
+        }
+        result
+    }
+
+    async fn truncate_after(&mut self, last_log_id: Option<LogIdOf<C>>) -> Result<(), io::Error> {
+        // truncate_after(None)        => delete everything (start at 0)
+        // truncate_after(Some(log_id)) => keep up to and including log_id
+        let truncate_at = last_log_id.next_index();
+        let cf_log = self.log_cf_handle();
+        let start_key = self.keys.log_key(truncate_at);
+        let (_lo, hi) = self.keys.log_range();
+        let it = self.db.iterator_cf(
+            &cf_log,
+            IteratorMode::From(&start_key, rocksdb::Direction::Forward),
+        );
+
+        let mut batch = WriteBatch::default();
+        for item in it {
+            let (k, _v) = item.map_err(io::Error::other)?;
+            if &*k > hi.as_slice() {
+                break;
+            }
+            batch.delete_cf(&cf_log, &k);
+        }
+        self.db.write(batch).map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    async fn purge(&mut self, log_id: LogIdOf<C>) -> Result<(), io::Error> {
+        let cf_log = self.log_cf_handle();
+        let cf_meta = self.meta_cf_handle();
+
+        let mut batch = WriteBatch::default();
+        let (lo, _hi) = self.keys.log_range();
+        let stop_at = self.keys.log_key(log_id.index);
+        let it = self.db.iterator_cf(
+            &cf_log,
+            IteratorMode::From(&lo, rocksdb::Direction::Forward),
+        );
+        for item in it {
+            let (k, _v) = item.map_err(io::Error::other)?;
+            if &*k > stop_at.as_slice() {
+                break;
+            }
+            batch.delete_cf(&cf_log, &k);
+        }
+
+        meta::put::<LogIdOf<C>, K>(
+            &mut batch,
+            &cf_meta,
+            &self.keys,
+            MetaLabel::LastPurged,
+            &log_id,
+        )
+        .map_err(io::Error::other)?;
+
+        self.db.write(batch).map_err(io::Error::other)?;
+        Ok(())
     }
 }
