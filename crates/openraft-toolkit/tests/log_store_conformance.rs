@@ -33,7 +33,7 @@ use openraft::type_config::alias::LogIdOf;
 use openraft::type_config::alias::SnapshotMetaOf;
 use openraft::type_config::alias::SnapshotOf;
 use openraft::type_config::alias::StoredMembershipOf;
-use openraft_toolkit::{Flat, RocksdbLogStore};
+use openraft_toolkit::{Flat, GroupPrefixed, KeySpace, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -175,19 +175,25 @@ impl RaftSnapshotBuilder<TestTypeConfig> for StubStateMachine {
     }
 }
 
-/// Builder for the bundled suite. The `TempDir` is the suite's `G` guard;
-/// it lives as long as the test does and removes the on-disk artifacts on drop.
-struct TestStoreBuilder;
+/// Builder for the bundled suite, generic over the [`KeySpace`] under test.
+///
+/// The `TempDir` is the suite's `G` guard; it lives as long as the test does
+/// and removes the on-disk artifacts on drop.
+struct TestStoreBuilder<K: KeySpace> {
+    keys: K,
+}
 
-impl StoreBuilder<TestTypeConfig, RocksdbLogStore<TestTypeConfig, Flat>, StubStateMachine, TempDir>
-    for TestStoreBuilder
+impl<K> StoreBuilder<TestTypeConfig, RocksdbLogStore<TestTypeConfig, K>, StubStateMachine, TempDir>
+    for TestStoreBuilder<K>
+where
+    K: KeySpace,
 {
     async fn build(
         &self,
     ) -> Result<
         (
             TempDir,
-            RocksdbLogStore<TestTypeConfig, Flat>,
+            RocksdbLogStore<TestTypeConfig, K>,
             StubStateMachine,
         ),
         StorageError<TestTypeConfig>,
@@ -207,22 +213,43 @@ impl StoreBuilder<TestTypeConfig, RocksdbLogStore<TestTypeConfig, Flat>, StubSta
                 .map_err(|e| StorageError::read(err_src(format!("open rocksdb: {e}"))))?,
         );
 
-        let store = RocksdbLogStore::<TestTypeConfig, Flat>::open(db, LOG_CF, META_CF, Flat)
-            .map_err(|e| StorageError::read(err_src(format!("open log store: {e}"))))?;
+        let store =
+            RocksdbLogStore::<TestTypeConfig, K>::open(db, LOG_CF, META_CF, self.keys.clone())
+                .map_err(|e| StorageError::read(err_src(format!("open log store: {e}"))))?;
 
         Ok((dir, store, StubStateMachine::default()))
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rocksdb_log_store_passes_openraft_suite() {
+async fn rocksdb_log_store_passes_openraft_suite_flat() {
+    let builder = TestStoreBuilder { keys: Flat };
     Suite::<
         TestTypeConfig,
         RocksdbLogStore<TestTypeConfig, Flat>,
         StubStateMachine,
-        TestStoreBuilder,
+        TestStoreBuilder<Flat>,
         TempDir,
-    >::test_all(TestStoreBuilder)
+    >::test_all(builder)
+    .await
+    .unwrap();
+}
+
+/// Same suite, but against [`GroupPrefixed`] with a non-trivial group id so
+/// any latent assumption that log/meta keys start at byte 0 (rather than after
+/// an 8-byte group prefix) fails the suite.
+#[tokio::test(flavor = "multi_thread")]
+async fn rocksdb_log_store_passes_openraft_suite_group_prefixed() {
+    let builder = TestStoreBuilder {
+        keys: GroupPrefixed::new(42),
+    };
+    Suite::<
+        TestTypeConfig,
+        RocksdbLogStore<TestTypeConfig, GroupPrefixed>,
+        StubStateMachine,
+        TestStoreBuilder<GroupPrefixed>,
+        TempDir,
+    >::test_all(builder)
     .await
     .unwrap();
 }

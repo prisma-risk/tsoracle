@@ -12,7 +12,7 @@
 //! The openraft test file (`raft/declare_raft_types_test.rs`) calls this out
 //! explicitly:
 //!
-//! ```ignore
+//! ```text
 //! // Responder<T> is not supported by  declare_raft_types
 //! ```
 //!
