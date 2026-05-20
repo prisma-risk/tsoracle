@@ -27,19 +27,16 @@ pub fn encode(high_water: u64) -> [u8; RECORD_LEN] {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<u64, RecordError> {
-    if bytes.len() < RECORD_LEN {
-        return Err(RecordError::TooShort(bytes.len()));
-    }
-    let magic: [u8; 4] = bytes[0..4].try_into().unwrap();
+    let magic: [u8; 4] = read_array(bytes, 0)?;
     if &magic != MAGIC {
         return Err(RecordError::BadMagic(magic));
     }
-    let version = bytes[4];
+    let version = *bytes.get(4).ok_or(RecordError::TooShort(bytes.len()))?;
     if version != VERSION {
         return Err(RecordError::UnsupportedVersion(version));
     }
-    let high_water = u64::from_le_bytes(bytes[5..13].try_into().unwrap());
-    let crc_recorded = u32::from_le_bytes(bytes[13..17].try_into().unwrap());
+    let high_water = u64::from_le_bytes(read_array(bytes, 5)?);
+    let crc_recorded = u32::from_le_bytes(read_array(bytes, 13)?);
     let crc_computed = crc32c::crc32c(&bytes[0..13]);
     if crc_recorded != crc_computed {
         return Err(RecordError::CrcMismatch {
@@ -48,6 +45,17 @@ pub fn decode(bytes: &[u8]) -> Result<u64, RecordError> {
         });
     }
     Ok(high_water)
+}
+
+fn read_array<const N: usize>(bytes: &[u8], start: usize) -> Result<[u8; N], RecordError> {
+    let end = start
+        .checked_add(N)
+        .ok_or(RecordError::TooShort(bytes.len()))?;
+    bytes
+        .get(start..end)
+        .ok_or(RecordError::TooShort(bytes.len()))?
+        .try_into()
+        .map_err(|_| RecordError::TooShort(bytes.len()))
 }
 
 #[cfg(test)]
@@ -80,6 +88,28 @@ mod tests {
     fn detects_short() {
         let buf = encode(42);
         assert!(matches!(decode(&buf[..10]), Err(RecordError::TooShort(10))));
+    }
+
+    #[test]
+    fn detects_short_magic_slice() {
+        assert!(matches!(decode(b"TSO"), Err(RecordError::TooShort(3))));
+    }
+
+    #[test]
+    fn detects_short_version_byte() {
+        assert!(matches!(decode(MAGIC), Err(RecordError::TooShort(4))));
+    }
+
+    #[test]
+    fn detects_short_high_water_slice() {
+        let bytes = [MAGIC.as_slice(), &[VERSION], &[0; 7]].concat();
+        assert!(matches!(decode(&bytes), Err(RecordError::TooShort(12))));
+    }
+
+    #[test]
+    fn detects_short_crc_slice() {
+        let bytes = [MAGIC.as_slice(), &[VERSION], &[0; 8], &[0; 3]].concat();
+        assert!(matches!(decode(&bytes), Err(RecordError::TooShort(16))));
     }
 
     use proptest::prelude::*;
