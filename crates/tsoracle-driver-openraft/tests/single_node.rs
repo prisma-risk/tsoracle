@@ -74,7 +74,7 @@ async fn leader_state_epoch_matches_raft_term() {
     // notion of term at the time we observed leadership.
     use openraft::async_runtime::watch::WatchReceiver;
     use openraft::vote::RaftTerm;
-    let mut metrics_rx = raft.metrics();
+    let metrics_rx = raft.metrics();
     let term = {
         let snap = metrics_rx.borrow_watched();
         snap.current_term.as_u64().unwrap_or(0)
