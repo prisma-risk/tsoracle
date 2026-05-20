@@ -31,7 +31,9 @@ use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 use tokio::time::timeout;
 use tsoracle_consensus::{ConsensusDriver, LeaderState};
-use tsoracle_driver_openraft::{HighWaterStateMachine, OpenraftDriver, OpenraftPeer, TypeConfig};
+use tsoracle_driver_openraft::{
+    HighWaterStateMachine, OpenraftDriver, OpenraftPeer, StandaloneHost, TypeConfig,
+};
 
 const LOG_CF: &str = "raft_log";
 const META_CF: &str = "raft_meta";
@@ -101,7 +103,7 @@ impl RaftNetworkV2<TypeConfig> for UnreachablePeer {
 // ---------------------------------------------------------------------------
 
 struct SingleNode {
-    driver: OpenraftDriver,
+    driver: Arc<OpenraftDriver<StandaloneHost>>,
     /// Kept alive so the rocksdb backing files outlive the test.
     _dir: TempDir,
     /// Raft handle. Keeping the original here keeps the cluster running for
@@ -160,7 +162,8 @@ async fn build_single_node() -> SingleNode {
     );
     raft.initialize(nodes).await.expect("initialize");
 
-    let driver = OpenraftDriver::new(raft.clone(), sm_clone);
+    let host = StandaloneHost::new(raft.clone(), sm_clone);
+    let driver = OpenraftDriver::new(host);
     SingleNode {
         driver,
         _dir: dir,

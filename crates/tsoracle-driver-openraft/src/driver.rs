@@ -1,201 +1,118 @@
-//! `ConsensusDriver` implementation backed by an `openraft::Raft` instance.
+//! `ConsensusDriver` impl on top of any [`OpenraftHighWaterHost`].
 //!
-//! [`OpenraftDriver`] wraps a pre-built `Raft<TypeConfig, HighWaterStateMachine>`
-//! handle plus a clone of the state machine. It exposes the surface that
-//! `tsoracle-server` consumes: a leader-state stream, a linearized read of the
-//! durable high-water, and a monotonic `persist_high_water` that goes through
-//! the raft log.
-//!
-//! # Why both `Raft` and a state-machine clone?
-//!
-//! `Raft<C, SM>` doesn't expose the state machine after construction. The
-//! caller must hand a clone of `HighWaterStateMachine` to the driver so reads
-//! can short-circuit through the `current_value()` accessor without taking the
-//! cost of an `ensure_linearizable` round trip. For strictly linearizable
-//! reads we still issue a read-index barrier; the state-machine clone is only
-//! a peek into the apply-progress.
+//! [`OpenraftDriver`] is a thin bridge: it owns the trait-surface boilerplate
+//! and leadership-event mapping, then delegates storage/submission to the
+//! supplied host. The bundled [`crate::StandaloneHost`] gives you the original
+//! "owns its own raft cluster" behavior; services that already run an openraft
+//! cluster implement [`OpenraftHighWaterHost`] directly against their existing
+//! cluster.
 //!
 //! # Fencing
 //!
-//! `persist_high_water(_, epoch)` reads `Raft::metrics()` and compares the
-//! observed `(state, current_term)` against the caller's epoch:
-//!
-//! - If the local node isn't the leader, returns
-//!   [`ConsensusError::NotLeader`] with the observed term (when knowable) so
-//!   the caller can surface a `LeaderHint`.
-//! - If the term advanced past `epoch`, returns
-//!   [`ConsensusError::Fenced`] — the caller is a stale leader and must yield.
-//! - Otherwise, the proposal is submitted via `client_write`.
-//!
-//! This is a best-effort pre-check: the proposal can still race with an
-//! election and arrive at the new leader's apply pipeline as a `Blank` or be
-//! rejected by `client_write` with `ForwardToLeader`. Both later outcomes are
-//! also classified appropriately.
+//! `persist_high_water(_, epoch)` deliberately ignores the `epoch` argument.
+//! Monotonicity is enforced inside the state machine's apply path
+//! (`max(prev, at_least)`); a stale leader can still submit a write, but the
+//! result is either dropped by `client_write`'s `ForwardToLeader` path or
+//! absorbed by the apply-time `max`. Both outcomes preserve correctness
+//! without a term-based pre-check.
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use openraft::Raft;
-use openraft::ServerState;
-use openraft::async_runtime::watch::WatchReceiver;
-use openraft::error::{ClientWriteError, RaftError};
-use openraft::vote::RaftTerm;
+use openraft::RaftTypeConfig;
 use openraft_toolkit::LeadershipState;
 use openraft_toolkit::lifecycle::leader::stream_from_receiver;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
 
-use crate::log_entry::HighWaterCommand;
-use crate::state_machine::HighWaterStateMachine;
-use crate::type_config::TypeConfig;
+use crate::host::OpenraftHighWaterHost;
 
-/// A [`ConsensusDriver`] that delegates to an openraft cluster.
+/// Driver bridging any [`OpenraftHighWaterHost`] to
+/// [`tsoracle_consensus::ConsensusDriver`].
 ///
-/// Constructed from a pre-built `Raft<TypeConfig, HighWaterStateMachine>` and
-/// a clone of the same state machine; see [`OpenraftDriver::new`].
-pub struct OpenraftDriver {
-    raft: Raft<TypeConfig, HighWaterStateMachine>,
-    state_machine: HighWaterStateMachine,
+/// Owns the leadership-mapping and trait-surface boilerplate; delegates the
+/// actual high-water storage to the host.
+pub struct OpenraftDriver<H: OpenraftHighWaterHost> {
+    host: Arc<H>,
 }
 
-impl OpenraftDriver {
-    /// Build a driver from a pre-constructed raft handle and a state-machine
-    /// clone.
-    ///
-    /// `state_machine` must be the same instance (i.e. share the inner `Arc`)
-    /// as the one passed to `Raft::new`; otherwise `load_high_water` will read
-    /// from a state machine that never sees the apply pipeline.
-    pub fn new(
-        raft: Raft<TypeConfig, HighWaterStateMachine>,
-        state_machine: HighWaterStateMachine,
-    ) -> Self {
-        Self {
-            raft,
-            state_machine,
-        }
+impl<H: OpenraftHighWaterHost> OpenraftDriver<H> {
+    /// Build a driver from a host value. The driver wraps the host in an
+    /// `Arc` so the leadership stream can keep it alive independently of the
+    /// outer driver handle.
+    pub fn new(host: H) -> Arc<Self> {
+        Arc::new(Self {
+            host: Arc::new(host),
+        })
+    }
+
+    /// Build a driver from a pre-shared `Arc<H>`. Useful when the host is
+    /// already shared with other subsystems (e.g. a placement driver that
+    /// hands the same backend to multiple gRPC services).
+    pub fn from_arc(host: Arc<H>) -> Arc<Self> {
+        Arc::new(Self { host })
     }
 }
 
 #[async_trait]
-impl ConsensusDriver for OpenraftDriver {
+impl<H: OpenraftHighWaterHost> ConsensusDriver for OpenraftDriver<H> {
     /// Return a stream of [`LeaderState`] transitions.
     ///
-    /// Wraps `openraft_toolkit::leadership_events` (which dedups by role
-    /// class) and maps each [`LeadershipState`] into the tsoracle-consensus
-    /// enum. Clones the raft handle into the returned stream so it owns
-    /// its own reference and is `'static`.
+    /// Goes through the toolkit's `stream_from_receiver` (the by-value entry
+    /// point) rather than `leadership_events(&raft)` to side-step a Rust 2024
+    /// lifetime-over-capture issue: the `&raft` form would require the
+    /// returned stream to borrow from `raft`, but we want `'static`. The
+    /// cloned host then rides along inside [`KeepAlive`] so dropping the
+    /// outer driver doesn't shut the raft down.
     fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
-        let raft = self.raft.clone();
-        // Wrap the toolkit stream in a tiny async-stream adapter that holds
-        // the cloned `Raft` for its lifetime so the inner borrow of
-        // `metrics()` stays valid.
-        Box::pin(owned_leadership_stream(raft))
+        let host = Arc::clone(&self.host);
+        Box::pin(owned_leadership_stream::<H>(host))
     }
 
-    /// Read the durably-persisted high-water mark.
-    ///
-    /// This is the state-machine-local value most recently written by
-    /// `apply`. The trait contract demands linearizability, but Phase A
-    /// callers exercise this only against single-node clusters where the
-    /// local apply is the global apply. A multi-node release will replace
-    /// this body with a `ensure_linearizable` barrier followed by the same
-    /// `current_value()` read.
+    /// Read the durably-persisted high-water mark via the host.
     async fn load_high_water(&self) -> Result<u64, ConsensusError> {
-        Ok(self.state_machine.current_value().await)
+        self.host.current_high_water().await
     }
 
-    /// Submit a `Bump` proposal through the raft log and return the new
-    /// committed value.
+    /// Submit a "bump to at_least" proposal via the host.
     ///
-    /// Fencing logic:
-    /// 1. Snapshot `Raft::metrics()`. If we are not the leader, return
-    ///    [`ConsensusError::NotLeader`] with the observed term.
-    /// 2. If the observed term is greater than `epoch.0`, return
-    ///    [`ConsensusError::Fenced`].
-    /// 3. Otherwise call `client_write`; classify the response.
-    async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
-        // Step 1: pre-check fencing using a snapshot of the metrics watch.
-        // `borrow_watched` returns a guard whose `clone` we take so the lock
-        // is released before any `.await`.
-        let (state, observed_term) = {
-            let snap = self.raft.metrics().borrow_watched().clone();
-            (snap.state, snap.current_term.as_u64().unwrap_or(0))
-        };
-
-        match state {
-            ServerState::Leader => {
-                if observed_term > epoch.0 {
-                    return Err(ConsensusError::Fenced {
-                        expected: epoch,
-                        current: Epoch(observed_term),
-                    });
-                }
-                // observed_term < epoch.0 is impossible in a well-behaved
-                // caller (we never advertise an epoch we haven't seen as
-                // leader). If it happens, treat it as a stale view that will
-                // be corrected by the client_write path itself.
-            }
-            ServerState::Follower | ServerState::Learner | ServerState::Candidate => {
-                return Err(ConsensusError::NotLeader {
-                    observed: Some(Epoch(observed_term)),
-                });
-            }
-            ServerState::Shutdown => {
-                return Err(ConsensusError::NotLeader { observed: None });
-            }
-        }
-
-        // Step 2: submit the proposal.
-        match self
-            .raft
-            .client_write(HighWaterCommand::Bump { target: at_least })
-            .await
-        {
-            Ok(resp) => Ok(resp.data.value),
-            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(_))) => {
-                Err(ConsensusError::NotLeader { observed: None })
-            }
-            // ChangeMembershipError can't be returned for an AppData write;
-            // bucketed with the other transient errors anyway.
-            Err(e) => Err(ConsensusError::TransientDriver(Box::new(e))),
-        }
+    /// The `epoch` arg is intentionally ignored: fencing is the state
+    /// machine's monotonicity guarantee (`max(prev, at_least)`), not a
+    /// term-based pre-check.
+    async fn persist_high_water(
+        &self,
+        at_least: u64,
+        _epoch: Epoch,
+    ) -> Result<u64, ConsensusError> {
+        self.host.submit_advance(at_least).await
     }
 }
 
-/// Build a `'static` `Stream<Item = LeaderState>` from an owned `Raft` handle.
+/// Build a `'static` `Stream<Item = LeaderState>` from an owned host handle.
 ///
-/// Goes through the toolkit's `stream_from_receiver` (the receiver-by-value
-/// entry point) so the resulting stream's lifetime isn't tied to any borrow
-/// of `raft`. The cloned `raft` then rides along inside [`KeepAlive`] so
-/// dropping the outer driver doesn't close the metrics watch.
-///
-/// The wrapper layer is needed because `Raft<C, SM>` doesn't expose a way to
-/// keep the cluster alive purely via the metrics watch — the metrics sender
-/// lives inside the raft core, and the core shuts down when the last `Raft`
-/// handle is dropped.
-fn owned_leadership_stream(
-    raft: Raft<TypeConfig, HighWaterStateMachine>,
+/// The cloned `Arc<H>` rides along inside [`KeepAlive`] so the host (and the
+/// raft it owns) outlives the stream's polling.
+fn owned_leadership_stream<H: OpenraftHighWaterHost>(
+    host: Arc<H>,
 ) -> impl Stream<Item = LeaderState> + Send + 'static {
+    let rx = host.raft().metrics();
     let inner: Pin<Box<dyn Stream<Item = LeaderState> + Send>> =
-        Box::pin(stream_from_receiver::<TypeConfig>(raft.metrics()).map(map_leader_state));
-    KeepAlive { _raft: raft, inner }
+        Box::pin(stream_from_receiver::<H::Config>(rx).map(map_leader_state::<H::Config>));
+    KeepAlive { _host: host, inner }
 }
 
-/// A stream wrapper that keeps a [`Raft`] handle alive for the duration of
-/// the inner stream. Without this, the cloned handle would drop at the end
-/// of `owned_leadership_stream` and shut the raft down once the original
-/// driver lost its other reference.
-///
-/// The inner stream is already `Pin<Box<dyn Stream + Send>>` so polling it
-/// is a straight delegation. The wrapper itself is `Unpin` because all of
-/// its fields are.
-struct KeepAlive {
-    _raft: Raft<TypeConfig, HighWaterStateMachine>,
+/// Stream wrapper that keeps an `Arc<H>` alive for the duration of the inner
+/// stream. Without this, the cloned host would drop at the end of
+/// `owned_leadership_stream` and shut the raft down once the outer driver
+/// lost its other reference.
+struct KeepAlive<H: OpenraftHighWaterHost> {
+    _host: Arc<H>,
     inner: Pin<Box<dyn Stream<Item = LeaderState> + Send>>,
 }
 
-impl Stream for KeepAlive {
+impl<H: OpenraftHighWaterHost> Stream for KeepAlive<H> {
     type Item = LeaderState;
 
     fn poll_next(
@@ -206,11 +123,18 @@ impl Stream for KeepAlive {
     }
 }
 
-fn map_leader_state(s: LeadershipState<TypeConfig>) -> LeaderState {
+/// Project a toolkit [`LeadershipState`] into a tsoracle-consensus
+/// [`LeaderState`].
+///
+/// Always returns `leader_endpoint: None` on the follower branch: the generic
+/// mapper has no way to extract an endpoint from `C::Node` (different hosts
+/// pick different `Node` types). Hosts that need endpoint resolution wrap the
+/// driver themselves and provide their own `ConsensusDriver` impl.
+fn map_leader_state<C: RaftTypeConfig>(s: LeadershipState<C>) -> LeaderState {
     match s {
         LeadershipState::Leader { term } => LeaderState::Leader { epoch: Epoch(term) },
-        LeadershipState::Follower { leader, .. } => LeaderState::Follower {
-            leader_endpoint: leader.map(|(_, node)| node.addr),
+        LeadershipState::Follower { .. } => LeaderState::Follower {
+            leader_endpoint: None,
         },
         LeadershipState::Candidate { .. }
         | LeadershipState::Learner
