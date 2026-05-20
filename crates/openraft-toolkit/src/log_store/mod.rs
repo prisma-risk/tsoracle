@@ -381,3 +381,57 @@ where
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod range_boundary_tests {
+    use super::range_boundary;
+    use proptest::prelude::*;
+    use std::ops::Bound;
+
+    proptest! {
+        // The half-open range form `a..b` is the canonical case used by
+        // `try_get_log_entries`. The output must equal `(a, b)` exactly so
+        // iteration starts at `a` and stops before `b`.
+        #[test]
+        fn half_open_range_passes_through(a in any::<u64>(), b in any::<u64>()) {
+            prop_assert_eq!(range_boundary(a..b), (a, b));
+        }
+
+        // Inclusive end form `a..=b` becomes `(a, b.saturating_add(1))`. At
+        // u64::MAX the saturation collapses the range to `(a, u64::MAX)` —
+        // the highest index then becomes unreachable. That is the documented
+        // (and intentional) limit; pinning it here means any future refactor
+        // that "fixes" the saturation by widening the output to u128 has to
+        // confront this test first.
+        #[test]
+        fn inclusive_end_saturates_at_max(a in any::<u64>(), b in any::<u64>()) {
+            prop_assert_eq!(range_boundary(a..=b), (a, b.saturating_add(1)));
+        }
+
+        // Excluded start form (Bound::Excluded) bumps the start by one with
+        // saturation. Range types in std don't expose this directly, so the
+        // test constructs it through the trait directly.
+        #[test]
+        fn excluded_start_saturates_at_max(a in any::<u64>(), b in any::<u64>()) {
+            let r = (Bound::Excluded(a), Bound::Excluded(b));
+            prop_assert_eq!(range_boundary(r), (a.saturating_add(1), b));
+        }
+
+        // Unbounded sides default to (0, u64::MAX). Combined with explicit
+        // bounds on the other side, the open side keeps its default.
+        #[test]
+        fn open_start_defaults_to_zero(b in any::<u64>()) {
+            prop_assert_eq!(range_boundary(..b), (0, b));
+        }
+
+        #[test]
+        fn open_end_defaults_to_u64_max(a in any::<u64>()) {
+            prop_assert_eq!(range_boundary(a..), (a, u64::MAX));
+        }
+    }
+
+    #[test]
+    fn fully_unbounded_range_is_full_u64_space() {
+        assert_eq!(range_boundary::<std::ops::RangeFull>(..), (0, u64::MAX));
+    }
+}

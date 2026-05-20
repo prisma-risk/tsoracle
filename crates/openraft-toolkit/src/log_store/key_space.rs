@@ -111,6 +111,16 @@ impl KeySpace for GroupPrefixed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn any_meta_label() -> impl Strategy<Value = MetaLabel> {
+        prop_oneof![
+            Just(MetaLabel::Vote),
+            Just(MetaLabel::Committed),
+            Just(MetaLabel::LastPurged),
+            Just(MetaLabel::LastMembership),
+        ]
+    }
 
     #[test]
     fn flat_log_keys_sort_by_index() {
@@ -144,6 +154,53 @@ mod tests {
             for b in &labels[i + 1..] {
                 assert_ne!(k.meta_key(*a), k.meta_key(*b));
             }
+        }
+    }
+
+    proptest! {
+        // Strict monotonicity in index space implies strict monotonicity of the
+        // encoded key in lex byte order — the contract the rocksdb iterator
+        // relies on to walk entries in index order.
+        #[test]
+        fn flat_log_key_monotonic_in_index(a in any::<u64>(), b in any::<u64>()) {
+            let k = Flat;
+            let ka = k.log_key(a);
+            let kb = k.log_key(b);
+            match a.cmp(&b) {
+                std::cmp::Ordering::Less    => prop_assert!(ka < kb),
+                std::cmp::Ordering::Equal   => prop_assert_eq!(ka, kb),
+                std::cmp::Ordering::Greater => prop_assert!(ka > kb),
+            }
+        }
+
+        // log_range must contain log_key(i) for every reachable index.
+        #[test]
+        fn flat_log_range_contains_every_index(i in any::<u64>()) {
+            let k = Flat;
+            let (lo, hi) = k.log_range();
+            let key = k.log_key(i);
+            prop_assert!(lo <= key);
+            prop_assert!(key <= hi);
+        }
+
+        // No meta key may collide with any log key (otherwise a meta read could
+        // observe an entry's serialized bytes and vice versa).
+        #[test]
+        fn flat_meta_and_log_keys_never_collide(i in any::<u64>(), label in any_meta_label()) {
+            let k = Flat;
+            prop_assert_ne!(k.meta_key(label), k.log_key(i));
+        }
+
+        // Flat is documented as `u64::to_be_bytes`; this roundtrip pins that so
+        // any future "optimization" that breaks decoding fails here.
+        #[test]
+        fn flat_log_key_roundtrips_as_u64_be(i in any::<u64>()) {
+            let k = Flat;
+            let bytes = k.log_key(i);
+            prop_assert_eq!(bytes.len(), 8);
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&bytes);
+            prop_assert_eq!(u64::from_be_bytes(arr), i);
         }
     }
 }
@@ -192,6 +249,96 @@ mod group_prefixed_tests {
             for idx in [0u64, 1, 100, u64::MAX] {
                 assert_ne!(mk, g.log_key(idx));
             }
+        }
+    }
+
+    use proptest::prelude::*;
+
+    fn any_meta_label() -> impl Strategy<Value = MetaLabel> {
+        prop_oneof![
+            Just(MetaLabel::Vote),
+            Just(MetaLabel::Committed),
+            Just(MetaLabel::LastPurged),
+            Just(MetaLabel::LastMembership),
+        ]
+    }
+
+    proptest! {
+        // Within a single group, log_key remains strictly monotonic in index.
+        #[test]
+        fn group_log_key_monotonic_within_group(
+            g_id in any::<u64>(),
+            a in any::<u64>(),
+            b in any::<u64>(),
+        ) {
+            let g = GroupPrefixed::new(g_id);
+            let ka = g.log_key(a);
+            let kb = g.log_key(b);
+            match a.cmp(&b) {
+                std::cmp::Ordering::Less    => prop_assert!(ka < kb),
+                std::cmp::Ordering::Equal   => prop_assert_eq!(ka, kb),
+                std::cmp::Ordering::Greater => prop_assert!(ka > kb),
+            }
+        }
+
+        // For any two distinct groups and any two indices, log keys never collide.
+        // This is the load-bearing property for multiplexing N raft instances on
+        // one column family.
+        #[test]
+        fn group_log_keys_disjoint_across_groups(
+            g1 in any::<u64>(),
+            g2 in any::<u64>(),
+            i1 in any::<u64>(),
+            i2 in any::<u64>(),
+        ) {
+            prop_assume!(g1 != g2);
+            let k1 = GroupPrefixed::new(g1).log_key(i1);
+            let k2 = GroupPrefixed::new(g2).log_key(i2);
+            prop_assert_ne!(k1, k2);
+        }
+
+        // log_range for group g strictly excludes any other group's keys, in
+        // both directions. Iterators bounded by `log_range` therefore cannot
+        // leak into a neighbor's data.
+        #[test]
+        fn group_log_range_strictly_excludes_other_groups(
+            g_id in any::<u64>(),
+            other_id in any::<u64>(),
+            other_idx in any::<u64>(),
+        ) {
+            prop_assume!(g_id != other_id);
+            let (lo, hi) = GroupPrefixed::new(g_id).log_range();
+            let other_key = GroupPrefixed::new(other_id).log_key(other_idx);
+            // other_key must be either strictly below lo or strictly above hi.
+            prop_assert!(other_key < lo || other_key > hi);
+        }
+
+        // Inside a single group, log_range brackets every reachable index.
+        #[test]
+        fn group_log_range_contains_every_index_in_group(
+            g_id in any::<u64>(),
+            i in any::<u64>(),
+        ) {
+            let g = GroupPrefixed::new(g_id);
+            let (lo, hi) = g.log_range();
+            let key = g.log_key(i);
+            prop_assert!(lo <= key);
+            prop_assert!(key <= hi);
+        }
+
+        // No meta key (any group, any label) collides with any log key
+        // (any group, any index). The `/` byte separator in meta_key plus the
+        // 16-byte log_key length keep these disjoint.
+        #[test]
+        fn group_meta_and_log_keys_never_collide(
+            g_meta in any::<u64>(),
+            label in any_meta_label(),
+            g_log in any::<u64>(),
+            i in any::<u64>(),
+        ) {
+            let mk = GroupPrefixed::new(g_meta).meta_key(label);
+            let lk = GroupPrefixed::new(g_log).log_key(i);
+            prop_assert_ne!(mk, lk);
         }
     }
 }

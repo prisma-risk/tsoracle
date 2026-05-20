@@ -85,4 +85,49 @@ mod tests {
         let err = decode::<Payload>(1, &[]).unwrap_err();
         assert!(matches!(err, CodecError::Empty));
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // Roundtrip: encode then decode at the same version must return the
+        // original value, for any (version, payload). The Payload's two fields
+        // give us coverage of an integer + an arbitrary UTF-8 string body.
+        #[test]
+        fn encode_decode_roundtrip(
+            version in any::<u8>(),
+            a in any::<u64>(),
+            b in any::<String>(),
+        ) {
+            let p = Payload { a, b };
+            let bytes = encode(version, &p).unwrap();
+            prop_assert_eq!(bytes[0], version);
+            let back: Payload = decode(version, &bytes).unwrap();
+            prop_assert_eq!(p, back);
+        }
+
+        // Version-mismatch detection: decoding with the wrong expected version
+        // must return CodecError::Version{ expected, actual } carrying the
+        // exact values, for any pair (encoded_version, expected_version) where
+        // the two differ.
+        #[test]
+        fn decode_rejects_any_version_mismatch(
+            encoded in any::<u8>(),
+            expected in any::<u8>(),
+            a in any::<u64>(),
+            b in any::<String>(),
+        ) {
+            prop_assume!(encoded != expected);
+            let bytes = encode(encoded, &Payload { a, b }).unwrap();
+            match decode::<Payload>(expected, &bytes) {
+                Err(CodecError::Version { expected: e, actual: c }) => {
+                    prop_assert_eq!(e, expected);
+                    prop_assert_eq!(c, encoded);
+                }
+                other => prop_assert!(
+                    false,
+                    "expected Version mismatch error; got {other:?}",
+                ),
+            }
+        }
+    }
 }
