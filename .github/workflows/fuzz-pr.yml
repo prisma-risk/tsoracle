@@ -63,11 +63,19 @@ jobs:
         # use-after-free and buffer overruns from the libc FFI in driver-file).
         # UBSAN is a stretch goal; cargo-fuzz 0.13.1 multi-sanitizer support
         # would let us add ',undefined' here.
+        #
+        # --target x86_64-unknown-linux-gnu overrides cargo-fuzz 0.13's
+        # default of x86_64-unknown-linux-musl on Linux. The musl default
+        # links libc statically, which is incompatible with ASAN
+        # (sancov needs dynamic linking). Pinning to the gnu triple matches
+        # the host toolchain installed by dtolnay/rust-toolchain.
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set +e
-          cargo fuzz run "$TARGET" --sanitizer address \
+          cargo fuzz run "$TARGET" \
+            --sanitizer address \
+            --target x86_64-unknown-linux-gnu \
             -- -max_total_time=300 \
             2>&1 | tee fuzz-output.log
           EXIT=${PIPESTATUS[0]}

@@ -91,12 +91,18 @@ jobs:
       - name: Run fuzz target
         id: fuzz
         working-directory: fuzz
+        # --target x86_64-unknown-linux-gnu overrides cargo-fuzz 0.13's
+        # default of x86_64-unknown-linux-musl on Linux. The musl default
+        # links libc statically, which is incompatible with ASAN. See the
+        # matching comment in fuzz-pr.yml for the full explanation.
         env:
           TARGET: ${{ matrix.target }}
           BUDGET: ${{ steps.budget.outputs.seconds }}
         run: |
           set +e
-          cargo fuzz run "$TARGET" --sanitizer address \
+          cargo fuzz run "$TARGET" \
+            --sanitizer address \
+            --target x86_64-unknown-linux-gnu \
             -- -max_total_time="$BUDGET" \
             2>&1 | tee fuzz-output.log
           EXIT=${PIPESTATUS[0]}
