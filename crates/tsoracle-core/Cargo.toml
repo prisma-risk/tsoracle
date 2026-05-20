@@ -1,0 +1,30 @@
+[package]
+name         = "tsoracle-core"
+description  = "Sync algorithm core for tsoracle: window allocator, 46/18-bit timestamp packing, monotonicity invariants."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+readme.workspace       = true
+documentation = "https://docs.rs/tsoracle-core"
+keywords      = ["timestamp", "oracle", "tso", "hlc", "algorithm"]
+categories    = ["algorithms", "date-and-time", "concurrency"]
+
+[features]
+default    = ["std"]
+std        = []
+serde      = ["dep:serde"]
+test-clock = []
+
+[package.metadata.docs.rs]
+features       = ["std", "serde"]
+rustdoc-args   = ["--cfg", "docsrs"]
+
+[dependencies]
+thiserror = { workspace = true }
+serde     = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

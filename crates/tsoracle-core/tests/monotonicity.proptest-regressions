@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 036a0ac2501b7b4d7e67fb546dd32e1a0f3b59e1ae60d3420f90d830fb8c2300 # shrinks to ops = [Gain { high_water: 406090486901, epoch_bump: 1 }, Grant { now_ms: 187797416781, count: 1 }, Gain { high_water: 0, epoch_bump: 1 }, Grant { now_ms: 0, count: 1 }]
