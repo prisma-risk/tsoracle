@@ -27,3 +27,44 @@ impl fmt::Display for HighWaterCommand {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_renders_bump() {
+        let cmd = HighWaterCommand::Bump { target: 42 };
+        assert_eq!(format!("{cmd}"), "Bump { target: 42 }");
+    }
+
+    #[test]
+    fn display_renders_zero_target() {
+        let cmd = HighWaterCommand::Bump { target: 0 };
+        assert_eq!(format!("{cmd}"), "Bump { target: 0 }");
+    }
+
+    #[test]
+    fn postcard_round_trip_bump() {
+        let cmd = HighWaterCommand::Bump { target: 1_234_567_890 };
+        let bytes = postcard::to_stdvec(&cmd).expect("serialize");
+        let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn postcard_round_trip_zero() {
+        let cmd = HighWaterCommand::Bump { target: 0 };
+        let bytes = postcard::to_stdvec(&cmd).expect("serialize");
+        let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn postcard_round_trip_max() {
+        let cmd = HighWaterCommand::Bump { target: u64::MAX };
+        let bytes = postcard::to_stdvec(&cmd).expect("serialize");
+        let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, cmd);
+    }
+}
