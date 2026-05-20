@@ -30,7 +30,7 @@ pub(super) fn atomic_write_raw(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 pub(super) fn load_vote(dir: &Path) -> io::Result<Option<Vote>> {
     match fs::read(dir.join("vote")) {
-        Ok(b) => bincode::deserialize::<Vote>(&b)
+        Ok(b) => postcard::from_bytes::<Vote>(&b)
             .map(Some)
             .map_err(|e| io::Error::other(e.to_string())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -39,7 +39,7 @@ pub(super) fn load_vote(dir: &Path) -> io::Result<Option<Vote>> {
 }
 
 pub(super) fn save_vote(dir: &Path, vote: &Vote) -> io::Result<()> {
-    let bytes = bincode::serialize(vote).map_err(|e| io::Error::other(e.to_string()))?;
+    let bytes = postcard::to_stdvec(vote).map_err(|e| io::Error::other(e.to_string()))?;
     atomic_write_raw(&dir.join("vote"), &bytes)
 }
 
@@ -51,7 +51,7 @@ pub(super) fn load_log_entries(dir: &Path) -> io::Result<BTreeMap<u64, Entry>> {
         if let Ok(idx) = name.parse::<u64>() {
             let bytes = fs::read(item.path())?;
             let entry: Entry =
-                bincode::deserialize(&bytes).map_err(|e| io::Error::other(e.to_string()))?;
+                postcard::from_bytes(&bytes).map_err(|e| io::Error::other(e.to_string()))?;
             out.insert(idx, entry);
         }
     }
@@ -59,7 +59,7 @@ pub(super) fn load_log_entries(dir: &Path) -> io::Result<BTreeMap<u64, Entry>> {
 }
 
 pub(super) fn save_log_entry(dir: &Path, idx: u64, entry: &Entry) -> io::Result<()> {
-    let bytes = bincode::serialize(entry).map_err(|e| io::Error::other(e.to_string()))?;
+    let bytes = postcard::to_stdvec(entry).map_err(|e| io::Error::other(e.to_string()))?;
     atomic_write_raw(&dir.join("log").join(idx.to_string()), &bytes)
 }
 

@@ -13,7 +13,7 @@ pub enum RocksdbLogStoreError {
     #[error("rocksdb error: {0}")]
     RocksDb(#[from] rocksdb::Error),
     #[error("decode error: {0}")]
-    Decode(#[from] bincode::Error),
+    Decode(#[from] postcard::Error),
     #[error("column family `{0}` not found")]
     MissingColumnFamily(String),
 }
@@ -159,12 +159,12 @@ fn range_boundary<RB: RangeBounds<u64>>(range: RB) -> (u64, u64) {
     (start, end)
 }
 
-fn bincode_encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
-    bincode::serialize(value).map_err(io::Error::other)
+fn postcard_encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
+    postcard::to_stdvec(value).map_err(io::Error::other)
 }
 
-fn bincode_decode<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
-    bincode::deserialize(bytes).map_err(io::Error::other)
+fn postcard_decode<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
+    postcard::from_bytes(bytes).map_err(io::Error::other)
 }
 
 impl<C, K> RocksdbLogStore<C, K>
@@ -196,7 +196,7 @@ where
         if &*k < lo.as_slice() {
             return Ok(None);
         }
-        let entry: C::Entry = bincode_decode(&v)?;
+        let entry: C::Entry = postcard_decode(&v)?;
         Ok(Some(entry.log_id()))
     }
 }
@@ -233,7 +233,7 @@ where
             if &*k >= end_key.as_slice() {
                 break;
             }
-            let entry: C::Entry = bincode_decode(&v)?;
+            let entry: C::Entry = postcard_decode(&v)?;
             out.push(entry);
         }
         Ok(out)
@@ -320,7 +320,7 @@ where
         for entry in entries {
             let (_leader, idx) = entry.log_id_parts();
             let key = self.keys.log_key(idx);
-            let value = bincode_encode(&entry)?;
+            let value = postcard_encode(&entry)?;
             batch.put_cf(&cf_log, &key, &value);
         }
 

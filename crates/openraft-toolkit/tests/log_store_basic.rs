@@ -120,7 +120,7 @@ async fn save_committed_with_none_clears_existing_record() {
 
 // Corrupt the bytes stored at the Vote key, then verify `read_vote` surfaces
 // the decode error rather than silently returning `None` or panicking. Drives
-// the `bincode::deserialize` error arm in `meta::read` which is unreachable
+// the `postcard::from_bytes` error arm in `meta::read` which is unreachable
 // from any legitimate API call sequence.
 #[tokio::test]
 async fn read_vote_surfaces_decode_error_on_corrupted_meta() {
@@ -131,7 +131,7 @@ async fn read_vote_surfaces_decode_error_on_corrupted_meta() {
     // shared `Arc<DB>` — the public store API has no "write raw bytes" door.
     let key = Flat.meta_key(MetaLabel::Vote);
     let cf = db.cf_handle(META_CF).unwrap();
-    db.put_cf(&cf, &key, b"not a valid bincode-encoded vote")
+    db.put_cf(&cf, &key, b"not a valid postcard-encoded vote")
         .unwrap();
 
     let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
@@ -141,7 +141,7 @@ async fn read_vote_surfaces_decode_error_on_corrupted_meta() {
         .read_vote()
         .await
         .expect_err("read_vote should propagate the decode failure");
-    // The exact message comes from bincode; we just want to confirm an error
+    // The exact message comes from postcard; we just want to confirm an error
     // path actually fires rather than asserting a brittle substring.
     let _ = err.to_string();
 }

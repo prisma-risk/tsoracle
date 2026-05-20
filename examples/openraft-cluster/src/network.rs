@@ -5,9 +5,9 @@
 //!
 //! Wire format:
 //!   - `AppendEntries` / `Vote`: a `RaftMessage { bytes payload }` where
-//!     `payload` is a bincode-encoded openraft request or response.
+//!     `payload` is a postcard-encoded openraft request or response.
 //!   - `Snapshot`: a *client-streaming* RPC of `SnapshotChunk` messages.
-//!     One `header` chunk (bincode-encoded vote + meta), then `SNAPSHOT_CHUNK_SIZE`
+//!     One `header` chunk (postcard-encoded vote + meta), then `SNAPSHOT_CHUNK_SIZE`
 //!     byte `data` chunks until end-of-stream. The receiver reassembles the
 //!     data buffer and calls `Raft::install_full_snapshot`.
 //!
@@ -120,14 +120,14 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
         let mut c = self.client().await?;
         let payload =
-            bincode::serialize(&rpc).map_err(|e| RPCError::Network(NetworkError::new(&*e)))?;
+            postcard::to_stdvec(&rpc).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let resp = c
             .append_entries(RaftMessage { payload })
             .await
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let body: AppendEntriesResponse<TypeConfig> =
-            bincode::deserialize(&resp.into_inner().payload)
-                .map_err(|e| RPCError::Network(NetworkError::new(&*e)))?;
+            postcard::from_bytes(&resp.into_inner().payload)
+                .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         Ok(body)
     }
 
@@ -138,19 +138,19 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         let mut c = self.client().await?;
         let payload =
-            bincode::serialize(&rpc).map_err(|e| RPCError::Network(NetworkError::new(&*e)))?;
+            postcard::to_stdvec(&rpc).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let resp = c
             .vote(RaftMessage { payload })
             .await
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
-        let body: VoteResponse<TypeConfig> = bincode::deserialize(&resp.into_inner().payload)
-            .map_err(|e| RPCError::Network(NetworkError::new(&*e)))?;
+        let body: VoteResponse<TypeConfig> = postcard::from_bytes(&resp.into_inner().payload)
+            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         Ok(body)
     }
 
     /// Send a snapshot to the target as a stream of `SnapshotChunk`s.
     ///
-    /// Stream layout: one `header` chunk (bincode vote + bincode meta),
+    /// Stream layout: one `header` chunk (postcard vote + postcard meta),
     /// followed by `ceil(data.len() / SNAPSHOT_CHUNK_SIZE)` `data` chunks.
     /// An empty data buffer is permitted and results in zero `data` chunks.
     ///
@@ -165,10 +165,10 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
         _option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
         // Pre-encode the header fields. Both are small (Vote + SnapshotMeta).
-        let vote_bytes = bincode::serialize(&vote)
-            .map_err(|e| StreamingError::Network(NetworkError::new(&*e)))?;
-        let meta_bytes = bincode::serialize(&snapshot.meta)
-            .map_err(|e| StreamingError::Network(NetworkError::new(&*e)))?;
+        let vote_bytes = postcard::to_stdvec(&vote)
+            .map_err(|e| StreamingError::Network(NetworkError::new(&e)))?;
+        let meta_bytes = postcard::to_stdvec(&snapshot.meta)
+            .map_err(|e| StreamingError::Network(NetworkError::new(&e)))?;
         let data_bytes = snapshot.snapshot.into_inner();
 
         // Build the chunk stream lazily. We materialize chunks into owned
@@ -209,8 +209,8 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
                     .map_err(|e| StreamingError::Network(NetworkError::new(&e)))?
                     .into_inner();
                 let resp: SnapshotResponse<TypeConfig> =
-                    bincode::deserialize(&inner.payload)
-                        .map_err(|e| StreamingError::Network(NetworkError::new(&*e)))?;
+                    postcard::from_bytes(&inner.payload)
+                        .map_err(|e| StreamingError::Network(NetworkError::new(&e)))?;
                 Ok(resp)
             }
             closed = cancel => {
@@ -235,7 +235,7 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
         request: tonic::Request<RaftMessage>,
     ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
         let body: AppendEntriesRequest<TypeConfig> =
-            bincode::deserialize(&request.into_inner().payload)
+            postcard::from_bytes(&request.into_inner().payload)
                 .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
         let resp = self
             .raft
@@ -243,7 +243,7 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
         let payload =
-            bincode::serialize(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
+            postcard::to_stdvec(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
         Ok(tonic::Response::new(RaftMessage { payload }))
     }
 
@@ -251,7 +251,7 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
         &self,
         request: tonic::Request<RaftMessage>,
     ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
-        let body: VoteRequest<TypeConfig> = bincode::deserialize(&request.into_inner().payload)
+        let body: VoteRequest<TypeConfig> = postcard::from_bytes(&request.into_inner().payload)
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
         let resp = self
             .raft
@@ -259,7 +259,7 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
         let payload =
-            bincode::serialize(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
+            postcard::to_stdvec(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
         Ok(tonic::Response::new(RaftMessage { payload }))
     }
 
@@ -295,10 +295,10 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
             }
         };
 
-        let vote: VoteOf<TypeConfig> = bincode::deserialize(&header.vote)
+        let vote: VoteOf<TypeConfig> = postcard::from_bytes(&header.vote)
             .map_err(|e| tonic::Status::invalid_argument(format!("bad vote: {e}")))?;
         let meta: openraft::type_config::alias::SnapshotMetaOf<TypeConfig> =
-            bincode::deserialize(&header.meta)
+            postcard::from_bytes(&header.meta)
                 .map_err(|e| tonic::Status::invalid_argument(format!("bad meta: {e}")))?;
 
         // Reassemble subsequent data chunks. We don't know the total size up
@@ -336,7 +336,7 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         let payload =
-            bincode::serialize(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
+            postcard::to_stdvec(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
         Ok(tonic::Response::new(RaftMessage { payload }))
     }
 }
