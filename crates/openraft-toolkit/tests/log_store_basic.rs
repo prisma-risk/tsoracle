@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
-use openraft::storage::{RaftLogReader, RaftLogStorage};
-use openraft::{LogId, Vote};
-use openraft_toolkit::{Flat, KeySpace, MetaLabel, RocksdbLogStore};
+use openraft::entry::RaftEntry;
+use openraft::storage::{IOFlushed, RaftLogReader, RaftLogStorage};
+use openraft::{Entry, LogId, Vote};
+use openraft_toolkit::{Flat, GroupPrefixed, KeySpace, MetaLabel, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 
@@ -143,4 +144,61 @@ async fn read_vote_surfaces_decode_error_on_corrupted_meta() {
     // The exact message comes from bincode; we just want to confirm an error
     // path actually fires rather than asserting a brittle substring.
     let _ = err.to_string();
+}
+
+// Regression test for a cross-group keyspace leak in `last_log_id_in_cf`.
+//
+// When two `GroupPrefixed` keyspaces share a single log column family — the
+// whole point of `GroupPrefixed` — the reverse-scan implementation of
+// `last_log_id_in_cf` seeks from `hi` of the *current* group and returns the
+// first key that is `<= hi`. It does **not** check that the returned key is
+// `>= lo`. If the current group has no entries but a numerically lower group
+// does, the iterator surfaces the lower group's last entry as if it belonged
+// to the current group. `get_log_state` then reports a `last_log_id` that
+// the current group never wrote.
+//
+// Expected (correct) behaviour: an empty group reports `last_log_id: None`
+// regardless of what other groups in the same CF have written.
+#[tokio::test]
+async fn get_log_state_isolates_groups_in_shared_column_family() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+
+    // Group 4 has one entry at index 100.
+    let mut store_g4: RocksdbLogStore<TestTypeConfig, GroupPrefixed> =
+        RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, GroupPrefixed::new(4)).unwrap();
+    let entry_g4: Entry<TestLeaderId, common::TestAppData, u64, common::TestPeer> =
+        Entry::new_blank(LogId::new(
+            TestLeaderId {
+                term: 1,
+                node_id: 1,
+            },
+            100,
+        ));
+    store_g4
+        .append(std::iter::once(entry_g4), IOFlushed::noop())
+        .await
+        .unwrap();
+
+    // Group 5 shares the same CF but has written nothing.
+    let mut store_g5: RocksdbLogStore<TestTypeConfig, GroupPrefixed> =
+        RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, GroupPrefixed::new(5)).unwrap();
+
+    let state = store_g5.get_log_state().await.unwrap();
+    assert!(
+        state.last_log_id.is_none(),
+        "group 5 has no entries but get_log_state returned {:?}; \
+         last_log_id_in_cf leaked group 4's entry across the keyspace boundary",
+        state.last_log_id,
+    );
+    assert!(state.last_purged_log_id.is_none());
+
+    // Sanity: group 4 still sees its own entry, so the bug is direction-specific
+    // (reverse scan ignores `lo`, not a generic isolation failure).
+    let state_g4 = store_g4.get_log_state().await.unwrap();
+    assert_eq!(
+        state_g4.last_log_id.as_ref().map(|id| id.index),
+        Some(100),
+        "group 4 should still observe its own entry",
+    );
 }

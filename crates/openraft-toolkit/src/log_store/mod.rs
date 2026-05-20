@@ -176,17 +176,26 @@ where
     /// Scan the log CF in reverse and return the highest-index `LogId`, or
     /// `None` if the log range is empty. The full log id (not just the index)
     /// is read out of the encoded `Entry`'s `log_id` field.
+    ///
+    /// For `GroupPrefixed` the log CF can host multiple raft groups. The
+    /// reverse iterator from `hi` will happily walk back into a neighbouring
+    /// group's bytes if the current group is empty, so the first item must
+    /// also be bounded by `lo`. Once we observe a key below `lo` the iterator
+    /// is monotonically decreasing and can never re-enter our range, so
+    /// returning `None` is safe.
     fn last_log_id_in_cf(&self) -> io::Result<Option<LogIdOf<C>>> {
         let cf = self.log_cf_handle();
-        let (_lo, hi) = self.keys.log_range();
-        // Seek to the last key that is `<= hi` and walk backwards from there.
+        let (lo, hi) = self.keys.log_range();
         let mut it = self
             .db
             .iterator_cf(&cf, IteratorMode::From(&hi, rocksdb::Direction::Reverse));
         let Some(item) = it.next() else {
             return Ok(None);
         };
-        let (_k, v) = item.map_err(io::Error::other)?;
+        let (k, v) = item.map_err(io::Error::other)?;
+        if &*k < lo.as_slice() {
+            return Ok(None);
+        }
         let entry: C::Entry = bincode_decode(&v)?;
         Ok(Some(entry.log_id()))
     }
