@@ -60,20 +60,20 @@ impl Default for ServerBuilder {
 }
 
 impl ServerBuilder {
-    pub fn consensus_driver(mut self, b: Arc<dyn ConsensusDriver>) -> Self {
-        self.consensus = Some(b);
+    pub fn consensus_driver(mut self, driver: Arc<dyn ConsensusDriver>) -> Self {
+        self.consensus = Some(driver);
         self
     }
-    pub fn clock(mut self, c: Arc<dyn Clock>) -> Self {
-        self.clock = Some(c);
+    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = Some(clock);
         self
     }
-    pub fn window_ahead(mut self, d: Duration) -> Self {
-        self.window_ahead = d;
+    pub fn window_ahead(mut self, window_ahead: Duration) -> Self {
+        self.window_ahead = window_ahead;
         self
     }
-    pub fn failover_advance(mut self, d: Duration) -> Self {
-        self.failover_advance = d;
+    pub fn failover_advance(mut self, failover_advance: Duration) -> Self {
+        self.failover_advance = failover_advance;
         self
     }
     pub fn build(self) -> Result<Server, BuildError> {
@@ -328,9 +328,9 @@ impl Server {
 /// - `Err(JoinError)` — task was cancelled or panicked. Cancellation maps to
 ///   Ok (we asked for it); panic maps to `WatchPanic` with payload.
 fn join_to_server_result(
-    r: Result<Result<(), ServerError>, tokio::task::JoinError>,
+    join_result: Result<Result<(), ServerError>, tokio::task::JoinError>,
 ) -> Result<(), ServerError> {
-    match r {
+    match join_result {
         Ok(inner) => inner,
         Err(join_err) if join_err.is_panic() => {
             let payload = panic_payload_to_string(join_err.into_panic());
@@ -341,10 +341,10 @@ fn join_to_server_result(
 }
 
 fn panic_payload_to_string(panic: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = panic.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = panic.downcast_ref::<String>() {
-        s.clone()
+    if let Some(text) = panic.downcast_ref::<&'static str>() {
+        (*text).to_string()
+    } else if let Some(text) = panic.downcast_ref::<String>() {
+        text.clone()
     } else {
         "watch task panicked with non-string payload".to_string()
     }

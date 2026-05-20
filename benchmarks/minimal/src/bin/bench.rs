@@ -1,5 +1,4 @@
-//! tsoracle bench-minimal — see ../README.md and the design doc at
-//! docs/superpowers/specs/2026-05-19-benchmarks-minimal-design.md.
+//! tsoracle bench-minimal — see ../README.md.
 
 use std::net::SocketAddr;
 use std::thread::available_parallelism;

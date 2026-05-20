@@ -1,4 +1,4 @@
-//! tsoracle overhead benchmark. See `docs/superpowers/specs/2026-05-19-benchmarks-minimal-design.md`.
+//! tsoracle overhead benchmark.
 
 use std::net::SocketAddr;
 use std::process::Command;
