@@ -202,7 +202,57 @@ pub async fn build_single_node() -> TestCluster {
 }
 
 pub async fn build_three_node() -> TestCluster {
-    unimplemented!("build_three_node lands in a follow-up task")
+    let net = MemNetwork::<TypeConfig>::new();
+    let cfg = test_raft_config();
+
+    let mut nodes: Vec<TestNode> = Vec::new();
+    let mut drivers: Vec<Arc<OpenraftDriver<StandaloneHost>>> = Vec::new();
+
+    for id in [1u64, 2, 3] {
+        let dir = TempDir::new().unwrap();
+        let log_store = open_rocksdb_log_store(&dir);
+        let sm = HighWaterStateMachine::new();
+        let sm_clone = sm.clone();
+        let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
+            id,
+            cfg.clone(),
+            net.factory_for(id),
+            log_store,
+            sm,
+        )
+        .await
+        .expect("Raft::new");
+        net.register(id, raft.clone());
+
+        let host = StandaloneHost::new(raft.clone(), sm_clone.clone());
+        drivers.push(OpenraftDriver::new(host));
+        nodes.push(TestNode {
+            id,
+            raft,
+            sm: sm_clone,
+            log_dir: dir,
+        });
+    }
+
+    // Initialize membership on node 1.
+    let mut mem = BTreeMap::new();
+    for id in [1u64, 2, 3] {
+        mem.insert(
+            id,
+            OpenraftPeer {
+                addr: format!("mem-node-{id}"),
+            },
+        );
+    }
+    nodes[0].raft.initialize(mem).await.expect("initialize");
+
+    let partitions = net.partitions();
+    TestCluster {
+        nodes,
+        network: Some(net),
+        partitions: Some(partitions),
+        drivers,
+    }
 }
 
 pub async fn reopen_node(_prior: TestNode) -> TestNode {
