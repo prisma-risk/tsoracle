@@ -14,15 +14,23 @@
 //!   an in-memory `u64` counter with bincode snapshots.
 //! - [`type_config`] declares the `RaftTypeConfig` via
 //!   `openraft_toolkit::declare_raft_types_ext!`.
+//! - [`host`] declares the `OpenraftHighWaterHost` trait services implement
+//!   to plug their consensus into the driver.
+//! - [`standalone`] supplies the bundled host that owns its own raft cluster
+//!   and the [`HighWaterStateMachine`].
 //! - [`driver`] wraps the `Raft` handle and the state machine into the
 //!   `ConsensusDriver` impl.
 
 pub mod driver;
+pub mod host;
 pub mod log_entry;
+pub mod standalone;
 pub mod state_machine;
 pub mod type_config;
 
 pub use driver::OpenraftDriver;
+pub use host::OpenraftHighWaterHost;
 pub use log_entry::HighWaterCommand;
+pub use standalone::StandaloneHost;
 pub use state_machine::{HighWaterStateMachine, HighWaterStateMachineSnapshot};
 pub use type_config::{HighWaterApplied, OpenraftPeer, TypeConfig};
