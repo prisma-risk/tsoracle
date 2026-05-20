@@ -1,6 +1,6 @@
 /target
+/.worktrees/
 **/*.rs.bk
-Cargo.lock
 Cargo.lock.bak
 *.swp
 .DS_Store

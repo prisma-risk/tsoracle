@@ -19,11 +19,11 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: build
-        run: cargo build --workspace --all-features
+        run: cargo build --workspace --all-features --locked
       - name: test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --locked
 
   buf:
     runs-on: ubuntu-latest
