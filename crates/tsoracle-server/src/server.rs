@@ -251,6 +251,64 @@ impl Server {
             }
         }
     }
+
+    /// Run the gRPC server on a caller-provided `TcpListener` until either
+    /// the caller-provided `shutdown` fires or the leader-watch task terminates.
+    ///
+    /// Use this instead of [`Self::serve_with_shutdown`] when you need to
+    /// observe the OS-picked port (`127.0.0.1:0`) before clients connect, or
+    /// when you want to wrap the listener in an outer adapter before passing it
+    /// in. The listening socket is owned by the caller and passed here; tsoracle
+    /// starts accepting on it immediately.
+    ///
+    /// Three outcomes:
+    /// 1. `shutdown` fires first → tonic drains in-flights and returns `Ok`.
+    ///    The watch handle is aborted; any error it had been about to return
+    ///    is forfeited (the process is shutting down anyway).
+    /// 2. Watch returns `Ok(Err(e))` → poisoned state is already published;
+    ///    the caller-provided shutdown is cancelled internally so tonic begins
+    ///    graceful shutdown; in-flight `GetTs` calls whose `try_grant` already
+    ///    succeeded complete with the timestamps they were allocated; new calls
+    ///    fail fast. Returns `Err(e)`.
+    /// 3. Watch task panics → returns `Err(ServerError::WatchPanic{..})`
+    ///    with the panic payload stringified. Same drain semantics as (2).
+    pub async fn serve_with_listener(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<(), ServerError> {
+        let (routes, mut watch_handle) = self.into_router();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let combined_shutdown = async move {
+            tokio::select! {
+                _ = shutdown => {}
+                _ = cancel_rx => {}
+            }
+        };
+
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+
+        let serve = TonicServer::builder()
+            .add_routes(routes)
+            .serve_with_incoming_shutdown(incoming, combined_shutdown);
+        tokio::pin!(serve);
+
+        tokio::select! {
+            biased;
+
+            watch_result = &mut watch_handle => {
+                let _ = cancel_tx.send(());
+                let _ = serve.await;
+                join_to_server_result(watch_result)
+            }
+            serve_result = &mut serve => {
+                watch_handle.abort();
+                serve_result?;
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Convert a `JoinHandle` result into a `ServerError`-typed result.

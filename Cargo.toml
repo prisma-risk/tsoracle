@@ -11,6 +11,7 @@ members  = [
     "examples/embedded-server",
     "examples/failover-demo",
     "examples/openraft-cluster",
+    "benchmarks/minimal",
 ]
 default-members = [
     "crates/tsoracle-proto",
@@ -40,6 +41,8 @@ bytes              = "1"
 clap               = { version = "4", features = ["derive"] }
 crc32c             = "0.6"
 futures            = "0.3"
+hdrhistogram       = "7"
+humantime          = "2"
 parking_lot        = "0.12"
 proptest           = "1"
 prost              = "0.14"
@@ -59,3 +62,7 @@ openraft           = { version = "0.10.0-alpha.18", features = ["serde", "type-a
 [profile.release]
 lto           = "thin"
 codegen-units = 1
+
+[profile.release.package.bench-minimal]
+debug           = 2
+split-debuginfo = "packed"

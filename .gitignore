@@ -7,3 +7,10 @@ Cargo.lock.bak
 /examples/openraft-cluster/.data/
 /examples/embedded-server/tsoracle-embedded-data/
 /lcov.info
+
+# bench-minimal flamegraph artifacts (written to CWD by the bench binary
+# when run with --features flamegraph; never tracked).
+tracing.folded
+flamegraph.svg
+# bench-throughput-sweep writes one JSON per client count; ignore them.
+/bench-*.json
