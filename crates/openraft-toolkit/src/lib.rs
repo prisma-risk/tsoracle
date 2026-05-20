@@ -13,3 +13,6 @@ pub mod lifecycle;
 pub mod test_fakes;
 
 pub use codec::{CodecError, decode, encode};
+
+#[cfg(feature = "rocksdb-log-store")]
+pub use log_store::{Flat, KeySpace, MetaLabel};
