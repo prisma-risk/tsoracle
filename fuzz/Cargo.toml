@@ -50,3 +50,11 @@ test              = false
 doc               = false
 bench             = false
 doctest           = false
+
+[[bin]]
+name              = "proto_leader_hint_decode"
+path              = "fuzz_targets/proto_leader_hint_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
