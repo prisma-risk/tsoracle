@@ -39,7 +39,7 @@ impl MetaLabel {
 ///   never see another raft instance's entries.
 /// - `meta_key` produces distinct keys per `MetaLabel` and never collides with
 ///   any `log_key`.
-pub trait KeySpace: Debug + Send + Sync + 'static {
+pub trait KeySpace: Clone + Debug + Send + Sync + 'static {
     fn log_key(&self, index: u64) -> Vec<u8>;
     fn log_range(&self) -> (Vec<u8>, Vec<u8>);
     fn meta_key(&self, label: MetaLabel) -> Vec<u8>;
