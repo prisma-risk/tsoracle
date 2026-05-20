@@ -34,7 +34,7 @@ pub(crate) fn decode_get_ts_response(
     }
     let last_logical = resp.logical_start.checked_add(resp.count.saturating_sub(1));
     match last_logical {
-        Some(l) if l <= LOGICAL_MAX => {}
+        Some(last) if last <= LOGICAL_MAX => {}
         _ => {
             return Err(ClientError::Rpc(tonic::Status::internal(format!(
                 "server returned logical_start={} + count={} that overflows \

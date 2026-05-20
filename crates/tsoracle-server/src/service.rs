@@ -21,14 +21,16 @@ fn leader_hint_from(server: &Server) -> LeaderHint {
     }
 }
 
-fn core_status(e: CoreError) -> Status {
-    match e {
+fn core_status(error: CoreError) -> Status {
+    match error {
         CoreError::NotLeader => Status::failed_precondition("not leader"),
         CoreError::WindowExhausted => Status::internal("window exhausted"),
-        CoreError::InvalidCount(c) => Status::invalid_argument(format!("invalid count: {c}")),
-        CoreError::PhysicalMsOutOfRange(v) => {
-            Status::out_of_range(format!("physical_ms {v} exceeds 46-bit timestamp field"))
+        CoreError::InvalidCount(count) => {
+            Status::invalid_argument(format!("invalid count: {count}"))
         }
+        CoreError::PhysicalMsOutOfRange(physical_ms) => Status::out_of_range(format!(
+            "physical_ms {physical_ms} exceeds 46-bit timestamp field"
+        )),
         CoreError::InvalidLeadershipWindow {
             fence_floor,
             committed_ceiling,

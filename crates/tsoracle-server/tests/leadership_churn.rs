@@ -56,8 +56,8 @@ impl ConsensusDriver for FaultyPersistDriver {
     }
 
     async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
-        let n = self.persists_observed.fetch_add(1, Ordering::SeqCst);
-        if n == 0 {
+        let prior_count = self.persists_observed.fetch_add(1, Ordering::SeqCst);
+        if prior_count == 0 {
             // Let the leader-transition fence persist succeed so the server
             // reaches Serving and the allocator gets a valid epoch.
             return self.inner.persist_high_water(at_least, epoch).await;

@@ -67,8 +67,8 @@ struct InitArgs {
     seed_physical_ms: u64,
 }
 
-fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
-    humantime::parse_duration(s).map_err(|e| e.to_string())
+fn parse_duration(input: &str) -> std::result::Result<Duration, String> {
+    humantime::parse_duration(input).map_err(|e| e.to_string())
 }
 
 #[tokio::main]

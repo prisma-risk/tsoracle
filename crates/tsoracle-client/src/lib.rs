@@ -38,8 +38,8 @@ impl ClientBuilder {
         }
     }
 
-    pub fn batch_flush_interval(mut self, d: Duration) -> Self {
-        self.flush_interval = d;
+    pub fn batch_flush_interval(mut self, flush_interval: Duration) -> Self {
+        self.flush_interval = flush_interval;
         self
     }
 

@@ -126,11 +126,11 @@ async fn extension_stampede_coalesces_to_single_persist() {
     let barrier = Arc::new(Barrier::new(STAMPEDE_SIZE));
     let mut tasks = Vec::with_capacity(STAMPEDE_SIZE);
     for _ in 0..STAMPEDE_SIZE {
-        let b = barrier.clone();
-        let mut c = client.clone();
+        let barrier = barrier.clone();
+        let mut client = client.clone();
         tasks.push(tokio::spawn(async move {
-            b.wait().await;
-            c.get_ts(GetTsRequest { count: 1 }).await
+            barrier.wait().await;
+            client.get_ts(GetTsRequest { count: 1 }).await
         }));
     }
 

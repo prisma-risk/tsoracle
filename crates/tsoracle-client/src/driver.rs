@@ -186,11 +186,11 @@ async fn run_chunks(rpc_fn: RpcFn, chunks: Vec<(u32, VecDeque<Waiter>)>) -> Vec<
         let result = match &failed {
             Some(e) => Err(clone_client_error(e)),
             None => {
-                let r = rpc_fn(count).await;
-                if let Err(ref e) = r {
+                let result = rpc_fn(count).await;
+                if let Err(ref e) = result {
                     failed = Some(clone_client_error(e));
                 }
-                r
+                result
             }
         };
         output.push((count, result, waiters));
@@ -198,11 +198,11 @@ async fn run_chunks(rpc_fn: RpcFn, chunks: Vec<(u32, VecDeque<Waiter>)>) -> Vec<
     output
 }
 
-fn enqueue(queue: &mut VecDeque<Waiter>, first_arrival: &mut Option<Instant>, w: Waiter) {
+fn enqueue(queue: &mut VecDeque<Waiter>, first_arrival: &mut Option<Instant>, waiter: Waiter) {
     if first_arrival.is_none() {
         *first_arrival = Some(Instant::now());
     }
-    queue.push_back(w);
+    queue.push_back(waiter);
 }
 
 /// Deliver one chunk's RPC outcome to its waiters.
@@ -258,13 +258,15 @@ fn deliver(
 /// `Transport` collapses to `NoReachableEndpoints` because the underlying
 /// transport details aren't useful for downstream callers, and we can't
 /// duplicate the original error value.
-fn clone_client_error(e: &ClientError) -> ClientError {
-    match e {
-        ClientError::Rpc(s) => ClientError::Rpc(tonic::Status::new(s.code(), s.message())),
+fn clone_client_error(error: &ClientError) -> ClientError {
+    match error {
+        ClientError::Rpc(status) => {
+            ClientError::Rpc(tonic::Status::new(status.code(), status.message()))
+        }
         ClientError::Transport(_) => ClientError::NoReachableEndpoints,
         ClientError::NoReachableEndpoints => ClientError::NoReachableEndpoints,
-        ClientError::InvalidEndpoint(s) => ClientError::InvalidEndpoint(s.clone()),
-        ClientError::InvalidCount(c) => ClientError::InvalidCount(*c),
+        ClientError::InvalidEndpoint(endpoint) => ClientError::InvalidEndpoint(endpoint.clone()),
+        ClientError::InvalidCount(count) => ClientError::InvalidCount(*count),
     }
 }
 
@@ -286,10 +288,10 @@ mod tests {
             let calls = calls.clone();
             Box::pin(async move {
                 calls.lock().push(count);
-                let v: Vec<Timestamp> = (0..count)
+                let timestamps: Vec<Timestamp> = (0..count)
                     .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
                     .collect();
-                Ok(v)
+                Ok(timestamps)
             })
         }
     }
@@ -308,26 +310,30 @@ mod tests {
 
         let mut handles = Vec::new();
         for _ in 0..4 {
-            let d = driver.clone();
-            handles.push(tokio::spawn(async move { d.request(100_000).await }));
+            let driver = driver.clone();
+            handles.push(tokio::spawn(async move { driver.request(100_000).await }));
         }
         let results = futures::future::join_all(handles).await;
 
-        for r in &results {
-            let v = r
+        for result in &results {
+            let timestamps = result
                 .as_ref()
                 .expect("task join")
                 .as_ref()
                 .expect("request must succeed");
-            assert_eq!(v.len(), 100_000, "each waiter must get its full count");
+            assert_eq!(
+                timestamps.len(),
+                100_000,
+                "each waiter must get its full count"
+            );
         }
 
         let observed = calls.lock().clone();
         assert!(
-            observed.iter().all(|&c| c <= LOGICAL_MAX + 1),
+            observed.iter().all(|&count| count <= LOGICAL_MAX + 1),
             "every RPC must respect the per-call cap; observed counts: {observed:?}",
         );
-        let total: u64 = observed.iter().map(|&c| c as u64).sum();
+        let total: u64 = observed.iter().map(|&count| count as u64).sum();
         assert_eq!(
             total, 400_000,
             "exactly 4 * 100_000 timestamps must be issued across all chunks"
@@ -346,12 +352,12 @@ mod tests {
     async fn waiter_above_per_rpc_cap_gets_invalid_count() {
         let calls: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let driver = Driver::spawn(recording_ok_rpc(calls), Duration::ZERO);
-        let r = driver.request(LOGICAL_MAX + 2).await;
+        let result = driver.request(LOGICAL_MAX + 2).await;
         assert!(
-            matches!(r, Err(ClientError::InvalidCount(c)) if c == LOGICAL_MAX + 2),
+            matches!(result, Err(ClientError::InvalidCount(count)) if count == LOGICAL_MAX + 2),
             "expected InvalidCount({}), got {:?}",
             LOGICAL_MAX + 2,
-            r
+            result
         );
     }
 
@@ -368,16 +374,16 @@ mod tests {
         ));
 
         let small1 = {
-            let d = driver.clone();
-            tokio::spawn(async move { d.request(5).await })
+            let driver = driver.clone();
+            tokio::spawn(async move { driver.request(5).await })
         };
         let oversize = {
-            let d = driver.clone();
-            tokio::spawn(async move { d.request(LOGICAL_MAX + 2).await })
+            let driver = driver.clone();
+            tokio::spawn(async move { driver.request(LOGICAL_MAX + 2).await })
         };
         let small2 = {
-            let d = driver.clone();
-            tokio::spawn(async move { d.request(7).await })
+            let driver = driver.clone();
+            tokio::spawn(async move { driver.request(7).await })
         };
 
         let small1_r = small1.await.unwrap();
@@ -412,17 +418,17 @@ mod tests {
         > {
             Box::pin(async move {
                 let short = count.saturating_sub(1);
-                let v: Vec<Timestamp> = (0..short)
+                let timestamps: Vec<Timestamp> = (0..short)
                     .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
                     .collect();
-                Ok(v)
+                Ok(timestamps)
             })
         };
         let driver = Driver::spawn(rpc, Duration::ZERO);
-        let r = driver.request(5).await;
+        let result = driver.request(5).await;
         assert!(
-            matches!(r, Err(ClientError::Rpc(_))),
-            "short response must error, got {r:?}",
+            matches!(result, Err(ClientError::Rpc(_))),
+            "short response must error, got {result:?}",
         );
     }
 
@@ -436,17 +442,17 @@ mod tests {
         > {
             Box::pin(async move {
                 let long = count.saturating_add(3);
-                let v: Vec<Timestamp> = (0..long)
+                let timestamps: Vec<Timestamp> = (0..long)
                     .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
                     .collect();
-                Ok(v)
+                Ok(timestamps)
             })
         };
         let driver = Driver::spawn(rpc, Duration::ZERO);
-        let r = driver.request(5).await;
+        let result = driver.request(5).await;
         assert!(
-            matches!(r, Err(ClientError::Rpc(_))),
-            "long response must error, got {r:?}",
+            matches!(result, Err(ClientError::Rpc(_))),
+            "long response must error, got {result:?}",
         );
     }
 }
