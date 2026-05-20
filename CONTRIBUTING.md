@@ -4,15 +4,15 @@ Thanks for your interest in tsoracle. This guide covers the local setup, the che
 
 ## Setup
 
-This is a Rust project. The toolchain channel is pinned in `[rust-toolchain.toml](rust-toolchain.toml)`; running any `cargo` command will install the matching version for you.
+This is a Rust project. The toolchain channel is pinned in [`rust-toolchain.toml`](rust-toolchain.toml); running any `cargo` command will install the matching version for you.
 
 You'll also need:
 
-- `**protoc**` — the Protocol Buffers compiler. `tonic-prost-build` invokes it during `cargo build`. On macOS: `brew install protobuf`. On Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`.
-- `**[buf](https://buf.build/docs/installation)**` (optional, only needed if you touch `.proto` files) — CI runs `buf lint`, `buf format`, and `buf breaking` against `crates/tsoracle-proto/proto`.
-- `**[cargo-deny](https://github.com/EmbarkStudios/cargo-deny)**` (optional) — CI runs `cargo deny check` against `[deny.toml](deny.toml)` to enforce the license allow-list and advisory policy.
-- `**[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov)**` (optional, only needed to reproduce coverage locally) — CI runs `cargo llvm-cov` and uploads the resulting `lcov.info` to [Coveralls](https://coveralls.io/github/prisma-risk/tsoracle). Install with `cargo install cargo-llvm-cov`. Coverage is reported only — the build does not fail on a coverage drop.
-- `**[cargo-edit](https://github.com/killercup/cargo-edit)**` (optional, only needed for releases) — provides `cargo set-version`, used by the Makefile's `release-bump` target to bump `workspace.package.version` and rewrite every intra-workspace dep version ref in one shot. Install with `cargo install cargo-edit`.
+- **`protoc`** — the Protocol Buffers compiler. `tonic-prost-build` invokes it during `cargo build`. On macOS: `brew install protobuf`. On Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`.
+- **[`buf`](https://buf.build/docs/installation)** (optional, only needed if you touch `.proto` files) — CI runs `buf lint`, `buf format`, and `buf breaking` against `crates/tsoracle-proto/proto`.
+- **[`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny)** (optional) — CI runs `cargo deny check` against [`deny.toml`](deny.toml) to enforce the license allow-list and advisory policy.
+- **[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)** (optional, only needed to reproduce coverage locally) — CI runs `cargo llvm-cov` and uploads the resulting `lcov.info` to [Coveralls](https://coveralls.io/github/prisma-risk/tsoracle). Install with `cargo install cargo-llvm-cov`. Coverage is reported only — the build does not fail on a coverage drop.
+- **[`cargo-edit`](https://github.com/killercup/cargo-edit)** (optional, only needed for releases) — provides `cargo set-version`, used by the Makefile's `release-bump` target to bump `workspace.package.version` and rewrite every intra-workspace dep version ref in one shot. Install with `cargo install cargo-edit`.
 
 ## Workspace layout
 
