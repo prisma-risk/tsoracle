@@ -1,5 +1,11 @@
 //! Cluster bootstrap helpers.
 //!
+//! Coverage note: excluded from `make coverage` because exercising this
+//! wrapper requires a live raft, which the toolkit's own tests deliberately
+//! don't stand up. Downstream consumers' integration tests carry the real
+//! coverage; the compile-time signature shim in `tests/lifecycle.rs` is what
+//! catches openraft API drift inside this file.
+//!
 //! Most raft consumers need one of three startup modes:
 //!
 //! - **Fresh**: first-time start; the caller knows the initial voter set.

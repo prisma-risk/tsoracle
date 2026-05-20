@@ -99,6 +99,13 @@ deny:
 # crates are excluded because their behavior is exercised transitively by
 # integration tests on tsoracle-server, and including them would dilute the
 # signal. Requires cargo-llvm-cov: cargo install cargo-llvm-cov.
+#
+# `openraft-toolkit/src/lifecycle/{bootstrap,membership}.rs` are excluded by
+# `--ignore-filename-regex`: they are thin async wrappers around real
+# `Raft<C, SM>` calls and need a live raft to execute, which the toolkit's own
+# tests deliberately don't stand up (see `tests/lifecycle.rs` header). Coverage
+# for those wrappers is earned downstream by the openraft consumer that uses
+# them; the compile-time signature shims in `tests/lifecycle.rs` catch API drift.
 
 coverage:
 	$(CARGO) llvm-cov \
@@ -108,6 +115,7 @@ coverage:
 	  --exclude example-failover-demo \
 	  --exclude example-openraft-cluster \
 	  --exclude bench-minimal \
+	  --ignore-filename-regex 'crates/openraft-toolkit/src/lifecycle/(bootstrap|membership)\.rs$$' \
 	  --lcov --output-path lcov.info
 
 # Release --------------------------------------------------------------------

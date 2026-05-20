@@ -172,3 +172,149 @@ async fn leadership_events_dedups_repeated_class_until_transition() {
     drop(tx);
     assert!(stream.next().await.is_none());
 }
+
+// Walks the role-class projections that the Follower→Leader test doesn't touch:
+// Candidate, Learner, Shutdown. Each is sent as the *initial* watch value so the
+// dedup logic emits it unconditionally on first poll; this keeps the test
+// straight-line rather than threading a multi-step transition through one
+// sender.
+#[tokio::test]
+async fn leadership_events_projects_candidate_learner_and_shutdown() {
+    use futures::StreamExt;
+    use openraft::RaftMetrics;
+    use openraft::ServerState;
+    use openraft::type_config::TypeConfigExt;
+    use openraft_toolkit::LeadershipState;
+
+    async fn first_emission(state: ServerState, term: u64) -> LeadershipState<TestTypeConfig> {
+        let mut metrics: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
+        metrics.state = state;
+        metrics.current_term = term;
+        let (_tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
+        let mut stream =
+            std::pin::pin!(openraft_toolkit::lifecycle::leader::stream_from_receiver::<
+                TestTypeConfig,
+            >(rx));
+        stream.next().await.expect("initial state emitted")
+    }
+
+    assert!(matches!(
+        first_emission(ServerState::Candidate, 5).await,
+        LeadershipState::Candidate { term: 5 }
+    ));
+    assert!(matches!(
+        first_emission(ServerState::Learner, 9).await,
+        LeadershipState::Learner
+    ));
+    assert!(matches!(
+        first_emission(ServerState::Shutdown, 2).await,
+        LeadershipState::Shutdown
+    ));
+}
+
+// Drives `resolve_leader`'s populated-membership branch: when the metrics report
+// a `current_leader` that exists in `membership_config.nodes()`, the Follower
+// projection carries the resolved `(id, node)` pair. Without this, only the
+// `current_leader = None` path (covered by the initial-state test above) gets
+// exercised.
+#[tokio::test]
+async fn leadership_events_resolves_follower_leader_when_in_membership() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use openraft::Membership;
+    use openraft::RaftMetrics;
+    use openraft::StoredMembership;
+    use openraft::type_config::TypeConfigExt;
+    use openraft::type_config::alias::StoredMembershipOf;
+    use openraft_toolkit::LeadershipState;
+
+    let peer_2 = TestPeer {
+        addr: "host-2:9000".into(),
+    };
+    let nodes: BTreeMap<u64, TestPeer> = BTreeMap::from([
+        (
+            1,
+            TestPeer {
+                addr: "host-1:9000".into(),
+            },
+        ),
+        (2, peer_2.clone()),
+    ]);
+    let membership: Membership<u64, TestPeer> =
+        Membership::new(vec![BTreeSet::from([1u64, 2])], nodes).unwrap();
+    let stored: StoredMembershipOf<TestTypeConfig> = StoredMembership::new(None, membership);
+
+    let mut metrics: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
+    metrics.current_leader = Some(2);
+    metrics.membership_config = Arc::new(stored);
+
+    let (_tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
+    let mut stream = std::pin::pin!(openraft_toolkit::lifecycle::leader::stream_from_receiver::<
+        TestTypeConfig,
+    >(rx));
+
+    let first = stream.next().await.expect("initial state emitted");
+    match first {
+        LeadershipState::Follower {
+            term: 0,
+            leader: Some((id, node)),
+        } => {
+            assert_eq!(id, 2);
+            assert_eq!(node, peer_2);
+        }
+        other => panic!("expected Follower with resolved leader; got {other:?}"),
+    }
+}
+
+// Counterpart to the test above: when `current_leader` is set but the node id
+// isn't present in `membership_config.nodes()` (e.g. the leader was just
+// removed from the config), `resolve_leader` returns `None` and the Follower
+// projection carries `leader: None`. This exercises `find(...).map(...)`'s
+// no-match arm.
+#[tokio::test]
+async fn leadership_events_drops_follower_leader_when_not_in_membership() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use openraft::Membership;
+    use openraft::RaftMetrics;
+    use openraft::StoredMembership;
+    use openraft::type_config::TypeConfigExt;
+    use openraft::type_config::alias::StoredMembershipOf;
+    use openraft_toolkit::LeadershipState;
+
+    let nodes: BTreeMap<u64, TestPeer> = BTreeMap::from([(
+        1,
+        TestPeer {
+            addr: "host-1:9000".into(),
+        },
+    )]);
+    let membership: Membership<u64, TestPeer> =
+        Membership::new(vec![BTreeSet::from([1u64])], nodes).unwrap();
+    let stored: StoredMembershipOf<TestTypeConfig> = StoredMembership::new(None, membership);
+
+    let mut metrics: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
+    // 99 is intentionally absent from the membership above.
+    metrics.current_leader = Some(99);
+    metrics.membership_config = Arc::new(stored);
+
+    let (_tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
+    let mut stream = std::pin::pin!(openraft_toolkit::lifecycle::leader::stream_from_receiver::<
+        TestTypeConfig,
+    >(rx));
+
+    let first = stream.next().await.expect("initial state emitted");
+    assert!(
+        matches!(
+            first,
+            LeadershipState::Follower {
+                term: 0,
+                leader: None
+            }
+        ),
+        "expected Follower with no resolved leader; got {first:?}",
+    );
+}

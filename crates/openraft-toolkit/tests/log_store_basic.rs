@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use openraft::storage::{RaftLogReader, RaftLogStorage};
 use openraft::{LogId, Vote};
-use openraft_toolkit::{Flat, RocksdbLogStore};
+use openraft_toolkit::{Flat, KeySpace, MetaLabel, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 
@@ -90,4 +90,57 @@ async fn save_and_read_committed_roundtrips() {
     );
     store.save_committed(Some(log_id)).await.unwrap();
     assert_eq!(store.read_committed().await.unwrap(), Some(log_id));
+}
+
+// `save_committed(None)` after a `Some(...)` write must clear the stored value.
+// This is the only call path that exercises `meta::delete`; the openraft
+// conformance suite never drives this transition, so without this test the
+// delete helper sits at 0% coverage.
+#[tokio::test]
+async fn save_committed_with_none_clears_existing_record() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+
+    let log_id: LogId<TestLeaderId> = LogId::new(
+        TestLeaderId {
+            term: 4,
+            node_id: 1,
+        },
+        9,
+    );
+    store.save_committed(Some(log_id)).await.unwrap();
+    assert_eq!(store.read_committed().await.unwrap(), Some(log_id));
+
+    store.save_committed(None).await.unwrap();
+    assert!(store.read_committed().await.unwrap().is_none());
+}
+
+// Corrupt the bytes stored at the Vote key, then verify `read_vote` surfaces
+// the decode error rather than silently returning `None` or panicking. Drives
+// the `bincode::deserialize` error arm in `meta::read` which is unreachable
+// from any legitimate API call sequence.
+#[tokio::test]
+async fn read_vote_surfaces_decode_error_on_corrupted_meta() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+
+    // Inject garbage bytes under the `Flat` keyspace's Vote key directly via the
+    // shared `Arc<DB>` — the public store API has no "write raw bytes" door.
+    let key = Flat.meta_key(MetaLabel::Vote);
+    let cf = db.cf_handle(META_CF).unwrap();
+    db.put_cf(&cf, &key, b"not a valid bincode-encoded vote")
+        .unwrap();
+
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
+
+    let err = store
+        .read_vote()
+        .await
+        .expect_err("read_vote should propagate the decode failure");
+    // The exact message comes from bincode; we just want to confirm an error
+    // path actually fires rather than asserting a brittle substring.
+    let _ = err.to_string();
 }

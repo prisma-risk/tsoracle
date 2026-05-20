@@ -1,5 +1,11 @@
 //! Membership-change wrappers.
 //!
+//! Coverage note: excluded from `make coverage` because exercising these
+//! wrappers requires a live raft, which the toolkit's own tests deliberately
+//! don't stand up. Downstream consumers' integration tests carry the real
+//! coverage; the compile-time signature shims in `tests/lifecycle.rs` are what
+//! catch openraft API drift inside this file.
+//!
 //! These thin helpers translate openraft's deeply-nested error enums into a
 //! `MembershipError` consumers can match on without pulling in openraft's
 //! internal error modules.
