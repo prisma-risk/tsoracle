@@ -21,11 +21,11 @@ A standalone timestamp oracle for Rust — strictly monotonic, gap-free integer 
 
 ## Features
 
-- **Monotonic & gap-free** — every issued timestamp is strictly greater than the last; no skipped or repeated values, ever.
-- **Crash-safe** — window state is fsync'd before any timestamp in that window is handed out, so a restart never rewinds.
-- **Pluggable consensus** — implement one trait (`ConsensusDriver`) to plug in openraft, raft-rs, etcd, or your own replicated log.
-- **gRPC client included** — `tsoracle-client` handles leader discovery, request coalescing, and reconnection for you.
-- **Embeddable** — host the server inside your own binary with a few lines of Rust, or run the standalone CLI.
+- 🔢 **Monotonic & gap-free** — every issued timestamp is strictly greater than the last; no skipped or repeated values, ever.
+- 🛡️ **Crash-safe** — window state is fsync'd before any timestamp in that window is handed out, so a restart never rewinds.
+- 🔌 **Pluggable consensus** — implement one trait (`ConsensusDriver`) to plug in openraft, raft-rs, etcd, or your own replicated log.
+- 📦 **gRPC client included** — `tsoracle-client` handles leader discovery, request coalescing, and reconnection for you.
+- 🧩 **Embeddable** — host the server inside your own binary with a few lines of Rust, or run the standalone CLI.
 
 ## Quickstart
 
@@ -81,17 +81,6 @@ A *timestamp oracle* is a service that hands out strictly increasing integer IDs
 - Per-host clocks aren't monotonic or accurate enough, and database sequences don't scale to your workload.
 
 tsoracle is a small, embeddable Rust implementation. The consensus layer is left as a trait, so you can run it single-node behind one fsync (the default), or wire it into a replicated log of your choice.
-
-## Migrating from an existing timestamp source
-
-`tsoracle serve` against an empty state directory starts at high-water `0`. If you're moving off a prior sequence or oracle, seed the state file once so the new oracle starts above every timestamp anyone has already seen:
-
-```bash
-tsoracle init --seed-physical-ms <MAX_OBSERVED_MILLIS> --state-dir ./tsoracle-data
-tsoracle serve --state-dir ./tsoracle-data
-```
-
-`init` refuses to overwrite an existing state file, so accidental rollback is prevented.
 
 ## Documentation
 
