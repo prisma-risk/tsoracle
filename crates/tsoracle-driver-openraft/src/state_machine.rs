@@ -491,5 +491,43 @@ mod tests {
                 Ok(())
             })?;
         }
+
+        /// Snapshot payload round-trip: build_snapshot -> install_snapshot
+        /// preserves (current_value, last_applied, last_membership) across
+        /// arbitrary apply sequences.
+        #[test]
+        fn p2_snapshot_payload_round_trip(
+            bumps in prop::collection::vec(any::<u64>(), 0..=32)
+        ) {
+            rt().block_on(async {
+                let mut sm = HighWaterStateMachine::new();
+                let mut idx = 0u64;
+                for t in &bumps {
+                    idx += 1;
+                    apply_one(
+                        &mut sm,
+                        idx,
+                        EntryPayload::Normal(HighWaterCommand::Bump { target: *t }),
+                    )
+                    .await;
+                }
+
+                let snap = sm.build_snapshot().await.expect("build_snapshot");
+                let meta = snap.meta.clone();
+                let bytes = snap.snapshot.into_inner();
+
+                let mut sm2 = HighWaterStateMachine::new();
+                sm2.install_snapshot(&meta, std::io::Cursor::new(bytes))
+                    .await
+                    .expect("install_snapshot");
+
+                prop_assert_eq!(sm2.current_value().await, sm.current_value().await);
+                let (a_last, a_mem) = sm.applied_state().await.unwrap();
+                let (b_last, b_mem) = sm2.applied_state().await.unwrap();
+                prop_assert_eq!(a_last, b_last);
+                prop_assert_eq!(a_mem, b_mem);
+                Ok(())
+            })?;
+        }
     }
 }
