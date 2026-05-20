@@ -26,3 +26,11 @@ test              = false
 doc               = false
 bench             = false
 doctest           = false
+
+[[bin]]
+name              = "record_roundtrip"
+path              = "fuzz_targets/record_roundtrip.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
