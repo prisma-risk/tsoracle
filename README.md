@@ -103,7 +103,7 @@ Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
   <img src="https://contrib.rocks/image?repo=prisma-risk/tsoracle"/>
 </a>
 
-Made with [contributors-img](https://contrib.rocks).
+Made with [contrib.rocks](https://contrib.rocks).
 
 ## License
 
