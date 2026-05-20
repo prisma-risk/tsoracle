@@ -2,7 +2,7 @@
 //!
 //! Layout under `dir`:
 //!   dir/
-//!     vote              # bincode-encoded openraft Vote (latest)
+//!     vote              # postcard-encoded openraft Vote (latest)
 //!     log/              # one file per log index, named `<index>`
 //!     state.json        # last_applied LogId + high_water (atomic rewrite)
 //!     snapshot.bin      # most recent snapshot, if any
@@ -19,7 +19,7 @@
 //!   snapshot.rs   — StoredSnapshot, snapshot::install/current free fns,
 //!                   RaftSnapshotBuilder impl
 //!   io.rs         — atomic_write_raw and on-disk format helpers
-//!                   (bincode vote, bincode log entries, JSON state,
+//!                   (postcard vote, postcard log entries, JSON state,
 //!                   raw bytes snapshot + JSON sidecar meta)
 
 mod io;

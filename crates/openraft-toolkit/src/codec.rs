@@ -1,6 +1,6 @@
 //! Binary wire codec for openraft RPC payloads and storage records.
 //!
-//! Every payload is encoded as `[version_byte | bincode(value)]`. The leading
+//! Every payload is encoded as `[version_byte | postcard(value)]`. The leading
 //! byte lets us evolve the wire format without an explicit migration when both
 //! sides of an upgrade run mixed versions briefly.
 
@@ -14,12 +14,12 @@ pub enum CodecError {
     #[error("version mismatch: expected {expected}, got {actual}")]
     Version { expected: u8, actual: u8 },
     #[error("decode failed: {0}")]
-    Decode(#[from] bincode::Error),
+    Decode(#[from] postcard::Error),
 }
 
-/// Encode `value` as `[version | bincode(value)]`.
+/// Encode `value` as `[version | postcard(value)]`.
 pub fn encode<T: Serialize>(version: u8, value: &T) -> Result<Vec<u8>, CodecError> {
-    let body = bincode::serialize(value)?;
+    let body = postcard::to_stdvec(value)?;
     let mut out = Vec::with_capacity(1 + body.len());
     out.push(version);
     out.extend_from_slice(&body);
@@ -38,7 +38,7 @@ pub fn decode<T: for<'de> Deserialize<'de>>(
             actual: *first,
         });
     }
-    Ok(bincode::deserialize(rest)?)
+    Ok(postcard::from_bytes(rest)?)
 }
 
 #[cfg(test)]

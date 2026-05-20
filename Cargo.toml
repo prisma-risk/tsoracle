@@ -38,7 +38,7 @@ authors      = ["Sebastian Thiebaud <sebastian@prismarisk.com>"]
 [workspace.dependencies]
 anyhow             = "1"
 async-trait        = "0.1"
-bincode            = "1"
+postcard           = { version = "1", features = ["use-std"] }
 bytes              = "1"
 clap               = { version = "4", features = ["derive"] }
 crc32c             = "0.6"

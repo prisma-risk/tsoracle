@@ -126,7 +126,7 @@ impl RaftStateMachine<TestTypeConfig> for StubStateMachine {
         snapshot: Cursor<Vec<u8>>,
     ) -> Result<(), io::Error> {
         let bytes = snapshot.into_inner();
-        let payload: SnapshotPayload = bincode::deserialize(&bytes).map_err(io::Error::other)?;
+        let payload: SnapshotPayload = postcard::from_bytes(&bytes).map_err(io::Error::other)?;
         let mut s = self.state.lock().unwrap();
         s.last_applied = payload.last_applied;
         s.last_membership = payload.last_membership;
@@ -158,7 +158,7 @@ impl RaftSnapshotBuilder<TestTypeConfig> for StubStateMachine {
             last_applied: s.last_applied,
             last_membership: s.last_membership.clone(),
         };
-        let bytes = bincode::serialize(&payload).map_err(io::Error::other)?;
+        let bytes = postcard::to_stdvec(&payload).map_err(io::Error::other)?;
         let meta = TestSnapshotMeta {
             last_log_id: s.last_applied,
             last_membership: s.last_membership.clone(),
