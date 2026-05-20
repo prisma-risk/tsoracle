@@ -10,14 +10,17 @@
 //! # Layering
 //!
 //! - [`log_entry`] defines the single command type replicated through the log.
+//! - [`state_machine`] implements `openraft::storage::RaftStateMachine` over
+//!   an in-memory `u64` counter with bincode snapshots.
 //! - [`type_config`] declares the `RaftTypeConfig` via
 //!   `openraft_toolkit::declare_raft_types_ext!`.
 //!
-//! The state machine and the `ConsensusDriver` impl are added in follow-up
-//! commits.
+//! The `ConsensusDriver` impl is added in a follow-up commit.
 
 pub mod log_entry;
+pub mod state_machine;
 pub mod type_config;
 
 pub use log_entry::HighWaterCommand;
+pub use state_machine::{HighWaterStateMachine, HighWaterStateMachineSnapshot};
 pub use type_config::{HighWaterApplied, OpenraftPeer, TypeConfig};
