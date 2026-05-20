@@ -17,11 +17,10 @@
 //! ```
 //!
 //! The openraft macro's hard-coded default is `ProgressResponder<Self, T>`.
-//! Matching the databend-meta / placement-driver choice
-//! (`OneshotResponder<Self, T>`) therefore requires emitting an
-//! `impl RaftTypeConfig` block directly. That also gives us full control over
-//! `LeaderId`, `Vote`, `Entry`, `Batch`, and `ErrorSource` so the macro
-//! produces output bit-identical to placement-driver's hand-written impl.
+//! Defaulting to `OneshotResponder<Self, T>` instead therefore requires
+//! emitting an `impl RaftTypeConfig` block directly. That also gives the macro
+//! full control over `LeaderId`, `Vote`, `Entry`, `Batch`, and `ErrorSource`,
+//! so the produced impl is identical to a hand-written one.
 
 /// Declare a `RaftTypeConfig` with sensible defaults.
 ///
@@ -46,7 +45,7 @@
 /// Inherited (non-overridable) defaults:
 /// - `Term = u64`
 /// - `LeaderId = openraft::impls::leader_id_adv::LeaderId<Self::Term, Self::NodeId>`
-///   (multi-leader-per-term, matching databend-meta)
+///   (multi-leader-per-term)
 /// - `Vote = openraft::impls::Vote<Self::LeaderId>`
 /// - `Batch<T> = openraft::impls::InlineBatch<T>`
 /// - `ErrorSource = openraft::impls::BoxedErrorSource`

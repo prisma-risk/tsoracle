@@ -1,8 +1,8 @@
 //! Tests for the lifecycle helpers.
 //!
-//! Real cluster behavior is covered by the PD migration's integration tests
-//! once the toolkit is wired up. The tests here are compile-time signature
-//! checks plus pure-function assertions where possible.
+//! Real cluster behavior is exercised by downstream consumers' integration
+//! tests. The tests here are compile-time signature checks plus pure-function
+//! assertions where possible.
 
 use std::collections::BTreeMap;
 

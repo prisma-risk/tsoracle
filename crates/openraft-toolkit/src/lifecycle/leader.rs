@@ -143,8 +143,7 @@ fn project_state<C: RaftTypeConfig>(m: &RaftMetrics<C>) -> LeadershipState<C> {
 fn resolve_leader<C: RaftTypeConfig>(m: &RaftMetrics<C>) -> Option<(C::NodeId, C::Node)> {
     let leader_id = m.current_leader.clone()?;
     // `membership_config` is `Arc<StoredMembership<...>>`; `nodes()` yields
-    // `(&NodeId, &Node)`. Match openraft's lookup style verbatim (see
-    // `placement-driver::pd_handle::forward_to_leader_from_metrics`).
+    // `(&NodeId, &Node)`.
     m.membership_config
         .nodes()
         .find(|(id, _)| *id == &leader_id)
