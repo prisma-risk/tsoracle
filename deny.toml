@@ -33,6 +33,4 @@ skip = [
 ]
 
 [advisories]
-# bincode 1.x is feature-complete per its maintainers (RUSTSEC-2025-0141);
-# the openraft-cluster example keeps using it to stay close to upstream openraft examples.
-ignore = ["RUSTSEC-2025-0141"]
+ignore = []
