@@ -1470,6 +1470,7 @@ dependencies = [
  "async-trait",
  "futures",
  "openraft",
+ "parking_lot",
  "postcard",
  "proptest",
  "rocksdb",
