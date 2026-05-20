@@ -14,6 +14,8 @@ pub enum RecordError {
     UnsupportedVersion(u8),
     #[error("crc mismatch: expected {expected:#010x}, computed {computed:#010x}")]
     CrcMismatch { expected: u32, computed: u32 },
+    #[error("file too long: {len} bytes (expected 17)")]
+    TrailingBytes { len: usize },
 }
 
 pub fn encode(high_water: u64) -> [u8; RECORD_LEN] {
@@ -27,6 +29,9 @@ pub fn encode(high_water: u64) -> [u8; RECORD_LEN] {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<u64, RecordError> {
+    if bytes.len() > RECORD_LEN {
+        return Err(RecordError::TrailingBytes { len: bytes.len() });
+    }
     let magic: [u8; 4] = read_array(bytes, 0)?;
     if &magic != MAGIC {
         return Err(RecordError::BadMagic(magic));
@@ -110,6 +115,17 @@ mod tests {
     fn detects_short_crc_slice() {
         let bytes = [MAGIC.as_slice(), &[VERSION], &[0; 8], &[0; 3]].concat();
         assert!(matches!(decode(&bytes), Err(RecordError::TooShort(16))));
+    }
+
+    #[test]
+    fn detects_trailing_bytes() {
+        let valid = encode(42);
+        let mut overlong = valid.to_vec();
+        overlong.push(0xAB);
+        assert!(matches!(
+            decode(&overlong),
+            Err(RecordError::TrailingBytes { len: 18 })
+        ));
     }
 
     use proptest::prelude::*;
