@@ -97,6 +97,14 @@ Each example is its own crate. Build with `cargo run -p example-<name>`.
 
 Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, the checks CI will run on your PR, commit message conventions, and the release process.
 
+### Contributors
+
+<a href="https://github.com/prisma-risk/tsoracle/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=prisma-risk/tsoracle"/>
+</a>
+
+Made with [contributors-img](https://contrib.rocks).
+
 ## License
 
 Licensed under [Apache-2.0](LICENSE).
