@@ -8,6 +8,7 @@ members  = [
     "crates/tsoracle-client",
     "crates/tsoracle-driver-file",
     "crates/tsoracle-bin",
+    "crates/openraft-toolkit",
     "examples/embedded-server",
     "examples/failover-demo",
     "examples/openraft-cluster",
@@ -21,6 +22,7 @@ default-members = [
     "crates/tsoracle-client",
     "crates/tsoracle-driver-file",
     "crates/tsoracle-bin",
+    "crates/openraft-toolkit",
 ]
 
 [workspace.package]
@@ -59,6 +61,7 @@ tonic-reflection   = "0.14"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 openraft           = { version = "0.10.0-alpha.20", features = ["serde", "type-alias"] }
+rocksdb            = { version = "0.22", default-features = false, features = ["lz4"] }
 
 [profile.release]
 lto           = "thin"

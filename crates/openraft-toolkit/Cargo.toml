@@ -1,0 +1,33 @@
+[package]
+name         = "openraft-toolkit"
+description  = "Reusable openraft glue: TypeConfig macro, RocksDB log store, lifecycle helpers"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+authors.workspace      = true
+
+[features]
+default            = ["rocksdb-log-store"]
+rocksdb-log-store  = ["dep:rocksdb"]
+test-fakes         = []
+
+[dependencies]
+async-trait      = { workspace = true }
+bincode          = { workspace = true }
+futures          = { workspace = true }
+openraft         = { workspace = true }
+rocksdb          = { workspace = true, optional = true, features = ["multi-threaded-cf"] }
+serde            = { workspace = true }
+thiserror        = { workspace = true }
+tokio            = { workspace = true }
+tokio-stream     = { workspace = true }
+tracing          = { workspace = true }
+
+[dev-dependencies]
+openraft         = { workspace = true, features = ["serde", "type-alias"] }
+proptest         = { workspace = true }
+tempfile         = { workspace = true }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
