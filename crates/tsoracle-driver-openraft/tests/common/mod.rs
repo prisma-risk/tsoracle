@@ -66,8 +66,7 @@ where
     }
     assert_eq!(
         last, expected,
-        "eventually_eq timed out after {:?}: last={:?} expected={:?}",
-        timeout, last, expected
+        "eventually_eq timed out after {timeout:?}: last={last:?} expected={expected:?}",
     );
 }
 
