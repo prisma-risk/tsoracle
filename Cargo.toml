@@ -14,6 +14,10 @@ members  = [
     "examples/openraft-cluster",
     "benchmarks/minimal",
 ]
+# The fuzz crate is a standalone cargo project pinned to nightly via its own
+# rust-toolchain.toml. Excluding it here keeps `cargo build --workspace` on
+# stable from trying to compile its #![no_main] harnesses.
+exclude = ["fuzz"]
 default-members = [
     "crates/tsoracle-proto",
     "crates/tsoracle-core",

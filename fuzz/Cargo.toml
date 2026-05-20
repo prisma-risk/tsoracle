@@ -1,0 +1,22 @@
+[package]
+name    = "tsoracle-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Empty [workspace] table makes this its own workspace root and prevents
+# `cargo build --workspace` from the parent repo discovering these targets,
+# which is required because the harnesses use #![no_main] and only build
+# on the pinned nightly toolchain.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys        = "0.4"
+prost                = "0.14"
+tsoracle-driver-file = { path = "../crates/tsoracle-driver-file" }
+tsoracle-proto       = { path = "../crates/tsoracle-proto" }
+
+# Fuzz targets are added by later tasks (one [[bin]] per target).
