@@ -255,6 +255,37 @@ pub async fn build_three_node() -> TestCluster {
     }
 }
 
-pub async fn reopen_node(_prior: TestNode) -> TestNode {
-    unimplemented!("reopen_node lands in a follow-up task")
+pub async fn reopen_node(prior: TestNode) -> TestNode {
+    let TestNode {
+        id,
+        raft,
+        sm: _,
+        log_dir,
+    } = prior;
+
+    // Shut down the prior Raft cleanly so RocksDB files are released.
+    raft.shutdown().await.expect("prior raft shutdown");
+    drop(raft);
+
+    // Reopen RocksDB at the same path with a fresh state machine. openraft
+    // will re-apply committed log entries during Raft::new.
+    let log_store = open_rocksdb_log_store(&log_dir);
+    let sm = HighWaterStateMachine::new();
+    let sm_clone = sm.clone();
+    let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
+        id,
+        test_raft_config(),
+        UnreachableNetwork,
+        log_store,
+        sm,
+    )
+    .await
+    .expect("Raft::new on reopen");
+
+    TestNode {
+        id,
+        raft,
+        sm: sm_clone,
+        log_dir,
+    }
 }
