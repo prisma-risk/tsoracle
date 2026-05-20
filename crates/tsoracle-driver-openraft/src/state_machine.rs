@@ -371,4 +371,83 @@ mod tests {
         let (last, _) = sm.applied_state().await.unwrap();
         assert_eq!(last.map(|l| l.index), Some(2));
     }
+
+    // ---- Snapshot tests ----
+
+    #[tokio::test]
+    async fn build_snapshot_round_trips_payload() {
+        let mut sm = HighWaterStateMachine::new();
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::Bump { target: 500 }),
+        )
+        .await;
+
+        let snap = sm.build_snapshot().await.expect("build_snapshot");
+        let bytes = snap.snapshot.into_inner();
+        let payload: HighWaterStateMachineSnapshot =
+            postcard::from_bytes(&bytes).expect("decode snapshot");
+        assert_eq!(payload.current_value, 500);
+        assert_eq!(payload.last_applied.map(|l| l.index), Some(1));
+    }
+
+    #[tokio::test]
+    async fn build_snapshot_uses_fresh_id_each_time() {
+        let mut sm = HighWaterStateMachine::new();
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::Bump { target: 7 }),
+        )
+        .await;
+
+        let a = sm.build_snapshot().await.expect("build_snapshot a");
+        let b = sm.build_snapshot().await.expect("build_snapshot b");
+        assert_ne!(
+            a.meta.snapshot_id, b.meta.snapshot_id,
+            "two snapshots at same last_applied must have distinct ids"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_replaces_state() {
+        let mut sm = HighWaterStateMachine::new();
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 999,
+            last_applied: Some(log_id(5)),
+            last_membership: StoredMem::default(),
+        };
+        let bytes = postcard::to_stdvec(&payload).expect("serialize payload");
+
+        let meta = SnapMeta {
+            last_log_id: payload.last_applied,
+            last_membership: payload.last_membership.clone(),
+            snapshot_id: "test-install-1".to_string(),
+        };
+        sm.install_snapshot(&meta, std::io::Cursor::new(bytes))
+            .await
+            .expect("install_snapshot");
+
+        assert_eq!(sm.current_value().await, 999);
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(last.map(|l| l.index), Some(5));
+
+        let current = sm
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("snapshot present");
+        assert_eq!(current.meta.snapshot_id, "test-install-1");
+    }
+
+    #[tokio::test]
+    async fn get_current_snapshot_initially_none() {
+        let mut sm = HighWaterStateMachine::new();
+        let s = sm
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot");
+        assert!(s.is_none());
+    }
 }
