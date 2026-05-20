@@ -58,7 +58,7 @@ tonic-prost-build  = "0.14"
 tonic-reflection   = "0.14"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-openraft           = { version = "0.10.0-alpha.18", features = ["serde", "type-alias"] }
+openraft           = { version = "0.10.0-alpha.20", features = ["serde", "type-alias"] }
 
 [profile.release]
 lto           = "thin"
