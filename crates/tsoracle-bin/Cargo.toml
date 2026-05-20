@@ -1,0 +1,34 @@
+[package]
+name         = "tsoracle"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description  = "Standalone timestamp oracle server"
+publish      = true
+
+[[bin]]
+name = "tsoracle"
+path = "src/main.rs"
+
+[dependencies]
+anyhow                = "1"
+humantime             = "2"
+clap                  = { workspace = true }
+tokio                 = { workspace = true, features = ["signal"] }
+tracing               = { workspace = true }
+tracing-subscriber    = { workspace = true }
+tsoracle-core         = { path = "../tsoracle-core", version = "0.1.0" }
+tsoracle-server       = { path = "../tsoracle-server", version = "0.1.0" }
+tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "0.1.0" }
+
+[dev-dependencies]
+tsoracle-client    = { path = "../tsoracle-client", version = "0.1.0" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.0" }
+async-trait        = { workspace = true }
+futures            = { workspace = true }
+parking_lot        = { workspace = true }
+tokio-stream       = { workspace = true }
+tempfile           = { workspace = true }
+tokio              = { workspace = true, features = ["process"] }
