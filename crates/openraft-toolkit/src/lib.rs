@@ -14,7 +14,8 @@ pub mod test_fakes;
 
 pub use codec::{CodecError, decode, encode};
 pub use lifecycle::{
-    BootstrapError, BootstrapMode, MembershipError, add_learner, bootstrap, change_membership,
+    BootstrapError, BootstrapMode, LeadershipState, MembershipError, add_learner, bootstrap,
+    change_membership, leadership_events,
 };
 
 #[cfg(feature = "rocksdb-log-store")]
