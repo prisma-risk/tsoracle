@@ -37,9 +37,11 @@ jobs:
       - name: buf format
         run: buf format --diff --exit-code crates/tsoracle-proto/proto
       - name: buf breaking
+        if: github.event_name == 'pull_request'
         env:
-          BASE_REF: ${{ github.event.pull_request.base.ref || 'main' }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
+          git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/heads/${BASE_REF}"
           buf breaking crates/tsoracle-proto/proto \
             --against ".git#branch=${BASE_REF},subdir=crates/tsoracle-proto/proto"
 
