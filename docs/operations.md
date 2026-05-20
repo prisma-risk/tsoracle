@@ -1,0 +1,41 @@
+# Operations
+
+How to run tsoracle in production — the parameters worth tuning (`window_ahead`, `failover_advance`), monitoring, deployment topologies, and the client's retry behavior. Each section is a focused reference; read in any order.
+
+## Sizing window_ahead
+
+Default is 3 seconds. Each window extension costs one `persist_high_water` round-trip — for the file driver that is `write + fsync + rename + dir-fsync`, roughly 1–5 ms on a modern SSD. At 3-second window-ahead, extension rate is well under 1/sec in steady state. Lower values trade more frequent fsyncs for tighter bounds on stale-window timestamps after a clock skip.
+
+Do not run `window_ahead` below 100 ms with the file driver. The fsync rate dominates throughput at that point. If you need tighter window bounds, use a consensus driver with batched log appends instead.
+
+## Sizing failover_advance
+
+Default is 1 second. On leadership gain, the new leader first computes `serving_floor = max(prior_max + 1, now_ms)` and then persists `requested = serving_floor + failover_advance`. The `+1` is mandatory because `prior_max` is an inclusive high-water: the prior leader could have served `(prior_max, LOGICAL_MAX)`. Larger `failover_advance` values give more headroom against clock skew between old and new leaders; smaller values reduce timestamp "jumps" visible to clients. 1 second is appropriate for most deployments; consider 5–10 seconds if your nodes' clocks may differ by more than a second.
+
+## Monitoring hooks
+
+Metrics are not yet emitted by the server. The signals planned for a future release, intended for wiring against the `metrics` crate facade (`metrics-exporter-prometheus`, `metrics-exporter-influx`, etc.), are:
+
+- `tsoracle.get_ts.total` — total GetTs RPCs handled (counter)
+- `tsoracle.get_ts.timestamps_issued` — sum of `count` across all GetTs responses (counter)
+- `tsoracle.window.extensions.total` — number of persist_high_water calls (counter)
+- `tsoracle.window.extension_latency` — duration of persist_high_water (histogram, seconds)
+- `tsoracle.leader_transition.total` — leader-watch saw a state change (counter)
+- `tsoracle.leader_transition.fence_latency` — duration of the failover fence (histogram, seconds)
+- `tsoracle.not_leader.total` — RPCs rejected with `NOT_LEADER` (counter)
+
+## Advertised endpoints in multi-node deployments
+
+The consensus driver owns the mapping from consensus leader identity to tsoracle endpoint. The source of that mapping is the driver's choice — explicit configuration, consensus membership metadata, service discovery, or anything else. Drivers report the resolved endpoint to the server via `LeaderState::Follower { leader_endpoint }`; the server forwards it in `LeaderHint` trailers so clients can redirect. The library itself never sees the mapping and exposes no flag for it. Single-node deployments (`tsoracle-driver-file`) have no peers to advertise to.
+
+## Deployment topologies
+
+**Single-node:** one `tsoracle serve` process, `tsoracle-driver-file`. No HA. Good for dev, small services, deployments where TSO availability is not in the critical path.
+
+**HA via your own consensus:** N nodes (typically 3 or 5), each running `tsoracle serve` embedded in a binary that supplies a custom `ConsensusDriver` over your consensus library. Clients configure all N endpoints. Leader handles `GetTs`; followers redirect.
+
+**Sharded TSO domains:** for systems wanting separate monotonic sequences per keyspace, run one tsoracle cluster per shard. The library has no opinion on sharding.
+
+## Client retry behavior
+
+The client gives `FAILED_PRECONDITION` special handling: it parses the `tsoracle-leader-hint-bin` trailer (see [The leader-hint trailer](key-subsystems.md#the-leader-hint-trailer)) and moves the hinted leader to the front of the current retry worklist. Other gRPC errors, including `UNAVAILABLE` and `INTERNAL`, are recorded and the client continues through the configured endpoints once for that call. Configure `endpoints` with all known servers so cold-start works even when the cached leader is unreachable.
