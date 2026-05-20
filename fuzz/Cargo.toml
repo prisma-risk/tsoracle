@@ -42,3 +42,11 @@ test              = false
 doc               = false
 bench             = false
 doctest           = false
+
+[[bin]]
+name              = "proto_get_ts_response_decode"
+path              = "fuzz_targets/proto_get_ts_response_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
