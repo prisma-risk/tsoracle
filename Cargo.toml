@@ -7,6 +7,7 @@ members  = [
     "crates/tsoracle-server",
     "crates/tsoracle-client",
     "crates/tsoracle-driver-file",
+    "crates/tsoracle-driver-openraft",
     "crates/tsoracle-bin",
     "crates/openraft-toolkit",
     "examples/embedded-server",
@@ -25,6 +26,7 @@ default-members = [
     "crates/tsoracle-server",
     "crates/tsoracle-client",
     "crates/tsoracle-driver-file",
+    "crates/tsoracle-driver-openraft",
     "crates/tsoracle-bin",
     "crates/openraft-toolkit",
 ]

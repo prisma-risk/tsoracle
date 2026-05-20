@@ -1,0 +1,32 @@
+[package]
+name         = "tsoracle-driver-openraft"
+description  = "openraft-backed ConsensusDriver for tsoracle"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+authors.workspace      = true
+
+[dependencies]
+async-trait        = { workspace = true }
+bincode            = { workspace = true }
+futures            = { workspace = true }
+openraft           = { workspace = true }
+openraft-toolkit   = { path = "../openraft-toolkit" }
+parking_lot        = { workspace = true }
+serde              = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-stream       = { workspace = true }
+tracing            = { workspace = true }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.0" }
+tsoracle-core      = { path = "../tsoracle-core", version = "0.1.0" }
+
+[dev-dependencies]
+anyhow           = { workspace = true }
+openraft-toolkit = { path = "../openraft-toolkit", features = ["rocksdb-log-store"] }
+rocksdb          = { workspace = true }
+tempfile         = { workspace = true }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
