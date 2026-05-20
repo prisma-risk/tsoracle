@@ -14,13 +14,15 @@
 //!   an in-memory `u64` counter with bincode snapshots.
 //! - [`type_config`] declares the `RaftTypeConfig` via
 //!   `openraft_toolkit::declare_raft_types_ext!`.
-//!
-//! The `ConsensusDriver` impl is added in a follow-up commit.
+//! - [`driver`] wraps the `Raft` handle and the state machine into the
+//!   `ConsensusDriver` impl.
 
+pub mod driver;
 pub mod log_entry;
 pub mod state_machine;
 pub mod type_config;
 
+pub use driver::OpenraftDriver;
 pub use log_entry::HighWaterCommand;
 pub use state_machine::{HighWaterStateMachine, HighWaterStateMachineSnapshot};
 pub use type_config::{HighWaterApplied, OpenraftPeer, TypeConfig};
