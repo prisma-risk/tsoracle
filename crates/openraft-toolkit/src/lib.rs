@@ -11,3 +11,5 @@ pub mod lifecycle;
 
 #[cfg(any(test, feature = "test-fakes"))]
 pub mod test_fakes;
+
+pub use codec::{CodecError, decode, encode};
