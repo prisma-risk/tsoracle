@@ -1,7 +1,7 @@
 //! In-memory `RaftStateMachine` for the high-water counter.
 //!
 //! State is one `u64` plus the openraft-required apply-progress metadata
-//! (`last_applied`, `last_membership`). Snapshots are bincode-encoded blobs of
+//! (`last_applied`, `last_membership`). Snapshots are postcard-encoded blobs of
 //! that tuple. All state lives inside an `Arc<Mutex<HighWaterCore>>` so the
 //! state machine is cheaply cloneable — required because openraft's
 //! `RaftStateMachine::SnapshotBuilder = Self` design hands out clones to drive
@@ -39,7 +39,7 @@ type SnapOf = SnapshotOf<TypeConfig>;
 type SnapData = Cursor<Vec<u8>>;
 type StoredMem = StoredMembershipOf<TypeConfig>;
 
-/// Snapshot payload — bincode-encoded under the hood.
+/// Snapshot payload — postcard-encoded under the hood.
 ///
 /// Exposed at the crate root so callers building tooling around the snapshot
 /// format (e.g. inspectors, migration tools) can decode it without re-deriving
@@ -143,7 +143,7 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
                 last_membership: core.last_membership.clone(),
                 snapshot_id,
             };
-            let bytes = bincode::serialize(&payload)
+            let bytes = postcard::to_stdvec(&payload)
                 .map_err(|e| io::Error::other(format!("snapshot serialize: {e}")))?;
             let stored = StoredSnapshot {
                 meta: meta.clone(),
@@ -231,7 +231,7 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
         snapshot: SnapData,
     ) -> Result<(), io::Error> {
         let bytes = snapshot.into_inner();
-        let payload: HighWaterStateMachineSnapshot = bincode::deserialize(&bytes)
+        let payload: HighWaterStateMachineSnapshot = postcard::from_bytes(&bytes)
             .map_err(|e| io::Error::other(format!("snapshot deserialize: {e}")))?;
 
         let mut core = self.core.lock();

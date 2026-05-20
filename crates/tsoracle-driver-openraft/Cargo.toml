@@ -11,9 +11,9 @@ authors.workspace      = true
 
 [dependencies]
 async-trait        = { workspace = true }
-bincode            = { workspace = true }
 futures            = { workspace = true }
 openraft           = { workspace = true }
+postcard           = { workspace = true }
 openraft-toolkit   = { path = "../openraft-toolkit" }
 parking_lot        = { workspace = true }
 serde              = { workspace = true }
