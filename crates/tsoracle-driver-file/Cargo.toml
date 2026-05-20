@@ -1,0 +1,37 @@
+[package]
+name         = "tsoracle-driver-file"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+readme.workspace       = true
+description  = "Single-node fsync-durable file driver (ConsensusDriver impl) for tsoracle."
+documentation = "https://docs.rs/tsoracle-driver-file"
+keywords      = ["tsoracle", "wal", "storage", "fsync", "driver"]
+categories    = ["database-implementations", "filesystem"]
+
+[features]
+default = []
+
+[package.metadata.docs.rs]
+all-features = false
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+async-trait        = { workspace = true }
+crc32c             = { workspace = true }
+futures            = { workspace = true }
+libc               = "0.2"
+parking_lot        = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-stream       = { workspace = true }
+tsoracle-core      = { path = "../tsoracle-core", version = "0.1.0" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.0" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["test-util"] }
