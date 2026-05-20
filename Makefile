@@ -31,6 +31,7 @@ WORKSPACE_VERSION := $(shell grep -E '^version[[:space:]]*=' Cargo.toml | head -
 .PHONY: all ci check fmt fmt-check lint fix build test doc \
         proto proto-lint proto-fmt proto-fmt-check proto-breaking \
         deny coverage clean help \
+        bench bench-throughput-sweep bench-latency \
         release-bump release-dry-run release-publish release-tag
 
 # Default target: full CI parity.
@@ -106,6 +107,7 @@ coverage:
 	  --exclude example-embedded-server \
 	  --exclude example-failover-demo \
 	  --exclude example-openraft-cluster \
+	  --exclude bench-minimal \
 	  --lcov --output-path lcov.info
 
 # Release --------------------------------------------------------------------
@@ -194,6 +196,25 @@ release-tag:
 	@echo
 	@echo "Tagged and pushed v$(WORKSPACE_VERSION). Draft the release notes on GitHub."
 
+# Benchmarks ----------------------------------------------------------------
+# `bench-minimal` is a characterization tool, not a CI gate. None of these
+# targets are wired into `ci:` or `check:`.
+
+bench:
+	$(CARGO) run --release -p bench-minimal --bin bench -- \
+	  --clients 64 --ops 1m --batch-size 4
+
+bench-throughput-sweep:
+	@for c in 1 4 16 64 256 1024; do \
+	  echo "==> --clients $$c"; \
+	  $(CARGO) run --release -p bench-minimal --bin bench -- \
+	    --clients $$c --ops 1m --batch-size 4 --json > bench-$$c.json || exit 1; \
+	done
+
+bench-latency:
+	$(CARGO) run --release -p bench-minimal --bin bench -- \
+	  --clients 1 --ops 200k --batch-size 1
+
 # Help -----------------------------------------------------------------------
 
 help:
@@ -222,6 +243,10 @@ help:
 	@echo ""
 	@echo "  coverage         cargo llvm-cov on library crates -> lcov.info"
 	@echo "                   (excludes tsoracle-bin and examples/)"
+	@echo ""
+	@echo "  bench            Run the bench-minimal characterization workload."
+	@echo "  bench-throughput-sweep  Run bench across clients=1..1024 (--json files)."
+	@echo "  bench-latency    Run bench at clients=1 for latency-focused output."
 	@echo ""
 	@echo "Release flow (run in order; see CONTRIBUTING.md):"
 	@echo "  release-bump     1) Bump workspace + intra-workspace dep refs, commit."

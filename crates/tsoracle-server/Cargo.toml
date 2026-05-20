@@ -39,8 +39,9 @@ tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.0" }
 tsoracle-proto     = { path = "../tsoracle-proto", version = "0.1.0" }
 
 [dev-dependencies]
-tokio        = { workspace = true, features = ["test-util"] }
-tsoracle-core = { path = "../tsoracle-core", version = "0.1.0", features = ["test-clock"] }
+tokio          = { workspace = true, features = ["test-util"] }
+tsoracle-core   = { path = "../tsoracle-core", version = "0.1.0", features = ["test-clock"] }
+tsoracle-client = { path = "../tsoracle-client", version = "0.1.0" }
 
 [[test]]
 name = "e2e"
@@ -60,4 +61,8 @@ required-features = ["test-fakes"]
 
 [[test]]
 name = "leadership_churn"
+required-features = ["test-fakes"]
+
+[[test]]
+name = "serve_with_listener"
 required-features = ["test-fakes"]
