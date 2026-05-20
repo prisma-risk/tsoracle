@@ -14,8 +14,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -62,8 +62,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      - name: protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
       - name: coverage
         run: make coverage
       - uses: coverallsapp/github-action@v2
