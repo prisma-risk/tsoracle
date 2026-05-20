@@ -62,7 +62,9 @@ mod tests {
 
     #[test]
     fn openraft_peer_round_trips_empty_addr() {
-        let peer = OpenraftPeer { addr: String::new() };
+        let peer = OpenraftPeer {
+            addr: String::new(),
+        };
         let bytes = postcard::to_stdvec(&peer).expect("serialize");
         let back: OpenraftPeer = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(back, peer);

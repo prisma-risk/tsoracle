@@ -15,15 +15,13 @@ use tokio::time::timeout;
 use tsoracle_consensus::{ConsensusDriver, LeaderState};
 use tsoracle_core::Epoch;
 
-use common::{build_single_node, eventually_eq, reopen_node, TestCluster};
+use common::{TestCluster, build_single_node, eventually_eq, reopen_node};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_replays_high_water_from_rocksdb_log() {
     let cluster = build_single_node().await;
     let TestCluster {
-        mut nodes,
-        drivers,
-        ..
+        mut nodes, drivers, ..
     } = cluster;
     let driver = drivers[0].clone();
 
@@ -59,10 +57,8 @@ async fn restart_replays_high_water_from_rocksdb_log() {
     let reopened = reopen_node(prior).await;
 
     // Build a fresh driver against the reopened node.
-    let host = tsoracle_driver_openraft::StandaloneHost::new(
-        reopened.raft.clone(),
-        reopened.sm.clone(),
-    );
+    let host =
+        tsoracle_driver_openraft::StandaloneHost::new(reopened.raft.clone(), reopened.sm.clone());
     let reopened_driver = tsoracle_driver_openraft::OpenraftDriver::new(host);
 
     // Replay yields the last persisted value.

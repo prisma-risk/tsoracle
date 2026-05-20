@@ -13,7 +13,7 @@ use tokio::time::timeout;
 use tsoracle_consensus::ConsensusDriver;
 use tsoracle_core::Epoch;
 
-use common::{build_three_node, eventually_eq, TestCluster};
+use common::{TestCluster, build_three_node, eventually_eq};
 
 async fn find_leader_idx(cluster: &TestCluster) -> usize {
     timeout(Duration::from_secs(10), async {

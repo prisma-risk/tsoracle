@@ -15,7 +15,7 @@ use tokio::time::timeout;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError};
 use tsoracle_core::Epoch;
 
-use common::{build_three_node, eventually_eq, TestCluster};
+use common::{TestCluster, build_three_node, eventually_eq};
 
 async fn find_leader_idx(cluster: &TestCluster) -> usize {
     timeout(Duration::from_secs(10), async {
@@ -45,7 +45,10 @@ async fn three_node_leader_persists_and_followers_converge() {
     assert_eq!(leader_driver.load_high_water().await.unwrap(), 0);
 
     // Advance.
-    let v = leader_driver.persist_high_water(100, Epoch(1)).await.unwrap();
+    let v = leader_driver
+        .persist_high_water(100, Epoch(1))
+        .await
+        .unwrap();
     assert_eq!(v, 100);
 
     // All three SMs should converge on 100 within 5 seconds.
@@ -64,7 +67,9 @@ async fn three_node_follower_returns_not_leader() {
     let cluster = build_three_node().await;
 
     let leader_idx = find_leader_idx(&cluster).await;
-    let follower_idx = (0..3).find(|i| *i != leader_idx).expect("a follower exists");
+    let follower_idx = (0..3)
+        .find(|i| *i != leader_idx)
+        .expect("a follower exists");
     let follower_driver = &cluster.drivers[follower_idx];
 
     let err = follower_driver

@@ -46,7 +46,9 @@ mod tests {
 
     #[test]
     fn postcard_round_trip_bump() {
-        let cmd = HighWaterCommand::Bump { target: 1_234_567_890 };
+        let cmd = HighWaterCommand::Bump {
+            target: 1_234_567_890,
+        };
         let bytes = postcard::to_stdvec(&cmd).expect("serialize");
         let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(back, cmd);

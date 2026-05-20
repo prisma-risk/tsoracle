@@ -277,7 +277,10 @@ mod tests {
         openraft::testing::log_id::<TypeConfig>(1, 1, index)
     }
 
-    fn entry(index: u64, payload: EntryPayload<HighWaterCommand, u64, crate::type_config::OpenraftPeer>) -> EntryResponder<TypeConfig> {
+    fn entry(
+        index: u64,
+        payload: EntryPayload<HighWaterCommand, u64, crate::type_config::OpenraftPeer>,
+    ) -> EntryResponder<TypeConfig> {
         let e: EntryOf<TypeConfig> = match payload {
             EntryPayload::Blank => EntryOf::<TypeConfig>::new_blank(log_id(index)),
             EntryPayload::Normal(d) => EntryOf::<TypeConfig>::new_normal(log_id(index), d),
@@ -291,7 +294,9 @@ mod tests {
         index: u64,
         payload: EntryPayload<HighWaterCommand, u64, crate::type_config::OpenraftPeer>,
     ) {
-        sm.apply(stream::iter([Ok(entry(index, payload))])).await.expect("apply");
+        sm.apply(stream::iter([Ok(entry(index, payload))]))
+            .await
+            .expect("apply");
     }
 
     // --- Tests ---
@@ -362,10 +367,7 @@ mod tests {
             EntryPayload::Normal(HighWaterCommand::Bump { target: 42 }),
         )
         .await;
-        let mem = openraft::Membership::new_with_defaults(
-            vec![BTreeSet::from([1u64])],
-            [1u64],
-        );
+        let mem = openraft::Membership::new_with_defaults(vec![BTreeSet::from([1u64])], [1u64]);
         apply_one(&mut sm, 2, EntryPayload::Membership(mem)).await;
         assert_eq!(sm.current_value().await, 42);
         let (last, _) = sm.applied_state().await.unwrap();

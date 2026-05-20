@@ -10,7 +10,9 @@ use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use openraft::error::{Fatal, NetworkError, RPCError, RaftError, ReplicationClosed, StreamingError};
+use openraft::error::{
+    Fatal, NetworkError, RPCError, RaftError, ReplicationClosed, StreamingError,
+};
 use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
@@ -171,7 +173,9 @@ where
             )))
         })?;
         target.append_entries(rpc).await.map_err(|e| {
-            RPCError::Network(NetworkError::from_string(format!("mem-network remote: {e}")))
+            RPCError::Network(NetworkError::from_string(format!(
+                "mem-network remote: {e}"
+            )))
         })
     }
 
@@ -193,7 +197,9 @@ where
             )))
         })?;
         target.vote(rpc).await.map_err(|e| {
-            RPCError::Network(NetworkError::from_string(format!("mem-network remote: {e}")))
+            RPCError::Network(NetworkError::from_string(format!(
+                "mem-network remote: {e}"
+            )))
         })
     }
 

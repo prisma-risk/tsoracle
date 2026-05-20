@@ -85,10 +85,7 @@ impl RaftSnapshotBuilder<SmokeConfig> for SmokeStateMachine {
         let meta = SnapMeta {
             last_log_id: core.last_applied,
             last_membership: core.last_membership.clone(),
-            snapshot_id: format!(
-                "smoke-{}",
-                core.last_applied.map(|l| l.index).unwrap_or(0)
-            ),
+            snapshot_id: format!("smoke-{}", core.last_applied.map(|l| l.index).unwrap_or(0)),
         };
         let bytes = postcard::to_stdvec(&core.value)
             .map_err(|e| io::Error::other(format!("smoke build_snapshot: {e}")))?;
@@ -182,8 +179,12 @@ async fn three_node_mem_network_elects_and_replicates() {
         .unwrap(),
     );
 
-    let mut nodes: Vec<(u64, Raft<SmokeConfig, SmokeStateMachine>, SmokeStateMachine, TempDir)> =
-        Vec::new();
+    let mut nodes: Vec<(
+        u64,
+        Raft<SmokeConfig, SmokeStateMachine>,
+        SmokeStateMachine,
+        TempDir,
+    )> = Vec::new();
 
     for id in [1u64, 2, 3] {
         let dir = TempDir::new().unwrap();
