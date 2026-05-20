@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members  = [
+    "crates/tsoracle-proto",
+    "crates/tsoracle-core",
+    "crates/tsoracle-consensus",
+    "crates/tsoracle-server",
+    "crates/tsoracle-client",
+    "crates/tsoracle-driver-file",
+    "crates/tsoracle-bin",
+    "examples/embedded-server",
+    "examples/failover-demo",
+    "examples/openraft-cluster",
+]
+default-members = [
+    "crates/tsoracle-proto",
+    "crates/tsoracle-core",
+    "crates/tsoracle-consensus",
+    "crates/tsoracle-server",
+    "crates/tsoracle-client",
+    "crates/tsoracle-driver-file",
+    "crates/tsoracle-bin",
+]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.88"
+license      = "Apache-2.0"
+repository   = "https://github.com/prisma-risk/tsoracle"
+homepage     = "https://github.com/prisma-risk/tsoracle"
+readme       = "README.md"
+authors      = ["Sebastian Thiebaud <sebastian@prismarisk.com>"]
+
+[workspace.dependencies]
+anyhow             = "1"
+async-trait        = "0.1"
+bincode            = "1"
+bytes              = "1"
+clap               = { version = "4", features = ["derive"] }
+crc32c             = "0.6"
+futures            = "0.3"
+parking_lot        = "0.12"
+proptest           = "1"
+prost              = "0.14"
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+tempfile           = "3"
+thiserror          = "2"
+tokio              = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "fs"] }
+tokio-stream       = { version = "0.1", features = ["sync"] }
+tonic              = "0.14"
+tonic-prost        = "0.14"
+tonic-prost-build  = "0.14"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+openraft           = { version = "0.10.0-alpha.18", features = ["serde", "type-alias"] }
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1

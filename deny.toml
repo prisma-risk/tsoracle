@@ -1,0 +1,38 @@
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+# Known-acceptable duplicate-version crates. Each one is a transitive skew we
+# can't fix at the workspace level — it converges only when the named upstream
+# crate bumps. Re-evaluate periodically.
+skip = [
+    # 0.51.0 via wasip3 (wasi-0.3.0-rc preview) vs 0.57.1 via wasip2 (stable).
+    { name = "wit-bindgen" },
+    # 0.9.x via proptest vs 0.10.x via openraft. Converges when proptest bumps.
+    { name = "rand" },
+    # Same root cause as `rand`.
+    { name = "rand_core" },
+    # 0.3.x via proptest/tempfile (rand 0.9) vs 0.4.x via openraft (rand 0.10).
+    { name = "getrandom" },
+    # 0.15.x via petgraph → prost-build vs 0.17.x via indexmap.
+    { name = "hashbrown" },
+    # Target-conditional duplicate (Windows/UEFI codepaths).
+    { name = "r-efi" },
+]
+
+[advisories]
+# bincode 1.x is feature-complete per its maintainers (RUSTSEC-2025-0141);
+# the openraft-cluster example keeps using it to stay close to upstream openraft examples.
+ignore = ["RUSTSEC-2025-0141"]
