@@ -1,0 +1,154 @@
+name: Fuzz auto-issue
+description: |
+  On fuzz crash, computes a bug dedupe signature from the libFuzzer
+  output (panic message + top stack frames), checks for an existing
+  open issue with that signature, and either appends a comment or
+  opens a new one. Looks up the target's assignee from an explicit
+  target -> @user map embedded below.
+
+inputs:
+  target:
+    description: Fuzz target name (e.g. record_decode).
+    required: true
+  libfuzzer-output:
+    description: Path to a file containing libFuzzer's combined stdout/stderr.
+    required: true
+  artifact-name:
+    description: GitHub artifact name (for the issue body link).
+    required: true
+  run-id:
+    description: GitHub Actions run ID.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Compute dedupe signature
+      id: sig
+      shell: bash
+      run: |
+        set -euo pipefail
+        OUTPUT="${{ inputs.libfuzzer-output }}"
+
+        # First panic-line excerpt (capped) and the top 3 symbolicated frames
+        # form the dedupe key. Using stack frames rather than the input hash
+        # means two inputs hitting the same bug dedupe to the same issue.
+        PANIC=$(grep -m 1 -E "^thread .* panicked at" "$OUTPUT" 2>/dev/null \
+                | head -c 200 \
+                || echo "no-panic-line")
+        FRAMES=$(grep -E "^\s+[0-9]+:" "$OUTPUT" 2>/dev/null \
+                 | head -n 3 \
+                 | tr -d ' \t' \
+                 || true)
+        SIG=$(printf "%s\n%s" "$PANIC" "$FRAMES" | shasum -a 256 | cut -c1-8)
+
+        echo "sig=${SIG}"           >> "$GITHUB_OUTPUT"
+        echo "panic_excerpt=${PANIC}" >> "$GITHUB_OUTPUT"
+        echo "Computed dedupe signature: ${SIG}"
+
+    - name: Look up target assignee
+      id: assignee
+      shell: bash
+      run: |
+        # Explicit target -> @user lookup. CODEOWNERS controls PR review
+        # routing; this map controls issue assignment. Specific handles
+        # filled in at PR review time.
+        case "${{ inputs.target }}" in
+          record_decode|record_roundtrip)
+            echo "user=TBD-driver-file-owner" >> "$GITHUB_OUTPUT"
+            ;;
+          proto_get_ts_request_decode|proto_get_ts_response_decode|proto_leader_hint_decode)
+            echo "user=TBD-proto-owner" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "user=" >> "$GITHUB_OUTPUT"
+            ;;
+        esac
+
+    - name: Check for existing open issue
+      id: existing
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        SIG="${{ steps.sig.outputs.sig }}"
+        EXISTING=$(gh issue list \
+          --repo "${{ github.repository }}" \
+          --label area:fuzz \
+          --state open \
+          --search "sig=${SIG}" \
+          --json number \
+          --jq '.[0].number // empty')
+        echo "number=${EXISTING}" >> "$GITHUB_OUTPUT"
+
+    - name: Append comment to existing issue
+      if: steps.existing.outputs.number != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh issue comment "${{ steps.existing.outputs.number }}" \
+          --repo "${{ github.repository }}" \
+          --body "Reproduced again in run [${{ inputs.run-id }}](https://github.com/${{ github.repository }}/actions/runs/${{ inputs.run-id }}). Artifact: \`${{ inputs.artifact-name }}\`."
+
+    - name: Open new issue
+      if: steps.existing.outputs.number == ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        TARGET="${{ inputs.target }}"
+        SIG="${{ steps.sig.outputs.sig }}"
+        PANIC="${{ steps.sig.outputs.panic_excerpt }}"
+        ASSIGNEE="${{ steps.assignee.outputs.user }}"
+        ARTIFACT="${{ inputs.artifact-name }}"
+        RUN_ID="${{ inputs.run-id }}"
+        REPO="${{ github.repository }}"
+
+        case "$TARGET" in
+          record_decode)                   DESC="record::decode never panics on any input bytes" ;;
+          record_roundtrip)                DESC="record::encode/decode roundtrip in both directions" ;;
+          proto_get_ts_request_decode)     DESC="prost decode of GetTsRequest from arbitrary bytes" ;;
+          proto_get_ts_response_decode)    DESC="prost decode of GetTsResponse from arbitrary bytes" ;;
+          proto_leader_hint_decode)        DESC="prost decode of LeaderHint from arbitrary bytes" ;;
+          *)                               DESC="(unknown target)" ;;
+        esac
+
+        BODY=$(cat <<EOF
+        Fuzz target \`${TARGET}\` crashed.
+
+        **What this target tests:** ${DESC}.
+
+        **Reproduce locally:**
+
+        \`\`\`bash
+        gh run download ${RUN_ID} --name ${ARTIFACT}
+        cd fuzz
+        # Replace <crash-file> with the downloaded reproducer path.
+        cargo fuzz run ${TARGET} ../<crash-file>
+        \`\`\`
+
+        **Failing run:** https://github.com/${REPO}/actions/runs/${RUN_ID}
+
+        **Dedupe signature:** \`sig=${SIG}\`
+        EOF
+        )
+
+        # Guard against passing an unresolved TBD placeholder to --assignee,
+        # which would cause gh issue create to fail. When handles are filled
+        # in at PR review time, the TBD- prefix goes away and assignment works.
+        ASSIGN_ARGS=()
+        case "$ASSIGNEE" in
+          ""|TBD-*) ;;
+          *) ASSIGN_ARGS+=(--assignee "$ASSIGNEE") ;;
+        esac
+
+        gh issue create \
+          --repo "$REPO" \
+          --title "[fuzz] ${TARGET}: ${PANIC} (sig=${SIG})" \
+          --label area:fuzz \
+          --label priority:investigate \
+          --body "$BODY" \
+          "${ASSIGN_ARGS[@]}"
