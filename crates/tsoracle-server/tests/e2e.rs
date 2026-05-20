@@ -128,7 +128,12 @@ async fn returns_not_leader_with_hint() {
     // Wait for the follower hint to actually be visible in state — distinct
     // from the initial NotServing { leader_endpoint: None }.
     wait_until(&mut state_rx, |s| {
-        matches!(s, ServingState::NotServing { leader_endpoint: Some(_) })
+        matches!(
+            s,
+            ServingState::NotServing {
+                leader_endpoint: Some(_)
+            }
+        )
     })
     .await;
     wait_for_grpc_handshake(local_addr, Duration::from_secs(5))

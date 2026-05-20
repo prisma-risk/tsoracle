@@ -131,7 +131,12 @@ async fn client_follows_leader_hint_on_first_call() {
     driver_a.become_follower(Some(addr_b.to_string()));
     driver_b.become_leader(Epoch(1));
     wait_until(&mut state_rx_a, |s| {
-        matches!(s, ServingState::NotServing { leader_endpoint: Some(_) })
+        matches!(
+            s,
+            ServingState::NotServing {
+                leader_endpoint: Some(_)
+            }
+        )
     })
     .await;
     wait_until(&mut state_rx_b, |s| matches!(s, ServingState::Serving)).await;
