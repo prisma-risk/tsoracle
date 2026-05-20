@@ -15,4 +15,4 @@ pub mod test_fakes;
 pub use codec::{CodecError, decode, encode};
 
 #[cfg(feature = "rocksdb-log-store")]
-pub use log_store::{Flat, KeySpace, MetaLabel};
+pub use log_store::{Flat, GroupPrefixed, KeySpace, MetaLabel};

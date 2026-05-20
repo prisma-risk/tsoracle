@@ -2,4 +2,4 @@
 
 pub mod key_space;
 
-pub use key_space::{Flat, KeySpace, MetaLabel};
+pub use key_space::{Flat, GroupPrefixed, KeySpace, MetaLabel};
