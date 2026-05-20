@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tonic::transport::Server as TonicServer;
-use tsoracle_core::Epoch;
+use tsoracle_core::{Epoch, Timestamp};
 use tsoracle_proto::v1::{GetTsRequest, tso_service_client::TsoServiceClient};
 use tsoracle_server::test_fakes::InMemoryDriver;
 use tsoracle_server::{Server, ServingState};
@@ -36,10 +36,6 @@ async fn wait_for_serving(rx: &mut tokio::sync::watch::Receiver<ServingState>, w
             return;
         }
     }
-}
-
-fn packed(physical_ms: u64, logical_start: u32) -> u64 {
-    (physical_ms << 18) | (logical_start as u64)
 }
 
 #[tokio::main]
@@ -76,18 +72,18 @@ async fn main() -> anyhow::Result<()> {
     wait_for_serving(&mut state_rx, true).await;
     println!("[serving] became leader at epoch=1");
 
-    let mut last: Option<u64> = None;
+    let mut last: Option<Timestamp> = None;
     for _ in 0..5 {
         let resp = client.get_ts(GetTsRequest { count: 1 }).await?.into_inner();
-        let packed_ts = packed(resp.physical_ms, resp.logical_start);
+        let ts = Timestamp::pack(resp.physical_ms, resp.logical_start);
         println!(
             "  ts = {}.{} (epoch={})",
             resp.physical_ms, resp.logical_start, resp.epoch
         );
         if let Some(prev) = last {
-            assert!(packed_ts > prev, "monotonicity violated within epoch 1");
+            assert!(ts > prev, "monotonicity violated within epoch 1");
         }
-        last = Some(packed_ts);
+        last = Some(ts);
     }
 
     // ── Phase 2: become follower (fence) ──────────────────────────────────────
@@ -107,14 +103,14 @@ async fn main() -> anyhow::Result<()> {
 
     for _ in 0..5 {
         let resp = client.get_ts(GetTsRequest { count: 1 }).await?.into_inner();
-        let packed_ts = packed(resp.physical_ms, resp.logical_start);
+        let ts = Timestamp::pack(resp.physical_ms, resp.logical_start);
         println!(
             "  ts = {}.{} (epoch={})",
             resp.physical_ms, resp.logical_start, resp.epoch
         );
         let prev = last.expect("phase 1 issued at least one timestamp");
-        assert!(packed_ts > prev, "fence failed: ts <= last pre-fence ts");
-        last = Some(packed_ts);
+        assert!(ts > prev, "fence failed: ts <= last pre-fence ts");
+        last = Some(ts);
     }
 
     println!("OK: 10 timestamps, all strictly monotonic across the fence.");
