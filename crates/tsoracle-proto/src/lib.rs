@@ -11,6 +11,14 @@ pub mod v1 {
     tonic::include_proto!("tsoracle.v1");
 }
 
+/// Encoded `FileDescriptorSet` for every proto compiled by this crate.
+/// Feed to `tonic_reflection::server::Builder::register_encoded_file_descriptor_set`
+/// to expose gRPC server reflection (`grpcurl`, `evans`, Postman) without
+/// shipping the `.proto` files to clients.
+#[cfg(feature = "reflection")]
+pub const FILE_DESCRIPTOR_SET: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/tsoracle_descriptor.bin"));
+
 #[cfg(test)]
 mod tests {
     use super::v1::*;

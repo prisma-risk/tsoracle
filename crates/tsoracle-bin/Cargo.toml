@@ -12,6 +12,10 @@ publish      = true
 name = "tsoracle"
 path = "src/main.rs"
 
+[features]
+default    = []
+reflection = ["tsoracle-server/reflection"]
+
 [dependencies]
 anyhow                = "1"
 humantime             = "2"
