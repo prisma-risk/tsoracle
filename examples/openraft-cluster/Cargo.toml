@@ -1,0 +1,37 @@
+[package]
+name                   = "example-openraft-cluster"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description            = "tsoracle example: HA via openraft, 3-node multi-process cluster"
+publish                = false
+
+[[bin]]
+name = "openraft-cluster"
+path = "src/main.rs"
+
+[dependencies]
+tsoracle-core      = { path = "../../crates/tsoracle-core", version = "0.1.0" }
+tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.0" }
+tsoracle-server    = { path = "../../crates/tsoracle-server", version = "0.1.0" }
+
+openraft           = { workspace = true }
+tonic              = { workspace = true }
+tonic-prost        = { workspace = true }
+prost              = { workspace = true }
+tokio              = { workspace = true, features = ["signal"] }
+tokio-stream       = { workspace = true }
+futures            = { workspace = true }
+async-trait        = { workspace = true }
+clap               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+bincode            = { workspace = true }
+anyhow             = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }

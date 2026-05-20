@@ -1,0 +1,349 @@
+//! tonic-based peer transport for openraft 0.10.
+//!
+//! Uses `RaftNetworkV2` (the modern API in 0.10). `RaftNetwork` (V1) was
+//! removed in 0.10.0-alpha.20 and redirects to `openraft-legacy`.
+//!
+//! Wire format:
+//!   - `AppendEntries` / `Vote`: a `RaftMessage { bytes payload }` where
+//!     `payload` is a bincode-encoded openraft request or response.
+//!   - `Snapshot`: a *client-streaming* RPC of `SnapshotChunk` messages.
+//!     One `header` chunk (bincode-encoded vote + meta), then `SNAPSHOT_CHUNK_SIZE`
+//!     byte `data` chunks until end-of-stream. The receiver reassembles the
+//!     data buffer and calls `Raft::install_full_snapshot`.
+//!
+//! The chunked snapshot path is what makes this example safe to use with a
+//! state machine that grows past the default gRPC unary frame limit (4 MiB).
+//! See `proto/raft.proto` for the framing rules.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::io::Cursor;
+use std::sync::Arc;
+
+use futures::StreamExt;
+use openraft::error::{NetworkError, RPCError, StreamingError, Unreachable};
+use openraft::errors::ReplicationClosed;
+use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
+use openraft::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
+};
+use openraft::type_config::alias::{SnapshotOf, VoteOf};
+use tokio::sync::Mutex;
+use tonic::transport::Channel;
+
+use crate::types::{Node, NodeId, TypeConfig};
+
+pub mod proto {
+    tonic::include_proto!("raft.v1");
+}
+
+use proto::RaftMessage;
+use proto::SnapshotChunk;
+use proto::SnapshotHeader;
+use proto::raft_peer_service_client::RaftPeerServiceClient;
+use proto::raft_peer_service_server::{RaftPeerService, RaftPeerServiceServer};
+use proto::snapshot_chunk::Kind as ChunkKind;
+
+/// Snapshot data is shipped in chunks of this many bytes. Sized to fit
+/// comfortably inside the default gRPC max-frame limit (4 MiB) with room
+/// for proto overhead and to keep per-RPC memory bounded on both sides.
+/// The header chunk is sent separately and is small (a Vote + SnapshotMeta).
+const SNAPSHOT_CHUNK_SIZE: usize = 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// PeerFactory — constructs PeerNetwork instances for each target node.
+// ---------------------------------------------------------------------------
+
+pub struct PeerFactory {
+    addrs: Arc<HashMap<NodeId, String>>,
+    pool: Arc<Mutex<HashMap<NodeId, RaftPeerServiceClient<Channel>>>>,
+}
+
+impl PeerFactory {
+    pub fn new(addrs: HashMap<NodeId, String>) -> Self {
+        Self {
+            addrs: Arc::new(addrs),
+            pool: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl RaftNetworkFactory<TypeConfig> for PeerFactory {
+    type Network = PeerNetwork;
+
+    async fn new_client(&mut self, target: NodeId, _node: &Node) -> Self::Network {
+        PeerNetwork {
+            target,
+            addrs: self.addrs.clone(),
+            pool: self.pool.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PeerNetwork — implements RaftNetworkV2<TypeConfig> for one target peer.
+// ---------------------------------------------------------------------------
+
+pub struct PeerNetwork {
+    target: NodeId,
+    addrs: Arc<HashMap<NodeId, String>>,
+    pool: Arc<Mutex<HashMap<NodeId, RaftPeerServiceClient<Channel>>>>,
+}
+
+impl PeerNetwork {
+    /// Return a cached (or freshly connected) tonic client to the target.
+    async fn client(&self) -> Result<RaftPeerServiceClient<Channel>, RPCError<TypeConfig>> {
+        let mut pool = self.pool.lock().await;
+        if let Some(c) = pool.get(&self.target) {
+            return Ok(c.clone());
+        }
+        let endpoint = self.addrs.get(&self.target).ok_or_else(|| {
+            RPCError::Network(NetworkError::from_string(format!(
+                "no address configured for node {}",
+                self.target
+            )))
+        })?;
+        let url = format!("http://{endpoint}");
+        let client = RaftPeerServiceClient::connect(url)
+            .await
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
+        pool.insert(self.target, client.clone());
+        Ok(client)
+    }
+}
+
+impl RaftNetworkV2<TypeConfig> for PeerNetwork {
+    async fn append_entries(
+        &mut self,
+        rpc: AppendEntriesRequest<TypeConfig>,
+        _option: RPCOption,
+    ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
+        let mut c = self.client().await?;
+        let payload =
+            bincode::serialize(&rpc).map_err(|e| RPCError::Network(NetworkError::new(&*e)))?;
+        let resp = c
+            .append_entries(RaftMessage { payload })
+            .await
+            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let body: AppendEntriesResponse<TypeConfig> =
+            bincode::deserialize(&resp.into_inner().payload)
+                .map_err(|e| RPCError::Network(NetworkError::new(&*e)))?;
+        Ok(body)
+    }
+
+    async fn vote(
+        &mut self,
+        rpc: VoteRequest<TypeConfig>,
+        _option: RPCOption,
+    ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
+        let mut c = self.client().await?;
+        let payload =
+            bincode::serialize(&rpc).map_err(|e| RPCError::Network(NetworkError::new(&*e)))?;
+        let resp = c
+            .vote(RaftMessage { payload })
+            .await
+            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let body: VoteResponse<TypeConfig> = bincode::deserialize(&resp.into_inner().payload)
+            .map_err(|e| RPCError::Network(NetworkError::new(&*e)))?;
+        Ok(body)
+    }
+
+    /// Send a snapshot to the target as a stream of `SnapshotChunk`s.
+    ///
+    /// Stream layout: one `header` chunk (bincode vote + bincode meta),
+    /// followed by `ceil(data.len() / SNAPSHOT_CHUNK_SIZE)` `data` chunks.
+    /// An empty data buffer is permitted and results in zero `data` chunks.
+    ///
+    /// Cancellation: if `cancel` resolves before the server responds, the
+    /// in-flight stream is dropped (closing the client side of the stream)
+    /// and we return `StreamingError::Closed`.
+    async fn full_snapshot(
+        &mut self,
+        vote: VoteOf<TypeConfig>,
+        snapshot: SnapshotOf<TypeConfig>,
+        cancel: impl Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
+        _option: RPCOption,
+    ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
+        // Pre-encode the header fields. Both are small (Vote + SnapshotMeta).
+        let vote_bytes = bincode::serialize(&vote)
+            .map_err(|e| StreamingError::Network(NetworkError::new(&*e)))?;
+        let meta_bytes = bincode::serialize(&snapshot.meta)
+            .map_err(|e| StreamingError::Network(NetworkError::new(&*e)))?;
+        let data_bytes = snapshot.snapshot.into_inner();
+
+        // Build the chunk stream lazily. We materialize chunks into owned
+        // Vecs (a copy per chunk) because prost generates `bytes` fields as
+        // `Vec<u8>` by default. The original `data_bytes` is freed when the
+        // iterator is exhausted; total transient memory is ≈ data_bytes plus
+        // one in-flight chunk.
+        let header_chunk = SnapshotChunk {
+            kind: Some(ChunkKind::Header(SnapshotHeader {
+                vote: vote_bytes,
+                meta: meta_bytes,
+            })),
+        };
+
+        let data_chunks = data_bytes
+            .chunks(SNAPSHOT_CHUNK_SIZE)
+            .map(|c| SnapshotChunk {
+                kind: Some(ChunkKind::Data(c.to_vec())),
+            })
+            .collect::<Vec<_>>();
+
+        let outbound =
+            futures::stream::iter(std::iter::once(header_chunk).chain(data_chunks.into_iter()));
+
+        let mut c = self.client().await.map_err(|e| match e {
+            RPCError::Network(n) => StreamingError::Network(n),
+            RPCError::Unreachable(u) => StreamingError::Unreachable(u),
+            RPCError::Timeout(t) => StreamingError::Timeout(t),
+            // RPCError::RemoteError is Infallible in the default type param
+        })?;
+
+        // Drive the streaming RPC concurrently with the cancellation future.
+        // If `cancel` fires first, dropping the in-flight future closes the
+        // outbound stream and aborts on the server side.
+        tokio::select! {
+            result = c.snapshot(outbound) => {
+                let inner = result
+                    .map_err(|e| StreamingError::Network(NetworkError::new(&e)))?
+                    .into_inner();
+                let resp: SnapshotResponse<TypeConfig> =
+                    bincode::deserialize(&inner.payload)
+                        .map_err(|e| StreamingError::Network(NetworkError::new(&*e)))?;
+                Ok(resp)
+            }
+            closed = cancel => {
+                Err(StreamingError::Closed(closed))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PeerServiceImpl — tonic server, demuxes RaftMessage → Raft API calls.
+// ---------------------------------------------------------------------------
+
+pub struct PeerServiceImpl<SM = ()> {
+    pub raft: openraft::Raft<TypeConfig, SM>,
+}
+
+#[tonic::async_trait]
+impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
+    async fn append_entries(
+        &self,
+        request: tonic::Request<RaftMessage>,
+    ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
+        let body: AppendEntriesRequest<TypeConfig> =
+            bincode::deserialize(&request.into_inner().payload)
+                .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        let resp = self
+            .raft
+            .append_entries(body)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        let payload =
+            bincode::serialize(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
+        Ok(tonic::Response::new(RaftMessage { payload }))
+    }
+
+    async fn vote(
+        &self,
+        request: tonic::Request<RaftMessage>,
+    ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
+        let body: VoteRequest<TypeConfig> = bincode::deserialize(&request.into_inner().payload)
+            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        let resp = self
+            .raft
+            .vote(body)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        let payload =
+            bincode::serialize(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
+        Ok(tonic::Response::new(RaftMessage { payload }))
+    }
+
+    /// Reassemble a streamed snapshot and hand it to `install_full_snapshot`.
+    ///
+    /// Framing contract (mirrors `proto/raft.proto`):
+    ///   - exactly one `header` chunk at the start;
+    ///   - zero or more `data` chunks afterwards;
+    ///   - any other ordering is rejected as `InvalidArgument`.
+    async fn snapshot(
+        &self,
+        request: tonic::Request<tonic::Streaming<SnapshotChunk>>,
+    ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
+        let mut stream = request.into_inner();
+
+        // The first chunk must be the header.
+        let first = stream
+            .next()
+            .await
+            .ok_or_else(|| tonic::Status::invalid_argument("snapshot stream ended before header"))?
+            .map_err(|e| tonic::Status::internal(format!("snapshot stream error: {e}")))?;
+        let header = match first.kind {
+            Some(ChunkKind::Header(h)) => h,
+            Some(ChunkKind::Data(_)) => {
+                return Err(tonic::Status::invalid_argument(
+                    "first snapshot chunk must be a header",
+                ));
+            }
+            None => {
+                return Err(tonic::Status::invalid_argument(
+                    "snapshot chunk missing kind",
+                ));
+            }
+        };
+
+        let vote: VoteOf<TypeConfig> = bincode::deserialize(&header.vote)
+            .map_err(|e| tonic::Status::invalid_argument(format!("bad vote: {e}")))?;
+        let meta: openraft::type_config::alias::SnapshotMetaOf<TypeConfig> =
+            bincode::deserialize(&header.meta)
+                .map_err(|e| tonic::Status::invalid_argument(format!("bad meta: {e}")))?;
+
+        // Reassemble subsequent data chunks. We don't know the total size up
+        // front (the sender doesn't advertise it), so we start with an empty
+        // Vec and let it grow. For tiny snapshots this is one allocation;
+        // for large ones it grows geometrically.
+        let mut data: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|e| tonic::Status::internal(format!("snapshot stream error: {e}")))?;
+            match chunk.kind {
+                Some(ChunkKind::Data(bytes)) => data.extend_from_slice(&bytes),
+                Some(ChunkKind::Header(_)) => {
+                    return Err(tonic::Status::invalid_argument(
+                        "unexpected header chunk after first",
+                    ));
+                }
+                None => {
+                    return Err(tonic::Status::invalid_argument(
+                        "snapshot chunk missing kind",
+                    ));
+                }
+            }
+        }
+
+        let snapshot = openraft::storage::Snapshot {
+            meta,
+            snapshot: Cursor::new(data),
+        };
+
+        let resp = self
+            .raft
+            .install_full_snapshot(vote, snapshot)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        let payload =
+            bincode::serialize(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
+        Ok(tonic::Response::new(RaftMessage { payload }))
+    }
+}
+
+/// Construct the tonic server-side handler for the RaftPeerService.
+pub fn server<SM: Send + Sync + 'static>(
+    raft: openraft::Raft<TypeConfig, SM>,
+) -> RaftPeerServiceServer<PeerServiceImpl<SM>> {
+    RaftPeerServiceServer::new(PeerServiceImpl { raft })
+}

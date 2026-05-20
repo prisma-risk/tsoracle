@@ -1,0 +1,19 @@
+[package]
+name                   = "example-failover-demo"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description            = "tsoracle example: in-process failover fence pedagogy demo"
+publish                = false
+
+[dependencies]
+tsoracle-core      = { path = "../../crates/tsoracle-core", version = "0.1.0" }
+tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.0" }
+tsoracle-server    = { path = "../../crates/tsoracle-server", version = "0.1.0", features = ["test-fakes"] }
+tsoracle-proto     = { path = "../../crates/tsoracle-proto", version = "0.1.0" }
+tokio              = { workspace = true, features = ["time"] }
+tonic              = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }
