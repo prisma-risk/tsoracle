@@ -1,0 +1,11 @@
+# Per-path PR review routing.
+#
+# Issue assignment is NOT controlled by this file. It is handled
+# separately by the auto-issue composite action's inline target -> @user
+# map in .github/actions/fuzz-auto-issue/action.yml.
+
+/crates/tsoracle-driver-file/   @SebastianThiebaud
+/crates/tsoracle-proto/         @SebastianThiebaud
+/fuzz/                          @SebastianThiebaud
+/.github/workflows/fuzz-*.yml   @SebastianThiebaud
+/.github/actions/fuzz-*/        @SebastianThiebaud

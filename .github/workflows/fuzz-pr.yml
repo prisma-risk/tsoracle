@@ -1,0 +1,114 @@
+name: fuzz (per-PR)
+
+on:
+  pull_request:
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      issues: write
+      contents: read
+    strategy:
+      # One target crashing must not cancel the others; we want to see every
+      # regression on a single PR, not just the first one.
+      fail-fast: false
+      matrix:
+        target:
+          - record_decode
+          - record_roundtrip
+          - proto_get_ts_request_decode
+          - proto_get_ts_response_decode
+          - proto_leader_hint_decode
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        # The pin lives in fuzz/rust-toolchain.toml; this step installs the
+        # matching channel so the rustup proxy picks it up automatically.
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-31
+          components: rust-src, llvm-tools-preview
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.1
+
+      - name: Restore working corpus
+        # The save key embeds github.run_id so every run writes a unique
+        # cache entry (GitHub's actions/cache only writes on miss; a stable
+        # key would silently discard newly-discovered corpus entries).
+        # restore-keys does prefix-match fallback to the most recent matching
+        # entry; the last fallback line catches harness refactors.
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', format('fuzz/fuzz_targets/{0}.rs', matrix.target)) }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', format('fuzz/fuzz_targets/{0}.rs', matrix.target)) }}-
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Run fuzz target (5 minutes)
+        id: fuzz
+        working-directory: fuzz
+        # No +nightly override; fuzz/rust-toolchain.toml controls the channel.
+        # --sanitizer address is the load-bearing safety net (ASAN catches
+        # use-after-free and buffer overruns from the libc FFI in driver-file).
+        # UBSAN is a stretch goal; cargo-fuzz 0.13.1 multi-sanitizer support
+        # would let us add ',undefined' here.
+        #
+        # --target x86_64-unknown-linux-gnu overrides cargo-fuzz 0.13's
+        # default of x86_64-unknown-linux-musl on Linux. The musl default
+        # links libc statically, which is incompatible with ASAN
+        # (sancov needs dynamic linking). Pinning to the gnu triple matches
+        # the host toolchain installed by dtolnay/rust-toolchain.
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set +e
+          cargo fuzz run "$TARGET" \
+            --sanitizer address \
+            --target x86_64-unknown-linux-gnu \
+            -- -max_total_time=300 \
+            2>&1 | tee fuzz-output.log
+          EXIT=${PIPESTATUS[0]}
+          echo "exit_code=${EXIT}" >> "$GITHUB_OUTPUT"
+          exit $EXIT
+
+      - name: Upload crash artifact
+        if: failure() && steps.fuzz.outputs.exit_code != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Auto-file deduplicated issue (same-repo PRs only)
+        # Fork-PR workflows receive a read-only GITHUB_TOKEN, so issue
+        # creation would fail anyway. The artifact upload above remains the
+        # visible signal for those runs.
+        if: |
+          failure() &&
+          steps.fuzz.outputs.exit_code != '0' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: ./.github/actions/fuzz-auto-issue
+        with:
+          target: ${{ matrix.target }}
+          libfuzzer-output: fuzz/fuzz-output.log
+          artifact-name: fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
+          run-id: ${{ github.run_id }}
+
+      - name: Save working corpus (even on failure)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', format('fuzz/fuzz_targets/{0}.rs', matrix.target)) }}-${{ github.run_id }}
