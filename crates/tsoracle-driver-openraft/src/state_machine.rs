@@ -450,4 +450,46 @@ mod tests {
             .expect("get_current_snapshot");
         assert!(s.is_none());
     }
+
+    // ---- Property tests ----
+
+    use proptest::prelude::*;
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    proptest! {
+        /// Monotonicity invariant: applying an arbitrary sequence of `Bump`
+        /// targets leaves the state machine at `max(0, max(targets))`, and
+        /// `current_value` is non-decreasing at every intermediate step.
+        #[test]
+        fn p1_monotonicity_under_arbitrary_bumps(
+            targets in prop::collection::vec(any::<u64>(), 0..=64)
+        ) {
+            rt().block_on(async {
+                let mut sm = HighWaterStateMachine::new();
+                let mut prev = 0u64;
+                let mut idx = 0u64;
+                for t in &targets {
+                    idx += 1;
+                    apply_one(
+                        &mut sm,
+                        idx,
+                        EntryPayload::Normal(HighWaterCommand::Bump { target: *t }),
+                    )
+                    .await;
+                    let now = sm.current_value().await;
+                    prop_assert!(now >= prev, "value went backwards: prev={prev} now={now}");
+                    prev = now;
+                }
+                let expected = targets.iter().copied().max().unwrap_or(0);
+                prop_assert_eq!(sm.current_value().await, expected);
+                Ok(())
+            })?;
+        }
+    }
 }
