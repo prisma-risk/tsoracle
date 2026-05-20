@@ -51,14 +51,10 @@ runs:
       shell: bash
       run: |
         # Explicit target -> @user lookup. CODEOWNERS controls PR review
-        # routing; this map controls issue assignment. Specific handles
-        # filled in at PR review time.
+        # routing; this map controls issue assignment.
         case "${{ inputs.target }}" in
-          record_decode|record_roundtrip)
-            echo "user=TBD-driver-file-owner" >> "$GITHUB_OUTPUT"
-            ;;
-          proto_get_ts_request_decode|proto_get_ts_response_decode|proto_leader_hint_decode)
-            echo "user=TBD-proto-owner" >> "$GITHUB_OUTPUT"
+          record_decode|record_roundtrip|proto_get_ts_request_decode|proto_get_ts_response_decode|proto_leader_hint_decode)
+            echo "user=SebastianThiebaud" >> "$GITHUB_OUTPUT"
             ;;
           *)
             echo "user=" >> "$GITHUB_OUTPUT"
@@ -136,14 +132,10 @@ runs:
         EOF
         )
 
-        # Guard against passing an unresolved TBD placeholder to --assignee,
-        # which would cause gh issue create to fail. When handles are filled
-        # in at PR review time, the TBD- prefix goes away and assignment works.
         ASSIGN_ARGS=()
-        case "$ASSIGNEE" in
-          ""|TBD-*) ;;
-          *) ASSIGN_ARGS+=(--assignee "$ASSIGNEE") ;;
-        esac
+        if [ -n "$ASSIGNEE" ]; then
+          ASSIGN_ARGS+=(--assignee "$ASSIGNEE")
+        fi
 
         gh issue create \
           --repo "$REPO" \

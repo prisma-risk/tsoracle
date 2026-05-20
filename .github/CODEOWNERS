@@ -3,14 +3,9 @@
 # Issue assignment is NOT controlled by this file. It is handled
 # separately by the auto-issue composite action's inline target -> @user
 # map in .github/actions/fuzz-auto-issue/action.yml.
-#
-# Specific handles are TBD-marked and must be replaced with real GitHub
-# usernames before merging. CODEOWNERS silently ignores unresolvable
-# handles, so a stale TBD-* entry will not block PR creation -- it just
-# fails to request a review.
 
-/crates/tsoracle-driver-file/   @TBD-driver-file-owner
-/crates/tsoracle-proto/         @TBD-proto-owner
-/fuzz/                          @TBD-fuzz-steward
-/.github/workflows/fuzz-*.yml   @TBD-fuzz-steward
-/.github/actions/fuzz-*/        @TBD-fuzz-steward
+/crates/tsoracle-driver-file/   @SebastianThiebaud
+/crates/tsoracle-proto/         @SebastianThiebaud
+/fuzz/                          @SebastianThiebaud
+/.github/workflows/fuzz-*.yml   @SebastianThiebaud
+/.github/actions/fuzz-*/        @SebastianThiebaud
