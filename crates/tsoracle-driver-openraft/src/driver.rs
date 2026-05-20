@@ -141,3 +141,71 @@ fn map_leader_state<C: RaftTypeConfig>(s: LeadershipState<C>) -> LeaderState {
         | LeadershipState::Shutdown => LeaderState::Unknown,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::map_leader_state;
+    use crate::type_config::TypeConfig;
+    use openraft_toolkit::LeadershipState;
+    use tsoracle_consensus::LeaderState;
+    use tsoracle_core::Epoch;
+
+    #[test]
+    fn leader_maps_to_leader_with_epoch() {
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Leader { term: 7 });
+        assert_eq!(s, LeaderState::Leader { epoch: Epoch(7) });
+    }
+
+    #[test]
+    fn follower_with_no_leader_maps_to_follower() {
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Follower {
+            term: 3,
+            leader: None,
+        });
+        assert_eq!(
+            s,
+            LeaderState::Follower {
+                leader_endpoint: None
+            }
+        );
+    }
+
+    #[test]
+    fn follower_with_known_leader_still_maps_without_endpoint() {
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Follower {
+            term: 4,
+            leader: Some((
+                2u64,
+                crate::type_config::OpenraftPeer {
+                    addr: "ignored".into(),
+                },
+            )),
+        });
+        // The generic mapper intentionally drops endpoint info; hosts that
+        // want endpoint resolution wrap the driver themselves.
+        assert_eq!(
+            s,
+            LeaderState::Follower {
+                leader_endpoint: None
+            }
+        );
+    }
+
+    #[test]
+    fn candidate_maps_to_unknown() {
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Candidate { term: 5 });
+        assert_eq!(s, LeaderState::Unknown);
+    }
+
+    #[test]
+    fn learner_maps_to_unknown() {
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Learner);
+        assert_eq!(s, LeaderState::Unknown);
+    }
+
+    #[test]
+    fn shutdown_maps_to_unknown() {
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Shutdown);
+        assert_eq!(s, LeaderState::Unknown);
+    }
+}
