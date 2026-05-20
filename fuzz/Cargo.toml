@@ -19,4 +19,10 @@ prost                = "0.14"
 tsoracle-driver-file = { path = "../crates/tsoracle-driver-file" }
 tsoracle-proto       = { path = "../crates/tsoracle-proto" }
 
-# Fuzz targets are added by later tasks (one [[bin]] per target).
+[[bin]]
+name              = "record_decode"
+path              = "fuzz_targets/record_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
