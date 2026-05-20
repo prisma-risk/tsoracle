@@ -180,7 +180,16 @@ impl Server {
         });
 
         let service = TsoServiceImpl { server };
-        let routes = Routes::new(TsoServiceServer::new(service));
+        #[allow(unused_mut)]
+        let mut routes = Routes::new(TsoServiceServer::new(service));
+        #[cfg(feature = "reflection")]
+        {
+            let reflection = tonic_reflection::server::Builder::configure()
+                .register_encoded_file_descriptor_set(tsoracle_proto::FILE_DESCRIPTOR_SET)
+                .build_v1()
+                .expect("FILE_DESCRIPTOR_SET emitted by build.rs is always valid");
+            routes = routes.add_service(reflection);
+        }
         (routes, watch_handle)
     }
 

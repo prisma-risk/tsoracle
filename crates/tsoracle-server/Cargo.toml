@@ -18,9 +18,10 @@ tls-rustls = ["tonic/tls-aws-lc"]
 tls-native = ["tonic/tls-native-roots"]
 tracing    = ["dep:tracing"]
 test-fakes = []
+reflection = ["dep:tonic-reflection", "tsoracle-proto/reflection"]
 
 [package.metadata.docs.rs]
-features       = ["tls-rustls", "tracing"]
+features       = ["tls-rustls", "tracing", "reflection"]
 rustdoc-args   = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -33,6 +34,7 @@ tokio              = { workspace = true }
 tokio-stream       = { workspace = true }
 tonic              = { workspace = true }
 tonic-prost        = { workspace = true }
+tonic-reflection   = { workspace = true, optional = true }
 tracing            = { workspace = true, optional = true }
 tsoracle-core      = { path = "../tsoracle-core", version = "0.1.0" }
 tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.0" }

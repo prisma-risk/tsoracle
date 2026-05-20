@@ -13,7 +13,7 @@ TSO_PEERS="1=127.0.0.1:50561,2=127.0.0.1:50562,3=127.0.0.1:50563"
 pids=()
 trap 'echo "shutting down..."; kill "${pids[@]}" 2>/dev/null || true; wait' INT TERM
 
-cargo build -p example-openraft-cluster
+cargo build -p example-openraft-cluster --features reflection
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')"
 BIN="$TARGET_DIR/debug/openraft-cluster"
 

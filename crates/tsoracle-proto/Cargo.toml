@@ -13,11 +13,12 @@ keywords      = ["tsoracle", "grpc", "protobuf", "timestamp", "wire"]
 categories    = ["network-programming", "encoding"]
 
 [features]
-default = []
-serde   = ["dep:serde"]
+default    = []
+serde      = ["dep:serde"]
+reflection = []
 
 [package.metadata.docs.rs]
-features       = ["serde"]
+features       = ["serde", "reflection"]
 rustdoc-args   = ["--cfg", "docsrs"]
 
 [dependencies]

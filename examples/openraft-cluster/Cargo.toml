@@ -12,6 +12,10 @@ publish                = false
 name = "openraft-cluster"
 path = "src/main.rs"
 
+[features]
+default    = []
+reflection = ["tsoracle-server/reflection"]
+
 [dependencies]
 tsoracle-core      = { path = "../../crates/tsoracle-core", version = "0.1.0" }
 tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.0" }
