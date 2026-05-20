@@ -14,3 +14,8 @@ tracing.folded
 flamegraph.svg
 # bench-throughput-sweep writes one JSON per client count; ignore them.
 /bench-*.json
+
+# Only track root-level markdown under docs/; ignore everything else
+# (subdirectories, generated artifacts, scratch files).
+docs/*
+!docs/*.md
