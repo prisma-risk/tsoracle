@@ -1,0 +1,31 @@
+syntax = "proto3";
+package tsoracle.v1;
+
+service TsoService {
+  rpc GetTs(GetTsRequest) returns (GetTsResponse);
+}
+
+message GetTsRequest {
+  // Number of consecutive timestamps to allocate. Must be >= 1.
+  uint32 count = 1;
+}
+
+message GetTsResponse {
+  // 46-bit milliseconds-since-Unix-epoch component.
+  uint64 physical_ms = 1;
+  // 18-bit logical counter; the response covers logicals
+  // [logical_start, logical_start + count - 1] at this physical_ms.
+  uint32 logical_start = 2;
+  // Number of consecutive timestamps allocated.
+  uint32 count = 3;
+  // Leader epoch that issued this grant.
+  uint64 epoch = 4;
+}
+
+// Carried in the `tsoracle-leader-hint-bin` binary metadata trailer when the
+// server returns FAILED_PRECONDITION from GetTs because it is not currently
+// the leader.
+message LeaderHint {
+  optional string leader_endpoint = 1;
+  optional uint64 leader_epoch = 2;
+}

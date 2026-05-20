@@ -1,0 +1,30 @@
+[package]
+name         = "tsoracle-proto"
+description  = "Generated protobuf/gRPC wire types for the timestamp oracle."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+readme.workspace       = true
+documentation = "https://docs.rs/tsoracle-proto"
+keywords      = ["tsoracle", "grpc", "protobuf", "timestamp", "wire"]
+categories    = ["network-programming", "encoding"]
+
+[features]
+default = []
+serde   = ["dep:serde"]
+
+[package.metadata.docs.rs]
+features       = ["serde"]
+rustdoc-args   = ["--cfg", "docsrs"]
+
+[dependencies]
+prost       = { workspace = true }
+tonic       = { workspace = true }
+tonic-prost = { workspace = true }
+serde       = { workspace = true, optional = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
