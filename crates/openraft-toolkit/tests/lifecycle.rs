@@ -40,3 +40,31 @@ where
     let fut = async move { openraft_toolkit::bootstrap(raft, mode).await };
     drop(fut);
 }
+
+// Same idea for `change_membership` / `add_learner`: keep a compile-time
+// signature check so an openraft bump that shifts the argument shape breaks
+// here rather than at the first downstream call site.
+#[allow(dead_code)]
+fn _change_membership_signature_compiles<C, SM>(
+    raft: &openraft::Raft<C, SM>,
+    voters: std::collections::BTreeSet<C::NodeId>,
+) where
+    C: openraft::RaftTypeConfig,
+    SM: openraft::storage::RaftStateMachine<C>,
+{
+    let fut = async move { openraft_toolkit::change_membership(raft, voters, false).await };
+    drop(fut);
+}
+
+#[allow(dead_code)]
+fn _add_learner_signature_compiles<C, SM>(
+    raft: &openraft::Raft<C, SM>,
+    id: C::NodeId,
+    node: C::Node,
+) where
+    C: openraft::RaftTypeConfig,
+    SM: openraft::storage::RaftStateMachine<C>,
+{
+    let fut = async move { openraft_toolkit::add_learner(raft, id, node, false).await };
+    drop(fut);
+}
