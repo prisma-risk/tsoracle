@@ -1,0 +1,28 @@
+[package]
+name         = "tsoracle-consensus"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+readme.workspace       = true
+description  = "ConsensusDriver trait: pluggable consensus extension point for tsoracle (openraft, raft-rs, etcd, ...)."
+documentation = "https://docs.rs/tsoracle-consensus"
+keywords      = ["tsoracle", "consensus", "raft", "timestamp", "trait"]
+categories    = ["network-programming", "concurrency", "rust-patterns"]
+
+[features]
+default = []
+serde   = ["dep:serde", "tsoracle-core/serde"]
+
+[package.metadata.docs.rs]
+features       = ["serde"]
+rustdoc-args   = ["--cfg", "docsrs"]
+
+[dependencies]
+async-trait    = { workspace = true }
+futures        = { workspace = true }
+thiserror      = { workspace = true }
+tsoracle-core  = { path = "../tsoracle-core", version = "0.1.0" }
+serde          = { workspace = true, optional = true }
