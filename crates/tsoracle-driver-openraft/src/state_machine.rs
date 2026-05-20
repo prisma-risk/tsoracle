@@ -253,3 +253,122 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeSet;
+
+    use futures::stream;
+    use openraft::EntryPayload;
+    use openraft::entry::RaftEntry;
+    use openraft::storage::EntryResponder;
+    use openraft::type_config::alias::EntryOf;
+
+    use crate::log_entry::HighWaterCommand;
+    use crate::type_config::TypeConfig;
+
+    // --- Test helpers ---
+
+    /// Build a `LogId` for the toolkit's default leader-id layout
+    /// (`LeaderId<u64, u64>`) with term=1, node_id=1, and the given index.
+    fn log_id(index: u64) -> LogIdOf<TypeConfig> {
+        openraft::testing::log_id::<TypeConfig>(1, 1, index)
+    }
+
+    fn entry(index: u64, payload: EntryPayload<HighWaterCommand, u64, crate::type_config::OpenraftPeer>) -> EntryResponder<TypeConfig> {
+        let e: EntryOf<TypeConfig> = match payload {
+            EntryPayload::Blank => EntryOf::<TypeConfig>::new_blank(log_id(index)),
+            EntryPayload::Normal(d) => EntryOf::<TypeConfig>::new_normal(log_id(index), d),
+            EntryPayload::Membership(m) => EntryOf::<TypeConfig>::new_membership(log_id(index), m),
+        };
+        (e, None)
+    }
+
+    async fn apply_one(
+        sm: &mut HighWaterStateMachine,
+        index: u64,
+        payload: EntryPayload<HighWaterCommand, u64, crate::type_config::OpenraftPeer>,
+    ) {
+        sm.apply(stream::iter([Ok(entry(index, payload))])).await.expect("apply");
+    }
+
+    // --- Tests ---
+
+    #[tokio::test]
+    async fn apply_blank_updates_only_log_id() {
+        let mut sm = HighWaterStateMachine::new();
+        apply_one(&mut sm, 1, EntryPayload::Blank).await;
+        assert_eq!(sm.current_value().await, 0);
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(last.map(|l| l.index), Some(1));
+    }
+
+    #[tokio::test]
+    async fn apply_normal_advances_value() {
+        let mut sm = HighWaterStateMachine::new();
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::Bump { target: 100 }),
+        )
+        .await;
+        assert_eq!(sm.current_value().await, 100);
+    }
+
+    #[tokio::test]
+    async fn apply_normal_holds_monotonic_under_stale_target() {
+        let mut sm = HighWaterStateMachine::new();
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::Bump { target: 100 }),
+        )
+        .await;
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::Bump { target: 50 }),
+        )
+        .await;
+        assert_eq!(sm.current_value().await, 100);
+    }
+
+    #[tokio::test]
+    async fn apply_normal_equal_target_holds_value() {
+        let mut sm = HighWaterStateMachine::new();
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::Bump { target: 100 }),
+        )
+        .await;
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::Bump { target: 100 }),
+        )
+        .await;
+        assert_eq!(sm.current_value().await, 100);
+    }
+
+    #[tokio::test]
+    async fn apply_membership_updates_membership_only() {
+        let mut sm = HighWaterStateMachine::new();
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::Bump { target: 42 }),
+        )
+        .await;
+        let mem = openraft::Membership::new_with_defaults(
+            vec![BTreeSet::from([1u64])],
+            [1u64],
+        );
+        apply_one(&mut sm, 2, EntryPayload::Membership(mem)).await;
+        assert_eq!(sm.current_value().await, 42);
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(last.map(|l| l.index), Some(2));
+    }
+}
