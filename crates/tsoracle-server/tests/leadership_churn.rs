@@ -16,9 +16,13 @@
 use core::pin::Pin;
 use futures::Stream;
 use parking_lot::Mutex;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::net::TcpListener;
+use tokio::time::sleep;
+use tonic::transport::Endpoint;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::{Epoch, testing::MockClock};
 use tsoracle_proto::v1::{GetTsRequest, tso_service_client::TsoServiceClient};
@@ -106,13 +110,6 @@ impl ConsensusDriver for FaultyLoadDriver {
     }
 }
 
-async fn bind_unused() -> std::net::SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    addr
-}
-
 async fn wait_until_serving(rx: &mut tokio::sync::watch::Receiver<ServingState>) {
     loop {
         if matches!(*rx.borrow_and_update(), ServingState::Serving) {
@@ -131,19 +128,42 @@ async fn wait_until_not_serving(rx: &mut tokio::sync::watch::Receiver<ServingSta
     }
 }
 
+async fn wait_for_grpc_handshake(
+    addr: SocketAddr,
+    budget: Duration,
+) -> Result<(), tonic::transport::Error> {
+    let deadline = Instant::now() + budget;
+    let endpoint: Endpoint = format!("http://{addr}").parse().unwrap();
+    let mut last_err: Option<tonic::transport::Error> = None;
+    loop {
+        match endpoint.connect().await {
+            Ok(channel) => {
+                drop(channel);
+                return Ok(());
+            }
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(last_err.unwrap_or(err));
+                }
+                last_err = Some(err);
+                sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
+}
+
 /// Boot a server with the given driver, drive it to `Serving`, and force the
 /// clock past the seeded high-water so the next `GetTs` triggers an extension.
 async fn boot_serving<D: ConsensusDriver + 'static>(
     driver: Arc<D>,
     in_memory_for_leader: &InMemoryDriver,
 ) -> (
-    std::net::SocketAddr,
+    SocketAddr,
     Arc<MockClock>,
     tokio::sync::watch::Receiver<ServingState>,
     tokio::task::JoinHandle<Result<(), ServerError>>,
     tokio::sync::oneshot::Sender<()>,
 ) {
-    let addr = bind_unused().await;
     let clock = Arc::new(MockClock::new(1_000));
     let server = Server::builder()
         .consensus_driver(driver)
@@ -152,31 +172,35 @@ async fn boot_serving<D: ConsensusDriver + 'static>(
         .failover_advance(Duration::from_millis(50))
         .build()
         .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
     let state_rx = server.state_rx.clone();
     let mut state_rx_for_wait = state_rx.clone();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let serve_handle = tokio::spawn(async move {
         server
-            .serve_with_shutdown(addr, async {
+            .serve_with_listener(listener, async {
                 let _ = shutdown_rx.await;
             })
             .await
     });
 
-    // Let the watch task subscribe to leadership_events before we publish.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     in_memory_for_leader.become_leader(Epoch(1));
     wait_until_serving(&mut state_rx_for_wait).await;
+    wait_for_grpc_handshake(local_addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
 
     // Push clock past the failover-fence ceiling so the next request hits
     // WindowExhausted and triggers extend_window.
     clock.set(1_000_000);
 
-    (addr, clock, state_rx, serve_handle, shutdown_tx)
+    (local_addr, clock, state_rx, serve_handle, shutdown_tx)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extend_window_maps_not_leader_to_failed_precondition_with_hint() {
     let in_memory = Arc::new(InMemoryDriver::new());
     let faulty = Arc::new(FaultyPersistDriver::new(
@@ -226,7 +250,7 @@ async fn extend_window_maps_not_leader_to_failed_precondition_with_hint() {
     let _ = serve_handle.await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extend_window_maps_fenced_to_failed_precondition_with_hint() {
     let in_memory = Arc::new(InMemoryDriver::new());
     let faulty = Arc::new(FaultyPersistDriver::new(
@@ -258,7 +282,7 @@ async fn extend_window_maps_fenced_to_failed_precondition_with_hint() {
     let _ = serve_handle.await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extend_window_maps_transient_driver_to_unavailable() {
     let in_memory = Arc::new(InMemoryDriver::new());
     let faulty = Arc::new(FaultyPersistDriver::new(
@@ -290,7 +314,7 @@ async fn extend_window_maps_transient_driver_to_unavailable() {
     let _ = serve_handle.await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extend_window_maps_permanent_driver_to_internal() {
     let in_memory = Arc::new(InMemoryDriver::new());
     let faulty = Arc::new(FaultyPersistDriver::new(
@@ -322,9 +346,8 @@ async fn extend_window_maps_permanent_driver_to_internal() {
     let _ = serve_handle.await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_with_shutdown_exits_when_watch_returns_error() {
-    let addr = bind_unused().await;
     let in_memory = Arc::new(InMemoryDriver::new());
     let faulty = Arc::new(FaultyLoadDriver::new(in_memory.clone()));
 
@@ -333,18 +356,19 @@ async fn serve_with_shutdown_exits_when_watch_returns_error() {
         .clock(Arc::new(MockClock::new(1_000)))
         .build()
         .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let state_rx = server.state_rx.clone();
 
     // No user shutdown — pending forever. The only way out is for the watch
     // task to die, which should trigger our tonic-cancel and propagate the
-    // error.
+    // error. Uses serve_with_listener so we own the bound socket and don't
+    // race the server's rebind.
     let serve_handle = tokio::spawn(async move {
         server
-            .serve_with_shutdown(addr, futures::future::pending::<()>())
+            .serve_with_listener(listener, futures::future::pending::<()>())
             .await
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
     in_memory.become_leader(Epoch(1));
 
     // serve_with_shutdown should complete with Err — load_high_water fails
