@@ -20,6 +20,6 @@
 //! [`ConsensusDriver`]: tsoracle_consensus::ConsensusDriver
 
 mod driver;
-mod record;
+pub mod record;
 
 pub use driver::{FileDriver, FileDriverError};
