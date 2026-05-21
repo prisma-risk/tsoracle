@@ -83,11 +83,21 @@ impl Supervisor {
                 SupervisorEvent::End => break,
             }
         }
+        self.final_pass();
         SupervisorOutcome {
             violations: self.state.violations,
             high_water: self.state.high_water,
             events_observed: self.state.events_observed,
         }
+    }
+
+    /// Final-pass policy (spec § "Shutdown"): drop unsettled state without
+    /// recording violations. Partial batches, unfinished fence checks, and
+    /// in-progress chaos windows are inconclusive at end-of-run — absence of
+    /// evidence is not evidence of absence.
+    fn final_pass(&mut self) {
+        self.state.open_batches.clear();
+        self.state.open_windows.clear();
     }
 
     fn on_issued(&mut self, sample: IssuedSample) {
@@ -458,5 +468,34 @@ mod tests {
         drop(tx);
         let outcome = handle.await.unwrap();
         assert_eq!(outcome.violations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_batch_at_end_is_dropped_without_violation() {
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 0, false, 100))).await.unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert!(outcome.violations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsettled_chaos_window_at_end_no_violation() {
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        let t0 = Instant::now();
+        tx.send(SupervisorEvent::Issued(sample(0, 100))).await.unwrap();
+        let started = t0 + Duration::from_millis(10);
+        let ended = t0 + Duration::from_millis(60);
+        let grace = Duration::from_millis(10);
+        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace))).await.unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert!(outcome.violations.is_empty(), "got: {:?}", outcome.violations);
     }
 }
