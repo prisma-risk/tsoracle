@@ -1114,6 +1114,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "husky-rs"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7efd8aa8491dc34722e4038a2fff2ce6cf1343976c81aa94bc1da5eeb6b7d2b2"
+
+[[package]]
 name = "hyper"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2810,6 +2816,7 @@ dependencies = [
 name = "tsoracle-core"
 version = "0.1.0"
 dependencies = [
+ "husky-rs",
  "proptest",
  "serde",
  "thiserror",

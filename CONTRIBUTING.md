@@ -80,13 +80,11 @@ make test-failpoints
 
 ### Pre-commit hook
 
-A tracked pre-commit hook in [`.githooks/pre-commit`](.githooks/pre-commit) runs the first two of those checks (`cargo fmt --check` and clippy) and blocks the commit on failure. Enable it once per clone:
+A tracked pre-commit hook in [`.husky/pre-commit`](.husky/pre-commit) runs the first two of those checks (`cargo fmt --check` and clippy) and blocks the commit on failure.
 
-```bash
-make install-hooks
-```
+It auto-installs on your first `cargo test` (any flavor — workspace-wide, or `-p tsoracle-core`) via [`husky-rs`](https://crates.io/crates/husky-rs), a dev-dependency on `tsoracle-core` that sets `core.hooksPath = .husky` for this clone. No manual setup is needed as long as you run cargo before your first commit. If you want the hook active before any cargo invocation, run `make install-hooks` to set `core.hooksPath = .husky` directly.
 
-That writes `core.hooksPath = .githooks` into your local `.git/config`. Bypass with `git commit --no-verify` when you know what you're doing — CI runs the same checks regardless, so a bypassed commit will still fail upstream.
+Bypass with `git commit --no-verify` when you know what you're doing — CI runs the same checks regardless, so a bypassed commit will still fail upstream.
 
 If you touched anything under `crates/tsoracle-proto/proto/`:
 

@@ -27,4 +27,5 @@ thiserror = { workspace = true }
 serde     = { workspace = true, optional = true }
 
 [dev-dependencies]
+husky-rs = { workspace = true }
 proptest = { workspace = true }
