@@ -38,6 +38,9 @@ tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.
 
 fail = { workspace = true, optional = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal", "test-util"] }
+
 [[bin]]
 name = "stress"
 path = "src/bin/stress.rs"
