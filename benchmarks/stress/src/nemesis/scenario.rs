@@ -178,4 +178,54 @@ mod tests {
     fn unknown_scenario_returns_err() {
         assert!(build("nonsense", Duration::from_secs(20)).is_err());
     }
+
+    #[test]
+    fn fence_stress_alternates_kill_and_pause() {
+        let s = build("fence-stress", Duration::from_secs(10)).unwrap();
+        assert!(s.ops.len() >= 2, "got {} ops", s.ops.len());
+        assert!(s.loadgen_pause.is_none());
+        let mut saw_kill = false;
+        let mut saw_pause = false;
+        for op in &s.ops {
+            match &op.op {
+                crate::chaos::ChaosOp::KillLeader => saw_kill = true,
+                crate::chaos::ChaosOp::PauseLeader { dur } => {
+                    saw_pause = true;
+                    assert_eq!(*dur, Duration::from_millis(500));
+                }
+                other => panic!("unexpected op: {other:?}"),
+            }
+        }
+        assert!(saw_kill && saw_pause, "expected both kill and pause ops");
+    }
+
+    #[test]
+    fn failpoint_cycle_arms_and_disarms() {
+        let s = build("failpoint-cycle", Duration::from_secs(40)).unwrap();
+        assert!(s.loadgen_pause.is_none());
+        let mut arm_count = 0;
+        let mut disarm_count = 0;
+        for op in &s.ops {
+            match &op.op {
+                crate::chaos::ChaosOp::ArmFailpoint { action, .. } => {
+                    arm_count += 1;
+                    assert_eq!(action, "panic");
+                }
+                crate::chaos::ChaosOp::DisarmFailpoint { .. } => disarm_count += 1,
+                other => panic!("unexpected op: {other:?}"),
+            }
+        }
+        assert!(arm_count > 0, "no arm ops emitted");
+        assert_eq!(
+            arm_count, disarm_count,
+            "every arm must have a matching disarm",
+        );
+    }
+
+    #[test]
+    fn catalog_summaries_are_non_empty() {
+        for info in catalog() {
+            assert!(!info.summary.is_empty(), "{} has empty summary", info.name);
+        }
+    }
 }

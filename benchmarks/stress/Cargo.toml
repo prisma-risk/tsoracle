@@ -40,6 +40,7 @@ tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal", "test-util"] }
 
 [[bin]]

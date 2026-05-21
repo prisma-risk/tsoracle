@@ -339,4 +339,164 @@ mod tests {
         let raw = sample_report().render_json();
         assert!(!raw.contains('\n'), "json must be one line: {raw}");
     }
+
+    #[test]
+    fn text_renders_all_outcome_variants() {
+        for (outcome, want) in [
+            (Outcome::Ok, "outcome=Ok"),
+            (Outcome::InvariantViolation, "outcome=InvariantViolation"),
+            (
+                Outcome::ProgrammerError {
+                    reason: "boom".into(),
+                },
+                "ProgrammerError: boom",
+            ),
+            (
+                Outcome::HarnessError {
+                    kind: HarnessErrorKind::HostFault {
+                        detail: "disk".into(),
+                    },
+                },
+                "HarnessError:",
+            ),
+            (Outcome::Interrupted, "outcome=Interrupted"),
+        ] {
+            let mut r = sample_report();
+            r.outcome = outcome;
+            let s = r.render_text();
+            assert!(s.contains(want), "missing {want:?} in:\n{s}");
+        }
+    }
+
+    #[test]
+    fn json_renders_all_outcome_variants() {
+        for (outcome, want) in [
+            (Outcome::Ok, "Ok"),
+            (Outcome::InvariantViolation, "InvariantViolation"),
+            (
+                Outcome::ProgrammerError {
+                    reason: "boom".into(),
+                },
+                "ProgrammerError",
+            ),
+            (
+                Outcome::HarnessError {
+                    kind: HarnessErrorKind::HostFault {
+                        detail: "disk".into(),
+                    },
+                },
+                "HarnessError",
+            ),
+            (Outcome::Interrupted, "Interrupted"),
+        ] {
+            let mut r = sample_report();
+            r.outcome = outcome;
+            let v: serde_json::Value = serde_json::from_str(&r.render_json()).unwrap();
+            assert_eq!(v["outcome"], want);
+        }
+    }
+
+    #[test]
+    fn renders_non_mem_topologies() {
+        for topo in [TopologyKind::Raft, TopologyKind::Process] {
+            let mut r = sample_report();
+            r.topology = topo;
+            let text = r.render_text();
+            let expect = match topo {
+                TopologyKind::Mem => "Mem",
+                TopologyKind::Raft => "Raft",
+                TopologyKind::Process => "Process",
+            };
+            assert!(text.contains(&format!("topology={expect}")), "{text}");
+            let json: serde_json::Value = serde_json::from_str(&r.render_json()).unwrap();
+            assert_eq!(json["topology"], expect);
+        }
+    }
+
+    #[test]
+    fn json_renders_random_schedule_source() {
+        let mut r = sample_report();
+        r.schedule.source = ScheduleSource::Random {
+            seed: 7,
+            params: crate::schedule::RandomParams::default(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&r.render_json()).unwrap();
+        assert_eq!(v["schedule_summary"]["source"], "random:7");
+    }
+
+    #[test]
+    fn violation_summary_covers_all_kinds() {
+        use crate::chaos::ChaosKind;
+        use crate::sample::{IssuedSample, LivenessIncident, LivenessIncidentKind};
+        use crate::types::ClientId;
+        use crate::violation::{Violation, ViolationKind};
+        use tsoracle_core::Timestamp;
+
+        let now = std::time::Instant::now();
+        let sample = IssuedSample {
+            client_id: ClientId(0),
+            batch_id: 0,
+            batch_idx: 0,
+            is_last: true,
+            ts: Timestamp(42),
+            issued_at: now,
+            recv_time: now,
+        };
+
+        let mut r = sample_report();
+        r.violations = vec![
+            Violation {
+                kind: ViolationKind::Monotonicity {
+                    prev: Timestamp(100),
+                    got: Timestamp(50),
+                    sample: sample.clone(),
+                },
+                at: now,
+            },
+            Violation {
+                kind: ViolationKind::BatchInternalOrdering {
+                    client_id: ClientId(1),
+                    batch_id: 7,
+                    values: vec![Timestamp(3), Timestamp(2)],
+                    detail: "out of order".into(),
+                },
+                at: now,
+            },
+            Violation {
+                kind: ViolationKind::FenceFreshness {
+                    pre_window_high_water: Timestamp(99),
+                    first_post_window_ts: Timestamp(50),
+                    window_kind: ChaosKind::LeaderKill,
+                },
+                at: now,
+            },
+            Violation {
+                kind: ViolationKind::Liveness {
+                    incident: LivenessIncident {
+                        kind: LivenessIncidentKind::DeadlineExceeded {
+                            client_id: ClientId(2),
+                            attempts: 3,
+                            last_error: "Unavailable".into(),
+                            started_at: now,
+                        },
+                        at: now,
+                    },
+                },
+                at: now,
+            },
+        ];
+
+        let v: serde_json::Value = serde_json::from_str(&r.render_json()).unwrap();
+        let arr = v["violations"].as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        let kinds: Vec<&str> = arr.iter().map(|v| v["kind"].as_str().unwrap()).collect();
+        assert!(kinds.contains(&"Monotonicity"));
+        assert!(kinds.contains(&"BatchInternalOrdering"));
+        assert!(kinds.contains(&"FenceFreshness"));
+        assert!(kinds.contains(&"Liveness"));
+
+        // Also covers the text-renderer count line.
+        let text = r.render_text();
+        assert!(text.contains("violations: 4"), "{text}");
+    }
 }

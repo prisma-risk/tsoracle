@@ -116,19 +116,26 @@ deny:
 # integration tests on tsoracle-server, and including them would dilute the
 # signal. Requires cargo-llvm-cov: cargo install cargo-llvm-cov.
 #
-# `openraft-toolkit/src/lifecycle/{bootstrap,membership}.rs` are excluded by
-# `--ignore-filename-regex`: they are thin async wrappers around real
-# `Raft<C, SM>` calls and need a live raft to execute, which the toolkit's own
-# tests deliberately don't stand up (see `tests/lifecycle.rs` header). Coverage
-# for those wrappers is earned downstream by the openraft consumer that uses
-# them; the compile-time signature shims in `tests/lifecycle.rs` catch API drift.
-#
-# `benchmarks/stress/src/bin/stress.rs` is excluded for the same reason as the
-# `tsoracle` CLI shim: it is a `clap` argument-parsing wrapper around
-# `stress::run` / `stress::run_inject_violation`, which the `tests/smoke.rs`
-# integration tests exercise end-to-end. `benchmarks/stress/src/topology/raft.rs`
-# and `process.rs` are `unimplemented!()` placeholders for future topology
-# variants and intentionally do not execute under any current test.
+# `cargo llvm-cov` accepts only a single `--ignore-filename-regex`, so the
+# per-file exclusions below are built up as separate Make variables (one per
+# logical reason) and joined into a single regex at the end.
+
+# Thin async wrappers around real `Raft<C, SM>` calls — they need a live raft
+# to execute, which the toolkit's own tests deliberately don't stand up (see
+# `tests/lifecycle.rs` header). Coverage is earned downstream by the openraft
+# consumer; the compile-time signature shims catch API drift.
+COV_IGNORE_OPENRAFT_LIFECYCLE := crates/openraft-toolkit/src/lifecycle/(bootstrap|membership)
+
+# `clap` argument-parsing wrapper around `stress::run` /
+# `stress::run_inject_violation`. The library entry points are exercised
+# end-to-end by `benchmarks/stress/tests/smoke.rs`.
+COV_IGNORE_STRESS_BIN := benchmarks/stress/src/bin/stress
+
+# `unimplemented!()` placeholders for future topology variants — intentionally
+# unreachable from any current test path.
+COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/(raft|process)
+
+COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_STRESS_TOPO_STUBS))\.rs
 
 coverage:
 	$(CARGO) llvm-cov \
@@ -139,7 +146,7 @@ coverage:
 	  --exclude example-openraft-piggyback \
 	  --exclude example-openraft-standalone \
 	  --exclude bench-minimal \
-	  --ignore-filename-regex '(crates/openraft-toolkit/src/lifecycle/(bootstrap|membership)|benchmarks/stress/src/bin/stress|benchmarks/stress/src/topology/(raft|process))\.rs$$' \
+	  --ignore-filename-regex '$(COV_IGNORE)$$' \
 	  --lcov --output-path lcov.info
 
 # Release --------------------------------------------------------------------

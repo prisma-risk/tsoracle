@@ -393,6 +393,14 @@ mod parse_count_tests {
         assert_eq!(parse_count("1k").unwrap(), 1_000);
     }
     #[test]
+    fn m_suffix() {
+        assert_eq!(parse_count("2m").unwrap(), 2_000_000);
+    }
+    #[test]
+    fn g_suffix() {
+        assert_eq!(parse_count("1g").unwrap(), 1_000_000_000);
+    }
+    #[test]
     fn underscores() {
         assert_eq!(parse_count("1_500k").unwrap(), 1_500_000);
     }
@@ -403,5 +411,162 @@ mod parse_count_tests {
     #[test]
     fn uppercase_rejected() {
         assert!(parse_count("1K").is_err());
+    }
+    #[test]
+    fn bare_suffix_rejected() {
+        let err = parse_count("k").unwrap_err();
+        assert!(err.contains("no digits"), "got: {err}");
+    }
+    #[test]
+    fn non_numeric_rejected() {
+        let err = parse_count("abc").unwrap_err();
+        assert!(err.contains("invalid number"), "got: {err}");
+    }
+    #[test]
+    fn overflow_rejected() {
+        // 999...g (max u64 is ~1.8e19, so 99e9 base * 1e9 multiplier overflows).
+        let err = parse_count("99999999999g").unwrap_err();
+        assert!(err.contains("overflow"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod resolve_schedule_tests {
+    use super::*;
+    use crate::config::{ScenarioKind, TopologyKind};
+    use std::net::SocketAddr;
+
+    fn cfg_with(scenario: ScenarioKind, duration: Option<Duration>) -> StressConfig {
+        StressConfig {
+            topology: TopologyKind::Mem,
+            scenario,
+            duration,
+            ops: None,
+            clients: 1,
+            batch_size: 1,
+            warmup: 1,
+            client_threads: 1,
+            server_threads: 1,
+            liveness_deadline: Duration::from_secs(5),
+            grace_mem: Duration::from_millis(100),
+            grace_raft: Duration::from_millis(750),
+            grace_process: Duration::from_secs(2),
+            nodes: 1,
+            bind: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+            json: false,
+            json_stream: false,
+            print_interval: Duration::from_secs(1),
+            seed: 0,
+            schedule_out: None,
+            ci_smoke: false,
+        }
+    }
+
+    #[test]
+    fn random_scenario_resolves_to_random_source() {
+        let cfg = cfg_with(
+            ScenarioKind::Random { seed: 42 },
+            Some(Duration::from_secs(10)),
+        );
+        let s = resolve_schedule(&cfg).unwrap();
+        match s.source {
+            crate::schedule::ScheduleSource::Random { seed, .. } => assert_eq!(seed, 42),
+            other => panic!("expected Random source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn named_scenario_resolves_via_catalog() {
+        let cfg = cfg_with(
+            ScenarioKind::Named("steady".into()),
+            Some(Duration::from_secs(10)),
+        );
+        let s = resolve_schedule(&cfg).unwrap();
+        match s.source {
+            crate::schedule::ScheduleSource::Named { scenario } => {
+                assert_eq!(scenario, "steady");
+            }
+            other => panic!("expected Named source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_named_scenario_errors() {
+        let cfg = cfg_with(
+            ScenarioKind::Named("does-not-exist".into()),
+            Some(Duration::from_secs(10)),
+        );
+        assert!(resolve_schedule(&cfg).is_err());
+    }
+
+    #[test]
+    fn no_duration_and_no_ops_errors() {
+        let cfg = cfg_with(ScenarioKind::Named("steady".into()), None);
+        let err = resolve_schedule(&cfg).unwrap_err().to_string();
+        assert!(err.contains("neither duration nor ops"), "got: {err}");
+    }
+
+    #[test]
+    fn ops_only_uses_default_total() {
+        // `ops`-only mode (no duration) takes the 30s placeholder total.
+        let mut cfg = cfg_with(ScenarioKind::Named("steady".into()), None);
+        cfg.ops = Some(1_000);
+        let s = resolve_schedule(&cfg).unwrap();
+        assert!(matches!(
+            s.source,
+            crate::schedule::ScheduleSource::Named { .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod load_schedule_tests {
+    use super::*;
+    use crate::schedule::{Schedule, ScheduleSource};
+    use std::io::Write;
+
+    #[test]
+    fn load_schedule_round_trips_from_disk() {
+        let original = Schedule {
+            source: ScheduleSource::Named {
+                scenario: "killer-loop".into(),
+            },
+            ops: Vec::new(),
+            total: Duration::from_secs(15),
+            loadgen_pause: None,
+        };
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(serde_json::to_string(&original).unwrap().as_bytes())
+            .unwrap();
+        let loaded = load_schedule(file.path()).unwrap();
+        assert_eq!(loaded.total, Duration::from_secs(15));
+        match loaded.source {
+            ScheduleSource::Named { scenario } => assert_eq!(scenario, "killer-loop"),
+            _ => panic!("wrong source"),
+        }
+    }
+
+    #[test]
+    fn load_schedule_errors_on_missing_file() {
+        assert!(load_schedule(std::path::Path::new("/no/such/path.json")).is_err());
+    }
+
+    #[test]
+    fn load_schedule_errors_on_invalid_json() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"not json").unwrap();
+        assert!(load_schedule(file.path()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod histogram_tests {
+    use super::*;
+
+    #[test]
+    fn new_histogram_has_expected_bounds() {
+        let h = new_histogram();
+        assert_eq!(h.high(), HISTO_MAX_US);
+        assert_eq!(h.low(), 1);
     }
 }
