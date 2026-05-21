@@ -335,11 +335,27 @@ impl ChaosController for ProcessController {
         })
         .await
     }
-    async fn arm_failpoint(&self, _name: &str, _action: &str) -> ChaosEvent {
-        unimplemented!("arm_failpoint lands in a follow-up commit")
+    async fn arm_failpoint(&self, name: &str, action: &str) -> ChaosEvent {
+        let grace = self.grace;
+        let kind = ChaosKind::FailpointArm { name: name.into() };
+        // Mutate the shared map before timing starts so the very next
+        // respawn sees the new entry.
+        self.failpoints.lock().arm(name, action);
+        timed_event(kind, grace, || async {
+            // Process topology: failpoint env vars are read by tsoracle at
+            // process startup. Live children are unaffected; only future
+            // respawns (e.g. those launched by a subsequent kill_leader)
+            // observe this arming. See spec § "ProcessTopology::arm_failpoint".
+            ChaosOutcome::Applied
+        })
+        .await
     }
-    async fn disarm_failpoint(&self, _name: &str) -> ChaosEvent {
-        unimplemented!("disarm_failpoint lands in a follow-up commit")
+
+    async fn disarm_failpoint(&self, name: &str) -> ChaosEvent {
+        let grace = self.grace;
+        let kind = ChaosKind::FailpointDisarm { name: name.into() };
+        self.failpoints.lock().disarm(name);
+        timed_event(kind, grace, || async { ChaosOutcome::Applied }).await
     }
 
     fn endpoints(&self) -> Vec<String> {
