@@ -94,15 +94,23 @@ impl Supervisor {
 
         // (2) Batch internal ordering.
         let key = (sample.client_id, sample.batch_id);
-        let entry = self
-            .state
+        self.state
             .open_batches
             .entry(key)
-            .or_insert_with(|| OpenBatch { values: Vec::new() });
-        entry.values.push(sample.ts);
+            .or_insert_with(|| OpenBatch { values: Vec::new() })
+            .values
+            .push(sample.ts);
         if sample.is_last {
-            let open = self.state.open_batches.remove(&key).expect("just inserted");
-            check_batch(&mut self.state.violations, sample.client_id, sample.batch_id, open.values);
+            // The just-inserted entry must exist; the `if let Some` handles
+            // the unreachable None case without triggering clippy::expect_used.
+            if let Some(open) = self.state.open_batches.remove(&key) {
+                check_batch(
+                    &mut self.state.violations,
+                    sample.client_id,
+                    sample.batch_id,
+                    open.values,
+                );
+            }
         }
     }
 }
