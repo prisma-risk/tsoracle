@@ -26,8 +26,6 @@ pub struct MemController {
     driver: Arc<InMemoryDriver>,
     endpoint: String,
     /// Bumped on each leader promotion so we don't clash with previous epochs.
-    /// Reserved for T17 (kill_leader promotes a fresh epoch).
-    #[allow(dead_code)]
     epoch: Mutex<Epoch>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     grace: Duration,
@@ -67,14 +65,35 @@ impl MemTopology {
 #[async_trait]
 impl ChaosController for MemController {
     async fn kill_leader(&self) -> ChaosEvent {
-        timed_event(ChaosKind::LeaderKill, self.grace, || async {
-            ChaosOutcome::Skipped { reason: "kill_leader not yet implemented (T17)".into() }
+        let driver = self.driver.clone();
+        let next_epoch = {
+            let mut guard = self.epoch.lock();
+            *guard = Epoch(guard.0 + 1);
+            *guard
+        };
+        timed_event(ChaosKind::LeaderKill, self.grace, move || async move {
+            // Step down then promote at the next epoch. With a single in-memory
+            // driver, "kill the leader and elect a new one" collapses to this
+            // synchronous transition. The fence in tsoracle-core guarantees the
+            // new epoch's first timestamp is > the old high-water.
+            driver.become_follower(None);
+            driver.become_leader(next_epoch);
+            ChaosOutcome::Applied
         })
         .await
     }
-    async fn pause_leader(&self, _dur: Duration) -> ChaosEvent {
-        timed_event(ChaosKind::LeaderPause, self.grace, || async {
-            ChaosOutcome::Skipped { reason: "pause_leader not yet implemented (T17)".into() }
+    async fn pause_leader(&self, dur: Duration) -> ChaosEvent {
+        let driver = self.driver.clone();
+        let next_epoch = {
+            let mut guard = self.epoch.lock();
+            *guard = Epoch(guard.0 + 1);
+            *guard
+        };
+        timed_event(ChaosKind::LeaderPause, self.grace, move || async move {
+            driver.become_follower(None);
+            tokio::time::sleep(dur).await;
+            driver.become_leader(next_epoch);
+            ChaosOutcome::Applied
         })
         .await
     }
@@ -117,6 +136,28 @@ mod tests {
         let client = tsoracle_client::Client::connect(endpoints).await.unwrap();
         let ts = client.get_ts().await.unwrap();
         assert!(ts.0 > 0, "expected a positive timestamp, got {ts:?}");
+        Box::new(topo.controller).shutdown().await;
+    }
+
+    use crate::topology::ChaosController;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn kill_leader_bumps_epoch_and_promotes() {
+        let topo = MemTopology::spawn(Duration::from_millis(50)).await.unwrap();
+        let client = tsoracle_client::Client::connect(topo.controller.endpoints()).await.unwrap();
+        let ts1 = client.get_ts().await.unwrap();
+        let ev = topo.controller.kill_leader().await;
+        assert!(ev.outcome.is_applied(), "got {:?}", ev.outcome);
+        let ts2 = client.get_ts().await.unwrap();
+        assert!(ts2 > ts1, "ts2={ts2:?} should be > ts1={ts1:?}");
+        Box::new(topo.controller).shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pause_leader_returns_applied() {
+        let topo = MemTopology::spawn(Duration::from_millis(50)).await.unwrap();
+        let ev = topo.controller.pause_leader(Duration::from_millis(20)).await;
+        assert!(ev.outcome.is_applied());
         Box::new(topo.controller).shutdown().await;
     }
 }
