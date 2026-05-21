@@ -1,6 +1,6 @@
 //! Single-consumer task that checks all four invariants.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use hdrhistogram::Histogram;
@@ -33,7 +33,21 @@ pub struct Supervisor {
 
 #[derive(Debug)]
 struct SupervisorState {
+    /// Maximum `ts` observed across all clients in arrival order. Used by the
+    /// fence-freshness check as the pre-window snapshot. NOT used by the
+    /// per-sample monotonicity check — arrival order at the supervisor's mpsc
+    /// is not issue order at the TSO under concurrent clients, so a global
+    /// arrival-order check would flag legitimate concurrent reorderings as
+    /// regressions.
     high_water: Timestamp,
+    /// Per-client maximum `ts` observed. A single client's RPCs are
+    /// causally ordered (each awaits the previous), so a client never
+    /// legitimately receives a `ts` ≤ its previous one — that is the actual
+    /// per-client monotonicity invariant.
+    per_client_high_water: HashMap<ClientId, Timestamp>,
+    /// All observed timestamps. A duplicate insert is a cross-client
+    /// uniqueness violation (the TSO must never issue the same `ts` twice).
+    seen_timestamps: HashSet<Timestamp>,
     open_batches: HashMap<(ClientId, BatchId), OpenBatch>,
     open_windows: Vec<OpenChaosWindow>,
     violations: Vec<Violation>,
@@ -45,6 +59,8 @@ impl Default for SupervisorState {
     fn default() -> Self {
         Self {
             high_water: Timestamp(0),
+            per_client_high_water: HashMap::new(),
+            seen_timestamps: HashSet::new(),
             open_batches: HashMap::new(),
             open_windows: Vec::new(),
             violations: Vec::new(),
@@ -124,17 +140,55 @@ impl Supervisor {
             let _ = self.state.latency.record(clamped);
         }
 
-        // (1) Global monotonicity.
-        if sample.ts <= self.state.high_water {
+        // (1) Monotonicity — split into two client-observable invariants:
+        //
+        //   (1a) Per-client monotonicity. A client awaits each RPC before
+        //   starting the next, so successive samples from the same client
+        //   must strictly increase. Any tie or regression is a real TSO bug.
+        //
+        //   (1b) Cross-client uniqueness. The TSO must never issue the same
+        //   `ts` twice. A duplicate `ts` across clients is a real TSO bug.
+        //
+        // We deliberately do NOT compare each sample against the global
+        // arrival-order high-water: the supervisor mpsc has multiple
+        // concurrent producers (one per client task), so arrival order at
+        // this consumer is not issue order at the TSO. Under the raft +
+        // killer-loop scenario, 8 stalled RPCs can unblock together with
+        // contiguous ts assigned in issue order yet land at the supervisor
+        // in an arbitrary permutation — that is legitimate, not a TSO
+        // regression. The fence-freshness check (1.5 below) is the right
+        // place for "no regression across a leadership change".
+        let prev = self
+            .state
+            .per_client_high_water
+            .get(&sample.client_id)
+            .copied()
+            .unwrap_or(Timestamp(0));
+        if sample.ts <= prev {
             self.state.violations.push(Violation {
                 kind: ViolationKind::Monotonicity {
-                    prev: self.state.high_water,
+                    prev,
                     got: sample.ts,
                     sample: sample.clone(),
                 },
                 at: Instant::now(),
             });
         } else {
+            self.state
+                .per_client_high_water
+                .insert(sample.client_id, sample.ts);
+        }
+        if !self.state.seen_timestamps.insert(sample.ts) {
+            self.state.violations.push(Violation {
+                kind: ViolationKind::Monotonicity {
+                    prev: sample.ts,
+                    got: sample.ts,
+                    sample: sample.clone(),
+                },
+                at: Instant::now(),
+            });
+        }
+        if sample.ts > self.state.high_water {
             self.state.high_water = sample.ts;
         }
 
@@ -315,6 +369,45 @@ mod tests {
             outcome.violations[0].kind,
             ViolationKind::Monotonicity { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn monotonicity_tolerates_cross_client_arrival_reorder() {
+        // Reproduces the raft + killer-loop scenario where 8 concurrent
+        // clients' stalled RPCs unblock together: the TSO assigns
+        // contiguous, monotonically increasing ts in issue order, but the
+        // per-client `IssuedSample`s land at the supervisor's mpsc in an
+        // arbitrary permutation. That is legitimate observed behavior, not
+        // a TSO regression — the supervisor must not flag it.
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        // Client 7's sample arrives first with the highest ts.
+        tx.send(SupervisorEvent::Issued(sample(7, 551)))
+            .await
+            .unwrap();
+        // Clients 0..6 then post their (lower) samples in arbitrary order.
+        for (client, ts) in [
+            (3, 547),
+            (0, 544),
+            (6, 550),
+            (1, 545),
+            (4, 548),
+            (2, 546),
+            (5, 549),
+        ] {
+            tx.send(SupervisorEvent::Issued(sample(client, ts)))
+                .await
+                .unwrap();
+        }
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert!(
+            outcome.violations.is_empty(),
+            "got: {:?}",
+            outcome.violations,
+        );
     }
 
     #[tokio::test]
