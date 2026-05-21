@@ -285,8 +285,55 @@ impl ChaosController for ProcessController {
         })
         .await
     }
-    async fn pause_leader(&self, _dur: Duration) -> ChaosEvent {
-        unimplemented!("pause_leader lands in a follow-up commit")
+    async fn pause_leader(&self, dur: Duration) -> ChaosEvent {
+        let grace = self.grace;
+        let Some(target_id) = self.current_leader() else {
+            return timed_event(ChaosKind::LeaderPause, grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "no current leader (empty topology)".into(),
+                }
+            })
+            .await;
+        };
+        let idx = target_id.0 as usize;
+        if idx >= self.nodes.len() {
+            return timed_event(ChaosKind::LeaderPause, grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: format!("round-robin idx {idx} out of range"),
+                }
+            })
+            .await;
+        }
+        let handle = self.nodes[idx].clone();
+        let pid = handle.pid.load(Ordering::Relaxed);
+        if pid == 0 {
+            return timed_event(ChaosKind::LeaderPause, grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: format!("node {idx} has no live PID"),
+                }
+            })
+            .await;
+        }
+
+        timed_event(ChaosKind::LeaderPause, grace, move || async move {
+            let target = Pid::from_raw(pid as i32);
+            if let Err(e) = kill(target, Signal::SIGSTOP) {
+                return ChaosOutcome::Failed {
+                    reason: format!("SIGSTOP(pid={pid}): {e}"),
+                };
+            }
+            tokio::time::sleep(dur).await;
+            // Best-effort: even if SIGCONT errors (e.g. process died
+            // between stop and resume), the chaos op as a whole is
+            // recorded so the supervisor accounts for the window.
+            if let Err(e) = kill(target, Signal::SIGCONT) {
+                return ChaosOutcome::Failed {
+                    reason: format!("SIGCONT(pid={pid}): {e}"),
+                };
+            }
+            ChaosOutcome::Applied
+        })
+        .await
     }
     async fn arm_failpoint(&self, _name: &str, _action: &str) -> ChaosEvent {
         unimplemented!("arm_failpoint lands in a follow-up commit")
