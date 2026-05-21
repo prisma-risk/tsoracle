@@ -80,3 +80,35 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           file: lcov.info
           format: lcov
+
+  stress-smoke:
+    name: stress smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+      - name: build
+        run: cargo build --release --bin tsoracle && cargo build --release -p stress
+      - name: smoke (mem)
+        run: cargo run --release -p stress -- run --topology mem --ci-smoke
+      - name: smoke (raft)
+        run: cargo run --release -p stress -- run --topology raft --ci-smoke --nodes 3
+      - name: smoke (process)
+        run: cargo run --release -p stress -- run --topology process --ci-smoke --nodes 1
+      - name: positive control (inject-violation)
+        # inject-violation deliberately breaks monotonicity and MUST exit 1;
+        # any other exit code means the supervisor stopped catching the break.
+        # `set +e` is required so `set -e` does not abort on the expected failure.
+        run: |
+          set +e
+          cargo run --release -p stress -- inject-violation --topology mem
+          code=$?
+          set -e
+          if [ "$code" != "1" ]; then
+            echo "::error::inject-violation exited $code (expected 1)"
+            exit 1
+          fi

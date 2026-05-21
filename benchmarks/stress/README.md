@@ -17,6 +17,7 @@ This crate is a peer of `benchmarks/minimal`, not a replacement. `bench-minimal`
 - `replay` subcommand.
 - `inject-violation` self-test as a positive CI control.
 - Smoke tests in `tests/smoke.rs` covering all three topologies (≤ 60 s total).
+- Per-PR CI smoke (`stress-smoke` job in `.github/workflows/ci.yml`) and nightly long-run workflow (`.github/workflows/stress-nightly.yml`) covering the full topology × scenario matrix at `--duration 5m`, with failures auto-filed as deduplicated GitHub issues.
 
 ## Run
 
@@ -88,4 +89,5 @@ These are landed-but-incomplete. Neither affects any of the four invariants; the
 
 ## See also
 
-- `benchmarks/minimal/README.md` — the steady-state characterization sibling.
+- `../../docs/stress-testing.md` — operator + contributor reference (canonical).
+- `../minimal/README.md` — the steady-state characterization sibling.

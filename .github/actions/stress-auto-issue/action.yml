@@ -1,0 +1,160 @@
+name: Stress auto-issue
+description: |
+  On a stress nightly failure, computes a bug dedupe signature from the
+  topology, scenario, and the sorted set of invariant-violation kinds in
+  the JSON report, checks for an existing open issue with that signature,
+  and either appends a comment or opens a new one. Mirrors the shape of
+  the sibling fuzz-auto-issue action.
+
+inputs:
+  topology:
+    description: Topology under which the stress run failed (mem | raft | process).
+    required: true
+  scenario:
+    description: Scenario name (e.g. killer-loop, fence-stress, random-1).
+    required: true
+  report-json:
+    description: Path to the JSON report produced by `stress run --json`.
+    required: true
+  artifact-name:
+    description: GitHub artifact name (for the issue body link).
+    required: true
+  run-id:
+    description: GitHub Actions run ID.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Compute dedupe signature
+      id: sig
+      shell: bash
+      env:
+        TOPOLOGY: ${{ inputs.topology }}
+        SCENARIO: ${{ inputs.scenario }}
+        REPORT_JSON: ${{ inputs.report-json }}
+      run: |
+        set -euo pipefail
+
+        # The dedupe key is (topology, scenario, sorted unique violation kinds).
+        # Same kind under a different topology usually has a different root
+        # cause, so topology and scenario are part of the key rather than only
+        # the issue title. A missing/empty report (e.g. harness crashed before
+        # writing JSON) falls back to a sentinel so the issue still files.
+        if [ -s "$REPORT_JSON" ] && jq -e '.violations' "$REPORT_JSON" >/dev/null 2>&1; then
+          KINDS=$(jq -r '.violations[].kind' "$REPORT_JSON" | sort -u | paste -sd, -)
+          OUTCOME=$(jq -r '.outcome' "$REPORT_JSON")
+          COUNT=$(jq -r '.violations | length' "$REPORT_JSON")
+        else
+          KINDS="no-report"
+          OUTCOME="no-report"
+          COUNT="0"
+        fi
+        # Default-empty fallback keeps the signature stable when the run
+        # exited non-zero with zero recorded violations (e.g. liveness
+        # deadline exceeded with no incident captured).
+        if [ -z "$KINDS" ]; then
+          KINDS="none"
+        fi
+        SIG=$(printf "%s\n%s\n%s\n" "$TOPOLOGY" "$SCENARIO" "$KINDS" | shasum -a 256 | cut -c1-8)
+
+        {
+          echo "sig=${SIG}"
+          echo "kinds=${KINDS}"
+          echo "outcome=${OUTCOME}"
+          echo "count=${COUNT}"
+        } >> "$GITHUB_OUTPUT"
+        echo "Computed dedupe signature: ${SIG} (kinds=${KINDS}, outcome=${OUTCOME})"
+
+    - name: Check for existing open issue
+      id: existing
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SIG: ${{ steps.sig.outputs.sig }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        EXISTING=$(gh issue list \
+          --repo "$REPO" \
+          --label area:stress \
+          --state open \
+          --search "sig=${SIG}" \
+          --json number \
+          --jq '.[0].number // empty')
+        echo "number=${EXISTING}" >> "$GITHUB_OUTPUT"
+
+    - name: Append comment to existing issue
+      if: steps.existing.outputs.number != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EXISTING_NUMBER: ${{ steps.existing.outputs.number }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ inputs.run-id }}
+        ARTIFACT: ${{ inputs.artifact-name }}
+      run: |
+        set -euo pipefail
+        BODY="Reproduced again in run [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}). Artifact: \`${ARTIFACT}\`."
+        gh issue comment "$EXISTING_NUMBER" --repo "$REPO" --body "$BODY"
+
+    - name: Open new issue
+      if: steps.existing.outputs.number == ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TOPOLOGY: ${{ inputs.topology }}
+        SCENARIO: ${{ inputs.scenario }}
+        SIG: ${{ steps.sig.outputs.sig }}
+        KINDS: ${{ steps.sig.outputs.kinds }}
+        OUTCOME: ${{ steps.sig.outputs.outcome }}
+        COUNT: ${{ steps.sig.outputs.count }}
+        ARTIFACT: ${{ inputs.artifact-name }}
+        RUN_ID: ${{ inputs.run-id }}
+        REPO: ${{ github.repository }}
+        REPORT_JSON: ${{ inputs.report-json }}
+      run: |
+        set -euo pipefail
+
+        # First few violation summaries inlined for at-a-glance context; the
+        # full JSON and the schedule live in the uploaded artifact.
+        if [ -s "$REPORT_JSON" ] && jq -e '.violations' "$REPORT_JSON" >/dev/null 2>&1; then
+          SAMPLE=$(jq -c '.violations[:5][]' "$REPORT_JSON")
+        else
+          SAMPLE="(no report.json produced -- check workflow logs)"
+        fi
+
+        BODY=$(cat <<EOF
+        Stress nightly failure: \`${TOPOLOGY}/${SCENARIO}\`.
+
+        - **Outcome:** \`${OUTCOME}\`
+        - **Violation kinds:** \`${KINDS}\`
+        - **Total violations:** ${COUNT}
+
+        **Reproduce locally:**
+
+        \`\`\`bash
+        gh run download ${RUN_ID} --name ${ARTIFACT}
+        # The schedule pins the nemesis op sequence bit-for-bit:
+        cargo run --release -p stress -- replay stress-schedule.json
+        \`\`\`
+
+        **Failing run:** https://github.com/${REPO}/actions/runs/${RUN_ID}
+
+        **First violations (full set in artifact):**
+
+        \`\`\`
+        ${SAMPLE}
+        \`\`\`
+
+        **Dedupe signature:** \`sig=${SIG}\`
+        EOF
+        )
+
+        gh issue create \
+          --repo "$REPO" \
+          --title "[stress] ${TOPOLOGY}/${SCENARIO}: ${KINDS} (sig=${SIG})" \
+          --label area:stress \
+          --label priority:investigate \
+          --assignee SebastianThiebaud \
+          --body "$BODY"

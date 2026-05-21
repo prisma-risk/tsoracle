@@ -1,0 +1,134 @@
+name: stress (nightly)
+
+on:
+  schedule:
+    # 03:00 UTC daily -- 1h after fuzz-nightly so they don't fight for runners.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      topology:
+        description: "Topology (mem | raft | process | all)"
+        required: false
+        default: all
+        type: string
+      scenario:
+        description: "Scenario name (or 'all')"
+        required: false
+        default: all
+        type: string
+      duration:
+        description: "--duration value (humantime)"
+        required: false
+        default: 5m
+        type: string
+
+jobs:
+  stress:
+    name: ${{ matrix.topology }}/${{ matrix.scenario }}
+    runs-on: ubuntu-latest
+    # Hard ceiling above the 15-minute --duration budget, leaving margin for
+    # build, smoke, and artifact upload.
+    timeout-minutes: 30
+    permissions:
+      issues: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        topology:
+          - mem
+          - raft
+          - process
+        scenario:
+          - steady
+          - killer-loop
+          - fence-stress
+          - failpoint-cycle
+          - random-1
+          - random-2
+          - random-3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip non-matching filters (manual dispatch)
+        if: |
+          github.event_name == 'workflow_dispatch' &&
+          ((github.event.inputs.topology != 'all' && github.event.inputs.topology != matrix.topology) ||
+           (github.event.inputs.scenario != 'all' && github.event.inputs.scenario != matrix.scenario))
+        env:
+          MATRIX_TOPOLOGY: ${{ matrix.topology }}
+          MATRIX_SCENARIO: ${{ matrix.scenario }}
+          REQUESTED_TOPOLOGY: ${{ github.event.inputs.topology }}
+          REQUESTED_SCENARIO: ${{ github.event.inputs.scenario }}
+        run: |
+          echo "Skipping ${MATRIX_TOPOLOGY}/${MATRIX_SCENARIO} (dispatch requested ${REQUESTED_TOPOLOGY}/${REQUESTED_SCENARIO})"
+          exit 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+
+      - name: build
+        run: cargo build --release --bin tsoracle && cargo build --release -p stress --features stress-failpoints
+
+      - name: Determine scenario args
+        id: args
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          REQUESTED_DURATION: ${{ github.event.inputs.duration }}
+        run: |
+          # Seeded random scenarios pin determinism via --seed N (the harness
+          # switches ScenarioKind to Random whenever --seed is nonzero, so the
+          # --scenario value is irrelevant in that branch).
+          case "$SCENARIO" in
+            random-1) ARGS="--scenario random --seed 1" ;;
+            random-2) ARGS="--scenario random --seed 2" ;;
+            random-3) ARGS="--scenario random --seed 3" ;;
+            *)        ARGS="--scenario $SCENARIO" ;;
+          esac
+          DUR="${REQUESTED_DURATION:-5m}"
+          echo "args=$ARGS --duration $DUR" >> "$GITHUB_OUTPUT"
+
+      - name: Run stress
+        id: stress
+        env:
+          TOPOLOGY: ${{ matrix.topology }}
+          ARGS: ${{ steps.args.outputs.args }}
+        run: |
+          set +e
+          # ARGS is intentionally word-split here.
+          # shellcheck disable=SC2086
+          cargo run --release -p stress --features stress-failpoints -- \
+            run --topology "$TOPOLOGY" \
+            $ARGS \
+            --clients 32 --batch-size 4 \
+            --json --schedule-out stress-schedule.json \
+            > stress-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-${{ matrix.topology }}-${{ matrix.scenario }}-${{ github.run_id }}
+          path: |
+            stress-report.json
+            stress-schedule.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Auto-file deduplicated issue on failure
+        if: failure() && steps.stress.outputs.exit_code != '0'
+        uses: ./.github/actions/stress-auto-issue
+        with:
+          topology: ${{ matrix.topology }}
+          scenario: ${{ matrix.scenario }}
+          report-json: stress-report.json
+          artifact-name: stress-${{ matrix.topology }}-${{ matrix.scenario }}-${{ github.run_id }}
+          run-id: ${{ github.run_id }}
