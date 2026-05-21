@@ -1,40 +1,298 @@
-//! In-process openraft cluster on `MemNetwork`.
+//! In-process openraft cluster on `MemNetwork`; chaos by partitioning the
+//! leader's outbound messages.
+//!
+//! Mirrors the `examples/openraft-piggyback` `build_cluster` wiring: a single
+//! shared `MemNetwork` registry, per-node `RocksdbLogStore` in a fresh
+//! tempdir, a `HighWaterStateMachine`, and a `tsoracle::Server` bound to a
+//! loopback port. Cluster membership is initialized on node 1 once every
+//! node's `Raft` handle is registered.
+//!
+//! Chaos primitives (`kill_leader`, `pause_leader`, failpoints) are stubbed
+//! to return `Skipped` for now; follow-up PRs land real implementations on
+//! top of `MemNetwork`'s partition controller and openraft's `shutdown`.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::topology::ChaosController;
+use anyhow::{Context, bail};
+use async_trait::async_trait;
+use openraft::async_runtime::watch::WatchReceiver;
+use openraft::{Config, Raft, SnapshotPolicy};
+use openraft_toolkit::test_fakes::MemNetwork;
+use openraft_toolkit::{Flat, RocksdbLogStore};
+use parking_lot::Mutex;
+use rocksdb::{ColumnFamilyDescriptor, DB, Options};
+use tempfile::TempDir;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tokio::time::{Instant, sleep};
+use tsoracle_driver_openraft::{
+    HighWaterStateMachine, OpenraftDriver, OpenraftPeer, StandaloneHost, TypeConfig,
+};
+use tsoracle_server::Server;
 
-pub struct RaftTopology;
+use crate::chaos::{ChaosEvent, ChaosKind, ChaosOutcome};
+use crate::topology::{ChaosController, NodeId, timed_event};
+
+const LOG_CF: &str = "raft_log";
+const META_CF: &str = "raft_meta";
+
+/// In-process openraft cluster with one `tsoracle::Server` per node.
+pub struct RaftTopology {
+    pub controller: RaftController,
+    pub server_handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+/// Owns the per-node raft handles, the shared `MemNetwork`, and the oneshot
+/// shutdown senders for each node's tsoracle server.
+pub struct RaftController {
+    nodes: Vec<RaftNode>,
+    #[allow(dead_code)] // Used by follow-up PRs that introduce partition-based chaos.
+    network: Arc<MemNetwork<TypeConfig>>,
+    grace: Duration,
+}
+
+struct RaftNode {
+    node_id: NodeId,
+    endpoint: String,
+    raft: Raft<TypeConfig, HighWaterStateMachine>,
+    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    /// Keep the rocksdb tempdir alive for the node's lifetime.
+    _log_dir: TempDir,
+}
+
+fn open_log_store(dir: &std::path::Path) -> anyhow::Result<RocksdbLogStore<TypeConfig, Flat>> {
+    let mut opts = Options::default();
+    opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
+    let cfs = vec![
+        ColumnFamilyDescriptor::new(LOG_CF, Options::default()),
+        ColumnFamilyDescriptor::new(META_CF, Options::default()),
+    ];
+    let driver = Arc::new(DB::open_cf_descriptors(&opts, dir, cfs)?);
+    Ok(RocksdbLogStore::open(driver, LOG_CF, META_CF, Flat)?)
+}
+
+fn raft_config() -> anyhow::Result<Arc<Config>> {
+    Ok(Arc::new(
+        Config {
+            heartbeat_interval: 100,
+            election_timeout_min: 300,
+            election_timeout_max: 600,
+            // HighWaterStateMachine is in-memory only — leaving snapshots on
+            // would let openraft purge logs the SM cannot rebuild from.
+            snapshot_policy: SnapshotPolicy::Never,
+            ..Default::default()
+        }
+        .validate()?,
+    ))
+}
 
 impl RaftTopology {
-    pub async fn spawn(_nodes: usize, _grace: Duration) -> anyhow::Result<Self> {
-        anyhow::bail!("raft topology not yet implemented")
+    /// Boot an N-node in-process cluster, each node running its own
+    /// `tsoracle::Server` bound to a fresh loopback port. Returns once
+    /// membership has been initialized and a leader has been observed.
+    pub async fn spawn(node_count: usize, grace: Duration) -> anyhow::Result<Self> {
+        if node_count == 0 {
+            bail!("raft topology requires at least one node");
+        }
+
+        let network = MemNetwork::<TypeConfig>::new();
+        let config = raft_config()?;
+
+        let mut nodes: Vec<RaftNode> = Vec::with_capacity(node_count);
+        let mut server_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(node_count);
+
+        for raw_id in 1..=node_count {
+            let node_id_u64 = raw_id as u64;
+            let log_dir = TempDir::new().context("raft topology: create tempdir")?;
+            let log_store = open_log_store(log_dir.path())
+                .with_context(|| format!("raft topology: open log store for node {node_id_u64}"))?;
+            let state_machine = HighWaterStateMachine::new();
+            let state_machine_for_host = state_machine.clone();
+
+            let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
+                node_id_u64,
+                config.clone(),
+                network.factory_for(node_id_u64),
+                log_store,
+                state_machine,
+            )
+            .await
+            .with_context(|| format!("raft topology: Raft::new for node {node_id_u64}"))?;
+            network.register(node_id_u64, raft.clone());
+
+            let host = StandaloneHost::new(raft.clone(), state_machine_for_host);
+            let driver = OpenraftDriver::new(host);
+            let server = Server::builder()
+                .consensus_driver(driver)
+                .build()
+                .map_err(|e| anyhow::anyhow!("raft topology: server build: {e:?}"))?;
+
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .context("raft topology: bind loopback")?;
+            let addr = listener.local_addr()?;
+            let endpoint = format!("http://{addr}");
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let endpoint_for_log = endpoint.clone();
+            let handle = tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = shutdown_rx.await;
+                };
+                if let Err(e) = server.serve_with_listener(listener, shutdown).await {
+                    tracing::error!(error = ?e, endpoint = %endpoint_for_log, "tsoracle server died");
+                }
+            });
+
+            nodes.push(RaftNode {
+                node_id: NodeId(raw_id as u32),
+                endpoint,
+                raft,
+                shutdown_tx: Mutex::new(Some(shutdown_tx)),
+                _log_dir: log_dir,
+            });
+            server_handles.push(handle);
+        }
+
+        // Initialize membership on node 1 once every node is registered.
+        let mut membership: BTreeMap<u64, OpenraftPeer> = BTreeMap::new();
+        for node in &nodes {
+            let id_u64 = u64::from(node.node_id.0);
+            membership.insert(
+                id_u64,
+                OpenraftPeer {
+                    addr: format!("mem-node-{id_u64}"),
+                },
+            );
+        }
+        nodes[0]
+            .raft
+            .initialize(membership)
+            .await
+            .context("raft topology: initialize membership")?;
+
+        wait_for_leader(&nodes).await?;
+
+        Ok(RaftTopology {
+            controller: RaftController {
+                nodes,
+                network,
+                grace,
+            },
+            server_handles,
+        })
     }
 }
 
-pub struct RaftController;
+async fn wait_for_leader(nodes: &[RaftNode]) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        for node in nodes {
+            let metrics = node.raft.metrics().borrow_watched().clone();
+            if metrics.current_leader.is_some() {
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            let snapshots: Vec<_> = nodes
+                .iter()
+                .map(|n| {
+                    let metrics = n.raft.metrics().borrow_watched().clone();
+                    format!(
+                        "node {} state={:?} term={:?} leader={:?}",
+                        n.node_id.0, metrics.state, metrics.current_term, metrics.current_leader
+                    )
+                })
+                .collect();
+            bail!(
+                "raft topology: no leader within 2s; snapshots:\n  {}",
+                snapshots.join("\n  ")
+            );
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+}
 
-#[async_trait::async_trait]
+#[async_trait]
 impl ChaosController for RaftController {
-    async fn kill_leader(&self) -> crate::chaos::ChaosEvent {
-        unimplemented!("raft topology not yet implemented")
+    async fn kill_leader(&self) -> ChaosEvent {
+        timed_event(ChaosKind::LeaderKill, self.grace, || async {
+            ChaosOutcome::Skipped {
+                reason: "kill_leader not yet implemented for raft topology".into(),
+            }
+        })
+        .await
     }
-    async fn pause_leader(&self, _dur: Duration) -> crate::chaos::ChaosEvent {
-        unimplemented!("raft topology not yet implemented")
+
+    async fn pause_leader(&self, _dur: Duration) -> ChaosEvent {
+        timed_event(ChaosKind::LeaderPause, self.grace, || async {
+            ChaosOutcome::Skipped {
+                reason: "pause_leader not yet implemented for raft topology".into(),
+            }
+        })
+        .await
     }
-    async fn arm_failpoint(&self, _: &str, _: &str) -> crate::chaos::ChaosEvent {
-        unimplemented!("raft topology not yet implemented")
+
+    async fn arm_failpoint(&self, name: &str, _action: &str) -> ChaosEvent {
+        let kind = ChaosKind::FailpointArm { name: name.into() };
+        timed_event(kind, self.grace, || async {
+            ChaosOutcome::Skipped {
+                reason: "arm_failpoint not yet implemented for raft topology".into(),
+            }
+        })
+        .await
     }
-    async fn disarm_failpoint(&self, _: &str) -> crate::chaos::ChaosEvent {
-        unimplemented!("raft topology not yet implemented")
+
+    async fn disarm_failpoint(&self, name: &str) -> ChaosEvent {
+        let kind = ChaosKind::FailpointDisarm { name: name.into() };
+        timed_event(kind, self.grace, || async {
+            ChaosOutcome::Skipped {
+                reason: "disarm_failpoint not yet implemented for raft topology".into(),
+            }
+        })
+        .await
     }
+
     fn endpoints(&self) -> Vec<String> {
-        unimplemented!("raft topology not yet implemented")
+        self.nodes.iter().map(|n| n.endpoint.clone()).collect()
     }
-    fn current_leader(&self) -> Option<crate::topology::NodeId> {
-        unimplemented!("raft topology not yet implemented")
+
+    fn current_leader(&self) -> Option<NodeId> {
+        for node in &self.nodes {
+            let metrics = node.raft.metrics().borrow_watched().clone();
+            if let Some(leader_id) = metrics.current_leader {
+                return Some(NodeId(leader_id as u32));
+            }
+        }
+        None
     }
+
     async fn shutdown(self: Box<Self>) {
-        unimplemented!("raft topology not yet implemented")
+        for node in &self.nodes {
+            if let Some(tx) = node.shutdown_tx.lock().take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spawn_3_nodes_reports_endpoints_and_leader() {
+        let topology = RaftTopology::spawn(3, Duration::from_millis(50))
+            .await
+            .expect("spawn 3-node raft topology");
+        let endpoints = topology.controller.endpoints();
+        assert_eq!(endpoints.len(), 3, "expected 3 endpoints, got {endpoints:?}");
+        assert!(
+            topology.controller.current_leader().is_some(),
+            "expected a leader after spawn"
+        );
+        Box::new(topology.controller).shutdown().await;
     }
 }

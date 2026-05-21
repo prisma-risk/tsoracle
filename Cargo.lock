@@ -2361,6 +2361,7 @@ dependencies = [
  "openraft-toolkit",
  "parking_lot",
  "rand 0.9.4",
+ "rocksdb",
  "serde",
  "serde_json",
  "tempfile",
