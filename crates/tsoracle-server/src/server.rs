@@ -404,3 +404,85 @@ impl Server {
         self.allocator.lock().try_grant(self.clock.now_ms(), count)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panic_payload_to_string_recovers_static_str() {
+        // `panic!("literal")` produces a `&'static str` payload; we want the
+        // verbatim text so operators see what the watch task said.
+        let payload: Box<dyn std::any::Any + Send> = Box::new("watch boom");
+        assert_eq!(panic_payload_to_string(payload), "watch boom");
+    }
+
+    #[test]
+    fn panic_payload_to_string_recovers_owned_string() {
+        // `panic!("{var}")` produces a `String` payload (formatted at panic
+        // time); the helper must downcast that branch too.
+        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("formatted"));
+        assert_eq!(panic_payload_to_string(payload), "formatted");
+    }
+
+    #[test]
+    fn panic_payload_to_string_falls_back_for_other_types() {
+        // Custom payloads (panic!(MyType { .. })) hit the catch-all branch.
+        struct Custom;
+        let payload: Box<dyn std::any::Any + Send> = Box::new(Custom);
+        assert_eq!(
+            panic_payload_to_string(payload),
+            "watch task panicked with non-string payload",
+        );
+    }
+
+    #[tokio::test]
+    async fn join_to_server_result_passes_through_clean_outcome() {
+        // Ok(Ok(())) — task finished cleanly; forward verbatim.
+        let handle = tokio::spawn(async { Ok::<(), ServerError>(()) });
+        let join = handle.await;
+        assert!(matches!(join_to_server_result(join), Ok(())));
+    }
+
+    #[tokio::test]
+    async fn join_to_server_result_forwards_inner_error() {
+        // Ok(Err(e)) — task returned an error; forward it.
+        let handle = tokio::spawn(async {
+            Err::<(), ServerError>(ServerError::WatchPanic {
+                payload: "synthetic".into(),
+            })
+        });
+        let join = handle.await;
+        match join_to_server_result(join) {
+            Err(ServerError::WatchPanic { payload }) => assert_eq!(payload, "synthetic"),
+            other => panic!("expected forwarded WatchPanic, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn join_to_server_result_translates_panic_to_watch_panic() {
+        // Err(JoinError::is_panic) — task panicked; surface as WatchPanic with
+        // the payload stringified by `panic_payload_to_string`.
+        let handle = tokio::spawn(async {
+            panic!("intentional");
+            #[allow(unreachable_code)]
+            Ok::<(), ServerError>(())
+        });
+        let join = handle.await;
+        match join_to_server_result(join) {
+            Err(ServerError::WatchPanic { payload }) => assert!(payload.contains("intentional")),
+            other => panic!("expected WatchPanic, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn join_to_server_result_treats_cancellation_as_clean_exit() {
+        // Err(JoinError::is_cancelled) — caller aborted the task; we asked
+        // for that, so map to Ok.
+        let handle: tokio::task::JoinHandle<Result<(), ServerError>> =
+            tokio::spawn(async { futures::future::pending().await });
+        handle.abort();
+        let join = handle.await;
+        assert!(matches!(join_to_server_result(join), Ok(())));
+    }
+}

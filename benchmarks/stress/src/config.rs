@@ -137,4 +137,33 @@ mod tests {
         cfg.clients = 0;
         assert!(cfg.validate().unwrap_err().contains("--clients"));
     }
+
+    #[test]
+    fn zero_batch_size_rejected() {
+        let mut cfg = ok_config();
+        cfg.batch_size = 0;
+        assert!(cfg.validate().unwrap_err().contains("--batch-size"));
+    }
+
+    #[test]
+    fn zero_client_threads_rejected() {
+        let mut cfg = ok_config();
+        cfg.client_threads = 0;
+        assert!(cfg.validate().unwrap_err().contains("--client-threads"));
+    }
+
+    #[test]
+    fn zero_server_threads_rejected() {
+        let mut cfg = ok_config();
+        cfg.server_threads = 0;
+        assert!(cfg.validate().unwrap_err().contains("--server-threads"));
+    }
+
+    #[test]
+    fn raft_topology_requires_nodes() {
+        let mut cfg = ok_config();
+        cfg.topology = TopologyKind::Raft;
+        cfg.nodes = 0;
+        assert!(cfg.validate().unwrap_err().contains("--nodes"));
+    }
 }

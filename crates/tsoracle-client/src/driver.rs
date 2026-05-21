@@ -460,4 +460,100 @@ mod tests {
             "long response must error, got {result:?}",
         );
     }
+
+    #[test]
+    fn clone_client_error_preserves_rpc_code_and_message() {
+        let original = ClientError::Rpc(tonic::Status::failed_precondition("nope"));
+        let cloned = clone_client_error(&original);
+        match cloned {
+            ClientError::Rpc(status) => {
+                assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+                assert_eq!(status.message(), "nope");
+            }
+            other => panic!("expected Rpc, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn clone_client_error_collapses_transport_to_no_reachable_endpoints() {
+        // Constructing a `tonic::transport::Error` directly isn't possible —
+        // it has no public constructor. Trigger one by attempting to dial a
+        // closed port; the resulting error is then handed to
+        // `clone_client_error` to confirm the collapse.
+        let endpoint = tonic::transport::Endpoint::from_static("http://127.0.0.1:1");
+        let transport_err = endpoint
+            .connect()
+            .await
+            .expect_err("connecting to a closed port must fail");
+        let original = ClientError::Transport(transport_err);
+        let cloned = clone_client_error(&original);
+        assert!(matches!(cloned, ClientError::NoReachableEndpoints));
+    }
+
+    #[test]
+    fn clone_client_error_preserves_simple_variants() {
+        let no_endpoints = clone_client_error(&ClientError::NoReachableEndpoints);
+        assert!(matches!(no_endpoints, ClientError::NoReachableEndpoints));
+
+        let invalid_endpoint =
+            clone_client_error(&ClientError::InvalidEndpoint("garbage://".into()));
+        match invalid_endpoint {
+            ClientError::InvalidEndpoint(s) => assert_eq!(s, "garbage://"),
+            other => panic!("expected InvalidEndpoint, got {other:?}"),
+        }
+
+        let invalid_count = clone_client_error(&ClientError::InvalidCount(99));
+        match invalid_count {
+            ClientError::InvalidCount(c) => assert_eq!(c, 99),
+            other => panic!("expected InvalidCount, got {other:?}"),
+        }
+    }
+
+    /// `run_chunks` fail-fast: once one chunk errors, every subsequent
+    /// chunk gets a cloned copy of the same error without burning another
+    /// RPC. This is the only path that flows through line 192 (the
+    /// `if let Some(err) = &failed` branch).
+    #[tokio::test]
+    async fn run_chunks_fails_subsequent_chunks_fast() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let rpc_calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_rpc = rpc_calls.clone();
+        let rpc = move |_count: u32| -> futures::future::BoxFuture<
+            'static,
+            Result<Vec<Timestamp>, ClientError>,
+        > {
+            calls_for_rpc.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async {
+                Err(ClientError::Rpc(tonic::Status::unavailable(
+                    "synthetic outage",
+                )))
+            })
+        };
+        let driver = Arc::new(Driver::spawn(rpc, Duration::from_millis(10)));
+        // Four waiters of LOGICAL_MAX+1 each: total = 4 * (LOGICAL_MAX+1).
+        // Coalescing produces a single batch, which is then split into 4
+        // chunks (one per per-call cap). The first chunk's RPC errors, and
+        // chunks 2–4 must receive cloned errors without further RPCs.
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let driver_handle = driver.clone();
+            handles.push(tokio::spawn(async move {
+                driver_handle.request(LOGICAL_MAX + 1).await
+            }));
+        }
+        let results = futures::future::join_all(handles).await;
+        for r in results {
+            let outer = r.expect("join");
+            assert!(
+                matches!(outer, Err(ClientError::Rpc(_))),
+                "every waiter must see an Rpc error, got {outer:?}",
+            );
+        }
+        // Exactly one RPC: the first chunk errored and fail-fast suppressed
+        // the others. (More than one would mean the fail-fast guard was
+        // bypassed.)
+        let rpc_count = rpc_calls.load(Ordering::Relaxed);
+        assert_eq!(rpc_count, 1, "fail-fast must issue exactly one RPC");
+    }
 }

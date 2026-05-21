@@ -413,3 +413,62 @@ impl ChaosController for ProcessController {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, AtomicU32};
+
+    /// Build a ChildHandle stub with no live `Child`, used to exercise the
+    /// log-scanning helpers without spawning the real binary.
+    fn stub_handle(logs: Vec<&str>) -> Arc<ChildHandle> {
+        let buffer: VecDeque<String> = logs.into_iter().map(String::from).collect();
+        Arc::new(ChildHandle {
+            child: parking_lot::Mutex::new(None),
+            pid: AtomicU32::new(0),
+            addr: OnceLock::new(),
+            port: OnceLock::new(),
+            binary: PathBuf::from("/dev/null"),
+            data_dir: PathBuf::from("/tmp"),
+            recent_logs: parking_lot::Mutex::new(buffer),
+            kill_expected: AtomicBool::new(false),
+        })
+    }
+
+    #[test]
+    fn parse_port_extracts_trailing_port() {
+        assert_eq!(parse_port("127.0.0.1:54321").unwrap(), 54321);
+        // IPv6-style with multiple ':' uses rsplit so only the trailing
+        // segment is parsed.
+        assert_eq!(parse_port("[::1]:9000").unwrap(), 9000);
+    }
+
+    #[test]
+    fn parse_port_rejects_missing_separator() {
+        let err = parse_port("no-colon-here").unwrap_err().to_string();
+        assert!(err.contains("no ':'"), "got {err}");
+    }
+
+    #[test]
+    fn parse_port_rejects_non_numeric() {
+        let err = parse_port("127.0.0.1:abc").unwrap_err().to_string();
+        assert!(err.contains("parse port"), "got {err}");
+    }
+
+    #[test]
+    fn scan_logs_for_addr_returns_none_when_no_serving_line() {
+        let handle = stub_handle(vec!["startup banner", "another line"]);
+        assert!(scan_logs_for_addr(&handle).is_none());
+    }
+
+    #[test]
+    fn scan_logs_for_addr_extracts_first_serving_line() {
+        let handle = stub_handle(vec!["banner", "serving on 127.0.0.1:5151", "later log"]);
+        assert_eq!(
+            scan_logs_for_addr(&handle).as_deref(),
+            Some("127.0.0.1:5151")
+        );
+    }
+}

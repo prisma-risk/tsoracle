@@ -278,4 +278,34 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, ConsensusError::PermanentDriver(_)));
     }
+
+    #[tokio::test]
+    async fn open_or_init_rejects_out_of_range_state() {
+        // Hand-write a state file whose encoded high_water exceeds the
+        // 46-bit physical_ms cap. open_or_init must refuse to load it
+        // rather than silently propagating an invariant violation into
+        // the allocator.
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state");
+        let bytes = record::encode(PHYSICAL_MS_MAX + 1);
+        fs::write(&state_path, bytes).unwrap();
+        let err = FileDriver::open_or_init(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, FileDriverError::PhysicalMsOutOfRange(v) if v == PHYSICAL_MS_MAX + 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn leadership_events_emits_initial_leader_at_epoch_zero() {
+        // FileDriver is single-node by design: every observer sees a single,
+        // permanent `Leader { epoch: 0 }` transition on subscription.
+        let dir = tempdir().unwrap();
+        let driver = FileDriver::open_or_init(dir.path()).unwrap();
+        let mut stream = driver.leadership_events();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream emits initial state within the timeout")
+            .expect("stream is not closed");
+        assert_eq!(first, LeaderState::Leader { epoch: Epoch::ZERO });
+    }
 }

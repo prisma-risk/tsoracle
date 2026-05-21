@@ -86,3 +86,32 @@ impl Client {
         self.driver.request(count).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn build_rejects_empty_endpoint_list() {
+        // Validation prevents a Client whose `pool` has no endpoints to try;
+        // every RPC would fail-fast with `NoReachableEndpoints` and burn no
+        // network roundtrips at all, so reject up-front instead.
+        match ClientBuilder::endpoints(Vec::new()).build().await {
+            Err(ClientError::NoReachableEndpoints) => {}
+            Err(other) => panic!("expected NoReachableEndpoints, got {other:?}"),
+            Ok(_) => panic!("expected Err, got Ok(Client)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_flush_interval_overrides_default() {
+        // The builder's `batch_flush_interval` knob feeds the driver's
+        // coalescing window; without a test it could silently revert to the
+        // default and no-one would notice from black-box behavior. We
+        // confirm the override path by reaching into the builder fields.
+        let custom = Duration::from_millis(25);
+        let builder = ClientBuilder::endpoints(vec!["http://127.0.0.1:1".into()])
+            .batch_flush_interval(custom);
+        assert_eq!(builder.flush_interval, custom);
+    }
+}
