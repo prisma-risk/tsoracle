@@ -144,10 +144,16 @@ fn build_config(a: &RunArgs) -> StressConfig {
         ci_smoke: a.ci_smoke,
     };
     if cfg.ci_smoke {
+        // Tuned so the smoke completes its warmup and measurement phase
+        // even on the worst-case topology (process + 1 node + killer-loop),
+        // where the single child is killed every 2s and healthy windows
+        // are only hundreds of milliseconds. The previous warmup of 1000
+        // RPCs across 16 clients was unachievable in those windows, so the
+        // smoke reported `outcome=Ok` with zero timestamps — a useless gate.
         cfg.duration = Some(Duration::from_secs(20));
-        cfg.clients = 16;
+        cfg.clients = 8;
         cfg.batch_size = 4;
-        cfg.warmup = 1_000;
+        cfg.warmup = 100;
         cfg.scenario = ScenarioKind::Named("killer-loop".into());
     }
     cfg

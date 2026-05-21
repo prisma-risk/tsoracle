@@ -315,7 +315,7 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
         .map_err(|err| anyhow::anyhow!("supervisor join: {err:?}"))?;
 
     // Build report.
-    let timestamps = supervisor_outcome.events_observed;
+    let timestamps = supervisor_outcome.issued_observed;
     let batch_size = cfg.batch_size.max(1) as u64;
     let client_calls = timestamps / batch_size;
     let elapsed_secs = elapsed.as_secs_f64().max(1e-9);

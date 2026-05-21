@@ -111,7 +111,7 @@ impl Report {
              outcome={outcome_str}\n\
              elapsed:       {:.3} s\n\
              recorded:      client_calls={} timestamps={}\n\
-             throughput:    client_calls/s: {:.0}        timestamps/s: {:.0}\n\
+             throughput:    client_calls/s: {:.2}        timestamps/s: {:.2}\n\
              latency per client call:\n  \
              p50: {} µs          p90: {} µs           p99: {} µs           p999: {} µs\n  \
              min: {} µs           max: {} µs          mean: {} µs\n\
