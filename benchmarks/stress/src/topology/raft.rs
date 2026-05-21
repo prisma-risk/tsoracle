@@ -178,7 +178,7 @@ impl RaftTopology {
             .await
             .context("raft topology: initialize membership")?;
 
-        wait_for_leader(&nodes).await?;
+        wait_for_leader(&nodes, Duration::from_secs(2)).await?;
 
         Ok(RaftTopology {
             controller: RaftController {
@@ -191,15 +191,9 @@ impl RaftTopology {
     }
 }
 
-async fn wait_for_leader(nodes: &[RaftNode]) -> anyhow::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+async fn wait_for_leader(nodes: &[RaftNode], timeout: Duration) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
     loop {
-        for node in nodes {
-            let metrics = node.raft.metrics().borrow_watched().clone();
-            if metrics.current_leader.is_some() {
-                return Ok(());
-            }
-        }
         if Instant::now() >= deadline {
             let snapshots: Vec<_> = nodes
                 .iter()
@@ -212,9 +206,15 @@ async fn wait_for_leader(nodes: &[RaftNode]) -> anyhow::Result<()> {
                 })
                 .collect();
             bail!(
-                "raft topology: no leader within 2s; snapshots:\n  {}",
+                "raft topology: no leader within {timeout:?}; snapshots:\n  {}",
                 snapshots.join("\n  ")
             );
+        }
+        for node in nodes {
+            let metrics = node.raft.metrics().borrow_watched().clone();
+            if metrics.current_leader.is_some() {
+                return Ok(());
+            }
         }
         sleep(Duration::from_millis(25)).await;
     }
@@ -487,6 +487,77 @@ mod tests {
         match ev.outcome {
             ChaosOutcome::Skipped { .. } => {}
             other => panic!("expected Skipped, got {other:?}"),
+        }
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_zero_nodes_rejected() {
+        match RaftTopology::spawn(0, Duration::from_millis(50)).await {
+            Err(err) => assert!(
+                format!("{err:#}").contains("at least one node"),
+                "unexpected error: {err:#}",
+            ),
+            Ok(_) => panic!("spawn(0) should reject, got Ok"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wait_for_leader_times_out() {
+        let topology = RaftTopology::spawn(3, Duration::from_millis(50))
+            .await
+            .expect("spawn 3-node raft topology");
+        // Re-invoke `wait_for_leader` with a zero deadline. The deadline check
+        // runs before the metrics poll on the first iteration, so the timeout
+        // branch always fires regardless of whether the cluster has a leader.
+        // This exercises the diagnostic snapshot path that real users only see
+        // when a cluster genuinely fails to elect.
+        let result = wait_for_leader(&topology.controller.nodes, Duration::ZERO).await;
+        match result {
+            Err(err) => {
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("no leader within") && msg.contains("snapshots:"),
+                    "unexpected error: {msg}",
+                );
+            }
+            Ok(()) => panic!("wait_for_leader with zero timeout should always bail"),
+        }
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[test]
+    fn open_log_store_errors_on_bad_path() {
+        // Pointing rocksdb at a path it cannot create (parent doesn't exist
+        // and we don't have permission to create it) exercises the error
+        // propagation from `DB::open_cf_descriptors`.
+        let bad = std::path::PathBuf::from("/nonexistent-root/stress-raft-test/log");
+        match open_log_store(&bad) {
+            Err(_) => {}
+            Ok(_) => panic!("open_log_store should fail on unreadable path"),
+        }
+    }
+
+    #[cfg(feature = "stress-failpoints")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arm_failpoint_returns_failed_on_invalid_action() {
+        let topology = RaftTopology::spawn(3, Duration::from_millis(50))
+            .await
+            .expect("spawn 3-node raft topology");
+        // The `fail` crate's action parser rejects gibberish; `arm_failpoint`
+        // surfaces that as `ChaosOutcome::Failed`.
+        let ev = topology
+            .controller
+            .arm_failpoint("stress-raft-test::fp_invalid", "not-a-real-action")
+            .await;
+        match ev.outcome {
+            ChaosOutcome::Failed { ref reason } => {
+                assert!(
+                    reason.contains("fail::cfg"),
+                    "expected fail::cfg in reason, got: {reason}",
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
         }
         Box::new(topology.controller).shutdown().await;
     }
