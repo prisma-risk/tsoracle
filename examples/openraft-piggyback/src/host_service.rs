@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use openraft::error::{ClientWriteError, RaftError};
+use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
 use openraft::storage::{EntryResponder, RaftStateMachine, Snapshot};
 use openraft::type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
 use openraft::{EntryPayload, Raft, RaftSnapshotBuilder, ReadPolicy, StoredMembership};
@@ -308,13 +308,18 @@ impl OpenraftHighWaterHost for PiggybackHost {
     }
 
     async fn current_high_water(&self) -> Result<u64, ConsensusError> {
-        // Multi-node demo: barrier-then-read. Same shape today's hand-rolled
-        // driver used. Hosts that want endpoint resolution on followers wrap
-        // their driver themselves (see openraft-standalone's StandaloneRouter).
-        self.raft
-            .ensure_linearizable(ReadPolicy::ReadIndex)
-            .await
-            .map_err(|e| ConsensusError::TransientDriver(Box::new(e)))?;
+        // Multi-node host: barrier-then-read. Mirrors StandaloneHost's error
+        // mapping so this example teaches the same pattern — ForwardToLeader
+        // becomes NotLeader (the server fence steps down cleanly); other
+        // RaftError variants are transient.
+        if let Err(e) = self.raft.ensure_linearizable(ReadPolicy::ReadIndex).await {
+            return match e {
+                RaftError::APIError(LinearizableReadError::ForwardToLeader(_)) => {
+                    Err(ConsensusError::NotLeader { observed: None })
+                }
+                _ => Err(ConsensusError::TransientDriver(Box::new(e))),
+            };
+        }
         Ok(self.state_machine.high_water().await)
     }
 

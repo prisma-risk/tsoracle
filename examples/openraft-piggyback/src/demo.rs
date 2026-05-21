@@ -104,12 +104,10 @@ async fn build_cluster() -> anyhow::Result<(Vec<Node>, Arc<MemNetwork<HostTypeCo
         let driver = OpenraftDriver::new(host);
         let server = TsoServer::builder().consensus_driver(driver).build()?;
 
-        let tso_port = 55560 + id as u16;
-        let tso_addr: std::net::SocketAddr = format!("127.0.0.1:{tso_port}").parse()?;
-        // Bind the listener before spawning so the port is ready for clients
-        // as soon as `build_cluster` returns — no race on serve_with_shutdown's
-        // internal bind.
-        let listener = tokio::net::TcpListener::bind(tso_addr).await?;
+        // Bind on port 0 so the OS assigns a free port, avoiding conflicts when
+        // the smoke test runs alongside other services or in parallel CI jobs.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let tso_port = listener.local_addr()?.port();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
             let shutdown = async move {
@@ -269,10 +267,10 @@ pub async fn run_demo() -> anyhow::Result<DemoOutcome> {
             match client.get_ts().await {
                 Ok(ts) => break ts,
                 Err(e) if Instant::now() < deadline => {
+                    tracing::warn!(error = ?e, "get_ts retrying");
                     sleep(Duration::from_millis(25)).await;
-                    let _ = e;
                 }
-                Err(e) => return Err(anyhow!("get_ts failed after retries: {e}")),
+                Err(e) => return Err(anyhow!("get_ts failed after 3s retries: {e}")),
             }
         }
     };
@@ -361,10 +359,10 @@ pub async fn run_demo() -> anyhow::Result<DemoOutcome> {
             match client.get_ts().await {
                 Ok(ts) => break ts,
                 Err(e) if Instant::now() < deadline => {
+                    tracing::warn!(error = ?e, "get_ts retrying");
                     sleep(Duration::from_millis(25)).await;
-                    let _ = e;
                 }
-                Err(_) => return Err(anyhow!("client.get_ts post-failover timed out")),
+                Err(e) => return Err(anyhow!("get_ts failed after 5s retries post-failover: {e}")),
             }
         }
     };
