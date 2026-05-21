@@ -36,6 +36,9 @@ jobs:
           - proto_get_ts_request_decode
           - proto_get_ts_response_decode
           - proto_leader_hint_decode
+          - log_entry_decode
+          - snapshot_payload_decode
+          - toolkit_codec_decode
     steps:
       - uses: actions/checkout@v4
 
