@@ -209,6 +209,12 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
                     play(&schedule, controller_box.as_ref(), event_tx, t0).await;
                     *controller_slot.lock() = Some(controller_box);
                 }
+                // Nemesis completion must NOT terminate the run: when the
+                // scenario has zero ops (e.g. `steady`), playback returns
+                // immediately, and tripping the outer `select!` here would
+                // make `--duration` a no-op. Park forever so the timer (or
+                // burst-pause) drives termination.
+                std::future::pending::<()>().await
             }
         };
 
