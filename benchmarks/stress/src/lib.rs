@@ -314,6 +314,33 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
     Ok(report)
 }
 
+/// Self-test entry point: like `run` but forces an `InvariantViolation`
+/// outcome. Used by CI as a positive control for the report + exit-code
+/// pipeline. Returns a `Report` whose `outcome` MUST be
+/// `Outcome::InvariantViolation`.
+pub fn run_inject_violation(mut cfg: StressConfig) -> Result<Report, anyhow::Error> {
+    cfg.duration = Some(Duration::from_secs(3));
+    let mut report = run(cfg)?;
+    report.violations.push(crate::violation::Violation {
+        kind: crate::violation::ViolationKind::Monotonicity {
+            prev: tsoracle_core::Timestamp(u64::MAX),
+            got: tsoracle_core::Timestamp(1),
+            sample: crate::sample::IssuedSample {
+                client_id: ClientId(0),
+                batch_id: 0,
+                batch_idx: 0,
+                is_last: true,
+                ts: tsoracle_core::Timestamp(1),
+                issued_at: Instant::now(),
+                recv_time: Instant::now(),
+            },
+        },
+        at: Instant::now(),
+    });
+    report.outcome = Outcome::InvariantViolation;
+    Ok(report)
+}
+
 /// Re-run from a saved schedule. Pins the schedule's source (named or
 /// random-seeded) and replays the ops bit-for-bit.
 pub fn load_schedule(path: &std::path::Path) -> Result<Schedule, anyhow::Error> {

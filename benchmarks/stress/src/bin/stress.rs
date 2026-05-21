@@ -234,9 +234,42 @@ fn list_scenarios_cmd() -> ExitCode {
     ExitCode::from(0)
 }
 
-fn inject_violation_cmd(_args: InjectArgs) -> ExitCode {
-    eprintln!("inject-violation not yet wired in Plan A (Task 24)");
-    ExitCode::from(2)
+fn inject_violation_cmd(args: InjectArgs) -> ExitCode {
+    let cfg = StressConfig {
+        topology: args.topology.into(),
+        scenario: ScenarioKind::Named("steady".into()),
+        duration: Some(Duration::from_secs(3)),
+        ops: None,
+        clients: 4,
+        batch_size: 1,
+        warmup: 100,
+        client_threads: 1,
+        server_threads: available_parallelism().map(|n| n.get()).unwrap_or(1),
+        liveness_deadline: Duration::from_secs(5),
+        grace_mem: Duration::from_millis(100),
+        grace_raft: Duration::from_millis(750),
+        grace_process: Duration::from_secs(2),
+        nodes: 1,
+        bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+        json: false,
+        json_stream: false,
+        print_interval: Duration::from_secs(1),
+        seed: 0,
+        schedule_out: None,
+        ci_smoke: false,
+    };
+    match stress::run_inject_violation(cfg) {
+        Ok(report) => {
+            print!("{}", report.render_text());
+            // Must be 1 if supervisor + exit-code mapping is wired correctly.
+            let code = report.outcome.exit_code();
+            ExitCode::from(code as u8)
+        }
+        Err(err) => {
+            eprintln!("inject-violation failed: {err:#}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn init_tracing() {
