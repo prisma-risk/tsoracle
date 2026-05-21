@@ -16,11 +16,25 @@ pub struct RaftController;
 
 #[async_trait::async_trait]
 impl ChaosController for RaftController {
-    async fn kill_leader(&self) -> crate::chaos::ChaosEvent { unimplemented!("Plan B") }
-    async fn pause_leader(&self, _dur: Duration) -> crate::chaos::ChaosEvent { unimplemented!("Plan B") }
-    async fn arm_failpoint(&self, _: &str, _: &str) -> crate::chaos::ChaosEvent { unimplemented!("Plan B") }
-    async fn disarm_failpoint(&self, _: &str) -> crate::chaos::ChaosEvent { unimplemented!("Plan B") }
-    fn endpoints(&self) -> Vec<String> { unimplemented!("Plan B") }
-    fn current_leader(&self) -> Option<crate::topology::NodeId> { unimplemented!("Plan B") }
-    async fn shutdown(self: Box<Self>) { unimplemented!("Plan B") }
+    async fn kill_leader(&self) -> crate::chaos::ChaosEvent {
+        unimplemented!("Plan B")
+    }
+    async fn pause_leader(&self, _dur: Duration) -> crate::chaos::ChaosEvent {
+        unimplemented!("Plan B")
+    }
+    async fn arm_failpoint(&self, _: &str, _: &str) -> crate::chaos::ChaosEvent {
+        unimplemented!("Plan B")
+    }
+    async fn disarm_failpoint(&self, _: &str) -> crate::chaos::ChaosEvent {
+        unimplemented!("Plan B")
+    }
+    fn endpoints(&self) -> Vec<String> {
+        unimplemented!("Plan B")
+    }
+    fn current_leader(&self) -> Option<crate::topology::NodeId> {
+        unimplemented!("Plan B")
+    }
+    async fn shutdown(self: Box<Self>) {
+        unimplemented!("Plan B")
+    }
 }

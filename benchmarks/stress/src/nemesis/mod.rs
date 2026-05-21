@@ -98,8 +98,12 @@ mod tests {
         async fn disarm_failpoint(&self, name: &str) -> ChaosEvent {
             timed_chaos(ChaosKind::FailpointDisarm { name: name.into() }).await
         }
-        fn endpoints(&self) -> Vec<String> { vec![] }
-        fn current_leader(&self) -> Option<NodeId> { Some(NodeId(0)) }
+        fn endpoints(&self) -> Vec<String> {
+            vec![]
+        }
+        fn current_leader(&self) -> Option<NodeId> {
+            Some(NodeId(0))
+        }
         async fn shutdown(self: Box<Self>) {}
     }
 
@@ -119,11 +123,24 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn playback_dispatches_ops_in_order() {
         let schedule = Schedule {
-            source: ScheduleSource::Named { scenario: "test".into() },
+            source: ScheduleSource::Named {
+                scenario: "test".into(),
+            },
             ops: vec![
-                ScheduledOp { at: Duration::from_millis(10), op: ChaosOp::KillLeader },
-                ScheduledOp { at: Duration::from_millis(20), op: ChaosOp::PauseLeader { dur: Duration::from_millis(5) } },
-                ScheduledOp { at: Duration::from_millis(30), op: ChaosOp::KillLeader },
+                ScheduledOp {
+                    at: Duration::from_millis(10),
+                    op: ChaosOp::KillLeader,
+                },
+                ScheduledOp {
+                    at: Duration::from_millis(20),
+                    op: ChaosOp::PauseLeader {
+                        dur: Duration::from_millis(5),
+                    },
+                },
+                ScheduledOp {
+                    at: Duration::from_millis(30),
+                    op: ChaosOp::KillLeader,
+                },
             ],
             loadgen_pause: None,
         };

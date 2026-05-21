@@ -38,7 +38,12 @@ where
     let outcome = f().await;
     let ended_at = Instant::now();
     ChaosEvent {
-        window: ChaosWindow { kind, started_at, ended_at, grace },
+        window: ChaosWindow {
+            kind,
+            started_at,
+            ended_at,
+            grace,
+        },
         outcome,
     }
 }

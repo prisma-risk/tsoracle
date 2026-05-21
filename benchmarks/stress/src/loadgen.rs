@@ -225,7 +225,11 @@ mod tests {
         drop(tx);
         let outcome = supervisor_handle.await.unwrap();
         assert!(issued > 0, "expected some timestamps issued, got 0");
-        assert!(outcome.violations.is_empty(), "got {:?}", outcome.violations);
+        assert!(
+            outcome.violations.is_empty(),
+            "got {:?}",
+            outcome.violations
+        );
 
         let _ = shutdown_tx.send(());
         let _ = server_handle.await;

@@ -54,9 +54,7 @@ use crate::event::SupervisorEvent;
 use crate::git::GitInfo;
 use crate::loadgen::{ClientTaskCfg, client_task};
 use crate::nemesis::{play, random, scenario};
-use crate::report::{
-    LatencyStats, Outcome, RecordedCounts, Report, Throughput,
-};
+use crate::report::{LatencyStats, Outcome, RecordedCounts, Report, Throughput};
 use crate::schedule::{RandomParams, Schedule};
 use crate::supervisor::Supervisor;
 use crate::topology::ChaosController;
@@ -286,7 +284,10 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
         hostname: hostname_str,
         topology,
         elapsed,
-        recorded: RecordedCounts { client_calls, timestamps },
+        recorded: RecordedCounts {
+            client_calls,
+            timestamps,
+        },
         throughput,
         latency_per_call_us: latency,
         transient_retries: transient_retries.load(Ordering::Relaxed),
@@ -385,13 +386,23 @@ mod parse_count_tests {
     use super::parse_count;
 
     #[test]
-    fn plain_number() { assert_eq!(parse_count("1").unwrap(), 1); }
+    fn plain_number() {
+        assert_eq!(parse_count("1").unwrap(), 1);
+    }
     #[test]
-    fn k_suffix() { assert_eq!(parse_count("1k").unwrap(), 1_000); }
+    fn k_suffix() {
+        assert_eq!(parse_count("1k").unwrap(), 1_000);
+    }
     #[test]
-    fn underscores() { assert_eq!(parse_count("1_500k").unwrap(), 1_500_000); }
+    fn underscores() {
+        assert_eq!(parse_count("1_500k").unwrap(), 1_500_000);
+    }
     #[test]
-    fn empty_rejected() { assert!(parse_count("").is_err()); }
+    fn empty_rejected() {
+        assert!(parse_count("").is_err());
+    }
     #[test]
-    fn uppercase_rejected() { assert!(parse_count("1K").is_err()); }
+    fn uppercase_rejected() {
+        assert!(parse_count("1K").is_err());
+    }
 }

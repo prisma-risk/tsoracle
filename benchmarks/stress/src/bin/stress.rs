@@ -177,7 +177,10 @@ fn replay_cmd(args: ReplayArgs) -> ExitCode {
     let schedule = match stress::load_schedule(&args.schedule) {
         Ok(s) => s,
         Err(err) => {
-            eprintln!("replay: failed to load schedule {:?}: {err:#}", args.schedule);
+            eprintln!(
+                "replay: failed to load schedule {:?}: {err:#}",
+                args.schedule
+            );
             return ExitCode::from(2);
         }
     };

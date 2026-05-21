@@ -57,10 +57,20 @@ mod tests {
     #[test]
     fn schedule_json_round_trip() {
         let s = Schedule {
-            source: ScheduleSource::Named { scenario: "killer-loop".into() },
+            source: ScheduleSource::Named {
+                scenario: "killer-loop".into(),
+            },
             ops: vec![
-                ScheduledOp { at: Duration::from_secs(2), op: ChaosOp::KillLeader },
-                ScheduledOp { at: Duration::from_secs(4), op: ChaosOp::PauseLeader { dur: Duration::from_millis(500) } },
+                ScheduledOp {
+                    at: Duration::from_secs(2),
+                    op: ChaosOp::KillLeader,
+                },
+                ScheduledOp {
+                    at: Duration::from_secs(4),
+                    op: ChaosOp::PauseLeader {
+                        dur: Duration::from_millis(500),
+                    },
+                },
             ],
             loadgen_pause: None,
         };
@@ -76,7 +86,9 @@ mod tests {
     #[test]
     fn schedule_with_loadgen_pause_round_trip() {
         let s = Schedule {
-            source: ScheduleSource::Named { scenario: "burst".into() },
+            source: ScheduleSource::Named {
+                scenario: "burst".into(),
+            },
             ops: vec![],
             loadgen_pause: Some(LoadgenPause {
                 at: Duration::from_secs(30),

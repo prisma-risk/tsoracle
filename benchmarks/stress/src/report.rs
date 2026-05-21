@@ -62,10 +62,21 @@ pub enum Outcome {
 
 #[derive(Debug, Clone)]
 pub enum HarnessErrorKind {
-    ServerPanic { topology: TopologyKind, detail: String },
-    SpawnFailure { topology: TopologyKind, detail: String },
-    TokioTaskPanic { task: &'static str, detail: String },
-    HostFault { detail: String },
+    ServerPanic {
+        topology: TopologyKind,
+        detail: String,
+    },
+    SpawnFailure {
+        topology: TopologyKind,
+        detail: String,
+    },
+    TokioTaskPanic {
+        task: &'static str,
+        detail: String,
+    },
+    HostFault {
+        detail: String,
+    },
 }
 
 impl Outcome {
@@ -181,7 +192,12 @@ fn violation_summary(v: &crate::violation::Violation) -> serde_json::Value {
         ViolationKind::Monotonicity { prev, got, .. } => {
             serde_json::json!({ "kind": "Monotonicity", "prev": prev.0, "got": got.0 })
         }
-        ViolationKind::BatchInternalOrdering { client_id, batch_id, detail, .. } => {
+        ViolationKind::BatchInternalOrdering {
+            client_id,
+            batch_id,
+            detail,
+            ..
+        } => {
             serde_json::json!({
                 "kind": "BatchInternalOrdering",
                 "client_id": client_id.0,
@@ -189,7 +205,11 @@ fn violation_summary(v: &crate::violation::Violation) -> serde_json::Value {
                 "detail": detail,
             })
         }
-        ViolationKind::FenceFreshness { pre_window_high_water, first_post_window_ts, .. } => {
+        ViolationKind::FenceFreshness {
+            pre_window_high_water,
+            first_post_window_ts,
+            ..
+        } => {
             serde_json::json!({
                 "kind": "FenceFreshness",
                 "pre_window_high_water": pre_window_high_water.0,
@@ -214,10 +234,15 @@ mod tests {
     fn exit_code_mapping() {
         assert_eq!(Outcome::Ok.exit_code(), 0);
         assert_eq!(Outcome::InvariantViolation.exit_code(), 1);
-        assert_eq!(Outcome::ProgrammerError { reason: "x".into() }.exit_code(), 2);
         assert_eq!(
-            Outcome::HarnessError { kind: HarnessErrorKind::HostFault { detail: "y".into() } }
-                .exit_code(),
+            Outcome::ProgrammerError { reason: "x".into() }.exit_code(),
+            2
+        );
+        assert_eq!(
+            Outcome::HarnessError {
+                kind: HarnessErrorKind::HostFault { detail: "y".into() }
+            }
+            .exit_code(),
             3
         );
         assert_eq!(Outcome::Interrupted.exit_code(), 130);
@@ -248,25 +273,38 @@ mod tests {
                 schedule_out: None,
                 ci_smoke: false,
             },
-            git: GitInfo { rev: "c0ffee".into(), dirty: false },
+            git: GitInfo {
+                rev: "c0ffee".into(),
+                dirty: false,
+            },
             hostname: "test-host".into(),
             topology: TopologyKind::Mem,
             elapsed: Duration::from_secs(20),
-            recorded: RecordedCounts { client_calls: 1_000, timestamps: 4_000 },
+            recorded: RecordedCounts {
+                client_calls: 1_000,
+                timestamps: 4_000,
+            },
             throughput: Throughput {
                 client_calls_per_sec: 50.0,
                 timestamps_per_sec: 200.0,
             },
             latency_per_call_us: LatencyStats {
-                p50: 100, p90: 200, p99: 500, p999: 1000,
-                min: 50, max: 2000, mean: 120,
+                p50: 100,
+                p90: 200,
+                p99: 500,
+                p999: 1000,
+                min: 50,
+                max: 2000,
+                mean: 120,
             },
             transient_retries: 0,
             out_of_range_samples: 0,
             violations: Vec::new(),
             chaos_events: Vec::new(),
             schedule: Schedule {
-                source: ScheduleSource::Named { scenario: "steady".into() },
+                source: ScheduleSource::Named {
+                    scenario: "steady".into(),
+                },
                 ops: Vec::new(),
                 loadgen_pause: None,
             },

@@ -258,9 +258,15 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
         let supervisor = Supervisor::new();
         let handle = tokio::spawn(supervisor.run(rx));
-        tx.send(SupervisorEvent::Issued(sample(0, 1))).await.unwrap();
-        tx.send(SupervisorEvent::Issued(sample(0, 2))).await.unwrap();
-        tx.send(SupervisorEvent::Issued(sample(0, 3))).await.unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 1)))
+            .await
+            .unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 2)))
+            .await
+            .unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 3)))
+            .await
+            .unwrap();
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
@@ -272,13 +278,20 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
         let supervisor = Supervisor::new();
         let handle = tokio::spawn(supervisor.run(rx));
-        tx.send(SupervisorEvent::Issued(sample(0, 100))).await.unwrap();
-        tx.send(SupervisorEvent::Issued(sample(1, 100))).await.unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 100)))
+            .await
+            .unwrap();
+        tx.send(SupervisorEvent::Issued(sample(1, 100)))
+            .await
+            .unwrap();
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
         assert_eq!(outcome.violations.len(), 1);
-        assert!(matches!(outcome.violations[0].kind, ViolationKind::Monotonicity { .. }));
+        assert!(matches!(
+            outcome.violations[0].kind,
+            ViolationKind::Monotonicity { .. }
+        ));
     }
 
     #[tokio::test]
@@ -286,15 +299,25 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
         let supervisor = Supervisor::new();
         let handle = tokio::spawn(supervisor.run(rx));
-        tx.send(SupervisorEvent::Issued(sample(0, 10))).await.unwrap();
-        tx.send(SupervisorEvent::Issued(sample(0, 9))).await.unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 10)))
+            .await
+            .unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 9)))
+            .await
+            .unwrap();
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
         assert_eq!(outcome.violations.len(), 1);
     }
 
-    fn batch_sample(client: u32, batch_id: u32, idx: u32, is_last: bool, ts_raw: u64) -> IssuedSample {
+    fn batch_sample(
+        client: u32,
+        batch_id: u32,
+        idx: u32,
+        is_last: bool,
+        ts_raw: u64,
+    ) -> IssuedSample {
         let now = Instant::now();
         IssuedSample {
             client_id: ClientId(client),
@@ -312,13 +335,23 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
         let supervisor = Supervisor::new();
         let handle = tokio::spawn(supervisor.run(rx));
-        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 0, false, 10))).await.unwrap();
-        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 1, false, 11))).await.unwrap();
-        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 2, true,  12))).await.unwrap();
+        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 0, false, 10)))
+            .await
+            .unwrap();
+        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 1, false, 11)))
+            .await
+            .unwrap();
+        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 2, true, 12)))
+            .await
+            .unwrap();
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
-        assert!(outcome.violations.is_empty(), "got {:?}", outcome.violations);
+        assert!(
+            outcome.violations.is_empty(),
+            "got {:?}",
+            outcome.violations
+        );
     }
 
     #[tokio::test]
@@ -326,16 +359,27 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
         let supervisor = Supervisor::new();
         let handle = tokio::spawn(supervisor.run(rx));
-        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 0, false, 20))).await.unwrap();
-        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 1, false, 22))).await.unwrap();
-        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 2, true,  23))).await.unwrap();
+        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 0, false, 20)))
+            .await
+            .unwrap();
+        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 1, false, 22)))
+            .await
+            .unwrap();
+        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 2, true, 23)))
+            .await
+            .unwrap();
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
-        let has_batch_violation = outcome.violations.iter().any(|v| {
-            matches!(v.kind, ViolationKind::BatchInternalOrdering { .. })
-        });
-        assert!(has_batch_violation, "expected batch violation, got {:?}", outcome.violations);
+        let has_batch_violation = outcome
+            .violations
+            .iter()
+            .any(|v| matches!(v.kind, ViolationKind::BatchInternalOrdering { .. }));
+        assert!(
+            has_batch_violation,
+            "expected batch violation, got {:?}",
+            outcome.violations
+        );
     }
 
     use crate::chaos::{ChaosEvent, ChaosKind, ChaosOutcome, ChaosWindow};
@@ -359,18 +403,26 @@ mod tests {
         let supervisor = Supervisor::new();
         let handle = tokio::spawn(supervisor.run(rx));
         let t0 = Instant::now();
-        tx.send(SupervisorEvent::Issued(sample(0, 100))).await.unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 100)))
+            .await
+            .unwrap();
         let started = t0;
         let ended = t0 + Duration::from_millis(50);
         let grace = Duration::from_millis(10);
-        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace))).await.unwrap();
+        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace)))
+            .await
+            .unwrap();
         let mut after = sample(0, 200);
         after.recv_time = ended + grace + Duration::from_millis(1);
         tx.send(SupervisorEvent::Issued(after)).await.unwrap();
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
-        assert!(outcome.violations.is_empty(), "got {:?}", outcome.violations);
+        assert!(
+            outcome.violations.is_empty(),
+            "got {:?}",
+            outcome.violations
+        );
     }
 
     #[tokio::test]
@@ -379,11 +431,15 @@ mod tests {
         let supervisor = Supervisor::new();
         let handle = tokio::spawn(supervisor.run(rx));
         let t0 = Instant::now();
-        tx.send(SupervisorEvent::Issued(sample(0, 500))).await.unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 500)))
+            .await
+            .unwrap();
         let started = t0;
         let ended = t0 + Duration::from_millis(50);
         let grace = Duration::from_millis(10);
-        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace))).await.unwrap();
+        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace)))
+            .await
+            .unwrap();
         let mut after = sample(0, 500);
         after.ts = Timestamp(450);
         after.recv_time = ended + grace + Duration::from_millis(1);
@@ -391,10 +447,15 @@ mod tests {
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
-        let has_fence = outcome.violations.iter().any(|v| {
-            matches!(v.kind, ViolationKind::FenceFreshness { .. })
-        });
-        assert!(has_fence, "expected fence violation: {:?}", outcome.violations);
+        let has_fence = outcome
+            .violations
+            .iter()
+            .any(|v| matches!(v.kind, ViolationKind::FenceFreshness { .. }));
+        assert!(
+            has_fence,
+            "expected fence violation: {:?}",
+            outcome.violations
+        );
     }
 
     use crate::sample::{LivenessIncident, LivenessIncidentKind};
@@ -420,7 +481,10 @@ mod tests {
         drop(tx);
         let outcome = handle.await.unwrap();
         assert_eq!(outcome.violations.len(), 1);
-        assert!(matches!(outcome.violations[0].kind, ViolationKind::Liveness { .. }));
+        assert!(matches!(
+            outcome.violations[0].kind,
+            ViolationKind::Liveness { .. }
+        ));
     }
 
     #[tokio::test]
@@ -431,7 +495,9 @@ mod tests {
         let started = Instant::now();
         let ended = started + Duration::from_millis(100);
         let grace = Duration::from_millis(50);
-        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace))).await.unwrap();
+        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace)))
+            .await
+            .unwrap();
         tx.send(SupervisorEvent::Liveness(LivenessIncident {
             kind: LivenessIncidentKind::DeadlineExceeded {
                 client_id: ClientId(0),
@@ -446,7 +512,11 @@ mod tests {
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
-        assert!(outcome.violations.is_empty(), "got: {:?}", outcome.violations);
+        assert!(
+            outcome.violations.is_empty(),
+            "got: {:?}",
+            outcome.violations
+        );
     }
 
     #[tokio::test]
@@ -475,7 +545,9 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
         let supervisor = Supervisor::new();
         let handle = tokio::spawn(supervisor.run(rx));
-        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 0, false, 100))).await.unwrap();
+        tx.send(SupervisorEvent::Issued(batch_sample(0, 1, 0, false, 100)))
+            .await
+            .unwrap();
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
@@ -488,14 +560,22 @@ mod tests {
         let supervisor = Supervisor::new();
         let handle = tokio::spawn(supervisor.run(rx));
         let t0 = Instant::now();
-        tx.send(SupervisorEvent::Issued(sample(0, 100))).await.unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 100)))
+            .await
+            .unwrap();
         let started = t0 + Duration::from_millis(10);
         let ended = t0 + Duration::from_millis(60);
         let grace = Duration::from_millis(10);
-        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace))).await.unwrap();
+        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace)))
+            .await
+            .unwrap();
         tx.send(SupervisorEvent::End).await.unwrap();
         drop(tx);
         let outcome = handle.await.unwrap();
-        assert!(outcome.violations.is_empty(), "got: {:?}", outcome.violations);
+        assert!(
+            outcome.violations.is_empty(),
+            "got: {:?}",
+            outcome.violations
+        );
     }
 }

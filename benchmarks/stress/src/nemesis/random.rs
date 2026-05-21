@@ -31,7 +31,9 @@ pub fn build(seed: u64, params: RandomParams) -> Schedule {
             ChaosOp::KillLeader
         } else if pick < params.weight_kill + params.weight_pause {
             let dur_ms = rng.random_range(50..500);
-            ChaosOp::PauseLeader { dur: Duration::from_millis(dur_ms) }
+            ChaosOp::PauseLeader {
+                dur: Duration::from_millis(dur_ms),
+            }
         } else {
             let names = [
                 "tsoracle::driver_file::write_record::after_fsync",
@@ -89,7 +91,10 @@ mod tests {
         let b = build(2, p);
         assert!(
             a.ops.len() != b.ops.len()
-                || a.ops.iter().zip(b.ops.iter()).any(|(oa, ob)| oa.at != ob.at),
+                || a.ops
+                    .iter()
+                    .zip(b.ops.iter())
+                    .any(|(oa, ob)| oa.at != ob.at),
             "seeds 1 vs 2 produced identical schedules"
         );
     }

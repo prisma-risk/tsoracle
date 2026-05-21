@@ -101,8 +101,12 @@ mod tests {
     #[test]
     fn chaos_outcome_classification() {
         let applied = ChaosOutcome::Applied;
-        let skipped = ChaosOutcome::Skipped { reason: "no leader".into() };
-        let failed = ChaosOutcome::Failed { reason: "spawn EBADF".into() };
+        let skipped = ChaosOutcome::Skipped {
+            reason: "no leader".into(),
+        };
+        let failed = ChaosOutcome::Failed {
+            reason: "spawn EBADF".into(),
+        };
         assert!(applied.is_applied());
         assert!(!skipped.is_applied());
         assert!(!failed.is_applied());

@@ -41,7 +41,9 @@ pub fn catalog_names() -> Vec<&'static str> {
 }
 
 pub fn build(name: &str, total: Duration) -> Result<Schedule, String> {
-    let source = ScheduleSource::Named { scenario: name.into() };
+    let source = ScheduleSource::Named {
+        scenario: name.into(),
+    };
     let (ops, loadgen_pause) = match name {
         "steady" => (Vec::new(), None),
         "burst" => (
@@ -65,7 +67,9 @@ pub fn build(name: &str, total: Duration) -> Result<Schedule, String> {
                     op: if kill_next {
                         ChaosOp::KillLeader
                     } else {
-                        ChaosOp::PauseLeader { dur: Duration::from_millis(500) }
+                        ChaosOp::PauseLeader {
+                            dur: Duration::from_millis(500),
+                        }
                     },
                 });
                 kill_next = !kill_next;
@@ -104,10 +108,18 @@ pub fn build(name: &str, total: Duration) -> Result<Schedule, String> {
         }
         other => return Err(format!("unknown scenario: {other}")),
     };
-    Ok(Schedule { source, ops, loadgen_pause })
+    Ok(Schedule {
+        source,
+        ops,
+        loadgen_pause,
+    })
 }
 
-fn interval_ops(total: Duration, gap: Duration, mut mk: impl FnMut(usize) -> ChaosOp) -> Vec<ScheduledOp> {
+fn interval_ops(
+    total: Duration,
+    gap: Duration,
+    mut mk: impl FnMut(usize) -> ChaosOp,
+) -> Vec<ScheduledOp> {
     let mut ops = Vec::new();
     let mut t = gap;
     let mut i = 0usize;
@@ -127,7 +139,13 @@ mod tests {
     #[test]
     fn catalog_contains_all_five() {
         let names = catalog_names();
-        let expected = ["steady", "burst", "killer-loop", "fence-stress", "failpoint-cycle"];
+        let expected = [
+            "steady",
+            "burst",
+            "killer-loop",
+            "fence-stress",
+            "failpoint-cycle",
+        ];
         for e in expected {
             assert!(names.contains(&e), "missing scenario: {e}, got: {names:?}");
         }

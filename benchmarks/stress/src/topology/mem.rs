@@ -58,7 +58,10 @@ impl MemTopology {
             shutdown_tx: Mutex::new(Some(shutdown_tx)),
             grace,
         };
-        Ok(MemTopology { controller, server_handle })
+        Ok(MemTopology {
+            controller,
+            server_handle,
+        })
     }
 }
 
@@ -106,7 +109,9 @@ impl ChaosController for MemController {
             return timed_event(kind, self.grace, move || async move {
                 match fail::cfg(name.as_str(), action.as_str()) {
                     Ok(()) => ChaosOutcome::Applied,
-                    Err(e) => ChaosOutcome::Failed { reason: format!("fail::cfg: {e}") },
+                    Err(e) => ChaosOutcome::Failed {
+                        reason: format!("fail::cfg: {e}"),
+                    },
                 }
             })
             .await;
@@ -137,7 +142,9 @@ impl ChaosController for MemController {
         {
             let _ = name;
             timed_event(kind, self.grace, || async {
-                ChaosOutcome::Skipped { reason: "stress-failpoints feature off".into() }
+                ChaosOutcome::Skipped {
+                    reason: "stress-failpoints feature off".into(),
+                }
             })
             .await
         }
@@ -163,7 +170,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn spawn_returns_reachable_endpoint() {
-        let topo = MemTopology::spawn(Duration::from_millis(100)).await.unwrap();
+        let topo = MemTopology::spawn(Duration::from_millis(100))
+            .await
+            .unwrap();
         let endpoints = topo.controller.endpoints();
         assert_eq!(endpoints.len(), 1);
         let client = tsoracle_client::Client::connect(endpoints).await.unwrap();
@@ -177,7 +186,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn kill_leader_bumps_epoch_and_promotes() {
         let topo = MemTopology::spawn(Duration::from_millis(50)).await.unwrap();
-        let client = tsoracle_client::Client::connect(topo.controller.endpoints()).await.unwrap();
+        let client = tsoracle_client::Client::connect(topo.controller.endpoints())
+            .await
+            .unwrap();
         let ts1 = client.get_ts().await.unwrap();
         let ev = topo.controller.kill_leader().await;
         assert!(ev.outcome.is_applied(), "got {:?}", ev.outcome);
@@ -189,7 +200,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pause_leader_returns_applied() {
         let topo = MemTopology::spawn(Duration::from_millis(50)).await.unwrap();
-        let ev = topo.controller.pause_leader(Duration::from_millis(20)).await;
+        let ev = topo
+            .controller
+            .pause_leader(Duration::from_millis(20))
+            .await;
         assert!(ev.outcome.is_applied());
         Box::new(topo.controller).shutdown().await;
     }
@@ -203,8 +217,15 @@ mod tests {
             .arm_failpoint("stress-test::fp_unused", "off")
             .await;
         assert!(ev_arm.outcome.is_applied(), "arm: {:?}", ev_arm.outcome);
-        let ev_disarm = topo.controller.disarm_failpoint("stress-test::fp_unused").await;
-        assert!(ev_disarm.outcome.is_applied(), "disarm: {:?}", ev_disarm.outcome);
+        let ev_disarm = topo
+            .controller
+            .disarm_failpoint("stress-test::fp_unused")
+            .await;
+        assert!(
+            ev_disarm.outcome.is_applied(),
+            "disarm: {:?}",
+            ev_disarm.outcome
+        );
         Box::new(topo.controller).shutdown().await;
     }
 

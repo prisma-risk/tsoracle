@@ -35,7 +35,11 @@ fn base_cfg(scenario: &str, duration_s: u64) -> StressConfig {
 #[test]
 fn steady_smoke_completes_clean() {
     let report = stress::run(base_cfg("steady", 5)).unwrap();
-    assert!(matches!(report.outcome, Outcome::Ok), "got: {:?}", report.outcome);
+    assert!(
+        matches!(report.outcome, Outcome::Ok),
+        "got: {:?}",
+        report.outcome
+    );
     assert!(report.violations.is_empty(), "got: {:?}", report.violations);
     assert!(report.recorded.timestamps > 0, "no timestamps issued");
 }
