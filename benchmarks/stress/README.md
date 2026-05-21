@@ -6,7 +6,7 @@ This crate is a peer of `benchmarks/minimal`, not a replacement. `bench-minimal`
 
 `publish = false` and excluded from `make coverage`. Run it when you want to know whether tsoracle maintains its invariants under sustained chaos.
 
-## What Plan A ships
+## Features
 
 - `--topology mem`: single in-process `tsoracle-server` against `InMemoryDriver`.
 - All four invariants (monotonicity, batch ordering, fence freshness, liveness).
@@ -16,7 +16,7 @@ This crate is a peer of `benchmarks/minimal`, not a replacement. `bench-minimal`
 - `inject-violation` self-test as a positive CI control.
 - Mem-topology smoke test in `tests/smoke.rs` (≤ 30 s).
 
-`--topology raft` and `--topology process` are stubbed with `unimplemented!()` and arrive in Plans B and C.
+`--topology raft` and `--topology process` are stubbed with `unimplemented!()` and will land in follow-up changes.
 
 ## Run
 
@@ -38,10 +38,10 @@ cargo run -p stress --release --features stress-failpoints -- run --topology mem
 
 The text report ends with:
 
-- `outcome=Ok | InvariantViolation | ...` — the headline result. Exit 0 / 1 / 2 / 3 / 130 per spec.
+- `outcome=Ok | InvariantViolation | ...` — the headline result. Maps to the exit code below.
 - `violations: N` — how many invariant breaks the supervisor recorded.
 - `chaos events: N` — how many nemesis ops were applied.
-- `latency per client call` — percentiles aggregated across all client tasks. (Latency stats land in zero values in Plan A; per-client histogram recording is a small follow-up — see "Known gaps" below.)
+- `latency per client call` — percentiles aggregated across all client tasks. (Latency stats currently read as zeros; per-client histogram recording is a known follow-up — see "Known gaps" below.)
 
 `--json` produces a one-line JSON report on stdout. Use this for CI parsing. `outcome` is the only field a workflow needs to key off; the rest is supporting evidence.
 
@@ -57,7 +57,7 @@ The text report ends with:
 
 CI gates should distinguish 1 from 3 — the first is a real bug, the second is a flake.
 
-## Known gaps (Plan A)
+## Known gaps
 
 These three are landed-but-incomplete. None affect any of the four invariants; they are presentation or budget polish that lands via small follow-ups:
 
@@ -65,9 +65,6 @@ These three are landed-but-incomplete. None affect any of the four invariants; t
 - Per-client histograms are allocated but `client_task` does not record per-call latency into them; `LatencyStats` values are zeroed.
 - `--ops`-bounded runs are accepted by CLI / validate() but `lib::run` only honors `--duration`. Adding an `--ops` budget needs a shared atomic + stop trigger; defer until needed.
 
-Plans B / C / D add the raft topology, process topology, and CI + docs respectively.
-
 ## See also
 
-- `docs/superpowers/specs/2026-05-21-stress-harness-design.md` — full design.
 - `benchmarks/minimal/README.md` — the steady-state characterization sibling.

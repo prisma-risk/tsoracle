@@ -1,9 +1,6 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 //! tsoracle stress + chaos harness.
-//!
-//! See `docs/superpowers/specs/2026-05-21-stress-harness-design.md` for the
-//! design. See `benchmarks/stress/README.md` for usage.
 
 pub mod chaos;
 pub mod config;
