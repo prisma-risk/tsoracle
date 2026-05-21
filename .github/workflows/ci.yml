@@ -32,6 +32,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: buf lint
         run: buf lint crates/tsoracle-proto/proto
       - name: buf format
