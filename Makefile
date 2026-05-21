@@ -30,7 +30,7 @@ WORKSPACE_VERSION := $(shell grep -E '^version[[:space:]]*=' Cargo.toml | head -
 
 .PHONY: all ci check fmt fmt-check lint fix build test test-failpoints doc \
         proto proto-lint proto-fmt proto-fmt-check proto-breaking \
-        deny coverage clean help install-hooks \
+        deny coverage coverage-html clean help install-hooks \
         bench bench-throughput-sweep bench-latency \
         release-bump release-dry-run release-publish release-tag
 
@@ -137,17 +137,31 @@ COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/(raft|process)
 
 COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_STRESS_TOPO_STUBS))\.rs
 
+# Shared exclude flags so `coverage` (lcov for CI) and `coverage-html` (local
+# browsable report) cannot drift apart on which crates participate.
+COV_EXCLUDES := \
+    --exclude tsoracle \
+    --exclude example-embedded-server \
+    --exclude example-failover-demo \
+    --exclude example-openraft-piggyback \
+    --exclude example-openraft-standalone \
+    --exclude bench-minimal
+
 coverage:
 	$(CARGO) llvm-cov \
 	  --workspace --all-features \
-	  --exclude tsoracle \
-	  --exclude example-embedded-server \
-	  --exclude example-failover-demo \
-	  --exclude example-openraft-piggyback \
-	  --exclude example-openraft-standalone \
-	  --exclude bench-minimal \
+	  $(COV_EXCLUDES) \
 	  --ignore-filename-regex '$(COV_IGNORE)$$' \
 	  --lcov --output-path lcov.info
+
+# Local HTML report. Output at target/llvm-cov/html/index.html; `--open` opens
+# it in the default browser. Re-runs the test suite, same as `coverage`.
+coverage-html:
+	$(CARGO) llvm-cov \
+	  --workspace --all-features \
+	  $(COV_EXCLUDES) \
+	  --ignore-filename-regex '$(COV_IGNORE)$$' \
+	  --html --open
 
 # Release --------------------------------------------------------------------
 # The release flow has four steps, mapped to four explicit targets. There is
@@ -282,6 +296,8 @@ help:
 	@echo ""
 	@echo "  coverage         cargo llvm-cov on library crates -> lcov.info"
 	@echo "                   (excludes tsoracle-bin and examples/)"
+	@echo "  coverage-html    Same as coverage; renders HTML at target/llvm-cov/html"
+	@echo "                   and opens it in the default browser."
 	@echo ""
 	@echo "  bench            Run the bench-minimal characterization workload."
 	@echo "  bench-throughput-sweep  Run bench across clients=1..1024 (--json files)."
