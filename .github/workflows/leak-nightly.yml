@@ -1,0 +1,73 @@
+name: leak (nightly)
+
+on:
+  schedule:
+    # 04:00 UTC daily -- staggered after fuzz (02:00) and stress (03:00) so
+    # the three nightlies don't fight for runners.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  lsan:
+    name: workspace tests under LeakSanitizer
+    runs-on: ubuntu-latest
+    # Hard ceiling: -Zsanitizer=leak slows tests ~2-3x and -Zbuild-std
+    # rebuilds libstd with instrumentation, which dominates the cold-cache
+    # run. Warm runs should comfortably finish well under this.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        # Match the pin used by fuzz/rust-toolchain.toml so the two nightly
+        # jobs share a known-good revision. Bump them together.
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-31
+          components: rust-src, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Sanitizer builds compile a separate copy of libstd into a custom
+          # target dir; isolate the cache key so it does not collide with
+          # the stable CI cache.
+          key: lsan
+          cache-targets: true
+
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+
+      - name: Run workspace tests under LeakSanitizer
+        env:
+          # -Zsanitizer=leak swaps in the standalone LSan runtime (no ASan,
+          # so the slowdown is much smaller than -Zsanitizer=address).
+          RUSTFLAGS: "-Zsanitizer=leak"
+          RUSTDOCFLAGS: "-Zsanitizer=leak"
+          CARGO_TERM_COLOR: always
+        run: |
+          # LSAN_OPTIONS:
+          #   suppressions= points at the in-repo allowlist.
+          #   exitcode=23 distinguishes "leaks detected" from a test panic
+          #     (which exits 101); either still fails the job.
+          #   print_suppressions=0 keeps the log clean on successful matches.
+          # GITHUB_WORKSPACE is set by the runner and contains the checkout
+          # path -- safer to read here than to template github.workspace
+          # into env (which an actionlint reviewer would flag).
+          export LSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/ci/lsan_suppressions.txt,exitcode=23,print_suppressions=0"
+
+          # -Zbuild-std rebuilds libstd with the leak-sanitizer runtime so
+          # stdlib allocations get accounted for instead of being reported
+          # as leaks. It requires an explicit --target, hence the spelled-
+          # out triple (also matches the convention in fuzz-nightly.yml).
+          # --no-fail-fast collects leak reports from every test binary in
+          # one run; cheaper to triage than re-running per-crate.
+          cargo +nightly-2026-03-31 \
+            -Zbuild-std \
+            test \
+            --workspace \
+            --all-features \
+            --locked \
+            --no-fail-fast \
+            --target x86_64-unknown-linux-gnu
