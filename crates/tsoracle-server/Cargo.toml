@@ -41,15 +41,15 @@ tonic              = { workspace = true }
 tonic-prost        = { workspace = true }
 tonic-reflection   = { workspace = true, optional = true }
 tracing            = { workspace = true, optional = true }
-tsoracle-core      = { path = "../tsoracle-core", version = "0.1.1" }
-tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.1" }
-tsoracle-proto     = { path = "../tsoracle-proto", version = "0.1.1" }
+tsoracle-core      = { path = "../tsoracle-core", version = "0.1.2" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.2" }
+tsoracle-proto     = { path = "../tsoracle-proto", version = "0.1.2" }
 
 [dev-dependencies]
 tokio          = { workspace = true, features = ["test-util"] }
 metrics-util   = { workspace = true }
-tsoracle-core   = { path = "../tsoracle-core", version = "0.1.1", features = ["test-clock"] }
-tsoracle-client = { path = "../tsoracle-client", version = "0.1.1" }
+tsoracle-core   = { path = "../tsoracle-core", version = "0.1.2", features = ["test-clock"] }
+tsoracle-client = { path = "../tsoracle-client", version = "0.1.2" }
 
 [[test]]
 name = "e2e"

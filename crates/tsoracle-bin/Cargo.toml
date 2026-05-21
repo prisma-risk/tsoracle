@@ -23,13 +23,13 @@ clap                  = { workspace = true }
 tokio                 = { workspace = true, features = ["signal"] }
 tracing               = { workspace = true }
 tracing-subscriber    = { workspace = true }
-tsoracle-core         = { path = "../tsoracle-core", version = "0.1.1" }
-tsoracle-server       = { path = "../tsoracle-server", version = "0.1.1" }
-tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "0.1.1" }
+tsoracle-core         = { path = "../tsoracle-core", version = "0.1.2" }
+tsoracle-server       = { path = "../tsoracle-server", version = "0.1.2" }
+tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "0.1.2" }
 
 [dev-dependencies]
-tsoracle-client    = { path = "../tsoracle-client", version = "0.1.1" }
-tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.1" }
+tsoracle-client    = { path = "../tsoracle-client", version = "0.1.2" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.2" }
 async-trait        = { workspace = true }
 futures            = { workspace = true }
 parking_lot        = { workspace = true }
