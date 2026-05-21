@@ -70,6 +70,7 @@ test-failpoints:
 	$(CARGO) test --workspace \
 	  --features tsoracle-driver-file/failpoints \
 	  --features tsoracle-server/failpoints,tsoracle-server/test-fakes \
+	  --features tsoracle-tests/failpoints \
 	  --features tsoracle-openraft-toolkit/failpoints,tsoracle-openraft-toolkit/rocksdb-log-store
 
 doc:

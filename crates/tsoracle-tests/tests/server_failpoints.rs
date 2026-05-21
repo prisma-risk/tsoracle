@@ -1,4 +1,4 @@
-#![cfg(all(feature = "failpoints", feature = "test-support"))]
+#![cfg(feature = "failpoints")]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
