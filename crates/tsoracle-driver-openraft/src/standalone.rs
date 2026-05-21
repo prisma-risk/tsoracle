@@ -8,7 +8,8 @@
 
 use async_trait::async_trait;
 use openraft::Raft;
-use openraft::error::{ClientWriteError, RaftError};
+use openraft::ReadPolicy;
+use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
 use tsoracle_consensus::ConsensusError;
 
 use crate::host::OpenraftHighWaterHost;
@@ -50,10 +51,24 @@ impl OpenraftHighWaterHost for StandaloneHost {
     }
 
     async fn current_high_water(&self) -> Result<u64, ConsensusError> {
-        // The standalone host doesn't issue a linearizable barrier here for the
-        // same reason the original driver didn't: a single-voter cluster has
-        // trivially linearizable local reads, and multi-node deployments will
-        // gain a barrier in a follow-up alongside the network impl.
+        // Issue the openraft read barrier so the local SM read below reflects
+        // every committed write from any prior leader at any prior epoch —
+        // the contract on `ConsensusDriver::load_high_water`. The fence in
+        // `tsoracle-server/src/fence.rs` is the load-bearing reader; a stale
+        // value there would let a new leader's `serving_floor + 1` land below
+        // a timestamp the prior leader could have served.
+        //
+        // `ForwardToLeader` maps to `NotLeader` so the server's step-down
+        // path triggers cleanly (same shape as `submit_advance` below); any
+        // other RaftError is transient (quorum loss, leadership churn).
+        if let Err(e) = self.raft.ensure_linearizable(ReadPolicy::ReadIndex).await {
+            return match e {
+                RaftError::APIError(LinearizableReadError::ForwardToLeader(_)) => {
+                    Err(ConsensusError::NotLeader { observed: None })
+                }
+                _ => Err(ConsensusError::TransientDriver(Box::new(e))),
+            };
+        }
         Ok(self.state_machine.current_value().await)
     }
 
