@@ -35,7 +35,7 @@ postcard           = { workspace = true }
 # unification re-enables it for their builds.
 tsoracle-openraft-toolkit   = { path = "../tsoracle-openraft-toolkit", version = "0.1.0", default-features = false }
 parking_lot        = { workspace = true }
-rocksdb            = { workspace = true, optional = true }
+rocksdb            = { workspace = true, optional = true, features = ["multi-threaded-cf"] }
 serde              = { workspace = true }
 thiserror          = { workspace = true }
 tokio              = { workspace = true }
