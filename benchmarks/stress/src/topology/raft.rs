@@ -7,9 +7,11 @@
 //! loopback port. Cluster membership is initialized on node 1 once every
 //! node's `Raft` handle is registered.
 //!
-//! Chaos primitives (`kill_leader`, `pause_leader`, failpoints) are stubbed
-//! to return `Skipped` for now; follow-up PRs land real implementations on
-//! top of `MemNetwork`'s partition controller and openraft's `shutdown`.
+//! `kill_leader` isolates the current leader on the shared `MemNetwork`'s
+//! partition controller for a short window, forcing the remaining quorum to
+//! elect a new leader, then heals the partition so subsequent chaos ops still
+//! have a quorum to work with. `pause_leader` and the failpoint primitives
+//! are stubbed to return `Skipped` until follow-up PRs land them.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -48,7 +50,6 @@ pub struct RaftTopology {
 /// shutdown senders for each node's tsoracle server.
 pub struct RaftController {
     nodes: Vec<RaftNode>,
-    #[allow(dead_code)] // Used by follow-up PRs that introduce partition-based chaos.
     network: Arc<MemNetwork<TypeConfig>>,
     grace: Duration,
 }
@@ -218,10 +219,34 @@ async fn wait_for_leader(nodes: &[RaftNode]) -> anyhow::Result<()> {
 #[async_trait]
 impl ChaosController for RaftController {
     async fn kill_leader(&self) -> ChaosEvent {
-        timed_event(ChaosKind::LeaderKill, self.grace, || async {
-            ChaosOutcome::Skipped {
-                reason: "kill_leader not yet implemented for raft topology".into(),
-            }
+        // The openraft `u64` NodeId of the leader is the key the shared
+        // `PartitionController` uses to gate edges. `current_leader()` on the
+        // trait returns the stress `NodeId(u32)` (narrowed from the same
+        // value), so we read metrics directly here to keep the openraft id
+        // in its native width and avoid a u32 -> u64 round-trip.
+        let leader_raft_id: Option<u64> = self
+            .nodes
+            .iter()
+            .find_map(|n| n.raft.metrics().borrow_watched().current_leader);
+        let Some(leader_raft_id) = leader_raft_id else {
+            return timed_event(ChaosKind::LeaderKill, self.grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "no current leader".into(),
+                }
+            })
+            .await;
+        };
+        let partitions = self.network.partitions();
+        timed_event(ChaosKind::LeaderKill, self.grace, move || async move {
+            partitions.isolate(leader_raft_id);
+            // Election timeout is 300-600ms; openraft can also need a few
+            // heartbeat-interval ticks (100ms each) before followers escalate
+            // to a candidate after losing the leader. 1500ms keeps the chaos
+            // window short while reliably producing a re-election in CI; the
+            // 750ms baseline from the sketch was tight enough to flake.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            partitions.heal(leader_raft_id);
+            ChaosOutcome::Applied
         })
         .await
     }
@@ -288,11 +313,75 @@ mod tests {
             .await
             .expect("spawn 3-node raft topology");
         let endpoints = topology.controller.endpoints();
-        assert_eq!(endpoints.len(), 3, "expected 3 endpoints, got {endpoints:?}");
+        assert_eq!(
+            endpoints.len(),
+            3,
+            "expected 3 endpoints, got {endpoints:?}"
+        );
         assert!(
             topology.controller.current_leader().is_some(),
             "expected a leader after spawn"
         );
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn kill_leader_triggers_reelection() {
+        let topology = RaftTopology::spawn(3, Duration::from_millis(750))
+            .await
+            .expect("spawn 3-node raft topology");
+        let original_leader = topology
+            .controller
+            .current_leader()
+            .expect("leader at boot");
+
+        let event = topology.controller.kill_leader().await;
+        assert!(
+            event.outcome.is_applied(),
+            "kill_leader expected Applied, got {:?}",
+            event.outcome
+        );
+
+        // Poll for a different leader; election timeout is 300-600ms, so up
+        // to 2s of polling is comfortably above the worst case while still
+        // failing fast if no re-election occurs.
+        let mut new_leader = None;
+        for _ in 0..40 {
+            if let Some(candidate) = topology.controller.current_leader() {
+                if candidate != original_leader {
+                    new_leader = Some(candidate);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let new_leader = match new_leader {
+            Some(id) => id,
+            None => {
+                let snapshots: Vec<String> = topology
+                    .controller
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        let metrics = n.raft.metrics().borrow_watched().clone();
+                        format!(
+                            "node {} state={:?} term={:?} leader={:?}",
+                            n.node_id.0,
+                            metrics.state,
+                            metrics.current_term,
+                            metrics.current_leader
+                        )
+                    })
+                    .collect();
+                panic!(
+                    "re-election should have produced a different leader (was {:?}); snapshots:\n  {}",
+                    original_leader,
+                    snapshots.join("\n  ")
+                );
+            }
+        };
+        assert_ne!(original_leader, new_leader);
+
         Box::new(topology.controller).shutdown().await;
     }
 }
