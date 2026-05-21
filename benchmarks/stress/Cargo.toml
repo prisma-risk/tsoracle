@@ -23,6 +23,7 @@ clap               = { workspace = true, features = ["derive"] }
 hdrhistogram       = { workspace = true }
 humantime          = { workspace = true }
 humantime-serde    = { workspace = true }
+parking_lot       = { workspace = true }
 rand               = { workspace = true }
 serde              = { workspace = true, features = ["derive"] }
 serde_json         = { workspace = true }
