@@ -6,6 +6,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tsoracle_core::Timestamp;
 
+use crate::chaos::{ChaosEvent, ChaosKind, ChaosWindow};
 use crate::event::SupervisorEvent;
 use crate::sample::IssuedSample;
 use crate::types::{BatchId, ClientId};
@@ -27,6 +28,7 @@ pub struct Supervisor {
 struct SupervisorState {
     high_water: Timestamp,
     open_batches: HashMap<(ClientId, BatchId), OpenBatch>,
+    open_windows: Vec<OpenChaosWindow>,
     violations: Vec<Violation>,
     events_observed: u64,
 }
@@ -36,6 +38,7 @@ impl Default for SupervisorState {
         Self {
             high_water: Timestamp(0),
             open_batches: HashMap::new(),
+            open_windows: Vec::new(),
             violations: Vec::new(),
             events_observed: 0,
         }
@@ -45,6 +48,16 @@ impl Default for SupervisorState {
 #[derive(Debug)]
 struct OpenBatch {
     values: Vec<Timestamp>,
+}
+
+#[derive(Debug)]
+struct OpenChaosWindow {
+    window: ChaosWindow,
+    pre_window_high_water: Timestamp,
+    /// Once true, the fence-freshness check has fired for this window and we
+    /// will not re-check it. Failpoint windows are pre-marked true since they
+    /// don't change leadership.
+    fence_freshness_checked: bool,
 }
 
 impl Default for Supervisor {
@@ -65,7 +78,7 @@ impl Supervisor {
             self.state.events_observed += 1;
             match event {
                 SupervisorEvent::Issued(sample) => self.on_issued(sample),
-                SupervisorEvent::Chaos(_) => {}    // Task 8
+                SupervisorEvent::Chaos(ev) => self.on_chaos(ev),
                 SupervisorEvent::Liveness(_) => {} // Task 9
                 SupervisorEvent::End => break,
             }
@@ -92,6 +105,37 @@ impl Supervisor {
             self.state.high_water = sample.ts;
         }
 
+        // (1.5) Fence freshness — first post-window-grace sample participates.
+        // We collect violations into a local buffer to keep the borrow of
+        // `self.state.open_windows` disjoint from the push into
+        // `self.state.violations`.
+        let pending_fence: Vec<Violation> = {
+            let mut found = Vec::new();
+            for open in self.state.open_windows.iter_mut() {
+                let post_grace_at = open.window.ended_at + open.window.grace;
+                if !open.fence_freshness_checked && sample.recv_time >= post_grace_at {
+                    if sample.ts <= open.pre_window_high_water {
+                        found.push(Violation {
+                            kind: ViolationKind::FenceFreshness {
+                                pre_window_high_water: open.pre_window_high_water,
+                                first_post_window_ts: sample.ts,
+                                window_kind: open.window.kind.clone(),
+                            },
+                            at: Instant::now(),
+                        });
+                    }
+                    open.fence_freshness_checked = true;
+                }
+            }
+            found
+        };
+        self.state.violations.extend(pending_fence);
+        // Drop windows past grace whose fence check has fired (or didn't apply).
+        self.state.open_windows.retain(|open| {
+            let post_grace_at = open.window.ended_at + open.window.grace;
+            sample.recv_time < post_grace_at || !open.fence_freshness_checked
+        });
+
         // (2) Batch internal ordering.
         let key = (sample.client_id, sample.batch_id);
         self.state
@@ -112,6 +156,26 @@ impl Supervisor {
                 );
             }
         }
+    }
+
+    fn on_chaos(&mut self, ev: ChaosEvent) {
+        // Only Applied windows participate in invariant checks. Skipped/Failed
+        // are recorded by the caller (in chaos_events vec); supervisor ignores.
+        if !ev.outcome.is_applied() {
+            return;
+        }
+        let pre_window_high_water = self.state.high_water;
+        let fence_freshness_checked = match ev.window.kind {
+            ChaosKind::LeaderKill | ChaosKind::LeaderPause => false,
+            // Failpoint windows participate only in liveness gating (Task 9);
+            // they don't change leadership so no fence check applies.
+            ChaosKind::FailpointArm { .. } | ChaosKind::FailpointDisarm { .. } => true,
+        };
+        self.state.open_windows.push(OpenChaosWindow {
+            window: ev.window,
+            pre_window_high_water,
+            fence_freshness_checked,
+        });
     }
 }
 
@@ -248,5 +312,64 @@ mod tests {
             matches!(v.kind, ViolationKind::BatchInternalOrdering { .. })
         });
         assert!(has_batch_violation, "expected batch violation, got {:?}", outcome.violations);
+    }
+
+    use crate::chaos::{ChaosEvent, ChaosKind, ChaosOutcome, ChaosWindow};
+    use std::time::Duration;
+
+    fn kill_window(started: Instant, ended: Instant, grace: Duration) -> ChaosEvent {
+        ChaosEvent {
+            window: ChaosWindow {
+                kind: ChaosKind::LeaderKill,
+                started_at: started,
+                ended_at: ended,
+                grace,
+            },
+            outcome: ChaosOutcome::Applied,
+        }
+    }
+
+    #[tokio::test]
+    async fn fence_freshness_clean_post_window() {
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        let t0 = Instant::now();
+        tx.send(SupervisorEvent::Issued(sample(0, 100))).await.unwrap();
+        let started = t0;
+        let ended = t0 + Duration::from_millis(50);
+        let grace = Duration::from_millis(10);
+        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace))).await.unwrap();
+        let mut after = sample(0, 200);
+        after.recv_time = ended + grace + Duration::from_millis(1);
+        tx.send(SupervisorEvent::Issued(after)).await.unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert!(outcome.violations.is_empty(), "got {:?}", outcome.violations);
+    }
+
+    #[tokio::test]
+    async fn fence_freshness_detects_regression() {
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        let t0 = Instant::now();
+        tx.send(SupervisorEvent::Issued(sample(0, 500))).await.unwrap();
+        let started = t0;
+        let ended = t0 + Duration::from_millis(50);
+        let grace = Duration::from_millis(10);
+        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace))).await.unwrap();
+        let mut after = sample(0, 500);
+        after.ts = Timestamp(450);
+        after.recv_time = ended + grace + Duration::from_millis(1);
+        tx.send(SupervisorEvent::Issued(after)).await.unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        let has_fence = outcome.violations.iter().any(|v| {
+            matches!(v.kind, ViolationKind::FenceFreshness { .. })
+        });
+        assert!(has_fence, "expected fence violation: {:?}", outcome.violations);
     }
 }
