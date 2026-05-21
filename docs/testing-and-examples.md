@@ -81,6 +81,7 @@ tsoracle's tests are organized along the same layering as the code:
 - **`tsoracle-client/tests/e2e.rs`** — client integration against a real server with the in-memory driver.
 - **`tsoracle-client/tests/freshness.rs`** — explicit test of the [freshness invariant](getting-started.md#the-freshness-invariant): concurrent waiters never receive timestamps allocated before they entered the driver.
 - **`tsoracle-bin/tests/smoke.rs`** — black-box test of the `tsoracle` CLI: spawn the binary, send a `GetTs`, check the response, terminate.
+- **`crates/{tsoracle-driver-file, tsoracle-server}/tests/failpoints.rs`** — fault-injection tests gated by each crate's `failpoints` Cargo feature. Inject panics, sleeps, and typed-error returns at named sites in `write_record`, the leader-watch fence, and the service path; assert the observable invariants on reopen / on the `JoinHandle` / on client-visible RPC behavior. See [Failpoint Testing](failpoint-testing.md) for the feature-gating model, the eight current sites, the wrapper macro shape, and contributor guidance for adding new sites.
 
 The `test-fakes` feature on `tsoracle-server` is the linchpin: it exposes `InMemoryDriver` (which would otherwise be `pub(crate)`), letting integration tests in dependent crates exercise leader transitions on a real tonic-mounted server without needing a real consensus library. The [failover-demo example](#failover-demo-example) uses the same affordance as a pedagogy tool.
 

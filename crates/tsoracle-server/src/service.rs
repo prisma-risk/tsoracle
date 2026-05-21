@@ -47,6 +47,7 @@ pub struct TsoServiceImpl {
 #[tonic::async_trait]
 impl TsoService for TsoServiceImpl {
     async fn get_ts(&self, req: Request<GetTsRequest>) -> Result<Response<GetTsResponse>, Status> {
+        crate::failpoint!("server::service::before_allocate");
         let count = req.into_inner().count;
         if count == 0 {
             return Err(Status::invalid_argument("count must be >= 1"));
@@ -137,6 +138,7 @@ impl TsoServiceImpl {
         // Drain barrier: leader-watch's write() waits behind this read until
         // our commit applies (or is silently dropped by the epoch check).
         let _gate = self.server.extension_gate.read().await;
+        crate::failpoint!("server::service::extension_gate_held");
 
         let (requested, epoch) = {
             let allocator = self.server.allocator.lock();

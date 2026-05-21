@@ -18,6 +18,8 @@
 //! [`docs`] module contains the docs.rs-rendered operations chapter; the
 //! repo's `docs/key-subsystems.md` covers the same internals in depth.
 
+#[macro_use]
+mod failpoint;
 mod fence;
 mod leader_hint;
 mod server;

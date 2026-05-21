@@ -28,7 +28,7 @@ RELEASE_CRATES := \
 # enforce that the tag, HEAD's commit message, and the bumped version all agree.
 WORKSPACE_VERSION := $(shell grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 
-.PHONY: all ci check fmt fmt-check lint fix build test doc \
+.PHONY: all ci check fmt fmt-check lint fix build test test-failpoints doc \
         proto proto-lint proto-fmt proto-fmt-check proto-breaking \
         deny coverage clean help install-hooks \
         bench bench-throughput-sweep bench-latency \
@@ -64,6 +64,15 @@ build:
 
 test:
 	$(CARGO) test --workspace --all-features
+
+# Run just the failpoint suite (fault-injection tests gated by the
+# `failpoints` Cargo feature on each opting-in crate). See
+# docs/failpoint-testing.md for the model.
+test-failpoints:
+	$(CARGO) test --workspace \
+	  --features tsoracle-driver-file/failpoints \
+	  --features tsoracle-server/failpoints,tsoracle-server/test-fakes \
+	  --features openraft-toolkit/failpoints,openraft-toolkit/rocksdb-log-store
 
 doc:
 	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features

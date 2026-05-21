@@ -13,6 +13,8 @@
 use futures::StreamExt;
 use std::sync::Arc;
 
+#[cfg(feature = "failpoints")]
+use tsoracle_consensus::ConsensusError;
 use tsoracle_consensus::LeaderState;
 
 use crate::server::{Server, ServerError, ServingState};
@@ -38,6 +40,18 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                 // the +1 below.
                 let prior_max = server.consensus.load_high_water().await?;
 
+                crate::failpoint!(
+                    "server::fence::after_load_before_persist",
+                    |arg: Option<String>| -> Result<(), ServerError> {
+                        let _ = arg;
+                        Err(ServerError::Consensus(ConsensusError::TransientDriver(
+                            Box::new(std::io::Error::other(
+                                "failpoint: server::fence::after_load_before_persist",
+                            )),
+                        )))
+                    }
+                );
+
                 // Compute the serving floor and the requested ceiling.
                 // serving_floor is the first physical_ms the new leader may
                 // issue at — strictly above any timestamp the prior leader
@@ -53,6 +67,8 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                     .consensus
                     .persist_high_water(requested, epoch)
                     .await?;
+
+                crate::failpoint!("server::fence::after_persist_before_publish");
 
                 // Seed the allocator with both bounds. The floor pins the
                 // lower bound; committed_ceiling = actual is the post-persist

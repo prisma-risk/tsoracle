@@ -100,4 +100,16 @@ mod tests {
         let order = pool.iter_round_robin();
         assert_eq!(order, vec!["a:1", "b:1", "c:1"]);
     }
+
+    #[test]
+    fn clear_leader_drops_cached_leader() {
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()]);
+        pool.set_leader("b:1".into());
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
+        pool.clear_leader();
+        assert!(pool.cached_leader().is_none());
+        // With the cache cleared, round-robin order falls back to the
+        // configured order — the cleared leader is not re-prepended.
+        assert_eq!(pool.iter_round_robin(), vec!["a:1", "b:1"]);
+    }
 }

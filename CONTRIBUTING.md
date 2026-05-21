@@ -72,6 +72,12 @@ cargo build --workspace --all-features
 cargo test  --workspace --all-features
 ```
 
+The `--all-features` flag activates the `failpoints` Cargo feature on each opting-in crate, so the failpoint suite (see [`docs/failpoint-testing.md`](docs/failpoint-testing.md)) is part of the normal `cargo test` run. To run just the failpoint suite:
+
+```bash
+make test-failpoints
+```
+
 ### Pre-commit hook
 
 A tracked pre-commit hook in [`.githooks/pre-commit`](.githooks/pre-commit) runs the first two of those checks (`cargo fmt --check` and clippy) and blocks the commit on failure. Enable it once per clone:

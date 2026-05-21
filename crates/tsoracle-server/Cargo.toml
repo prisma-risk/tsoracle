@@ -14,6 +14,7 @@ categories    = ["network-programming", "database"]
 
 [features]
 default    = ["tls-rustls", "tracing"]
+failpoints = ["dep:fail", "fail/failpoints"]
 tls-rustls = ["tonic/tls-aws-lc"]
 tls-native = ["tonic/tls-native-roots"]
 tracing    = ["dep:tracing"]
@@ -26,6 +27,7 @@ rustdoc-args   = ["--cfg", "docsrs"]
 
 [dependencies]
 async-trait        = { workspace = true }
+fail               = { workspace = true, optional = true }
 futures            = { workspace = true }
 parking_lot        = { workspace = true }
 prost              = { workspace = true }
@@ -68,3 +70,8 @@ required-features = ["test-fakes"]
 [[test]]
 name = "serve_with_listener"
 required-features = ["test-fakes"]
+
+[[test]]
+name              = "failpoints"
+path              = "tests/failpoints.rs"
+required-features = ["failpoints", "test-fakes"]

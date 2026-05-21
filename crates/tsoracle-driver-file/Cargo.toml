@@ -13,7 +13,8 @@ keywords      = ["tsoracle", "wal", "storage", "fsync", "driver"]
 categories    = ["database-implementations", "filesystem"]
 
 [features]
-default = []
+default    = []
+failpoints = ["dep:fail", "fail/failpoints"]
 
 [package.metadata.docs.rs]
 all-features = false
@@ -21,6 +22,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 async-trait        = { workspace = true }
+fail               = { workspace = true, optional = true }
 crc32c             = { workspace = true }
 futures            = { workspace = true }
 libc               = "0.2"
@@ -35,3 +37,8 @@ tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.0" }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["test-util"] }
+
+[[test]]
+name              = "failpoints"
+path              = "tests/failpoints.rs"
+required-features = ["failpoints"]

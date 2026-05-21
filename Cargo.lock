@@ -796,6 +796,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fail"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe5e43d0f78a42ad591453aedb1d7ae631ce7ee445c7643691055a9ed8d3b01c"
+dependencies = [
+ "log",
+ "once_cell",
+ "rand 0.8.6",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1493,6 +1504,7 @@ name = "openraft-toolkit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fail",
  "futures",
  "openraft",
  "parking_lot",
@@ -2773,6 +2785,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "crc32c",
+ "fail",
  "futures",
  "libc",
  "parking_lot",
@@ -2824,6 +2837,7 @@ name = "tsoracle-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fail",
  "futures",
  "parking_lot",
  "prost",

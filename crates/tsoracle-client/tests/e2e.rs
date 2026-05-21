@@ -3,7 +3,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::sleep;
 use tonic::transport::Endpoint;
-use tsoracle_client::Client;
+use tsoracle_client::{Client, ClientError};
 use tsoracle_core::Epoch;
 use tsoracle_server::{Server, ServingState, test_fakes::InMemoryDriver};
 
@@ -159,6 +159,63 @@ async fn client_follows_leader_hint_on_first_call() {
     let _ = sdb_tx.send(());
     let _ = server_a_task.await;
     let _ = server_b_task.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_surfaces_error_when_only_endpoint_is_a_hintless_follower() {
+    // A follower with no known leader replies FailedPrecondition with an empty
+    // LeaderHint. The retry loop must clear its cached leader (the cache is
+    // now stale), exhaust the worklist, and surface the RPC error — not loop
+    // on the same dead endpoint or swallow the status.
+    let driver = Arc::new(InMemoryDriver::new());
+
+    let server = Server::builder()
+        .consensus_driver(driver.clone())
+        .build()
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let mut state_rx = server.state_rx.clone();
+
+    let (sd_tx, sd_rx) = tokio::sync::oneshot::channel::<()>();
+    let serve = tokio::spawn(async move {
+        server
+            .serve_with_listener(listener, async {
+                let _ = sd_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    driver.become_follower(None);
+    wait_until(&mut state_rx, |s| {
+        matches!(
+            s,
+            ServingState::NotServing {
+                leader_endpoint: None
+            }
+        )
+    })
+    .await;
+    wait_for_grpc_handshake(local_addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
+
+    let client = Client::connect(vec![local_addr.to_string()]).await.unwrap();
+    let err = client
+        .get_ts()
+        .await
+        .expect_err("hintless follower must surface NOT_LEADER");
+    match err {
+        ClientError::Rpc(status) => {
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        }
+        other => panic!("expected ClientError::Rpc(FailedPrecondition), got {other:?}"),
+    }
+
+    let _ = sd_tx.send(());
+    let _ = serve.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

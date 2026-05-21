@@ -20,6 +20,8 @@
 //!
 //! [`ConsensusDriver`]: tsoracle_consensus::ConsensusDriver
 
+#[macro_use]
+mod failpoint;
 mod driver;
 pub mod record;
 
