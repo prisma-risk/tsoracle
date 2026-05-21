@@ -187,7 +187,7 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     let leader_snapshot_log_id = timeout(Duration::from_secs(10), async move {
         loop {
             let metrics = leader_raft.metrics().borrow_watched().clone();
-            if let Some(snapshot_log_id) = metrics.snapshot.clone() {
+            if let Some(snapshot_log_id) = metrics.snapshot {
                 if snapshot_log_id.index >= 5 {
                     return snapshot_log_id;
                 }
@@ -230,12 +230,9 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
         .metrics()
         .borrow_watched()
         .snapshot
-        .clone()
         .expect("trailing follower must have installed a snapshot");
     assert!(
         follower_snapshot_log_id.index >= leader_snapshot_log_id.index,
-        "follower snapshot {:?} must cover the leader's snapshot {:?}",
-        follower_snapshot_log_id,
-        leader_snapshot_log_id,
+        "follower snapshot {follower_snapshot_log_id:?} must cover the leader's snapshot {leader_snapshot_log_id:?}",
     );
 }
