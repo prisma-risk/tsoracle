@@ -74,7 +74,7 @@ Per-driver recipes:
 
 ## Worked example: openraft
 
-The canonical openraft integration ships in [`tsoracle-driver-openraft`](https://github.com/prisma-risk/tsoracle/tree/main/crates/tsoracle-driver-openraft). The crate provides `OpenraftDriver` (the generic `ConsensusDriver` bridge), `HighWaterStateMachine` (the in-memory state machine + postcard snapshot codec), and the `OpenraftHighWaterHost` trait — the integration boundary.
+The canonical openraft integration ships in [`tsoracle-driver-openraft`](https://github.com/prisma-risk/tsoracle/tree/main/crates/tsoracle-driver-openraft). The crate provides `OpenraftDriver` (the generic `ConsensusDriver` bridge), `HighWaterStateMachine` (the state machine + postcard snapshot codec, with a pluggable `SnapshotStore` for persistence — an in-memory default plus an optional `RocksdbSnapshotStore` behind the `rocksdb-snapshot-store` feature), and the `OpenraftHighWaterHost` trait — the integration boundary.
 
 ### `OpenraftHighWaterHost` trait
 
@@ -89,7 +89,7 @@ Two host shapes ship as worked examples:
 - [`examples/openraft-standalone`](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-standalone) uses the bundled `StandaloneHost`, which owns its own raft cluster + `HighWaterStateMachine`. Pick this when TSO gets its own cluster. The example shows the minimum bring-up (rocksdb log store, tonic peer transport) plus a small `StandaloneRouter` wrapper that adds `NodeId -> tsoracle-addr` resolution for `LeaderHint` follower-redirect.
 - [`examples/openraft-piggyback`](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-piggyback) implements `OpenraftHighWaterHost` against a host service's existing raft (a tiny KV in the demo). Pick this when your service already runs openraft for other state. The example shows the envelope pattern: `AppData = HostCommand::{Kv(...), Tso(HighWaterCommand)}`, with both halves applied by the same state machine.
 
-Both examples use `Config::snapshot_policy = SnapshotPolicy::Never` because the bundled / demo state machines keep state in memory only; production deployments will pair persisted snapshots with the default policy.
+The standalone example runs with openraft's default snapshot policy because `HighWaterStateMachine` writes through to a `RocksdbSnapshotStore` sharing the same `Arc<DB>` as the log store. The piggyback example keeps `SnapshotPolicy::Never` because its custom `HostStateMachine` still holds state in memory only — once a downstream embedder persists their own SM (the same `SnapshotStore` trait shape works), they can pair persisted snapshots with the default policy.
 
 ## Single-leader requirement
 

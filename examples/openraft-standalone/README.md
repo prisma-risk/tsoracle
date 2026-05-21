@@ -45,7 +45,7 @@ Find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that pr
 
 ## What's in this example
 
-- `src/main.rs` — CLI parse, openraft `Config`, rocksdb log store, `Raft::new`, optional `initialize`, and the three-binding driver wiring: `StandaloneHost::new` → `OpenraftDriver::new` → `StandaloneRouter::new`. About 150 lines including config and bootstrap.
+- `src/main.rs` — CLI parse, openraft `Config`, one rocksdb instance with three CFs (`raft_log` / `raft_meta` for the log store, `raft_snapshot` for `RocksdbSnapshotStore`), `Raft::new`, optional `initialize`, and the three-binding driver wiring: `StandaloneHost::new` → `OpenraftDriver::new` → `StandaloneRouter::new`. About 150 lines including config and bootstrap.
 - `src/router.rs` — `StandaloneRouter`, a `ConsensusDriver` that delegates `load_high_water` / `persist_high_water` to `OpenraftDriver<StandaloneHost>` but reimplements `leadership_events` to populate `LeaderState::Follower::leader_endpoint` from the `--tso-peers` map. About 40 lines. This is the "compose the driver, override what you need" pattern.
 - `src/network.rs` — tonic raft peer transport (`AppendEntries`, `Vote`, chunked snapshot stream). The bulk of the example; ports across cleanly because the driver crate's `TypeConfig` is the only handle the network needs.
 - `proto/raft.proto`, `build.rs` — peer-RPC service definition + tonic codegen.
@@ -56,8 +56,6 @@ Find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that pr
 This example shows the **minimum** wiring to take `ConsensusDriver` end-to-end with openraft. Several layers are simplified for readability and **must** be replaced before any real deployment:
 
 - **Snapshot transport.** `src/network.rs` streams snapshots in 1 MiB chunks over a client-streaming RPC, so frames stay well under gRPC's 4 MiB default. It does *not* implement resume-on-disconnect: a peer that fails mid-install starts the next attempt at chunk 0. For state machines that grow into the hundreds of MiB you'll want a resumable protocol with an explicit offset.
-
-- **Snapshots are disabled** (`SnapshotPolicy::Never` in `main.rs`). The driver crate's `HighWaterStateMachine` keeps state and any built snapshot in memory only. With the default `SnapshotPolicy::LogsSinceLast(N)`, openraft would build a snapshot every N entries and then purge logs covered by it — but on restart the in-memory snapshot is gone, and the SM cannot rebuild the purged log prefix. The trade-off: the raft log grows unboundedly. A production deployment needs persisted snapshots on the state machine (a planned driver-crate follow-up) before re-enabling them.
 
 - **Membership operations.** This example bootstraps a fixed 3-node cluster via `--bootstrap`. There is no add-learner / promote / remove flow shown. Use openraft's `change_membership` API and gate it behind whatever authentication you require.
 

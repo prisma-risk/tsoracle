@@ -44,9 +44,9 @@ starts three node processes in the background, with logs under `examples/openraf
 
 What this example demonstrates:
 
-- The minimum boot sequence: `RocksdbLogStore` (from `openraft-toolkit`) + `HighWaterStateMachine` + `StandaloneHost` + `OpenraftDriver`. The integration code is the three `let` bindings in `main.rs` plus the `StandaloneRouter` wrapper for endpoint resolution.
+- The minimum boot sequence: `RocksdbLogStore` (from `openraft-toolkit`) + `RocksdbSnapshotStore` + `HighWaterStateMachine::with_store` + `StandaloneHost` + `OpenraftDriver`, all sharing one `Arc<DB>` so the log and snapshot fsync together. The integration code is a handful of `let` bindings in `main.rs` plus the `StandaloneRouter` wrapper for endpoint resolution.
 - The compose-the-driver pattern: when the driver crate's generic mapping doesn't suit your `C::Node`, wrap `ConsensusDriver` and reimplement only the methods that need host-specific knowledge.
-- Snapshots are disabled (`SnapshotPolicy::Never`) because the bundled `HighWaterStateMachine` keeps state and snapshots in memory only — the raft log therefore grows unboundedly. Persisted snapshots are a planned driver-crate follow-up; until then, real deployments need either that follow-up or a persisted SM of their own.
+- Snapshots are persisted through `RocksdbSnapshotStore` (sharing the same rocksdb instance as the log store), so the example runs with openraft's default snapshot policy and the raft log is bounded. Embedders with custom state machines that still keep state in memory should disable snapshots via `SnapshotPolicy::Never` — see the `openraft-piggyback` example.
 
 To observe failover: find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that process, watch the survivors elect, then re-issue `GetTs`. Typical re-leader latency is 2–5 seconds (election + fence).
 

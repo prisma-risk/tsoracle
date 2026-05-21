@@ -9,6 +9,17 @@ repository.workspace   = true
 homepage.workspace     = true
 authors.workspace      = true
 
+[features]
+default                = ["rocksdb-snapshot-store"]
+# Enables `RocksdbSnapshotStore`, a `SnapshotStore` impl keyed in a
+# caller-managed RocksDB column family. Pairs naturally with
+# `openraft_toolkit::RocksdbLogStore` so one `Arc<DB>` covers both the
+# raft log and the persisted snapshot. Default-on because the two example
+# crates in this workspace both use the rocksdb-backed log store anyway;
+# downstream consumers that want a custom snapshot backend can opt out via
+# `default-features = false`.
+rocksdb-snapshot-store = ["dep:rocksdb"]
+
 [dependencies]
 async-trait        = { workspace = true }
 futures            = { workspace = true }
@@ -16,6 +27,7 @@ openraft           = { workspace = true }
 postcard           = { workspace = true }
 openraft-toolkit   = { path = "../openraft-toolkit" }
 parking_lot        = { workspace = true }
+rocksdb            = { workspace = true, optional = true }
 serde              = { workspace = true }
 thiserror          = { workspace = true }
 tokio              = { workspace = true }
