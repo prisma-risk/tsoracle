@@ -9,11 +9,11 @@
 //!
 //! # Why in-memory only
 //!
-//! This is the Phase A driver: durability comes from the raft log (which the
-//! caller persists via their own `RaftLogStorage`, e.g.
-//! `openraft_toolkit::RocksdbLogStore`). On restart the log replays into the
-//! state machine, rebuilding `current_value`. A persisted backend can ship as
-//! a follow-up without changing the trait wiring.
+//! Durability comes from the raft log, which the caller persists via their
+//! own `RaftLogStorage` (e.g. `openraft_toolkit::RocksdbLogStore`). On
+//! restart the log replays into the state machine, rebuilding
+//! `current_value`. A persisted backend can be added later without changing
+//! the trait wiring.
 
 use std::io;
 use std::io::Cursor;

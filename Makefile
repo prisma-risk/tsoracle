@@ -30,7 +30,7 @@ WORKSPACE_VERSION := $(shell grep -E '^version[[:space:]]*=' Cargo.toml | head -
 
 .PHONY: all ci check fmt fmt-check lint fix build test test-failpoints doc \
         proto proto-lint proto-fmt proto-fmt-check proto-breaking \
-        deny coverage clean help install-hooks \
+        deny coverage coverage-html clean help install-hooks \
         bench bench-throughput-sweep bench-latency \
         release-bump release-dry-run release-publish release-tag
 
@@ -116,23 +116,52 @@ deny:
 # integration tests on tsoracle-server, and including them would dilute the
 # signal. Requires cargo-llvm-cov: cargo install cargo-llvm-cov.
 #
-# `openraft-toolkit/src/lifecycle/{bootstrap,membership}.rs` are excluded by
-# `--ignore-filename-regex`: they are thin async wrappers around real
-# `Raft<C, SM>` calls and need a live raft to execute, which the toolkit's own
-# tests deliberately don't stand up (see `tests/lifecycle.rs` header). Coverage
-# for those wrappers is earned downstream by the openraft consumer that uses
-# them; the compile-time signature shims in `tests/lifecycle.rs` catch API drift.
+# `cargo llvm-cov` accepts only a single `--ignore-filename-regex`, so the
+# per-file exclusions below are built up as separate Make variables (one per
+# logical reason) and joined into a single regex at the end.
+
+# Thin async wrappers around real `Raft<C, SM>` calls — they need a live raft
+# to execute, which the toolkit's own tests deliberately don't stand up (see
+# `tests/lifecycle.rs` header). Coverage is earned downstream by the openraft
+# consumer; the compile-time signature shims catch API drift.
+COV_IGNORE_OPENRAFT_LIFECYCLE := crates/openraft-toolkit/src/lifecycle/(bootstrap|membership)
+
+# `clap` argument-parsing wrapper around `stress::run` /
+# `stress::run_inject_violation`. The library entry points are exercised
+# end-to-end by `benchmarks/stress/tests/smoke.rs`.
+COV_IGNORE_STRESS_BIN := benchmarks/stress/src/bin/stress
+
+# `unimplemented!()` placeholders for future topology variants — intentionally
+# unreachable from any current test path.
+COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/(raft|process)
+
+COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_STRESS_TOPO_STUBS))\.rs
+
+# Shared exclude flags so `coverage` (lcov for CI) and `coverage-html` (local
+# browsable report) cannot drift apart on which crates participate.
+COV_EXCLUDES := \
+    --exclude tsoracle \
+    --exclude example-embedded-server \
+    --exclude example-failover-demo \
+    --exclude example-openraft-piggyback \
+    --exclude example-openraft-standalone \
+    --exclude bench-minimal
 
 coverage:
 	$(CARGO) llvm-cov \
 	  --workspace --all-features \
-	  --exclude tsoracle \
-	  --exclude example-embedded-server \
-	  --exclude example-failover-demo \
-	  --exclude example-openraft-cluster \
-	  --exclude bench-minimal \
-	  --ignore-filename-regex 'crates/openraft-toolkit/src/lifecycle/(bootstrap|membership)\.rs$$' \
+	  $(COV_EXCLUDES) \
+	  --ignore-filename-regex '$(COV_IGNORE)$$' \
 	  --lcov --output-path lcov.info
+
+# Local HTML report. Output at target/llvm-cov/html/index.html; `--open` opens
+# it in the default browser. Re-runs the test suite, same as `coverage`.
+coverage-html:
+	$(CARGO) llvm-cov \
+	  --workspace --all-features \
+	  $(COV_EXCLUDES) \
+	  --ignore-filename-regex '$(COV_IGNORE)$$' \
+	  --html --open
 
 # Release --------------------------------------------------------------------
 # The release flow has four steps, mapped to four explicit targets. There is
@@ -267,6 +296,8 @@ help:
 	@echo ""
 	@echo "  coverage         cargo llvm-cov on library crates -> lcov.info"
 	@echo "                   (excludes tsoracle-bin and examples/)"
+	@echo "  coverage-html    Same as coverage; renders HTML at target/llvm-cov/html"
+	@echo "                   and opens it in the default browser."
 	@echo ""
 	@echo "  bench            Run the bench-minimal characterization workload."
 	@echo "  bench-throughput-sweep  Run bench across clients=1..1024 (--json files)."
