@@ -1,0 +1,42 @@
+[package]
+name = "stress"
+description = "tsoracle stress + chaos harness: load × nemesis × invariant checking. Not a published crate."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+readme.workspace       = true
+publish = false
+
+[features]
+default = []
+# Enables in-process failpoint chaos in mem/raft topologies. When off,
+# `arm_failpoint`/`disarm_failpoint` log a warning and return Skipped.
+stress-failpoints = ["dep:fail", "tsoracle-server/failpoints"]
+
+[dependencies]
+anyhow             = { workspace = true }
+async-trait        = { workspace = true }
+clap               = { workspace = true, features = ["derive"] }
+hdrhistogram       = { workspace = true }
+humantime          = { workspace = true }
+rand               = { workspace = true }
+serde              = { workspace = true, features = ["derive"] }
+serde_json         = { workspace = true }
+tokio              = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+tonic              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+tsoracle-server    = { path = "../../crates/tsoracle-server",    version = "0.1.0", features = ["test-fakes"] }
+tsoracle-client    = { path = "../../crates/tsoracle-client",    version = "0.1.0" }
+tsoracle-core      = { path = "../../crates/tsoracle-core",      version = "0.1.0" }
+tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.0" }
+
+fail = { workspace = true, optional = true }
+
+[[bin]]
+name = "stress"
+path = "src/bin/stress.rs"

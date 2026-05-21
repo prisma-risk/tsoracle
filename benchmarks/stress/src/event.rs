@@ -1,0 +1,1 @@
+//! `SupervisorEvent`: unified mpsc payload.

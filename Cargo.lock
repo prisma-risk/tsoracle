@@ -2331,6 +2331,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "stress"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "fail",
+ "hdrhistogram",
+ "humantime",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "tsoracle-client",
+ "tsoracle-consensus",
+ "tsoracle-core",
+ "tsoracle-server",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
