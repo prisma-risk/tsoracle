@@ -138,7 +138,15 @@ COV_IGNORE_STRESS_BIN := benchmarks/stress/src/bin/stress
 # unreachable from any current test path.
 COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/(raft|process)
 
-COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_STRESS_TOPO_STUBS))\.rs
+# Shared integration-test bootstrap helper. Gated by `test-support` (and
+# `cfg(test)`); never ships in the published library. Lives in `src/` only
+# because Cargo doesn't let multiple crates share `tests/common/mod.rs`.
+# Exercised implicitly by every test that calls `boot_server` /
+# `wait_for_grpc_handshake`; measuring it as production source would punish
+# legitimate "rare race" retry paths that local CI never trips.
+COV_IGNORE_TEST_SUPPORT := crates/tsoracle-server/src/test_support
+
+COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_STRESS_TOPO_STUBS)|$(COV_IGNORE_TEST_SUPPORT))\.rs
 
 # Shared exclude flags so `coverage` (lcov for CI) and `coverage-html` (local
 # browsable report) cannot drift apart on which crates participate.

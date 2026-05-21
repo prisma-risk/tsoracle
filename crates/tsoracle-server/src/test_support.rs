@@ -59,18 +59,13 @@ impl BootedServer {
     /// already exited (for example because its leader-watch task died),
     /// the receiver is gone and the send returns `Err` — that is the
     /// expected outcome for those failure-mode tests, and the task's
-    /// recorded result is surfaced regardless.
+    /// recorded result is surfaced regardless. A panicked or cancelled
+    /// task surfaces via `.expect` so the test fails loudly.
     pub async fn shutdown(self) -> Result<(), ServerError> {
         let _ = self.shutdown_tx.send(());
-        match self.serve_handle.await {
-            Ok(result) => result,
-            Err(join_err) => {
-                if join_err.is_panic() {
-                    std::panic::resume_unwind(join_err.into_panic());
-                }
-                panic!("server task was cancelled before shutdown");
-            }
-        }
+        self.serve_handle
+            .await
+            .expect("server task panicked or was cancelled before shutdown")
     }
 }
 
@@ -115,18 +110,13 @@ pub struct BootedRouter {
 }
 
 impl BootedRouter {
-    /// Send the shutdown signal and join the spawned task.
+    /// Send the shutdown signal and join the spawned task. A panicked or
+    /// cancelled router task surfaces via `.expect` so the test fails loudly.
     pub async fn shutdown(self) -> Result<(), tonic::transport::Error> {
         let _ = self.shutdown_tx.send(());
-        match self.serve_handle.await {
-            Ok(result) => result,
-            Err(join_err) => {
-                if join_err.is_panic() {
-                    std::panic::resume_unwind(join_err.into_panic());
-                }
-                panic!("router task was cancelled before shutdown");
-            }
-        }
+        self.serve_handle
+            .await
+            .expect("router task panicked or was cancelled before shutdown")
     }
 
     /// Abort the spawned task without graceful shutdown. Failpoints tests
