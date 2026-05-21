@@ -14,11 +14,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use openraft::Raft;
-use openraft_toolkit::LeadershipState;
-use openraft_toolkit::lifecycle::leader::stream_from_receiver;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
 use tsoracle_driver_openraft::{HighWaterStateMachine, OpenraftDriver, StandaloneHost, TypeConfig};
+use tsoracle_openraft_toolkit::LeadershipState;
+use tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver;
 
 /// `ConsensusDriver` wrapper that delegates load/persist to the bundled
 /// `OpenraftDriver<StandaloneHost>` and rebuilds `leadership_events()` over

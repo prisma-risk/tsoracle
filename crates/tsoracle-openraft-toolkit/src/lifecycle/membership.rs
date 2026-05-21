@@ -62,7 +62,7 @@ where
 {
     match raft.change_membership(voters, retain).await {
         Ok(_) => {
-            info!("openraft-toolkit: membership change applied");
+            info!("tsoracle-openraft-toolkit: membership change applied");
             Ok(())
         }
         Err(RaftError::APIError(ClientWriteError::ChangeMembershipError(e))) => {
@@ -94,7 +94,7 @@ where
 {
     match raft.add_learner(id, node, blocking).await {
         Ok(_) => {
-            info!("openraft-toolkit: learner added");
+            info!("tsoracle-openraft-toolkit: learner added");
             Ok(())
         }
         Err(RaftError::APIError(ClientWriteError::ForwardToLeader(f))) => {

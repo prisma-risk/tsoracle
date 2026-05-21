@@ -13,26 +13,24 @@ PROTO_DIR  := crates/tsoracle-proto/proto
 # Note: `#` must be escaped in Makefile values, otherwise it starts a comment.
 PROTO_BASE ?= .git\#branch=main,subdir=crates/tsoracle-proto/proto
 
-# Publish order for the release-* targets — must match the dependency order
+# Publish order for `release-dry-run` — must match the dependency order
 # documented in CONTRIBUTING.md (each crate depends only on those before it).
 RELEASE_CRATES := \
     tsoracle-proto \
     tsoracle-core \
+    tsoracle-openraft-toolkit \
     tsoracle-consensus \
     tsoracle-driver-file \
+    tsoracle-driver-openraft \
     tsoracle-server \
     tsoracle-client \
     tsoracle-bin
-
-# Workspace version read once from the root Cargo.toml. Used by release-tag to
-# enforce that the tag, HEAD's commit message, and the bumped version all agree.
-WORKSPACE_VERSION := $(shell grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 
 .PHONY: all ci check fmt fmt-check lint fix build test test-failpoints doc \
         proto proto-lint proto-fmt proto-fmt-check proto-breaking \
         deny coverage coverage-html clean help install-hooks \
         bench bench-throughput-sweep bench-latency \
-        release-bump release-dry-run release-publish release-tag
+        release-dry-run
 
 # Default target: full CI parity.
 all: ci
@@ -72,7 +70,7 @@ test-failpoints:
 	$(CARGO) test --workspace \
 	  --features tsoracle-driver-file/failpoints \
 	  --features tsoracle-server/failpoints,tsoracle-server/test-fakes \
-	  --features openraft-toolkit/failpoints,openraft-toolkit/rocksdb-log-store
+	  --features tsoracle-openraft-toolkit/failpoints,tsoracle-openraft-toolkit/rocksdb-log-store
 
 doc:
 	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
@@ -127,7 +125,7 @@ deny:
 # to execute, which the toolkit's own tests deliberately don't stand up (see
 # `tests/lifecycle.rs` header). Coverage is earned downstream by the openraft
 # consumer; the compile-time signature shims catch API drift.
-COV_IGNORE_OPENRAFT_LIFECYCLE := crates/openraft-toolkit/src/lifecycle/(bootstrap|membership)
+COV_IGNORE_OPENRAFT_LIFECYCLE := crates/tsoracle-openraft-toolkit/src/lifecycle/(bootstrap|membership)
 
 # `clap` argument-parsing wrapper around `stress::run` /
 # `stress::run_inject_violation`. The library entry points are exercised
@@ -175,90 +173,22 @@ coverage-html:
 	  --html --open
 
 # Release --------------------------------------------------------------------
-# The release flow has four steps, mapped to four explicit targets. There is
-# deliberately no `release` umbrella target: a partial publish should never be
-# the consequence of a single `make` invocation.
-#
-#   1) make release-bump VERSION=X.Y.Z   # bump workspace + intra-workspace deps, commit
-#   2) make release-dry-run              # package every crate in publish order, fail fast
-#   3) make release-publish              # the real, irreversible publishes
-#   4) make release-tag                  # annotated tag from workspace.package.version, push
-#
-# Step 1 uses `cargo set-version` (from cargo-edit). Install with:
-#   cargo install cargo-edit
-# Without it, the per-crate `tsoracle-X = { ..., version = "..." }` refs would
-# be left at the old version and the published metadata would be inconsistent.
+# Releases are driven by release-plz (see release-plz.toml at the repo root
+# and .github/workflows/release-plz.yml). Conventional-commit-driven bumps open
+# a release PR; merging it tags + publishes from CI. This target is the
+# local-validator complement: `cargo publish --dry-run` over every publishable
+# crate in dep order. Useful before merging anything that touches manifest
+# metadata, and required for the very first bootstrap publish (which release-plz
+# can't perform — every crate must already exist on crates.io before the bot
+# can manage it).
 
-release-bump:
-	@: $${VERSION:?VERSION is required. Usage: make release-bump VERSION=X.Y.Z}
-	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$$' \
-	  || { echo "error: VERSION='$(VERSION)' is not X.Y.Z[-pre]"; exit 1; }
-	@test -z "$$(git status --porcelain)" \
-	  || { echo "error: working tree has uncommitted changes — commit or stash first"; exit 1; }
-	@branch=$$(git symbolic-ref --short HEAD); \
-	  test "$$branch" = "main" \
-	  || { echo "error: not on main (current branch: $$branch)"; exit 1; }
-	@command -v cargo-set-version >/dev/null 2>&1 \
-	  || { echo "error: cargo-set-version not found. Install with: cargo install cargo-edit"; exit 1; }
-	$(CARGO) set-version --workspace $(VERSION)
-	$(CARGO) update --workspace
-	git add Cargo.toml crates/*/Cargo.toml Cargo.lock
-	git commit -m "chore: release v$(VERSION)"
-	@echo
-	@echo "Bumped workspace to v$(VERSION). Next: make release-dry-run"
-
-# Dry-run packaging for every crate, in publish order. Catches packaging,
-# metadata, and license-allow-list issues before any irreversible upload.
 release-dry-run:
 	@for crate in $(RELEASE_CRATES); do \
 	  echo "==> cargo publish --dry-run -p $$crate"; \
 	  $(CARGO) publish --dry-run -p $$crate || exit 1; \
 	done
 	@echo
-	@echo "All crates packaged cleanly. Next: make release-publish"
-
-# Real publish loop. If a publish fails mid-list, the upstream crates are
-# already on crates.io permanently — fix the failed crate and resume by
-# re-invoking this target (already-published versions are idempotent no-ops).
-release-publish:
-	@test -z "$$(git status --porcelain)" \
-	  || { echo "error: working tree has uncommitted changes — release commit must be HEAD"; exit 1; }
-	@branch=$$(git symbolic-ref --short HEAD); \
-	  test "$$branch" = "main" \
-	  || { echo "error: not on main (current branch: $$branch)"; exit 1; }
-	@expected="chore: release v$(WORKSPACE_VERSION)"; \
-	  actual=$$(git log -1 --pretty=%s); \
-	  test "$$actual" = "$$expected" \
-	    || { echo "error: HEAD subject is '$$actual', expected '$$expected'. Did you run release-bump?"; exit 1; }
-	@for crate in $(RELEASE_CRATES); do \
-	  echo "==> cargo publish -p $$crate"; \
-	  $(CARGO) publish -p $$crate \
-	    || { echo; echo "publish failed at $$crate. Fix the issue and re-run: make release-publish"; exit 1; }; \
-	done
-	@echo
-	@echo "All crates published at v$(WORKSPACE_VERSION). Next: make release-tag"
-
-# Tag the release commit and push the tag. Reads the version from the root
-# Cargo.toml so the tag can never disagree with what was actually published.
-release-tag:
-	@test -n "$(WORKSPACE_VERSION)" \
-	  || { echo "error: could not parse workspace.package.version from Cargo.toml"; exit 1; }
-	@test -z "$$(git status --porcelain)" \
-	  || { echo "error: working tree has uncommitted changes"; exit 1; }
-	@branch=$$(git symbolic-ref --short HEAD); \
-	  test "$$branch" = "main" \
-	  || { echo "error: not on main (current branch: $$branch)"; exit 1; }
-	@expected="chore: release v$(WORKSPACE_VERSION)"; \
-	  actual=$$(git log -1 --pretty=%s); \
-	  test "$$actual" = "$$expected" \
-	    || { echo "error: HEAD subject is '$$actual', expected '$$expected'. Did you run release-bump?"; exit 1; }
-	@git rev-parse "v$(WORKSPACE_VERSION)" >/dev/null 2>&1 \
-	  && { echo "error: tag v$(WORKSPACE_VERSION) already exists locally"; exit 1; } \
-	  || true
-	git tag -a "v$(WORKSPACE_VERSION)" -m "Release v$(WORKSPACE_VERSION)"
-	git push origin "v$(WORKSPACE_VERSION)"
-	@echo
-	@echo "Tagged and pushed v$(WORKSPACE_VERSION). Draft the release notes on GitHub."
+	@echo "All crates packaged cleanly."
 
 # Benchmarks ----------------------------------------------------------------
 # `bench-minimal` is a characterization tool, not a CI gate. None of these
@@ -316,11 +246,7 @@ help:
 	@echo ""
 	@echo "  install-hooks    Point this clone's git at .husky/ (pre-commit fmt+lint)."
 	@echo ""
-	@echo "Release flow (run in order; see CONTRIBUTING.md):"
-	@echo "  release-bump     1) Bump workspace + intra-workspace dep refs, commit."
-	@echo "                      Usage: make release-bump VERSION=X.Y.Z"
-	@echo "  release-dry-run  2) cargo publish --dry-run for every crate, in order."
-	@echo "  release-publish  3) Real publishes to crates.io, in order."
-	@echo "  release-tag      4) Annotated tag from workspace version, push to origin."
+	@echo "  release-dry-run  cargo publish --dry-run over every publishable crate, in dep order."
+	@echo "                   Real releases run via release-plz (.github/workflows/release-plz.yml)."
 	@echo ""
 	@echo "  help             this message"

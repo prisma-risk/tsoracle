@@ -33,10 +33,10 @@ use openraft::type_config::alias::LogIdOf;
 use openraft::type_config::alias::SnapshotMetaOf;
 use openraft::type_config::alias::SnapshotOf;
 use openraft::type_config::alias::StoredMembershipOf;
-use openraft_toolkit::{Flat, GroupPrefixed, KeySpace, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
+use tsoracle_openraft_toolkit::{Flat, GroupPrefixed, KeySpace, RocksdbLogStore};
 
 mod common;
 use common::TestTypeConfig;

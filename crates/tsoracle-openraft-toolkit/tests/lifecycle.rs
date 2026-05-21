@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use openraft_toolkit::BootstrapMode;
+use tsoracle_openraft_toolkit::BootstrapMode;
 
 mod common;
 use common::{TestPeer, TestTypeConfig};
@@ -37,7 +37,7 @@ where
     C: openraft::RaftTypeConfig,
     SM: openraft::storage::RaftStateMachine<C>,
 {
-    let fut = async move { openraft_toolkit::bootstrap(raft, mode).await };
+    let fut = async move { tsoracle_openraft_toolkit::bootstrap(raft, mode).await };
     drop(fut);
 }
 
@@ -52,7 +52,8 @@ fn _change_membership_signature_compiles<C, SM>(
     C: openraft::RaftTypeConfig,
     SM: openraft::storage::RaftStateMachine<C>,
 {
-    let fut = async move { openraft_toolkit::change_membership(raft, voters, false).await };
+    let fut =
+        async move { tsoracle_openraft_toolkit::change_membership(raft, voters, false).await };
     drop(fut);
 }
 
@@ -65,7 +66,7 @@ fn _add_learner_signature_compiles<C, SM>(
     C: openraft::RaftTypeConfig,
     SM: openraft::storage::RaftStateMachine<C>,
 {
-    let fut = async move { openraft_toolkit::add_learner(raft, id, node, false).await };
+    let fut = async move { tsoracle_openraft_toolkit::add_learner(raft, id, node, false).await };
     drop(fut);
 }
 
@@ -76,12 +77,12 @@ fn _add_learner_signature_compiles<C, SM>(
 #[allow(dead_code)]
 fn _leadership_events_signature_compiles<C, SM>(
     raft: &openraft::Raft<C, SM>,
-) -> impl futures::Stream<Item = openraft_toolkit::LeadershipState<C>>
+) -> impl futures::Stream<Item = tsoracle_openraft_toolkit::LeadershipState<C>>
 where
     C: openraft::RaftTypeConfig,
     SM: openraft::storage::RaftStateMachine<C>,
 {
-    openraft_toolkit::leadership_events(raft)
+    tsoracle_openraft_toolkit::leadership_events(raft)
 }
 
 #[tokio::test]
@@ -89,7 +90,7 @@ async fn leadership_events_emits_initial_state_and_terminates_on_drop() {
     use futures::StreamExt;
     use openraft::RaftMetrics;
     use openraft::type_config::TypeConfigExt;
-    use openraft_toolkit::LeadershipState;
+    use tsoracle_openraft_toolkit::LeadershipState;
 
     // Construct a `RaftMetrics<TestTypeConfig>` via the public `new_initial`
     // constructor — `Default` isn't implemented on alpha.20's `RaftMetrics`.
@@ -101,9 +102,9 @@ async fn leadership_events_emits_initial_state_and_terminates_on_drop() {
     // runtime-abstracted alias `WatchReceiverOf<C, RaftMetrics<C>>` exactly.
     let (tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
 
-    let mut stream = std::pin::pin!(openraft_toolkit::lifecycle::leader::stream_from_receiver::<
-        TestTypeConfig,
-    >(rx));
+    let mut stream = std::pin::pin!(
+        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
+    );
 
     // Initial state emits unconditionally.
     let first = stream.next().await.expect("initial state emitted");
@@ -133,15 +134,15 @@ async fn leadership_events_dedups_repeated_class_until_transition() {
     use openraft::ServerState;
     use openraft::WatchSender;
     use openraft::type_config::TypeConfigExt;
-    use openraft_toolkit::LeadershipState;
+    use tsoracle_openraft_toolkit::LeadershipState;
 
     // Start in Follower.
     let initial: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
     let (tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(initial);
 
-    let mut stream = std::pin::pin!(openraft_toolkit::lifecycle::leader::stream_from_receiver::<
-        TestTypeConfig,
-    >(rx));
+    let mut stream = std::pin::pin!(
+        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
+    );
 
     // First poll yields the initial Follower.
     let first = stream.next().await.expect("initial");
@@ -184,17 +185,18 @@ async fn leadership_events_projects_candidate_learner_and_shutdown() {
     use openraft::RaftMetrics;
     use openraft::ServerState;
     use openraft::type_config::TypeConfigExt;
-    use openraft_toolkit::LeadershipState;
+    use tsoracle_openraft_toolkit::LeadershipState;
 
     async fn first_emission(state: ServerState, term: u64) -> LeadershipState<TestTypeConfig> {
         let mut metrics: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
         metrics.state = state;
         metrics.current_term = term;
         let (_tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
-        let mut stream =
-            std::pin::pin!(openraft_toolkit::lifecycle::leader::stream_from_receiver::<
-                TestTypeConfig,
-            >(rx));
+        let mut stream = std::pin::pin!(
+            tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(
+                rx
+            )
+        );
         stream.next().await.expect("initial state emitted")
     }
 
@@ -228,7 +230,7 @@ async fn leadership_events_resolves_follower_leader_when_in_membership() {
     use openraft::StoredMembership;
     use openraft::type_config::TypeConfigExt;
     use openraft::type_config::alias::StoredMembershipOf;
-    use openraft_toolkit::LeadershipState;
+    use tsoracle_openraft_toolkit::LeadershipState;
 
     let peer_2 = TestPeer {
         addr: "host-2:9000".into(),
@@ -251,9 +253,9 @@ async fn leadership_events_resolves_follower_leader_when_in_membership() {
     metrics.membership_config = Arc::new(stored);
 
     let (_tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
-    let mut stream = std::pin::pin!(openraft_toolkit::lifecycle::leader::stream_from_receiver::<
-        TestTypeConfig,
-    >(rx));
+    let mut stream = std::pin::pin!(
+        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
+    );
 
     let first = stream.next().await.expect("initial state emitted");
     match first {
@@ -284,7 +286,7 @@ async fn leadership_events_drops_follower_leader_when_not_in_membership() {
     use openraft::StoredMembership;
     use openraft::type_config::TypeConfigExt;
     use openraft::type_config::alias::StoredMembershipOf;
-    use openraft_toolkit::LeadershipState;
+    use tsoracle_openraft_toolkit::LeadershipState;
 
     let nodes: BTreeMap<u64, TestPeer> = BTreeMap::from([(
         1,
@@ -302,9 +304,9 @@ async fn leadership_events_drops_follower_leader_when_not_in_membership() {
     metrics.membership_config = Arc::new(stored);
 
     let (_tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
-    let mut stream = std::pin::pin!(openraft_toolkit::lifecycle::leader::stream_from_receiver::<
-        TestTypeConfig,
-    >(rx));
+    let mut stream = std::pin::pin!(
+        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
+    );
 
     let first = stream.next().await.expect("initial state emitted");
     assert!(

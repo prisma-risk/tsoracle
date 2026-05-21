@@ -2,8 +2,8 @@
 
 use std::fmt;
 
-use openraft_toolkit::declare_raft_types_ext;
 use serde::{Deserialize, Serialize};
+use tsoracle_openraft_toolkit::declare_raft_types_ext;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestPeer {

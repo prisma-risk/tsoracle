@@ -1,4 +1,4 @@
-//! Smoke test for `openraft_toolkit::test_fakes::MemNetwork`.
+//! Smoke test for `tsoracle_openraft_toolkit::test_fakes::MemNetwork`.
 //!
 //! Stands up a 3-voter cluster with the in-memory network, asserts leader
 //! election within 10 seconds, writes one log entry through the leader, and
@@ -12,11 +12,11 @@ use std::time::Duration;
 use openraft::storage::{EntryResponder, RaftSnapshotBuilder, RaftStateMachine, Snapshot};
 use openraft::type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
 use openraft::{Config, EntryPayload, OptionalSend, Raft, StoredMembership};
-use openraft_toolkit::declare_raft_types_ext;
-use openraft_toolkit::test_fakes::MemNetwork;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
+use tsoracle_openraft_toolkit::declare_raft_types_ext;
+use tsoracle_openraft_toolkit::test_fakes::MemNetwork;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmokeNode;
@@ -163,9 +163,9 @@ impl RaftStateMachine<SmokeConfig> for SmokeStateMachine {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_node_mem_network_elects_and_replicates() {
-    use openraft_toolkit::{Flat, RocksdbLogStore};
     use rocksdb::{ColumnFamilyDescriptor, DB, Options};
     use tempfile::TempDir;
+    use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 
     let net = MemNetwork::<SmokeConfig>::new();
     let cfg = Arc::new(

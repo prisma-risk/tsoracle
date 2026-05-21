@@ -44,7 +44,7 @@ starts three node processes in the background, with logs under `examples/openraf
 
 What this example demonstrates:
 
-- The minimum boot sequence: `RocksdbLogStore` (from `openraft-toolkit`) + `RocksdbSnapshotStore` + `HighWaterStateMachine::with_store` + `StandaloneHost` + `OpenraftDriver`, all sharing one `Arc<DB>` so the log and snapshot fsync together. The integration code is a handful of `let` bindings in `main.rs` plus the `StandaloneRouter` wrapper for endpoint resolution.
+- The minimum boot sequence: `RocksdbLogStore` (from `tsoracle-openraft-toolkit`) + `RocksdbSnapshotStore` + `HighWaterStateMachine::with_store` + `StandaloneHost` + `OpenraftDriver`, all sharing one `Arc<DB>` so the log and snapshot fsync together. The integration code is a handful of `let` bindings in `main.rs` plus the `StandaloneRouter` wrapper for endpoint resolution.
 - The compose-the-driver pattern: when the driver crate's generic mapping doesn't suit your `C::Node`, wrap `ConsensusDriver` and reimplement only the methods that need host-specific knowledge.
 - Snapshots are persisted through `RocksdbSnapshotStore` (sharing the same rocksdb instance as the log store), so the example runs with openraft's default snapshot policy and the raft log is bounded. Embedders with custom state machines that still keep state in memory should disable snapshots via `SnapshotPolicy::Never` — see the `openraft-piggyback` example.
 
@@ -58,7 +58,7 @@ To observe failover: find the current leader in the logs (`grep "Leader" .data/n
 cargo run -p example-openraft-piggyback
 ```
 
-The demo boots a 3-node in-process cluster via `openraft_toolkit::test_fakes::MemNetwork`, runs a tsoracle server on each (each bound to an OS-assigned loopback port via `TcpListener::bind("127.0.0.1:0")`), and walks through: host KV writes that land in the host SM without touching the TSO field, GetTs bursts that are allocator-served (high-water does *not* advance per call), and a failover that asserts the freshness invariant survives (`new_high_water > old_high_water` AND `next_ts > last_pre_failover_ts`). Runs in roughly 3 seconds; the same `run_demo()` function backs `tests/smoke.rs`.
+The demo boots a 3-node in-process cluster via `tsoracle_openraft_toolkit::test_fakes::MemNetwork`, runs a tsoracle server on each (each bound to an OS-assigned loopback port via `TcpListener::bind("127.0.0.1:0")`), and walks through: host KV writes that land in the host SM without touching the TSO field, GetTs bursts that are allocator-served (high-water does *not* advance per call), and a failover that asserts the freshness invariant survives (`new_high_water > old_high_water` AND `next_ts > last_pre_failover_ts`). Runs in roughly 3 seconds; the same `run_demo()` function backs `tests/smoke.rs`.
 
 The envelope pattern at the heart of the example:
 

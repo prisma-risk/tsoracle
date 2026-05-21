@@ -13,7 +13,7 @@ authors.workspace      = true
 default                = ["rocksdb-snapshot-store"]
 # Enables `RocksdbSnapshotStore`, a `SnapshotStore` impl keyed in a
 # caller-managed RocksDB column family. Pairs naturally with
-# `openraft_toolkit::RocksdbLogStore` so one `Arc<DB>` covers both the
+# `tsoracle_openraft_toolkit::RocksdbLogStore` so one `Arc<DB>` covers both the
 # raft log and the persisted snapshot. Default-on because the two example
 # crates in this workspace both use the rocksdb-backed log store anyway;
 # downstream consumers that want a custom snapshot backend can opt out via
@@ -28,12 +28,12 @@ postcard           = { workspace = true }
 # `default-features = false` so this crate does not unilaterally pull the
 # toolkit's `rocksdb-log-store` feature (and its transitive `librocksdb-sys` →
 # `bindgen` → `clang-sys` chain) into every consumer. The driver's `src/` only
-# touches `openraft_toolkit::{LeadershipState, lifecycle, declare_raft_types_ext}`,
+# touches `tsoracle_openraft_toolkit::{LeadershipState, lifecycle, declare_raft_types_ext}`,
 # all of which live outside the feature-gated `log_store` module. Workspace
 # members that need `RocksdbLogStore` (examples, this crate's dev-deps) opt in
 # explicitly with `features = ["rocksdb-log-store"]` and cargo feature
 # unification re-enables it for their builds.
-openraft-toolkit   = { path = "../openraft-toolkit", default-features = false }
+tsoracle-openraft-toolkit   = { path = "../tsoracle-openraft-toolkit", version = "0.1.0", default-features = false }
 parking_lot        = { workspace = true }
 rocksdb            = { workspace = true, optional = true }
 serde              = { workspace = true }
@@ -46,7 +46,7 @@ tsoracle-core      = { path = "../tsoracle-core", version = "0.1.0" }
 
 [dev-dependencies]
 anyhow           = { workspace = true }
-openraft-toolkit = { path = "../openraft-toolkit", features = ["rocksdb-log-store", "test-fakes"] }
+tsoracle-openraft-toolkit = { path = "../tsoracle-openraft-toolkit", version = "0.1.0", features = ["rocksdb-log-store", "test-fakes"] }
 proptest         = { workspace = true }
 rocksdb          = { workspace = true }
 tempfile         = { workspace = true }

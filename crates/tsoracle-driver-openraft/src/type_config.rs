@@ -1,13 +1,13 @@
 //! `RaftTypeConfig` for the openraft-backed driver.
 //!
-//! Built via `openraft_toolkit::declare_raft_types_ext!` so the type config
+//! Built via `tsoracle_openraft_toolkit::declare_raft_types_ext!` so the type config
 //! inherits the toolkit's defaults (`NodeId = u64`, `Term = u64`, `LeaderId =
 //! leader_id_adv::LeaderId<u64, u64>`, `Responder = OneshotResponder`).
 
 use std::io::Cursor;
 
-use openraft_toolkit::declare_raft_types_ext;
 use serde::{Deserialize, Serialize};
+use tsoracle_openraft_toolkit::declare_raft_types_ext;
 
 use crate::log_entry::HighWaterCommand;
 

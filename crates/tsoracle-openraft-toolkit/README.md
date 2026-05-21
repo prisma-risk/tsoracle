@@ -1,4 +1,4 @@
-# openraft-toolkit
+# tsoracle-openraft-toolkit
 
 Reusable glue for building services on top of [openraft](https://github.com/databendlabs/openraft).
 

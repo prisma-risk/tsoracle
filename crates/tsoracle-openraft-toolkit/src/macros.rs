@@ -53,7 +53,7 @@
 /// # Examples
 ///
 /// ```ignore
-/// use openraft_toolkit::declare_raft_types_ext;
+/// use tsoracle_openraft_toolkit::declare_raft_types_ext;
 ///
 /// declare_raft_types_ext! {
 ///     pub MyTypeConfig:

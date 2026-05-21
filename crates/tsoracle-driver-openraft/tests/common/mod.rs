@@ -21,14 +21,14 @@ use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
 };
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
-use openraft_toolkit::test_fakes::{MemNetwork, PartitionController};
-use openraft_toolkit::{Flat, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 use tokio::time::Instant;
 use tsoracle_driver_openraft::{
     HighWaterStateMachine, OpenraftDriver, OpenraftPeer, StandaloneHost, TypeConfig,
 };
+use tsoracle_openraft_toolkit::test_fakes::{MemNetwork, PartitionController};
+use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 
 /// One node in a test cluster. Holds the raft handle, a clone of the state
 /// machine for direct reads, the rocksdb `Arc<DB>` (so subsequent reopens can
@@ -150,7 +150,7 @@ fn test_raft_config() -> Arc<openraft::Config> {
 /// Open a fresh rocksdb at `dir` with the three column families this crate's
 /// tests use:
 ///
-/// - `raft_log` / `raft_meta` — backing `openraft_toolkit::RocksdbLogStore`.
+/// - `raft_log` / `raft_meta` — backing `tsoracle_openraft_toolkit::RocksdbLogStore`.
 /// - `raft_snapshot` — backing `tsoracle_driver_openraft::RocksdbSnapshotStore`.
 fn open_rocksdb(dir: &TempDir) -> Arc<DB> {
     let mut opts = Options::default();

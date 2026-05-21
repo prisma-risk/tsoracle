@@ -1,5 +1,5 @@
 [package]
-name         = "openraft-toolkit"
+name         = "tsoracle-openraft-toolkit"
 description  = "Reusable openraft glue: TypeConfig macro, RocksDB log store, lifecycle helpers"
 version.workspace      = true
 edition.workspace      = true
@@ -7,7 +7,15 @@ rust-version.workspace = true
 license.workspace      = true
 repository.workspace   = true
 homepage.workspace     = true
+readme.workspace       = true
 authors.workspace      = true
+documentation = "https://docs.rs/tsoracle-openraft-toolkit"
+keywords      = ["openraft", "raft", "consensus", "rocksdb", "storage"]
+categories    = ["asynchronous", "database-implementations"]
+
+[package.metadata.docs.rs]
+features     = ["rocksdb-log-store"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default            = ["rocksdb-log-store"]

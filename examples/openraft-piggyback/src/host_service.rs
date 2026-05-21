@@ -16,11 +16,11 @@ use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
 use openraft::storage::{EntryResponder, RaftStateMachine, Snapshot};
 use openraft::type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
 use openraft::{EntryPayload, Raft, RaftSnapshotBuilder, ReadPolicy, StoredMembership};
-use openraft_toolkit::declare_raft_types_ext;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tsoracle_consensus::ConsensusError;
 use tsoracle_driver_openraft::{HighWaterCommand, OpenraftHighWaterHost};
+use tsoracle_openraft_toolkit::declare_raft_types_ext;
 
 // ---------- Envelope shape ----------
 

@@ -8,11 +8,11 @@ Add a failpoint when an invariant only manifests under a timing window or a part
 
 ## Feature gating
 
-Three crates currently opt in via a per-crate `failpoints` Cargo feature: `tsoracle-driver-file`, `tsoracle-server`, and `openraft-toolkit`. The feature is off by default. Run the failpoint suite with:
+Three crates currently opt in via a per-crate `failpoints` Cargo feature: `tsoracle-driver-file`, `tsoracle-server`, and `tsoracle-openraft-toolkit`. The feature is off by default. Run the failpoint suite with:
 
     make test-failpoints
 
-The Makefile target enables `tsoracle-driver-file/failpoints`, `tsoracle-server/failpoints`, `tsoracle-server/test-fakes` (needed for `InMemoryDriver`), `openraft-toolkit/failpoints`, and `openraft-toolkit/rocksdb-log-store`. The default CI test job runs `cargo test --workspace --all-features --locked`, which activates all of these features automatically, so the failpoint suite is part of the normal CI gate.
+The Makefile target enables `tsoracle-driver-file/failpoints`, `tsoracle-server/failpoints`, `tsoracle-server/test-fakes` (needed for `InMemoryDriver`), `tsoracle-openraft-toolkit/failpoints`, and `tsoracle-openraft-toolkit/rocksdb-log-store`. The default CI test job runs `cargo test --workspace --all-features --locked`, which activates all of these features automatically, so the failpoint suite is part of the normal CI gate.
 
 Release builds of the `tsoracle` binary do not include the `failpoints` feature on any crate. The `fail` crate is an optional dependency at the per-crate level (`fail = { workspace = true, optional = true }`) and the per-crate `failpoints` feature is what pulls it into the build graph; without the feature, `fail` is not linked.
 
@@ -64,12 +64,12 @@ With `feature = "failpoints"` off, both forms expand to `()` — zero code, no d
 | `server::service::before_allocate` | In `Service::get_ts`, before the allocator lock is taken. | `sleep(ms)`, `pause`. Used for timing-shape tests only — closure-form `return` would produce a `Status` directly and bypass the production `ConsensusError → Status` classification path. | `before_allocate_sleep_delays_get_ts` |
 | `server::service::extension_gate_held` | In `Service::extend_window`, immediately after the `extension_gate.read().await` guard is bound. | `pause`, `sleep(ms)`. | `extension_gate_held_sleep_delays_get_ts` |
 
-### `openraft-toolkit` — 2 sites in `crates/openraft-toolkit/src/log_store/mod.rs`
+### `tsoracle-openraft-toolkit` — 2 sites in `crates/tsoracle-openraft-toolkit/src/log_store/mod.rs`
 
 | Site name | Position | Useful actions | Test |
 |---|---|---|---|
-| `openraft_toolkit::log_store::before_write_batch` | In `RocksdbLogStore::append`, immediately before `self.db.write_opt(batch, &wo)`. | `panic`. | `panic_at_before_write_batch_leaves_log_empty` |
-| `openraft_toolkit::log_store::after_write_before_sync` | In `RocksdbLogStore::append`, between the rocksdb write and the `callback.io_completed(...)` notification. | `return` via the closure form (closure produces `Err(io::Error)`); `panic`. | `return_at_after_write_before_sync_persists_entry` |
+| `tsoracle_openraft_toolkit::log_store::before_write_batch` | In `RocksdbLogStore::append`, immediately before `self.db.write_opt(batch, &wo)`. | `panic`. | `panic_at_before_write_batch_leaves_log_empty` |
+| `tsoracle_openraft_toolkit::log_store::after_write_before_sync` | In `RocksdbLogStore::append`, between the rocksdb write and the `callback.io_completed(...)` notification. | `return` via the closure form (closure produces `Err(io::Error)`); `panic`. | `return_at_after_write_before_sync_persists_entry` |
 
 ## Writing a failpoint test
 

@@ -1081,21 +1081,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openraft-toolkit"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "openraft",
- "postcard",
- "serde",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2029,7 +2014,6 @@ dependencies = [
  "async-trait",
  "futures",
  "openraft",
- "openraft-toolkit",
  "parking_lot",
  "postcard",
  "serde",
@@ -2039,6 +2023,7 @@ dependencies = [
  "tracing",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-openraft-toolkit",
 ]
 
 [[package]]
@@ -2046,12 +2031,27 @@ name = "tsoracle-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
- "openraft-toolkit",
  "postcard",
  "prost",
  "tsoracle-driver-file",
  "tsoracle-driver-openraft",
+ "tsoracle-openraft-toolkit",
  "tsoracle-proto",
+]
+
+[[package]]
+name = "tsoracle-openraft-toolkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "openraft",
+ "postcard",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]

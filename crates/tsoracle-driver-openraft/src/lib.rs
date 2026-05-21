@@ -20,7 +20,7 @@
 //! - [`state_machine`] implements `openraft::storage::RaftStateMachine` over
 //!   an in-memory `u64` counter with bincode snapshots.
 //! - [`type_config`] declares the `RaftTypeConfig` via
-//!   `openraft_toolkit::declare_raft_types_ext!`.
+//!   `tsoracle_openraft_toolkit::declare_raft_types_ext!`.
 //! - [`host`] declares the `OpenraftHighWaterHost` trait services implement
 //!   to plug their consensus into the driver.
 //! - [`standalone`] supplies the bundled host that owns its own raft cluster

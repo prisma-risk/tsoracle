@@ -1,0 +1,60 @@
+name: release-plz
+
+on:
+  push:
+    branches:
+      - main
+
+# Tighten default token scope; each job opts in to what it needs.
+permissions:
+  contents: read
+
+jobs:
+  # Publishes (tags + cargo publish + GitHub Release) whenever the release PR
+  # has been merged into main. No-op on every other push.
+  release:
+    name: release-plz release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Opens or updates the release PR whenever main moves. The PR contains the
+  # version bumps + CHANGELOG diffs; merging it triggers the `release` job
+  # above on the next push.
+  release-pr:
+    name: release-plz PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

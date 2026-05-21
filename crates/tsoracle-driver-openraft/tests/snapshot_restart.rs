@@ -25,11 +25,11 @@ use futures::StreamExt;
 use openraft::async_runtime::watch::WatchReceiver;
 use openraft::storage::RaftLogStorage;
 use openraft::{Config, SnapshotPolicy};
-use openraft_toolkit::{Flat, RocksdbLogStore};
 use tokio::time::timeout;
 use tsoracle_consensus::{ConsensusDriver, LeaderState};
 use tsoracle_core::Epoch;
 use tsoracle_driver_openraft::TypeConfig;
+use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 
 use common::{TestCluster, build_single_node_with_config, reopen_node_with_config};
 

@@ -9,7 +9,7 @@ members  = [
     "crates/tsoracle-driver-file",
     "crates/tsoracle-driver-openraft",
     "crates/tsoracle-bin",
-    "crates/openraft-toolkit",
+    "crates/tsoracle-openraft-toolkit",
     "examples/embedded-server",
     "examples/failover-demo",
     "examples/openraft-piggyback",
@@ -30,7 +30,7 @@ default-members = [
     "crates/tsoracle-driver-file",
     "crates/tsoracle-driver-openraft",
     "crates/tsoracle-bin",
-    "crates/openraft-toolkit",
+    "crates/tsoracle-openraft-toolkit",
 ]
 
 [workspace.package]

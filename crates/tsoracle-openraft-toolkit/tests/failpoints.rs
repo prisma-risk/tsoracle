@@ -5,9 +5,9 @@ use std::sync::Arc;
 use openraft::entry::RaftEntry;
 use openraft::storage::{IOFlushed, RaftLogStorage};
 use openraft::{Entry, LogId};
-use openraft_toolkit::{Flat, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
+use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 
 mod common;
 use common::{TestLeaderId, TestTypeConfig};
@@ -42,7 +42,7 @@ fn blank_entry_at(index: u64) -> Entry<TestLeaderId, common::TestAppData, u64, c
     ))
 }
 
-/// `openraft_toolkit::log_store::before_write_batch` fires immediately before
+/// `tsoracle_openraft_toolkit::log_store::before_write_batch` fires immediately before
 /// `db.write_opt(batch, ...)`. A `panic` action terminates the task before the
 /// batch reaches RocksDB; after reopening the store, the log column family
 /// must still be empty. If a regression moves the failpoint to after the
@@ -58,7 +58,11 @@ async fn panic_at_before_write_batch_leaves_log_empty() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
 
-    fail::cfg("openraft_toolkit::log_store::before_write_batch", "panic").unwrap();
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::before_write_batch",
+        "panic",
+    )
+    .unwrap();
 
     let writer_db = Arc::clone(&db);
     let join = tokio::spawn(async move {
@@ -76,7 +80,11 @@ async fn panic_at_before_write_batch_leaves_log_empty() {
         "expected JoinError::is_panic(), got {join_err:?}"
     );
 
-    fail::cfg("openraft_toolkit::log_store::before_write_batch", "off").unwrap();
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::before_write_batch",
+        "off",
+    )
+    .unwrap();
 
     let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
         RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
@@ -89,7 +97,7 @@ async fn panic_at_before_write_batch_leaves_log_empty() {
     );
 }
 
-/// `openraft_toolkit::log_store::after_write_before_sync` fires after the
+/// `tsoracle_openraft_toolkit::log_store::after_write_before_sync` fires after the
 /// rocksdb write returns and before `callback.io_completed(...)`. A `return`
 /// action makes `append` produce `Err(io::Error)` while the WriteBatch has
 /// already been applied — the entry is durable on disk even though the
@@ -108,7 +116,7 @@ async fn return_at_after_write_before_sync_persists_entry() {
         RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
 
     fail::cfg(
-        "openraft_toolkit::log_store::after_write_before_sync",
+        "tsoracle_openraft_toolkit::log_store::after_write_before_sync",
         "return",
     )
     .unwrap();
@@ -116,7 +124,7 @@ async fn return_at_after_write_before_sync_persists_entry() {
         .append(std::iter::once(blank_entry_at(42)), IOFlushed::noop())
         .await;
     fail::cfg(
-        "openraft_toolkit::log_store::after_write_before_sync",
+        "tsoracle_openraft_toolkit::log_store::after_write_before_sync",
         "off",
     )
     .unwrap();

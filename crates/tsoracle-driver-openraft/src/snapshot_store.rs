@@ -88,7 +88,7 @@ mod rocksdb_backed {
     /// The caller owns the `Arc<DB>` and is responsible for opening the column
     /// family identified by `cf` before constructing the store; using the same
     /// `Arc<DB>` as the
-    /// [`openraft_toolkit::RocksdbLogStore`](https://docs.rs/openraft-toolkit/latest/openraft_toolkit/struct.RocksdbLogStore.html)
+    /// [`tsoracle_openraft_toolkit::RocksdbLogStore`](https://docs.rs/tsoracle-openraft-toolkit/latest/tsoracle_openraft_toolkit/struct.RocksdbLogStore.html)
     /// is the intended pattern — that way one rocksdb instance covers both the
     /// raft log and the snapshot.
     ///
@@ -99,7 +99,7 @@ mod rocksdb_backed {
     /// `key` defaults to `b"snapshot"` via [`RocksdbSnapshotStore::open`]; the
     /// caller can pick a different key to multiplex several state machines
     /// onto a shared CF (analogous to
-    /// [`openraft_toolkit::GroupPrefixed`](https://docs.rs/openraft-toolkit/latest/openraft_toolkit/struct.GroupPrefixed.html)
+    /// [`tsoracle_openraft_toolkit::GroupPrefixed`](https://docs.rs/tsoracle-openraft-toolkit/latest/tsoracle_openraft_toolkit/struct.GroupPrefixed.html)
     /// for the log store).
     pub struct RocksdbSnapshotStore {
         db: Arc<DB>,
