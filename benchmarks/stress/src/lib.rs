@@ -71,10 +71,10 @@ type SpawnedTopology = (
 );
 
 /// Histogram upper bound (60 seconds, microseconds).
-const HISTO_MAX_US: u64 = 60_000_000;
+pub(crate) const HISTO_MAX_US: u64 = 60_000_000;
 
 /// Build a histogram with the standard bounds.
-fn new_histogram() -> Histogram<u64> {
+pub(crate) fn new_histogram() -> Histogram<u64> {
     // Bounds are compile-time constants; failure here would indicate a bug in
     // hdrhistogram itself. We use `unwrap_or_else` plus a fallback rather than
     // `.expect(..)` to stay within the crate's lint policy (warn on expect_used
@@ -250,8 +250,7 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
         .block_on(supervisor_handle)
         .map_err(|err| anyhow::anyhow!("supervisor join: {err:?}"))?;
 
-    // Build report. (Latency stats are zero in Plan A — per-call histograms
-    // are deferred per the plan's known gaps.)
+    // Build report.
     let timestamps = supervisor_outcome.events_observed;
     let batch_size = cfg.batch_size.max(1) as u64;
     let client_calls = timestamps / batch_size;
@@ -260,7 +259,7 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
         client_calls_per_sec: client_calls as f64 / elapsed_secs,
         timestamps_per_sec: timestamps as f64 / elapsed_secs,
     };
-    let merged = new_histogram();
+    let merged = &supervisor_outcome.latency;
     let latency = LatencyStats {
         p50: merged.value_at_quantile(0.50),
         p90: merged.value_at_quantile(0.90),

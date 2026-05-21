@@ -59,10 +59,9 @@ CI gates should distinguish 1 from 3 — the first is a real bug, the second is 
 
 ## Known gaps
 
-These three are landed-but-incomplete. None affect any of the four invariants; they are presentation or budget polish that lands via small follow-ups:
+These are landed-but-incomplete. Neither affects any of the four invariants; they are presentation or budget polish that lands via small follow-ups:
 
 - `--json-stream` is plumbed as a CLI flag but not honored by the report path. Honor it when a real dashboard consumer exists.
-- Per-client histograms are allocated but `client_task` does not record per-call latency into them; `LatencyStats` values are zeroed.
 - `--ops`-bounded runs are accepted by CLI / validate() but `lib::run` only honors `--duration`. Adding an `--ops` budget needs a shared atomic + stop trigger; defer until needed.
 
 ## See also

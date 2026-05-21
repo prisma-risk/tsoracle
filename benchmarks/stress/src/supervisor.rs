@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use hdrhistogram::Histogram;
 use tokio::sync::mpsc;
 use tsoracle_core::Timestamp;
 
@@ -11,6 +12,7 @@ use crate::event::SupervisorEvent;
 use crate::sample::{IssuedSample, LivenessIncident};
 use crate::types::{BatchId, ClientId};
 use crate::violation::{Violation, ViolationKind};
+use crate::{HISTO_MAX_US, new_histogram};
 
 /// What the supervisor returns at end of run.
 #[derive(Debug, Clone)]
@@ -18,6 +20,11 @@ pub struct SupervisorOutcome {
     pub violations: Vec<Violation>,
     pub high_water: Timestamp,
     pub events_observed: u64,
+    /// Per-RPC latency in microseconds. One sample per batch (recorded on the
+    /// first `IssuedSample` of each batch, since all samples in a batch share
+    /// the same `issued_at`/`recv_time`). Values clamped to
+    /// `[1, HISTO_MAX_US]` to stay within histogram bounds.
+    pub latency: Histogram<u64>,
 }
 
 pub struct Supervisor {
@@ -31,6 +38,7 @@ struct SupervisorState {
     open_windows: Vec<OpenChaosWindow>,
     violations: Vec<Violation>,
     events_observed: u64,
+    latency: Histogram<u64>,
 }
 
 impl Default for SupervisorState {
@@ -41,6 +49,7 @@ impl Default for SupervisorState {
             open_windows: Vec::new(),
             violations: Vec::new(),
             events_observed: 0,
+            latency: new_histogram(),
         }
     }
 }
@@ -88,6 +97,7 @@ impl Supervisor {
             violations: self.state.violations,
             high_water: self.state.high_water,
             events_observed: self.state.events_observed,
+            latency: self.state.latency,
         }
     }
 
@@ -101,7 +111,20 @@ impl Supervisor {
     }
 
     fn on_issued(&mut self, sample: IssuedSample) {
-        // (1) Global monotonicity (unchanged from Task 6).
+        // (0) Per-RPC latency. All samples in a batch share `issued_at` and
+        // `recv_time`, so we record once per RPC by gating on `batch_idx == 0`.
+        // `saturating_duration_since` handles the (unlikely) case where the
+        // clock appears to go backward.
+        if sample.batch_idx == 0 {
+            let elapsed_us = sample
+                .recv_time
+                .saturating_duration_since(sample.issued_at)
+                .as_micros();
+            let clamped = (elapsed_us as u64).clamp(1, HISTO_MAX_US);
+            let _ = self.state.latency.record(clamped);
+        }
+
+        // (1) Global monotonicity.
         if sample.ts <= self.state.high_water {
             self.state.violations.push(Violation {
                 kind: ViolationKind::Monotonicity {
