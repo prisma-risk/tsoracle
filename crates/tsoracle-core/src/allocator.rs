@@ -272,7 +272,6 @@ impl Allocator {
         }
         Ok(())
     }
-
 }
 
 impl Default for Allocator {
@@ -295,7 +294,9 @@ mod tests {
     #[test]
     fn on_leadership_gained_sets_epoch() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(1000, 5000, Epoch(5)).unwrap();
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(5))
+            .unwrap();
         assert!(allocator.is_leader());
         assert_eq!(allocator.epoch(), Some(Epoch(5)));
     }
@@ -319,7 +320,9 @@ mod tests {
     #[test]
     fn on_leadership_lost_clears_state() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(1000, 5000, Epoch(5)).unwrap();
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(5))
+            .unwrap();
         allocator.on_leadership_lost();
         assert!(!allocator.is_leader());
         assert_eq!(allocator.epoch(), None);
@@ -334,7 +337,9 @@ mod tests {
     #[test]
     fn try_grant_zero_count() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(1000, 5000, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .unwrap();
         assert_eq!(
             allocator.try_grant(1000, 0),
             Err(CoreError::InvalidCount(0))
@@ -347,7 +352,9 @@ mod tests {
         // WindowExhausted; the server then extends.
         let mut allocator = Allocator::new();
         // fence_floor=5_000, ceiling=5_000 (tight window, no pre-extended gap).
-        allocator.try_on_leadership_gained(5_000, 5_000, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(5_000, 5_000, Epoch(1))
+            .unwrap();
         // now_ms below floor: clamps to floor=5_000, which equals the ceiling → succeeds.
         allocator.try_grant(4_999, 1).unwrap();
         // now_ms above ceiling: window exhausted.
@@ -362,7 +369,9 @@ mod tests {
         // The fence has already persisted a pre-extended window, so the allocator
         // can serve immediately. Grants start at fence_floor regardless of now_ms.
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(5_000, 10_000, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(5_000, 10_000, Epoch(1))
+            .unwrap();
         let grant = allocator.try_grant(1_000, 1).unwrap();
         // now_ms=1_000 < fence_floor=5_000, so next_physical_ms stays at 5_000.
         assert_eq!(grant.physical_ms, 5_000);
@@ -373,7 +382,9 @@ mod tests {
     #[test]
     fn prepare_window_extension_uses_now_ms_when_ahead_of_high_water() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(1000, 1000, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(1))
+            .unwrap();
         let target = allocator.try_prepare_window_extension(2000, 3000).unwrap();
         assert_eq!(target, 5000); // max(1001, 2000) + 3000
     }
@@ -381,7 +392,9 @@ mod tests {
     #[test]
     fn prepare_window_extension_uses_high_water_floor_when_clock_behind() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(10_000, 10_000, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(10_000, 10_000, Epoch(1))
+            .unwrap();
         let target = allocator.try_prepare_window_extension(500, 3000).unwrap();
         // floor = 10_001, clock = 500. max = 10_001. + 3000 = 13_001.
         assert_eq!(target, 13_001);
@@ -390,7 +403,9 @@ mod tests {
     #[test]
     fn prepare_window_extension_rejects_out_of_range_target() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(PHYSICAL_MS_MAX, PHYSICAL_MS_MAX, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(PHYSICAL_MS_MAX, PHYSICAL_MS_MAX, Epoch(1))
+            .unwrap();
         assert_eq!(
             allocator.try_prepare_window_extension(PHYSICAL_MS_MAX, 1),
             Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 2))
@@ -400,9 +415,13 @@ mod tests {
     #[test]
     fn commit_then_try_grant_succeeds() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(1000, 1000, Epoch(7)).unwrap();
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(7))
+            .unwrap();
         let target = allocator.try_prepare_window_extension(1000, 3000).unwrap();
-        allocator.try_commit_window_extension(target, Epoch(7)).unwrap();
+        allocator
+            .try_commit_window_extension(target, Epoch(7))
+            .unwrap();
         let grant = allocator.try_grant(1000, 5).unwrap();
         assert_eq!(grant.count, 5);
         assert_eq!(grant.logical_start, 0);
@@ -414,9 +433,15 @@ mod tests {
     #[test]
     fn commit_with_lower_value_is_ignored() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(1000, 1000, Epoch(1)).unwrap();
-        allocator.try_commit_window_extension(5000, Epoch(1)).unwrap();
-        allocator.try_commit_window_extension(3000, Epoch(1)).unwrap(); // attempt to regress
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(1))
+            .unwrap();
+        allocator
+            .try_commit_window_extension(5000, Epoch(1))
+            .unwrap();
+        allocator
+            .try_commit_window_extension(3000, Epoch(1))
+            .unwrap(); // attempt to regress
         // try_grant up to physical_ms=5000 should still work.
         let grant = allocator.try_grant(4500, 1).unwrap();
         assert_eq!(grant.physical_ms, 4500);
@@ -425,7 +450,9 @@ mod tests {
     #[test]
     fn commit_rejects_out_of_range_high_water() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(1000, 1000, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(1))
+            .unwrap();
         assert_eq!(
             allocator.try_commit_window_extension(PHYSICAL_MS_MAX + 1, Epoch(1)),
             Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
@@ -435,7 +462,9 @@ mod tests {
     #[test]
     fn try_grant_rejects_out_of_range_clock() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(1000, PHYSICAL_MS_MAX, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(1000, PHYSICAL_MS_MAX, Epoch(1))
+            .unwrap();
         assert_eq!(
             allocator.try_grant(PHYSICAL_MS_MAX + 1, 1),
             Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
@@ -446,9 +475,13 @@ mod tests {
     fn commit_at_wrong_epoch_is_silently_dropped() {
         let mut allocator = Allocator::new();
         // fence_floor=1000, ceiling=1000: tight initial window.
-        allocator.try_on_leadership_gained(1000, 1000, Epoch(5)).unwrap();
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(5))
+            .unwrap();
         // A late persist from epoch 4 (the prior leader) — fenced out.
-        allocator.try_commit_window_extension(9_999, Epoch(4)).unwrap();
+        allocator
+            .try_commit_window_extension(9_999, Epoch(4))
+            .unwrap();
         // The allocator's bound did not move; a grant at now=900 clamps to
         // floor=1000, and a request with now=1_100 exhausts the window.
         allocator.try_grant(900, 1).unwrap();
@@ -461,9 +494,13 @@ mod tests {
     #[test]
     fn commit_after_leadership_lost_is_ignored() {
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(1000, 5000, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .unwrap();
         allocator.on_leadership_lost();
-        allocator.try_commit_window_extension(9_999, Epoch(1)).unwrap();
+        allocator
+            .try_commit_window_extension(9_999, Epoch(1))
+            .unwrap();
         assert!(!allocator.is_leader());
     }
 
