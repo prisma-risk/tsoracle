@@ -36,3 +36,8 @@ proptest         = { workspace = true }
 rocksdb          = { workspace = true }
 tempfile         = { workspace = true }
 tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[[test]]
+name              = "failpoints"
+path              = "tests/failpoints.rs"
+required-features = ["failpoints", "rocksdb-log-store"]
