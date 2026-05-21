@@ -200,8 +200,8 @@ impl Supervisor {
         let pre_window_high_water = self.state.high_water;
         let fence_freshness_checked = match ev.window.kind {
             ChaosKind::LeaderKill | ChaosKind::LeaderPause => false,
-            // Failpoint windows participate only in liveness gating (Task 9);
-            // they don't change leadership so no fence check applies.
+            // Failpoint windows participate only in liveness gating; they don't
+            // change leadership so no fence check applies.
             ChaosKind::FailpointArm { .. } | ChaosKind::FailpointDisarm { .. } => true,
         };
         self.state.open_windows.push(OpenChaosWindow {
