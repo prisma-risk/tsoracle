@@ -58,7 +58,7 @@ To observe failover: find the current leader in the logs (`grep "Leader" .data/n
 cargo run -p example-openraft-piggyback
 ```
 
-The demo boots a 3-node in-process cluster via `openraft_toolkit::test_fakes::MemNetwork`, runs a tsoracle server on each (loopback ports 55561–55563), and walks through: host KV writes that land in the host SM without touching the TSO field, GetTs bursts that are allocator-served (high-water does *not* advance per call), and a failover that asserts the freshness invariant survives (`new_high_water > old_high_water` AND `next_ts > last_pre_failover_ts`). Runs in roughly 3 seconds; the same `run_demo()` function backs `tests/smoke.rs`.
+The demo boots a 3-node in-process cluster via `openraft_toolkit::test_fakes::MemNetwork`, runs a tsoracle server on each (each bound to an OS-assigned loopback port via `TcpListener::bind("127.0.0.1:0")`), and walks through: host KV writes that land in the host SM without touching the TSO field, GetTs bursts that are allocator-served (high-water does *not* advance per call), and a failover that asserts the freshness invariant survives (`new_high_water > old_high_water` AND `next_ts > last_pre_failover_ts`). Runs in roughly 3 seconds; the same `run_demo()` function backs `tests/smoke.rs`.
 
 The envelope pattern at the heart of the example:
 

@@ -185,10 +185,12 @@ async fn build_client(nodes: &[Node]) -> anyhow::Result<TsoClient> {
     Ok(TsoClient::connect(endpoints).await?)
 }
 
-/// Print + return the leader's current high-water, going through the same
-/// barrier-then-read path the production code uses (we just call the host's
-/// state machine directly here because the demo holds the handle; production
-/// code would go through `ConsensusDriver::load_high_water`).
+/// Demo helper: return the leader's current high-water by reading its SM
+/// directly. This is NOT the production read path — production code goes
+/// through `ConsensusDriver::load_high_water`, which `PiggybackHost`
+/// implements with an `ensure_linearizable` barrier. The shortcut is safe
+/// here because we already confirmed leadership via `current_leader()` and
+/// the demo runs single-threaded against committed in-process state.
 async fn high_water_of_leader(nodes: &[Node]) -> u64 {
     for node in nodes {
         if let Some(leader_id) = node.raft.current_leader().await {

@@ -12,7 +12,7 @@ The demo runs in roughly 3 seconds and prints a scripted walk-through of the int
 
 ## What the demo shows
 
-1. **Boot.** Three openraft nodes connected by `openraft_toolkit::MemNetwork` (no tonic, no peer discovery). Each runs a `tsoracle::Server` bound to a unique loopback port (55561, 55562, 55563).
+1. **Boot.** Three openraft nodes connected by `openraft_toolkit::MemNetwork` (no tonic, no peer discovery). Each runs a `tsoracle::Server` bound to an OS-assigned loopback port (`TcpListener::bind("127.0.0.1:0")`), so the demo and its smoke test can run repeatedly without port-conflict flake.
 2. **Post-fence high-water.** Once the tsoracle-server leader-watch task fires on the new leader, the fence in `tsoracle-server/src/fence.rs` persists `serving_floor + failover_advance`. The demo prints this value and labels it "post-fence; this is when consensus actually persisted."
 3. **Host KV writes ride the same raft.** Directly calling `leader_raft.client_write(HostCommand::Kv(Put { ... }))` lands an entry in the host's log. The demo asserts that the apply result's `tso` field is `None` (KV writes do not touch the TSO half) and prints a KV dump.
 4. **Steady-state TSO is allocator-served.** A burst of `GetTs` calls through `tsoracle_client::Client` returns strictly monotonic timestamps, **without** the durable high-water moving. That's not a bug: high-water advances on fences and on window-extension; steady-state `GetTs` hits the allocator. See [`docs/key-subsystems.md`](../../docs/key-subsystems.md) ("Steady-state window extension") for the rationale.

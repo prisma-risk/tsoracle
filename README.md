@@ -89,7 +89,7 @@ tsoracle is a small, embeddable Rust implementation. The consensus layer is left
 
 - [examples/embedded-server](examples/embedded-server) — embed `tsoracle-server` with the file driver in your own binary, with graceful shutdown.
 - [examples/failover-demo](examples/failover-demo) — pedagogy: watch the failover fence keep timestamps strictly monotonic across simulated leadership changes, in-process, no openraft.
-For HA, use [`tsoracle-driver-openraft`](crates/tsoracle-driver-openraft/); see [`examples/openraft-standalone`](examples/openraft-standalone/) (your own dedicated raft) and [`examples/openraft-piggyback`](examples/openraft-piggyback/) (share your service's existing raft).
+- For HA, use [`tsoracle-driver-openraft`](crates/tsoracle-driver-openraft/); see [`examples/openraft-standalone`](examples/openraft-standalone/) (your own dedicated raft) and [`examples/openraft-piggyback`](examples/openraft-piggyback/) (share your service's existing raft).
 
 Each example is its own crate. Build with `cargo run -p example-<name>`.
 
