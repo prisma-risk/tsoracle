@@ -14,7 +14,7 @@ Default is 1 second. On leadership gain, the new leader first computes `serving_
 
 ## Monitoring hooks
 
-Metrics are not yet emitted by the server. The signals planned for a future release, intended for wiring against the `metrics` crate facade (`metrics-exporter-prometheus`, `metrics-exporter-influx`, etc.), are:
+The server emits the following signals through the [`metrics`](https://docs.rs/metrics) crate facade. Emission is gated behind the `metrics` Cargo feature on `tsoracle-server` (off by default so the dependency stays opt-in for embedders who do not want it):
 
 - `tsoracle.get_ts.total` — total GetTs RPCs handled (counter)
 - `tsoracle.get_ts.timestamps_issued` — sum of `count` across all GetTs responses (counter)
@@ -23,6 +23,26 @@ Metrics are not yet emitted by the server. The signals planned for a future rele
 - `tsoracle.leader_transition.total` — leader-watch saw a state change (counter)
 - `tsoracle.leader_transition.fence_latency` — duration of the failover fence (histogram, seconds)
 - `tsoracle.not_leader.total` — RPCs rejected with `NOT_LEADER` (counter)
+
+The library is exporter-agnostic: embedders install whichever recorder they want (`metrics-exporter-prometheus`, `metrics-exporter-influx`, a custom sink) before constructing the [`Server`]. The example below wires Prometheus over an HTTP listener:
+
+```toml
+[dependencies]
+tsoracle-server             = { version = "0.1", features = ["metrics"] }
+metrics-exporter-prometheus = "0.16"
+```
+
+```rust,ignore
+use metrics_exporter_prometheus::PrometheusBuilder;
+
+PrometheusBuilder::new()
+    .with_http_listener(([0, 0, 0, 0], 9100))
+    .install()
+    .expect("install Prometheus recorder");
+
+// Build and serve `tsoracle_server::Server` as usual; emissions now flow
+// through the installed recorder.
+```
 
 ## Advertised endpoints in multi-node deployments
 

@@ -22,8 +22,21 @@ use crate::server::{Server, ServerError, ServingState};
 pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerError> {
     let mut stream = server.consensus.leadership_events();
     while let Some(evt) = stream.next().await {
+        // Every state change (Leader, Follower, Unknown) counts as a
+        // transition observed from the driver: the total counter answers
+        // "how often is leadership churning".
+        #[cfg(feature = "metrics")]
+        metrics::counter!("tsoracle.leader_transition.total").increment(1);
         match evt {
             LeaderState::Leader { epoch } => {
+                // Time the full fence: drain-barrier wait, durable persist,
+                // and allocator seed are all included. Recorded only when
+                // the fence reaches Serving; an early `?` return means
+                // leader-watch terminates and the next iteration would not
+                // observe Leader anyway, so dropping the timer is correct.
+                #[cfg(feature = "metrics")]
+                let fence_started_at = std::time::Instant::now();
+
                 // Clear serving so new GetTs requests return NOT_LEADER.
                 let _ = server.state_tx.send(ServingState::NotServing {
                     leader_endpoint: None,
@@ -82,6 +95,10 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                 // Publish serving, then release the drain guard.
                 let _ = server.state_tx.send(ServingState::Serving);
                 drop(drain_guard);
+
+                #[cfg(feature = "metrics")]
+                metrics::histogram!("tsoracle.leader_transition.fence_latency")
+                    .record(fence_started_at.elapsed().as_secs_f64());
 
                 crate::failpoint!("server::fence::after_serving_published");
             }

@@ -71,6 +71,12 @@ impl TsoService for TsoServiceImpl {
             };
             match outcome {
                 Ok(grant) => {
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics::counter!("tsoracle.get_ts.total").increment(1);
+                        metrics::counter!("tsoracle.get_ts.timestamps_issued")
+                            .increment(u64::from(grant.count));
+                    }
                     return Ok(Response::new(GetTsResponse {
                         physical_ms: grant.physical_ms,
                         logical_start: grant.logical_start,
@@ -154,12 +160,24 @@ impl TsoServiceImpl {
                 .map_err(core_status)?;
             (target, epoch)
         };
-        let actual = match self
+        // Count and time only the consensus round-trip itself: the
+        // recheck-after-acquire short-circuit above skips it, and operators
+        // tuning `window_ahead` care about how often a stampede actually
+        // reached persist + how long that took (success or failure).
+        #[cfg(feature = "metrics")]
+        let extension_started_at = std::time::Instant::now();
+        let persist_outcome = self
             .server
             .consensus
             .persist_high_water(requested, epoch)
-            .await
+            .await;
+        #[cfg(feature = "metrics")]
         {
+            metrics::counter!("tsoracle.window.extensions.total").increment(1);
+            metrics::histogram!("tsoracle.window.extension_latency")
+                .record(extension_started_at.elapsed().as_secs_f64());
+        }
+        let actual = match persist_outcome {
             Ok(v) => v,
             // NotLeader / Fenced are authoritative proof from the consensus
             // driver that this node's epoch is stale. Step down immediately
