@@ -79,6 +79,52 @@ fn open_log_store(dir: &std::path::Path) -> anyhow::Result<RocksdbLogStore<TypeC
     Ok(RocksdbLogStore::open(driver, LOG_CF, META_CF, Flat)?)
 }
 
+/// Pluggable backend for the spawn-time I/O dependencies that production
+/// `RaftTopology::spawn` cannot otherwise force into a failure mode.
+///
+/// Production code uses [`DefaultRaftBackend`]; tests inject impls that fail
+/// at a chosen step to exercise the `?` propagation paths in `spawn_with`.
+/// The `id` parameter lets a test backend differentiate behavior per node
+/// (fail only on node 1, succeed on the rest, etc.). Production ignores it.
+#[async_trait]
+pub trait RaftBackend: Send + Sync {
+    /// Allocate a fresh, writable directory for node `id`'s rocksdb log
+    /// store and open the store on it. The returned `TempDir` must be kept
+    /// alive for the node's lifetime; dropping it deletes the directory and
+    /// invalidates the log store.
+    async fn prepare_node_storage(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<(TempDir, RocksdbLogStore<TypeConfig, Flat>)>;
+
+    /// Bind the loopback listener that node `id`'s tsoracle server will
+    /// serve from. Production uses `127.0.0.1:0`.
+    async fn bind_loopback(&self, id: u64) -> anyhow::Result<TcpListener>;
+}
+
+/// Production [`RaftBackend`]: real `tempfile::TempDir`, real
+/// `RocksdbLogStore`, real `TcpListener::bind("127.0.0.1:0")`.
+pub struct DefaultRaftBackend;
+
+#[async_trait]
+impl RaftBackend for DefaultRaftBackend {
+    async fn prepare_node_storage(
+        &self,
+        _id: u64,
+    ) -> anyhow::Result<(TempDir, RocksdbLogStore<TypeConfig, Flat>)> {
+        let dir = TempDir::new().context("raft topology: create tempdir")?;
+        let store = open_log_store(dir.path())
+            .with_context(|| format!("raft topology: open log store at {:?}", dir.path()))?;
+        Ok((dir, store))
+    }
+
+    async fn bind_loopback(&self, _id: u64) -> anyhow::Result<TcpListener> {
+        TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("raft topology: bind loopback")
+    }
+}
+
 fn raft_config() -> anyhow::Result<Arc<Config>> {
     Ok(Arc::new(
         Config {
@@ -98,7 +144,22 @@ impl RaftTopology {
     /// Boot an N-node in-process cluster, each node running its own
     /// `tsoracle::Server` bound to a fresh loopback port. Returns once
     /// membership has been initialized and a leader has been observed.
+    ///
+    /// Uses [`DefaultRaftBackend`] for the spawn-time I/O steps. Tests that
+    /// need to exercise the failure paths call [`Self::spawn_with`] with a
+    /// fake backend.
     pub async fn spawn(node_count: usize, grace: Duration) -> anyhow::Result<Self> {
+        Self::spawn_with(&DefaultRaftBackend, node_count, grace).await
+    }
+
+    /// Like [`Self::spawn`] but with a caller-supplied [`RaftBackend`] for
+    /// the spawn-time I/O. Useful for tests that want to inject failures
+    /// at the storage-preparation or listener-binding steps.
+    pub async fn spawn_with(
+        backend: &dyn RaftBackend,
+        node_count: usize,
+        grace: Duration,
+    ) -> anyhow::Result<Self> {
         if node_count == 0 {
             bail!("raft topology requires at least one node");
         }
@@ -111,9 +172,7 @@ impl RaftTopology {
 
         for raw_id in 1..=node_count {
             let node_id_u64 = raw_id as u64;
-            let log_dir = TempDir::new().context("raft topology: create tempdir")?;
-            let log_store = open_log_store(log_dir.path())
-                .with_context(|| format!("raft topology: open log store for node {node_id_u64}"))?;
+            let (log_dir, log_store) = backend.prepare_node_storage(node_id_u64).await?;
             let state_machine = HighWaterStateMachine::new();
             let state_machine_for_host = state_machine.clone();
 
@@ -135,9 +194,7 @@ impl RaftTopology {
                 .build()
                 .map_err(|e| anyhow::anyhow!("raft topology: server build: {e:?}"))?;
 
-            let listener = TcpListener::bind("127.0.0.1:0")
-                .await
-                .context("raft topology: bind loopback")?;
+            let listener = backend.bind_loopback(node_id_u64).await?;
             let addr = listener.local_addr()?;
             let endpoint = format!("http://{addr}");
             let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -452,6 +509,122 @@ mod tests {
             event.outcome
         );
         Box::new(topology.controller).shutdown().await;
+    }
+
+    /// Backend that delegates to `DefaultRaftBackend` for every step except
+    /// the one named in `fail_step`, where it returns an injected error
+    /// when the call is for node `fail_at_node`.
+    struct FailingBackend {
+        fail_step: SpawnStep,
+        fail_at_node: u64,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SpawnStep {
+        PrepareStorage,
+        BindLoopback,
+    }
+
+    #[async_trait]
+    impl RaftBackend for FailingBackend {
+        async fn prepare_node_storage(
+            &self,
+            id: u64,
+        ) -> anyhow::Result<(TempDir, RocksdbLogStore<TypeConfig, Flat>)> {
+            if self.fail_step == SpawnStep::PrepareStorage && id == self.fail_at_node {
+                bail!("injected: prepare_node_storage failed for node {id}");
+            }
+            DefaultRaftBackend.prepare_node_storage(id).await
+        }
+
+        async fn bind_loopback(&self, id: u64) -> anyhow::Result<TcpListener> {
+            if self.fail_step == SpawnStep::BindLoopback && id == self.fail_at_node {
+                bail!("injected: bind_loopback failed for node {id}");
+            }
+            DefaultRaftBackend.bind_loopback(id).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spawn_propagates_storage_failure() {
+        // Inject a `prepare_node_storage` failure for the first node. The
+        // resulting `?` propagation surfaces through `spawn_with` as a
+        // descriptive `anyhow::Error`.
+        let backend = FailingBackend {
+            fail_step: SpawnStep::PrepareStorage,
+            fail_at_node: 1,
+        };
+        match RaftTopology::spawn_with(&backend, 3, Duration::from_millis(50)).await {
+            Err(err) => {
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("prepare_node_storage failed"),
+                    "expected storage-failure message, got: {msg}",
+                );
+            }
+            Ok(_) => panic!("spawn should propagate the injected storage failure"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spawn_propagates_bind_failure() {
+        // Inject a `bind_loopback` failure for the second node. The first
+        // node's storage and listener succeed; the second's bind fails.
+        let backend = FailingBackend {
+            fail_step: SpawnStep::BindLoopback,
+            fail_at_node: 2,
+        };
+        match RaftTopology::spawn_with(&backend, 3, Duration::from_millis(50)).await {
+            Err(err) => {
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("bind_loopback failed"),
+                    "expected bind-failure message, got: {msg}",
+                );
+            }
+            Ok(_) => panic!("spawn should propagate the injected bind failure"),
+        }
+    }
+
+    /// Build an empty `RaftController` for tests that need to exercise the
+    /// "no nodes" / "no current leader" code paths (which the production
+    /// `spawn` never produces because spawn waits for a leader to emerge).
+    fn empty_controller() -> RaftController {
+        RaftController {
+            nodes: Vec::new(),
+            network: MemNetwork::<TypeConfig>::new(),
+            grace: Duration::from_millis(50),
+        }
+    }
+
+    #[test]
+    fn current_leader_returns_none_when_no_nodes() {
+        let controller = empty_controller();
+        assert!(controller.current_leader().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kill_leader_skipped_when_no_nodes() {
+        let controller = empty_controller();
+        let ev = controller.kill_leader().await;
+        match ev.outcome {
+            ChaosOutcome::Skipped { ref reason } => {
+                assert!(reason.contains("no current leader"), "got reason: {reason}");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_leader_skipped_when_no_nodes() {
+        let controller = empty_controller();
+        let ev = controller.pause_leader(Duration::from_millis(50)).await;
+        match ev.outcome {
+            ChaosOutcome::Skipped { ref reason } => {
+                assert!(reason.contains("no current leader"), "got reason: {reason}");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "stress-failpoints")]
