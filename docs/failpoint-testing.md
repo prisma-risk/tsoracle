@@ -8,7 +8,7 @@ Add a failpoint when an invariant only manifests under a timing window or a part
 
 ## Feature gating
 
-Two crates currently opt in via a per-crate `failpoints` Cargo feature: `tsoracle-driver-file` and `tsoracle-server`. The `openraft-toolkit` crate has the feature wired but no sites yet (sites for that crate are tracked as a follow-up). The feature is off by default. Run the failpoint suite with:
+Three crates currently opt in via a per-crate `failpoints` Cargo feature: `tsoracle-driver-file`, `tsoracle-server`, and `openraft-toolkit`. The feature is off by default. Run the failpoint suite with:
 
     make test-failpoints
 
@@ -64,9 +64,12 @@ With `feature = "failpoints"` off, both forms expand to `()` — zero code, no d
 | `server::service::before_allocate` | In `Service::get_ts`, before the allocator lock is taken. | `sleep(ms)`, `pause`. Used for timing-shape tests only — closure-form `return` would produce a `Status` directly and bypass the production `ConsensusError → Status` classification path. | `before_allocate_sleep_delays_get_ts` |
 | `server::service::extension_gate_held` | In `Service::extend_window`, immediately after the `extension_gate.read().await` guard is bound. | `pause`, `sleep(ms)`. | `extension_gate_held_sleep_delays_get_ts` |
 
-### `openraft-toolkit`
+### `openraft-toolkit` — 2 sites in `crates/openraft-toolkit/src/log_store/mod.rs`
 
-The crate has the `failpoints` feature, the wrapper macro, and the lib.rs mount wired, but no sites yet. The original spec specified two sites (`openraft_toolkit::log_store::before_write_batch` and `openraft_toolkit::log_store::after_write_before_sync`); their tests require a non-trivial setup against the openraft 0.10 `RaftLogStorage::append` API and were deferred to a follow-up spec.
+| Site name | Position | Useful actions | Test |
+|---|---|---|---|
+| `openraft_toolkit::log_store::before_write_batch` | In `RocksdbLogStore::append`, immediately before `self.db.write_opt(batch, &wo)`. | `panic`. | `panic_at_before_write_batch_leaves_log_empty` |
+| `openraft_toolkit::log_store::after_write_before_sync` | In `RocksdbLogStore::append`, between the rocksdb write and the `callback.io_completed(...)` notification. | `return` via the closure form (closure produces `Err(io::Error)`); `panic`. | `return_at_after_write_before_sync_persists_entry` |
 
 ## Writing a failpoint test
 
