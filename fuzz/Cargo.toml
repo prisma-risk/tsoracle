@@ -14,10 +14,19 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys        = "0.4"
-prost                = "0.14"
-tsoracle-driver-file = { path = "../crates/tsoracle-driver-file" }
-tsoracle-proto       = { path = "../crates/tsoracle-proto" }
+libfuzzer-sys            = "0.4"
+# `default-features = false, features = ["use-std"]` matches the parent
+# workspace pin in `../Cargo.toml`; the fuzz crate is its own workspace root,
+# so workspace deps aren't inherited and the same flags must be repeated here.
+postcard                 = { version = "1", default-features = false, features = ["use-std"] }
+prost                    = "0.14"
+openraft-toolkit         = { path = "../crates/openraft-toolkit" }
+# `default-features = false` opts out of the `rocksdb-snapshot-store` feature
+# (which pulls in rocksdb). The fuzz harnesses only exercise pure postcard
+# decoders on serde-derived types, so the rocksdb backend is not needed.
+tsoracle-driver-file     = { path = "../crates/tsoracle-driver-file" }
+tsoracle-driver-openraft = { path = "../crates/tsoracle-driver-openraft", default-features = false }
+tsoracle-proto           = { path = "../crates/tsoracle-proto" }
 
 [[bin]]
 name              = "record_decode"
@@ -54,6 +63,30 @@ doctest           = false
 [[bin]]
 name              = "proto_leader_hint_decode"
 path              = "fuzz_targets/proto_leader_hint_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
+name              = "log_entry_decode"
+path              = "fuzz_targets/log_entry_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
+name              = "snapshot_payload_decode"
+path              = "fuzz_targets/snapshot_payload_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
+name              = "toolkit_codec_decode"
+path              = "fuzz_targets/toolkit_codec_decode.rs"
 test              = false
 doc               = false
 bench             = false
