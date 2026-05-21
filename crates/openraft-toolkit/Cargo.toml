@@ -28,6 +28,9 @@ tracing          = { workspace = true }
 
 [dev-dependencies]
 openraft         = { workspace = true, features = ["serde", "type-alias"] }
+parking_lot      = { workspace = true }
+postcard         = { workspace = true }
 proptest         = { workspace = true }
+rocksdb          = { workspace = true }
 tempfile         = { workspace = true }
 tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

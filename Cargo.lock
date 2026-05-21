@@ -1470,6 +1470,7 @@ dependencies = [
  "async-trait",
  "futures",
  "openraft",
+ "parking_lot",
  "postcard",
  "proptest",
  "rocksdb",
@@ -2755,6 +2756,29 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "tsoracle-consensus",
+ "tsoracle-core",
+]
+
+[[package]]
+name = "tsoracle-driver-openraft"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "openraft",
+ "openraft-toolkit",
+ "parking_lot",
+ "postcard",
+ "proptest",
+ "rocksdb",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
  "tsoracle-consensus",
  "tsoracle-core",
 ]
