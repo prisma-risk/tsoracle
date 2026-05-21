@@ -4,11 +4,12 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
 use tokio::time::sleep;
 use tsoracle_client::{Client, ClientError};
 use tsoracle_core::Epoch;
-use tsoracle_server::{Server, ServingState, test_fakes::InMemoryDriver};
+use tsoracle_server::Server;
+use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::test_support::{boot_server, wait_until_serving};
 
 fn unix_ms_now() -> u64 {
     std::time::SystemTime::now()
@@ -47,23 +48,7 @@ async fn timestamps_are_at_or_after_enqueue_time() {
         .build()
         .unwrap();
 
-    // Bind in the test (not in a helper that drops the listener) so there is
-    // no rebind window between "pick a port" and "server claims it". Clone
-    // state_rx before moving server into the spawn so we can observe the
-    // serving handshake from the outside.
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let local_addr = listener.local_addr().unwrap();
-    let mut state_rx = server.state_rx.clone();
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let serve = tokio::spawn(async move {
-        server
-            .serve_with_listener(listener, async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .unwrap();
-    });
+    let mut booted = boot_server(server).await;
 
     driver.become_leader(Epoch(1));
 
@@ -72,17 +57,13 @@ async fn timestamps_are_at_or_after_enqueue_time() {
     // This is a sanity gate: if the server never reaches Serving, the loop
     // below would otherwise spin until budget exhaustion with a less specific
     // error.
-    loop {
-        if matches!(*state_rx.borrow_and_update(), ServingState::Serving) {
-            break;
-        }
-        state_rx
-            .changed()
-            .await
-            .expect("state stream closed before reaching Serving");
-    }
+    wait_until_serving(&mut booted.state_rx).await;
 
-    let client = Arc::new(Client::connect(vec![local_addr.to_string()]).await.unwrap());
+    let client = Arc::new(
+        Client::connect(vec![booted.addr.to_string()])
+            .await
+            .unwrap(),
+    );
 
     // Bridge the small remaining gap between "state == Serving" and "tonic's
     // accept loop has been polled and is handling HTTP/2". Once one call
@@ -108,8 +89,7 @@ async fn timestamps_are_at_or_after_enqueue_time() {
         }
     }
 
-    let _ = shutdown_tx.send(());
-    let _ = serve.await;
+    booted.shutdown().await.unwrap();
 }
 
 fn rand_jitter() -> bool {
