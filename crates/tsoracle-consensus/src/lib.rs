@@ -98,9 +98,9 @@ pub trait ConsensusDriver: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use futures::stream;
 
-    // Compile-time smoke: a trivial implementer fits the trait bounds.
     struct Dummy;
 
     #[async_trait::async_trait]
@@ -123,5 +123,76 @@ mod tests {
     #[test]
     fn dummy_is_object_safe() {
         let _: Box<dyn ConsensusDriver> = Box::new(Dummy);
+    }
+
+    #[test]
+    fn dummy_driver_methods_return_documented_defaults() {
+        // Calling each method covers the trait-object dispatch path and
+        // confirms the Dummy's contract: empty stream, zero high-water,
+        // monotonic-advance returns the input. Uses futures' built-in
+        // executor to keep the crate free of a tokio dev-dependency.
+        let driver: Box<dyn ConsensusDriver> = Box::new(Dummy);
+        futures::executor::block_on(async {
+            let mut events = driver.leadership_events();
+            assert!(events.next().await.is_none(), "empty stream");
+            assert_eq!(driver.load_high_water().await.unwrap(), 0);
+            assert_eq!(
+                driver.persist_high_water(42, Epoch(7)).await.unwrap(),
+                42,
+                "persist returns the at_least argument unchanged",
+            );
+        });
+    }
+
+    #[test]
+    fn leader_state_payload_aware_equality() {
+        // `PartialEq` is the basis for `watch::Sender`'s debounce, so
+        // verify it discriminates on payload, not just variant tag.
+        let l1 = LeaderState::Leader { epoch: Epoch(1) };
+        let l2 = LeaderState::Leader { epoch: Epoch(2) };
+        assert_ne!(l1, l2, "different epochs must compare unequal");
+        assert_eq!(l1, LeaderState::Leader { epoch: Epoch(1) });
+
+        let f_known = LeaderState::Follower {
+            leader_endpoint: Some("http://node-2".into()),
+        };
+        let f_unknown = LeaderState::Follower {
+            leader_endpoint: None,
+        };
+        assert_ne!(
+            f_known, f_unknown,
+            "follower-leader-changes must surface as inequality",
+        );
+        assert_ne!(f_known, LeaderState::Unknown);
+        assert_eq!(LeaderState::Unknown, LeaderState::Unknown);
+
+        // Debug round-trips through the derive (covers the derive impl).
+        let rendered = format!("{l1:?}");
+        assert!(rendered.contains("Leader"));
+    }
+
+    #[test]
+    fn consensus_error_display_text() {
+        let not_leader = ConsensusError::NotLeader {
+            observed: Some(Epoch(3)),
+        };
+        assert!(not_leader.to_string().contains("not leader"));
+
+        let fenced = ConsensusError::Fenced {
+            expected: Epoch(2),
+            current: Epoch(5),
+        };
+        let fenced_text = fenced.to_string();
+        assert!(fenced_text.contains("fenced"));
+        assert!(fenced_text.contains('2'));
+        assert!(fenced_text.contains('5'));
+
+        let transient = ConsensusError::TransientDriver(Box::new(std::io::Error::other("flap")));
+        assert!(transient.to_string().contains("transient"));
+        assert!(transient.to_string().contains("flap"));
+
+        let permanent = ConsensusError::PermanentDriver(Box::new(std::io::Error::other("corrupt")));
+        assert!(permanent.to_string().contains("permanent"));
+        assert!(permanent.to_string().contains("corrupt"));
     }
 }
