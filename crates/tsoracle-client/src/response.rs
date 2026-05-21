@@ -77,6 +77,47 @@ mod tests {
         assert!(matches!(err, ClientError::Rpc(_)));
     }
 
+    #[test]
+    fn rejects_zero_count_when_requested_zero() {
+        // The Client crate's public surface caps `count` at MAX_TIMESTAMPS_PER_RPC
+        // and rejects 0 up-front, so `decode_get_ts_response` would not normally
+        // see these values. The defense-in-depth count-range guard here catches
+        // a server bug or wire tamper that bypasses that outer check.
+        let err = decode_get_ts_response(
+            GetTsResponse {
+                physical_ms: 1,
+                logical_start: 0,
+                count: 0,
+                epoch: 0,
+            },
+            0,
+        )
+        .unwrap_err();
+        let ClientError::Rpc(status) = err else {
+            panic!("expected Rpc, got something else");
+        };
+        assert!(status.message().contains("out-of-range count=0"));
+    }
+
+    #[test]
+    fn rejects_oversized_count_when_requested_oversized() {
+        let oversized = MAX_TIMESTAMPS_PER_RPC + 1;
+        let err = decode_get_ts_response(
+            GetTsResponse {
+                physical_ms: 1,
+                logical_start: 0,
+                count: oversized,
+                epoch: 0,
+            },
+            oversized,
+        )
+        .unwrap_err();
+        let ClientError::Rpc(status) = err else {
+            panic!("expected Rpc, got something else");
+        };
+        assert!(status.message().contains("out-of-range"));
+    }
+
     /// Strategy producing a `GetTsResponse` that satisfies every precondition
     /// `decode_get_ts_response` checks: count in `[1, MAX_TIMESTAMPS_PER_RPC]`,
     /// physical_ms in 46-bit range, and `logical_start + count - 1 <= LOGICAL_MAX`.
