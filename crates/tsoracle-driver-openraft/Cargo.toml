@@ -25,7 +25,15 @@ async-trait        = { workspace = true }
 futures            = { workspace = true }
 openraft           = { workspace = true }
 postcard           = { workspace = true }
-openraft-toolkit   = { path = "../openraft-toolkit" }
+# `default-features = false` so this crate does not unilaterally pull the
+# toolkit's `rocksdb-log-store` feature (and its transitive `librocksdb-sys` →
+# `bindgen` → `clang-sys` chain) into every consumer. The driver's `src/` only
+# touches `openraft_toolkit::{LeadershipState, lifecycle, declare_raft_types_ext}`,
+# all of which live outside the feature-gated `log_store` module. Workspace
+# members that need `RocksdbLogStore` (examples, this crate's dev-deps) opt in
+# explicitly with `features = ["rocksdb-log-store"]` and cargo feature
+# unification re-enables it for their builds.
+openraft-toolkit   = { path = "../openraft-toolkit", default-features = false }
 parking_lot        = { workspace = true }
 rocksdb            = { workspace = true, optional = true }
 serde              = { workspace = true }
