@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use openraft::async_runtime::watch::WatchReceiver;
 use openraft::{Config, Raft, SnapshotPolicy};
 use openraft_toolkit::test_fakes::MemNetwork;
 use openraft_toolkit::{Flat, RocksdbLogStore};
@@ -128,7 +129,6 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     nodes[0].raft.initialize(mem).await.expect("initialize");
 
     let leader_idx = find_leader_idx(&nodes).await;
-    let leader_id = nodes[leader_idx].id;
     let follower_idx = (0..3).find(|i| *i != leader_idx).unwrap();
     let follower_id = nodes[follower_idx].id;
 
@@ -186,7 +186,7 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     let leader_raft = nodes[leader_idx].raft.clone();
     let leader_snapshot_log_id = timeout(Duration::from_secs(10), async move {
         loop {
-            let metrics = leader_raft.metrics().borrow().clone();
+            let metrics = leader_raft.metrics().borrow_watched().clone();
             if let Some(snapshot_log_id) = metrics.snapshot.clone() {
                 if snapshot_log_id.index >= 5 {
                     return snapshot_log_id;
@@ -228,7 +228,7 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     let follower_snapshot_log_id = nodes[follower_idx]
         .raft
         .metrics()
-        .borrow()
+        .borrow_watched()
         .snapshot
         .clone()
         .expect("trailing follower must have installed a snapshot");
