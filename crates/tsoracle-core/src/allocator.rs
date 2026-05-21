@@ -104,6 +104,10 @@ impl Allocator {
         Ok(())
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "Convenience wrapper around `try_on_leadership_gained`. Tracked by #4."
+    )]
     pub fn on_leadership_gained(&mut self, fence_floor: u64, committed_ceiling: u64, epoch: Epoch) {
         self.try_on_leadership_gained(fence_floor, committed_ceiling, epoch)
             .expect("invalid leadership window");
@@ -246,6 +250,10 @@ impl Allocator {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "Convenience wrapper around `try_prepare_window_extension`. Tracked by #4."
+    )]
     pub fn prepare_window_extension(&self, now_ms: u64, ahead_ms: u64) -> u64 {
         self.try_prepare_window_extension(now_ms, ahead_ms)
             .expect("window extension exceeds timestamp physical_ms range")
@@ -282,6 +290,10 @@ impl Allocator {
         Ok(())
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "Convenience wrapper around `try_commit_window_extension`. Tracked by #4."
+    )]
     pub fn commit_window_extension(&mut self, persisted_high_water: u64, expected_epoch: Epoch) {
         self.try_commit_window_extension(persisted_high_water, expected_epoch)
             .expect("persisted high-water exceeds timestamp physical_ms range");

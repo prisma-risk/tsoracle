@@ -11,6 +11,10 @@ pub fn not_leader_status(hint: LeaderHint) -> Status {
     let mut status = Status::failed_precondition("not leader");
     let bytes = hint.encode_to_vec();
     let value = BinaryMetadataValue::from_bytes(&bytes);
+    #[expect(
+        clippy::expect_used,
+        reason = "`KEY` is a `const &'static str` of valid ASCII; `MetadataKey::from_bytes` cannot fail here. Tracked by #5."
+    )]
     let key = MetadataKey::from_bytes(KEY.as_bytes()).expect("valid key");
     status.metadata_mut().insert_bin(key, value);
     status
