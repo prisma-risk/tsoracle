@@ -1,6 +1,6 @@
 //! In-process 3-node piggyback demo.
 //!
-//! Boots three openraft nodes connected via `openraft_toolkit::MemNetwork`,
+//! Boots three openraft nodes connected via `tsoracle_openraft_toolkit::MemNetwork`,
 //! each running a tsoracle::Server bound to a unique loopback port. Drives a
 //! scripted sequence: KV writes via the host service, GetTs via a
 //! tsoracle-client, then a failover, asserting both halves of the freshness
@@ -13,8 +13,6 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail};
 use openraft::async_runtime::watch::WatchReceiver;
 use openraft::{Config, Raft, SnapshotPolicy};
-use openraft_toolkit::test_fakes::MemNetwork;
-use openraft_toolkit::{Flat, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
@@ -22,6 +20,8 @@ use tracing::info;
 use tsoracle_client::Client as TsoClient;
 use tsoracle_core::Timestamp;
 use tsoracle_driver_openraft::OpenraftDriver;
+use tsoracle_openraft_toolkit::test_fakes::MemNetwork;
+use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 use tsoracle_server::Server as TsoServer;
 
 use crate::host_service::{

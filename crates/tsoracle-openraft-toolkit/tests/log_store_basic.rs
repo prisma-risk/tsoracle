@@ -5,9 +5,9 @@ use std::sync::Arc;
 use openraft::entry::RaftEntry;
 use openraft::storage::{IOFlushed, RaftLogReader, RaftLogStorage};
 use openraft::{Entry, LogId, Vote};
-use openraft_toolkit::{Flat, GroupPrefixed, KeySpace, MetaLabel, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
+use tsoracle_openraft_toolkit::{Flat, GroupPrefixed, KeySpace, MetaLabel, RocksdbLogStore};
 
 mod common;
 use common::{TestLeaderId, TestTypeConfig};
@@ -44,7 +44,7 @@ fn open_fails_when_log_cf_missing() {
     let db = Arc::new(DB::open_cf_descriptors(&opts, dir.path(), cfs).unwrap());
     let err = RocksdbLogStore::<TestTypeConfig, Flat>::open(db, LOG_CF, META_CF, Flat).unwrap_err();
     assert!(
-        matches!(err, openraft_toolkit::RocksdbLogStoreError::MissingColumnFamily(ref s) if s == LOG_CF)
+        matches!(err, tsoracle_openraft_toolkit::RocksdbLogStoreError::MissingColumnFamily(ref s) if s == LOG_CF)
     );
 }
 

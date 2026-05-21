@@ -1,0 +1,32 @@
+# release-plz configuration — https://release-plz.ieni.dev/docs
+#
+# How releases work:
+#   1. Land commits on `main` using conventional commit prefixes (feat:, fix:,
+#      chore:, refactor:, docs:, etc.). The prefix determines the version bump.
+#   2. The `release-plz PR` job opens (or updates) a "Release PR" that bumps
+#      `[workspace.package].version` and writes per-crate CHANGELOG.md entries.
+#   3. Reviewing+merging that PR triggers the `release-plz release` job, which
+#      tags the release and runs `cargo publish` in topological order for every
+#      workspace member that does NOT have `publish = false`.
+
+[workspace]
+# Don't run `cargo update` during release; keep Cargo.lock churn scoped to PRs
+# that intentionally bump deps.
+dependencies_update = false
+
+# Create a GitHub Release for every published crate version.
+git_release_enable = true
+
+# Tag releases (one tag per crate, e.g. `tsoracle-core-v0.2.0`).
+git_tag_enable = true
+
+# Maintain CHANGELOG.md per crate from conventional commit messages.
+changelog_update = true
+
+# Run `cargo publish --verify` before uploading — catches breakage that only
+# shows up against the packaged tarball (e.g. files missing from `include`).
+publish_no_verify = false
+
+# Off for now; flip to `true` (and `cargo install cargo-semver-checks`) once we
+# want automated semver-compat guarding on the release PR.
+semver_check = false

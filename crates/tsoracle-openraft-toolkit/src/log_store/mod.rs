@@ -333,14 +333,14 @@ where
         }
 
         let wo = Self::write_sync_opts();
-        crate::failpoint!("openraft_toolkit::log_store::before_write_batch");
+        crate::failpoint!("tsoracle_openraft_toolkit::log_store::before_write_batch");
         let result = self.db.write_opt(batch, &wo).map_err(io::Error::other);
 
         crate::failpoint!(
-            "openraft_toolkit::log_store::after_write_before_sync",
+            "tsoracle_openraft_toolkit::log_store::after_write_before_sync",
             |_arg: Option<String>| -> Result<(), io::Error> {
                 Err(io::Error::other(
-                    "failpoint: openraft_toolkit::log_store::after_write_before_sync",
+                    "failpoint: tsoracle_openraft_toolkit::log_store::after_write_before_sync",
                 ))
             }
         );

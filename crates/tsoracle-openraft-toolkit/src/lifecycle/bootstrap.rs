@@ -73,7 +73,7 @@ where
     match mode {
         BootstrapMode::Fresh { initial_members } => match raft.initialize(initial_members).await {
             Ok(()) => {
-                info!("openraft-toolkit: raft initialized with fresh membership");
+                info!("tsoracle-openraft-toolkit: raft initialized with fresh membership");
                 Ok(())
             }
             Err(RaftError::APIError(InitializeError::NotAllowed(_))) => {
@@ -82,11 +82,11 @@ where
             Err(e) => Err(BootstrapError::Initialize(e.to_string())),
         },
         BootstrapMode::Reopen => {
-            info!("openraft-toolkit: reopen mode; relying on existing raft state");
+            info!("tsoracle-openraft-toolkit: reopen mode; relying on existing raft state");
             Ok(())
         }
         BootstrapMode::Join => {
-            warn!("openraft-toolkit: join mode; node will sit as learner until promoted");
+            warn!("tsoracle-openraft-toolkit: join mode; node will sit as learner until promoted");
             Ok(())
         }
     }

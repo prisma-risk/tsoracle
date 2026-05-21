@@ -768,7 +768,6 @@ dependencies = [
  "async-trait",
  "futures",
  "openraft",
- "openraft-toolkit",
  "parking_lot",
  "postcard",
  "rocksdb",
@@ -781,6 +780,7 @@ dependencies = [
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-driver-openraft",
+ "tsoracle-openraft-toolkit",
  "tsoracle-server",
 ]
 
@@ -793,7 +793,6 @@ dependencies = [
  "clap",
  "futures",
  "openraft",
- "openraft-toolkit",
  "postcard",
  "prost",
  "rocksdb",
@@ -807,6 +806,7 @@ dependencies = [
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-driver-openraft",
+ "tsoracle-openraft-toolkit",
  "tsoracle-server",
 ]
 
@@ -1567,26 +1567,6 @@ dependencies = [
  "openraft-rt",
  "rand 0.10.1",
  "tokio",
-]
-
-[[package]]
-name = "openraft-toolkit"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fail",
- "futures",
- "openraft",
- "parking_lot",
- "postcard",
- "proptest",
- "rocksdb",
- "serde",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tracing",
 ]
 
 [[package]]
@@ -2485,7 +2465,6 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "openraft",
- "openraft-toolkit",
  "parking_lot",
  "rand 0.9.4",
  "rocksdb",
@@ -2500,6 +2479,7 @@ dependencies = [
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-driver-openraft",
+ "tsoracle-openraft-toolkit",
  "tsoracle-server",
 ]
 
@@ -2980,7 +2960,6 @@ dependencies = [
  "async-trait",
  "futures",
  "openraft",
- "openraft-toolkit",
  "parking_lot",
  "postcard",
  "proptest",
@@ -2993,6 +2972,27 @@ dependencies = [
  "tracing",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-openraft-toolkit",
+]
+
+[[package]]
+name = "tsoracle-openraft-toolkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fail",
+ "futures",
+ "openraft",
+ "parking_lot",
+ "postcard",
+ "proptest",
+ "rocksdb",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]

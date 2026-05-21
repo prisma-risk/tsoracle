@@ -17,12 +17,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use openraft::{Config, Raft};
-use openraft_toolkit::{Flat, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tsoracle_driver_openraft::{
     HighWaterStateMachine, OpenraftDriver, OpenraftPeer, RocksdbSnapshotStore, SnapshotStore,
     StandaloneHost, TypeConfig,
 };
+use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 use tsoracle_server::Server as TsoServer;
 
 use crate::network::{PeerFactory, server as peer_server};

@@ -25,9 +25,9 @@ prost                    = "0.14"
 # `librocksdb-sys` → `bindgen` → `clang-sys`. The fuzz CI runner does not
 # have clang installed, and the fuzz harnesses only exercise pure postcard
 # decoders on serde-derived types, so the rocksdb backends are not needed.
-# `openraft_toolkit::codec` (the only toolkit surface the harnesses touch)
+# `tsoracle_openraft_toolkit::codec` (the only toolkit surface the harnesses touch)
 # is unconditional and lives outside the feature-gated `log_store` module.
-openraft-toolkit         = { path = "../crates/openraft-toolkit", default-features = false }
+tsoracle-openraft-toolkit         = { path = "../crates/tsoracle-openraft-toolkit", default-features = false }
 tsoracle-driver-file     = { path = "../crates/tsoracle-driver-file" }
 tsoracle-driver-openraft = { path = "../crates/tsoracle-driver-openraft", default-features = false }
 tsoracle-proto           = { path = "../crates/tsoracle-proto" }

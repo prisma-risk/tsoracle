@@ -1,23 +1,23 @@
 //! Regenerates the fuzz seed corpus for `toolkit_codec_decode`, deriving
 //! valid `[version | postcard(body)]` payloads from the canonical
-//! [`openraft_toolkit::encode`] entry point.
+//! [`tsoracle_openraft_toolkit::encode`] entry point.
 //!
 //! Run with:
 //!
-//!     cargo test -p openraft-toolkit --test generate_fuzz_seeds -- --ignored
+//!     cargo test -p tsoracle-openraft-toolkit --test generate_fuzz_seeds -- --ignored
 //!
 //! Idempotent. Re-run after any change to the codec framing.
 
 use std::fs;
 use std::path::PathBuf;
 
-use openraft_toolkit::encode;
 use serde::{Deserialize, Serialize};
+use tsoracle_openraft_toolkit::encode;
 
 /// Body type that mirrors `tsoracle_driver_openraft::HighWaterApplied` byte-
 /// for-byte under postcard (single `u64` field). Re-declared locally so this
 /// seed generator does not pull `tsoracle-driver-openraft` into
-/// `openraft-toolkit`'s dev-dependency graph; postcard's wire format is
+/// `tsoracle-openraft-toolkit`'s dev-dependency graph; postcard's wire format is
 /// structural, so the encoded bytes are identical.
 #[derive(Debug, Serialize, Deserialize)]
 struct HighWaterAppliedShape {

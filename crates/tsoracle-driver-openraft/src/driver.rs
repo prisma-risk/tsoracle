@@ -22,10 +22,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use openraft::RaftTypeConfig;
-use openraft_toolkit::LeadershipState;
-use openraft_toolkit::lifecycle::leader::stream_from_receiver;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
+use tsoracle_openraft_toolkit::LeadershipState;
+use tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver;
 
 use crate::host::OpenraftHighWaterHost;
 
@@ -146,9 +146,9 @@ fn map_leader_state<C: RaftTypeConfig>(s: LeadershipState<C>) -> LeaderState {
 mod tests {
     use super::map_leader_state;
     use crate::type_config::TypeConfig;
-    use openraft_toolkit::LeadershipState;
     use tsoracle_consensus::LeaderState;
     use tsoracle_core::Epoch;
+    use tsoracle_openraft_toolkit::LeadershipState;
 
     #[test]
     fn leader_maps_to_leader_with_epoch() {
