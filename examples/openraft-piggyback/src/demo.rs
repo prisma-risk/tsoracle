@@ -72,7 +72,12 @@ fn raft_config() -> anyhow::Result<Arc<Config>> {
             heartbeat_interval: 100,
             election_timeout_min: 300,
             election_timeout_max: 600,
-            // See README "Snapshots disabled" — the host SM is in-memory only.
+            // The driver crate's `HighWaterStateMachine` now persists snapshots
+            // through a pluggable `SnapshotStore`, but this example's own
+            // `HostStateMachine` (host_service.rs) still keeps the KV map and
+            // high-water in memory only. Disabling snapshots is the safe
+            // default until that SM gains the same write-through. See README
+            // "In-memory `HostStateMachine`."
             snapshot_policy: SnapshotPolicy::Never,
             ..Default::default()
         }

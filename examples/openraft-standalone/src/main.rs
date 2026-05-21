@@ -16,11 +16,12 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use openraft::{Config, Raft, SnapshotPolicy};
+use openraft::{Config, Raft};
 use openraft_toolkit::{Flat, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tsoracle_driver_openraft::{
-    HighWaterStateMachine, OpenraftDriver, OpenraftPeer, StandaloneHost, TypeConfig,
+    HighWaterStateMachine, OpenraftDriver, OpenraftPeer, RocksdbSnapshotStore, SnapshotStore,
+    StandaloneHost, TypeConfig,
 };
 use tsoracle_server::Server as TsoServer;
 
@@ -29,6 +30,7 @@ use crate::router::StandaloneRouter;
 
 const LOG_CF: &str = "raft_log";
 const META_CF: &str = "raft_meta";
+const SNAP_CF: &str = "raft_snapshot";
 
 #[derive(Parser, Debug)]
 #[command(name = "openraft-standalone")]
@@ -80,18 +82,16 @@ fn parse_peer_map(input: &str) -> anyhow::Result<HashMap<u64, String>> {
     Ok(out)
 }
 
-fn open_rocksdb_log_store(
-    dir: &std::path::Path,
-) -> anyhow::Result<RocksdbLogStore<TypeConfig, Flat>> {
+fn open_rocksdb(dir: &std::path::Path) -> anyhow::Result<Arc<DB>> {
     let mut opts = Options::default();
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);
     let cfs = vec![
         ColumnFamilyDescriptor::new(LOG_CF, Options::default()),
         ColumnFamilyDescriptor::new(META_CF, Options::default()),
+        ColumnFamilyDescriptor::new(SNAP_CF, Options::default()),
     ];
-    let driver = Arc::new(DB::open_cf_descriptors(&opts, dir, cfs)?);
-    Ok(RocksdbLogStore::open(driver, LOG_CF, META_CF, Flat)?)
+    Ok(Arc::new(DB::open_cf_descriptors(&opts, dir, cfs)?))
 }
 
 #[tokio::main]
@@ -103,22 +103,26 @@ async fn main() -> anyhow::Result<()> {
     let tso_addrs = Arc::new(parse_peer_map(&cli.tso_peers)?);
 
     // ---- Storage + state machine ----
+    // One rocksdb instance covers the raft log (`raft_log` / `raft_meta` CFs)
+    // and the state-machine snapshot (`raft_snapshot` CF), so a single
+    // `set_sync(true)` write fsyncs both halves together.
     std::fs::create_dir_all(&cli.raft_dir)?;
-    let log_store = open_rocksdb_log_store(&cli.raft_dir)?;
-    let state_machine = HighWaterStateMachine::new();
+    let db = open_rocksdb(&cli.raft_dir)?;
+    let log_store = RocksdbLogStore::open(db.clone(), LOG_CF, META_CF, Flat)?;
+    let snapshot_store: Arc<dyn SnapshotStore> = Arc::new(RocksdbSnapshotStore::open(db, SNAP_CF)?);
+    let state_machine = HighWaterStateMachine::with_store(snapshot_store)
+        .context("rehydrate state machine from persisted snapshot")?;
     let state_machine_for_host = state_machine.clone();
 
     // ---- Openraft config ----
-    // SnapshotPolicy::Never is intentional: the driver crate's
-    // HighWaterStateMachine keeps state and snapshots in memory only, so the
-    // default snapshot+purge policy could let openraft purge logs the SM
-    // cannot rebuild from on restart. See README "Production caveats."
+    // Default snapshot policy is fine now that the state machine writes
+    // through to a durable snapshot store: snapshots survive restart, so
+    // openraft is free to purge the log prefix each one covers.
     let config = Arc::new(
         Config {
             heartbeat_interval: 250,
             election_timeout_min: 1_000,
             election_timeout_max: 2_000,
-            snapshot_policy: SnapshotPolicy::Never,
             ..Default::default()
         }
         .validate()?,
