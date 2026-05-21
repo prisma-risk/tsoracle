@@ -1,0 +1,26 @@
+# LeakSanitizer suppressions for the nightly leak-check job.
+#
+# Format: one rule per line.
+#   leak:<symbol-substring>   -- match by function/symbol in the backtrace
+#   leak:<library-substring>  -- match by shared library or object filename
+# See https://github.com/google/sanitizers/wiki/AddressSanitizerLeakSanitizer#suppressions
+#
+# Principles:
+#   * Keep this file as small as possible. Every entry hides real
+#     allocations from the leak gate.
+#   * Add a comment before each rule explaining *why* the allocation is
+#     acceptable at process exit, and link an issue/PR if relevant.
+#   * Prefer fixing the leak over adding a suppression.
+#
+# The first nightly run is expected to surface additional process-lifetime
+# allocations from dependencies (commonly: tokio thread-pool teardown,
+# tonic/hyper connection pools, tracing-subscriber registries, openraft
+# background tasks). Triage each one, then either fix it or add a narrowly
+# scoped rule here with a justification.
+
+# --- RocksDB (C++ FFI) ----------------------------------------------------
+# RocksDB owns background flush/compaction threads and global block-cache
+# state. Even after Db::close(), some allocations stay attached to static
+# tables that the OS reclaims on exit. These are not real leaks but LSan
+# (rightly) cannot tell.
+leak:rocksdb::
