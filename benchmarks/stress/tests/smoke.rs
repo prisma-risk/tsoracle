@@ -62,3 +62,33 @@ fn inject_violation_self_test_exits_with_violation() {
     assert!(matches!(report.outcome, Outcome::InvariantViolation));
     assert!(!report.violations.is_empty());
 }
+
+#[test]
+fn raft_steady_smoke_completes_clean() {
+    let mut cfg = base_cfg("steady", 5);
+    cfg.topology = TopologyKind::Raft;
+    cfg.nodes = 3;
+    let report = stress::run(cfg).unwrap();
+    assert!(
+        matches!(report.outcome, Outcome::Ok),
+        "got: {:?}",
+        report.outcome
+    );
+    assert!(report.violations.is_empty(), "got: {:?}", report.violations);
+    assert!(report.recorded.timestamps > 0, "no timestamps issued");
+}
+
+#[test]
+fn raft_killer_loop_smoke_maintains_invariants() {
+    let mut cfg = base_cfg("killer-loop", 10);
+    cfg.topology = TopologyKind::Raft;
+    cfg.nodes = 3;
+    let report = stress::run(cfg).unwrap();
+    assert!(
+        matches!(report.outcome, Outcome::Ok),
+        "outcome: {:?}, violations: {:?}",
+        report.outcome,
+        report.violations,
+    );
+    assert!(report.recorded.timestamps > 0);
+}

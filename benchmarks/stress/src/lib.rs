@@ -59,6 +59,7 @@ use crate::schedule::{RandomParams, Schedule};
 use crate::supervisor::Supervisor;
 use crate::topology::ChaosController;
 use crate::topology::mem::MemTopology;
+use crate::topology::raft::RaftTopology;
 use crate::types::ClientId;
 
 /// Tuple returned by topology spawn helpers below: the chaos controller, the
@@ -127,7 +128,34 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
             let server_handle = topo.server_handle;
             (Box::new(topo.controller), endpoints, server_handle)
         }
-        TopologyKind::Raft => anyhow::bail!("raft topology not yet implemented"),
+        TopologyKind::Raft => {
+            let topo = server_rt.block_on(RaftTopology::spawn(cfg.nodes, grace))?;
+            let endpoints = topo.controller.endpoints();
+            // `RaftTopology` returns one server `JoinHandle<()>` per node,
+            // whereas `SpawnedTopology` carries a single
+            // `JoinHandle<Result<(), tsoracle_server::ServerError>>`. We treat
+            // the first node's handle as the "primary" returned handle (after
+            // wrapping it through an adapter task so the types line up) and
+            // detach a tiny supervisor for each remaining node's handle so
+            // they're reaped on shutdown. Per-node `ServerError`s are already
+            // surfaced via `tracing::error!` inside `RaftTopology::spawn`'s
+            // server task, so losing the typed error in the adapter is fine.
+            let mut handles = topo.server_handles.into_iter();
+            let first = handles
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("raft topology returned zero server handles"))?;
+            for extra in handles {
+                server_rt.spawn(async move {
+                    let _ = extra.await;
+                });
+            }
+            let server_handle: tokio::task::JoinHandle<Result<(), tsoracle_server::ServerError>> =
+                server_rt.spawn(async move {
+                    let _ = first.await;
+                    Ok(())
+                });
+            (Box::new(topo.controller), endpoints, server_handle)
+        }
         TopologyKind::Process => anyhow::bail!("process topology not yet implemented"),
     };
 

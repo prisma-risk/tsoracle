@@ -134,9 +134,9 @@ COV_IGNORE_OPENRAFT_LIFECYCLE := crates/openraft-toolkit/src/lifecycle/(bootstra
 # end-to-end by `benchmarks/stress/tests/smoke.rs`.
 COV_IGNORE_STRESS_BIN := benchmarks/stress/src/bin/stress
 
-# `unimplemented!()` placeholders for future topology variants — intentionally
-# unreachable from any current test path.
-COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/(raft|process)
+# `unimplemented!()` placeholders for topology variants not yet implemented —
+# intentionally unreachable from any current test path.
+COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/process
 
 COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_STRESS_TOPO_STUBS))\.rs
 
