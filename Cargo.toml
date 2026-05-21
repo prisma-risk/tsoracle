@@ -45,6 +45,7 @@ authors      = ["Sebastian Thiebaud <sebastian@prismarisk.com>"]
 [workspace.dependencies]
 anyhow             = "1"
 async-trait        = "0.1"
+fail               = { version = "0.5", default-features = false }
 postcard           = { version = "1", default-features = false, features = ["use-std"] }
 bytes              = "1"
 clap               = { version = "4", features = ["derive"] }

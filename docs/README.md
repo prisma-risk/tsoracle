@@ -17,6 +17,7 @@ For the **API reference**, see [docs.rs/tsoracle-server](https://docs.rs/tsoracl
 - **[Consensus Integration](consensus-integration.md)** — the `ConsensusDriver` trait, per-method recipes, worked openraft example, single-leader requirement.
 - **[Operations](operations.md)** — sizing `window_ahead`/`failover_advance`, monitoring hooks, deployment topologies, client retry behavior.
 - **[Testing and Examples](testing-and-examples.md)** — walkthroughs of `embedded-server`, `failover-demo`, `openraft-standalone`, `openraft-piggyback`, plus the workspace testing strategy.
+- **[Failpoint Testing](failpoint-testing.md)** — fault-injection points for crash-recovery, fence, and service-path tests; the feature-gating model and contributor guidance.
 
 ## Where to start
 
