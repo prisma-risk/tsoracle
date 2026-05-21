@@ -15,6 +15,7 @@ categories    = ["network-programming", "database"]
 [features]
 default    = ["tls-rustls", "tracing"]
 failpoints = ["dep:fail", "fail/failpoints"]
+metrics    = ["dep:metrics"]
 tls-rustls = ["tonic/tls-aws-lc"]
 tls-native = ["tonic/tls-native-roots"]
 tracing    = ["dep:tracing"]
@@ -23,13 +24,14 @@ test-support = ["test-fakes"]
 reflection = ["dep:tonic-reflection", "tsoracle-proto/reflection"]
 
 [package.metadata.docs.rs]
-features       = ["tls-rustls", "tracing", "reflection"]
+features       = ["tls-rustls", "tracing", "reflection", "metrics"]
 rustdoc-args   = ["--cfg", "docsrs"]
 
 [dependencies]
 async-trait        = { workspace = true }
 fail               = { workspace = true, optional = true }
 futures            = { workspace = true }
+metrics            = { workspace = true, optional = true }
 parking_lot        = { workspace = true }
 prost              = { workspace = true }
 thiserror          = { workspace = true }
@@ -45,6 +47,7 @@ tsoracle-proto     = { path = "../tsoracle-proto", version = "0.1.0" }
 
 [dev-dependencies]
 tokio          = { workspace = true, features = ["test-util"] }
+metrics-util   = { workspace = true }
 tsoracle-core   = { path = "../tsoracle-core", version = "0.1.0", features = ["test-clock"] }
 tsoracle-client = { path = "../tsoracle-client", version = "0.1.0" }
 
@@ -71,6 +74,10 @@ required-features = ["test-support"]
 [[test]]
 name = "serve_with_listener"
 required-features = ["test-support"]
+
+[[test]]
+name = "metrics"
+required-features = ["test-support", "metrics"]
 
 [[test]]
 name              = "failpoints"

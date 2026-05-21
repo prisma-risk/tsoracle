@@ -20,6 +20,11 @@ pub fn validate_key() -> Result<(), InvalidMetadataKey> {
 }
 
 pub fn not_leader_status(hint: LeaderHint) -> Status {
+    // Single chokepoint: every NOT_LEADER rejection in the service layer
+    // routes through this constructor, so the counter increments exactly
+    // once per rejection regardless of which call site detected it.
+    #[cfg(feature = "metrics")]
+    metrics::counter!("tsoracle.not_leader.total").increment(1);
     with_leader_hint(Status::failed_precondition("not leader"), hint, KEY)
 }
 
