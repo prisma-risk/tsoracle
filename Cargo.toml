@@ -12,7 +12,7 @@ members  = [
     "crates/openraft-toolkit",
     "examples/embedded-server",
     "examples/failover-demo",
-    "examples/openraft-cluster",
+    "examples/openraft-standalone",
     "benchmarks/minimal",
 ]
 # The fuzz crate is a standalone cargo project pinned to nightly via its own
