@@ -4,7 +4,7 @@ The tsoracle stress + chaos harness. Drives load against a tsoracle topology whi
 
 This crate is a peer of `benchmarks/minimal`, not a replacement. `bench-minimal` characterizes steady-state throughput and latency against an in-memory driver. `stress` is the invariant checker under chaos. Different consumers, different outputs.
 
-`publish = false` and excluded from `make coverage`. Run it when you want to know whether tsoracle maintains its invariants under sustained chaos.
+`publish = false`. Library code participates in `make coverage`; the CLI shim and the unimplemented topology stubs are filtered out via the Makefile's filename regex. Run it when you want to know whether tsoracle maintains its invariants under sustained chaos.
 
 ## Features
 

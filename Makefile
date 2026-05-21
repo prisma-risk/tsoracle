@@ -122,6 +122,13 @@ deny:
 # tests deliberately don't stand up (see `tests/lifecycle.rs` header). Coverage
 # for those wrappers is earned downstream by the openraft consumer that uses
 # them; the compile-time signature shims in `tests/lifecycle.rs` catch API drift.
+#
+# `benchmarks/stress/src/bin/stress.rs` is excluded for the same reason as the
+# `tsoracle` CLI shim: it is a `clap` argument-parsing wrapper around
+# `stress::run` / `stress::run_inject_violation`, which the `tests/smoke.rs`
+# integration tests exercise end-to-end. `benchmarks/stress/src/topology/raft.rs`
+# and `process.rs` are `unimplemented!()` placeholders for future topology
+# variants and intentionally do not execute under any current test.
 
 coverage:
 	$(CARGO) llvm-cov \
@@ -129,9 +136,10 @@ coverage:
 	  --exclude tsoracle \
 	  --exclude example-embedded-server \
 	  --exclude example-failover-demo \
-	  --exclude example-openraft-cluster \
+	  --exclude example-openraft-piggyback \
+	  --exclude example-openraft-standalone \
 	  --exclude bench-minimal \
-	  --ignore-filename-regex 'crates/openraft-toolkit/src/lifecycle/(bootstrap|membership)\.rs$$' \
+	  --ignore-filename-regex '(crates/openraft-toolkit/src/lifecycle/(bootstrap|membership)|benchmarks/stress/src/bin/stress|benchmarks/stress/src/topology/(raft|process))\.rs$$' \
 	  --lcov --output-path lcov.info
 
 # Release --------------------------------------------------------------------
