@@ -43,6 +43,11 @@ pub struct ChildHandle {
     /// Resolved bind address ("http://127.0.0.1:NNNN"). Set exactly once,
     /// during initial spawn, by `ProcessTopology::spawn`.
     pub addr: OnceLock<String>,
+    /// Resolved bind port. Set exactly once during initial spawn; pinned
+    /// so respawns rebind to the same port (and the harness's endpoint
+    /// list — handed to clients before the first chaos op — stays valid
+    /// across SIGKILL + respawn cycles).
+    pub port: OnceLock<u16>,
     /// Path to the `tsoracle` binary. Stable across respawns.
     pub binary: PathBuf,
     /// Per-node state directory. Reused across respawns so the file driver's
@@ -64,6 +69,7 @@ impl ChildHandle {
             child: Mutex::new(None),
             pid: AtomicU32::new(0),
             addr: OnceLock::new(),
+            port: OnceLock::new(),
             binary,
             data_dir,
             recent_logs: Mutex::new(VecDeque::with_capacity(LOG_RING_CAPACITY)),
@@ -99,10 +105,14 @@ pub async fn spawn_into(
     handle: &Arc<ChildHandle>,
     failpoints_env: Option<&str>,
 ) -> anyhow::Result<()> {
+    let listen = match handle.port.get() {
+        Some(port) => format!("127.0.0.1:{port}"),
+        None => "127.0.0.1:0".to_string(),
+    };
     let mut cmd = Command::new(&handle.binary);
     cmd.arg("serve")
         .arg("--listen")
-        .arg("127.0.0.1:0")
+        .arg(&listen)
         .arg("--state-dir")
         .arg(&handle.data_dir)
         .arg("--log")

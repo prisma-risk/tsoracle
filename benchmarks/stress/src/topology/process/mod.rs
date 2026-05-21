@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use async_trait::async_trait;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -35,9 +36,9 @@ use parking_lot::Mutex;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-use crate::chaos::ChaosEvent;
+use crate::chaos::{ChaosEvent, ChaosKind, ChaosOutcome};
 use crate::event::SupervisorEvent;
-use crate::topology::{ChaosController, NodeId};
+use crate::topology::{ChaosController, NodeId, timed_event};
 
 pub use self::child::{ChildHandle, ChildSpec, spawn_child, spawn_into, supervise_child};
 pub use self::failpoints_env::FailpointsEnv;
@@ -55,6 +56,13 @@ const RESOLVE_ADDR_POLL: Duration = Duration::from_millis(50);
 /// then inspects supervisor output.
 const SHUTDOWN_DRAIN: Duration = Duration::from_millis(100);
 
+/// Gap between SIGKILL and respawn. Lets the per-child reaper observe
+/// `child.wait()` return + clear `kill_expected` before the next spawn
+/// fills the slot. 50 ms is dead-conservative — wait() typically resolves
+/// within a few hundred microseconds of SIGKILL — but small enough that
+/// the nemesis chaos window stays bounded.
+const RESPAWN_GAP: Duration = Duration::from_millis(50);
+
 pub struct ProcessTopology {
     pub controller: ProcessController,
 }
@@ -69,12 +77,9 @@ pub struct ProcessController {
     /// `kill_leader` to spawn a fresh reaper task after each respawn
     /// (wired in a follow-up commit).
     liveness_tx: Mutex<Option<mpsc::Sender<SupervisorEvent>>>,
-    /// Shared FAILPOINTS map. `arm`/`disarm` (follow-up commit) update
-    /// it; every (re)spawn snapshots the current serialization into the
-    /// child's environment.
-    #[allow(dead_code)] // wired by arm_failpoint / disarm_failpoint in a follow-up
+    /// Shared FAILPOINTS map. `arm`/`disarm` update it; every (re)spawn
+    /// snapshots the current serialization into the child's environment.
     failpoints: Mutex<FailpointsEnv>,
-    #[allow(dead_code)] // consumed by the chaos op implementations in follow-up commits
     grace: Duration,
     /// Held until shutdown so the per-node `state_dir`s under it get
     /// cleaned up when the controller is dropped.
@@ -99,12 +104,19 @@ impl ProcessTopology {
             })
             .await?;
             let resolved = resolve_bound_addr(&handle).await?;
+            let port = parse_port(&resolved).with_context(|| {
+                format!("parse port from tsoracle's bind line: 'serving on {resolved}'")
+            })?;
             // OnceLock::set returns Err if already set, which can't happen
             // here because we just spawned the handle.
             handle
                 .addr
                 .set(format!("http://{resolved}"))
                 .map_err(|_| anyhow::anyhow!("addr already set on freshly-spawned child"))?;
+            handle
+                .port
+                .set(port)
+                .map_err(|_| anyhow::anyhow!("port already set on freshly-spawned child"))?;
             nodes.push(handle);
         }
         Ok(ProcessTopology {
@@ -180,10 +192,98 @@ fn scan_logs_for_addr(handle: &Arc<ChildHandle>) -> Option<String> {
     })
 }
 
+/// Extract the port from a "host:port" string. Used to populate
+/// `ChildHandle::port` after the initial bind so respawns can rebind to
+/// the same port instead of churning through ephemeral assignments.
+fn parse_port(addr: &str) -> anyhow::Result<u16> {
+    let port_str = addr
+        .rsplit_once(':')
+        .map(|(_, port)| port)
+        .ok_or_else(|| anyhow::anyhow!("no ':' separator in '{addr}'"))?;
+    port_str
+        .parse::<u16>()
+        .with_context(|| format!("parse port '{port_str}' from '{addr}'"))
+}
+
 #[async_trait]
 impl ChaosController for ProcessController {
     async fn kill_leader(&self) -> ChaosEvent {
-        unimplemented!("kill_leader lands in a follow-up commit")
+        let grace = self.grace;
+        // Snapshot inputs outside the closure so the move-future captures
+        // owned, send-safe state only.
+        let Some(target_id) = self.current_leader() else {
+            return timed_event(ChaosKind::LeaderKill, grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "no current leader (empty topology)".into(),
+                }
+            })
+            .await;
+        };
+        let idx = target_id.0 as usize;
+        if idx >= self.nodes.len() {
+            return timed_event(ChaosKind::LeaderKill, grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: format!("round-robin idx {idx} out of range"),
+                }
+            })
+            .await;
+        }
+        let handle = self.nodes[idx].clone();
+        let pid = handle.pid.load(Ordering::Relaxed);
+        if pid == 0 {
+            return timed_event(ChaosKind::LeaderKill, grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: format!("node {idx} has no live PID"),
+                }
+            })
+            .await;
+        }
+        // Arm BEFORE the kill so the reaper's swap sees `true` regardless
+        // of scheduling order between SIGKILL and wait()-return.
+        handle.kill_expected.store(true, Ordering::Relaxed);
+        let failpoints_env = self.failpoints.lock().to_env();
+        let liveness_tx = self.liveness_tx.lock().clone();
+
+        timed_event(ChaosKind::LeaderKill, grace, move || async move {
+            if let Err(e) = kill(Pid::from_raw(pid as i32), Signal::SIGKILL) {
+                // Disarm the kill_expected we set above: nothing happened.
+                handle.kill_expected.store(false, Ordering::Relaxed);
+                return ChaosOutcome::Failed {
+                    reason: format!("kill(pid={pid}, SIGKILL): {e}"),
+                };
+            }
+            // Let the reaper observe wait()-return and consume the
+            // kill_expected flag before we fill `handle.child` again.
+            tokio::time::sleep(RESPAWN_GAP).await;
+            // Drop stale stdout (incl. the dead child's `serving on …`
+            // line) so the post-respawn readiness scan can't match it.
+            handle.recent_logs.lock().clear();
+
+            let env = if failpoints_env.is_empty() {
+                None
+            } else {
+                Some(failpoints_env.as_str())
+            };
+            if let Err(e) = spawn_into(&handle, env).await {
+                return ChaosOutcome::Failed {
+                    reason: format!("respawn(pid was {pid}): {e}"),
+                };
+            }
+            // Wait for the new child to print `serving on …` so subsequent
+            // load-gen requests don't race the gRPC accept loop.
+            if let Err(e) = resolve_bound_addr(&handle).await {
+                return ChaosOutcome::Failed {
+                    reason: format!("post-respawn readiness: {e}"),
+                };
+            }
+            // Start a reaper for the freshly-spawned child. The original
+            // reaper consumed its one `wait()` and exited.
+            if let Some(tx) = liveness_tx {
+                tokio::spawn(supervise_child(handle.clone(), tx));
+            }
+            ChaosOutcome::Applied
+        })
+        .await
     }
     async fn pause_leader(&self, _dur: Duration) -> ChaosEvent {
         unimplemented!("pause_leader lands in a follow-up commit")
