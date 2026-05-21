@@ -210,3 +210,69 @@ impl TsoServiceImpl {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tsoracle_core::Epoch;
+
+    #[test]
+    fn core_status_maps_each_variant_to_documented_code() {
+        // Every CoreError variant has a distinct gRPC status code; if a
+        // future edit drops a branch the mapping table here catches it.
+        assert_eq!(
+            core_status(CoreError::NotLeader).code(),
+            tonic::Code::FailedPrecondition,
+        );
+
+        assert_eq!(
+            core_status(CoreError::WindowExhausted).code(),
+            tonic::Code::Internal,
+        );
+
+        let invalid = core_status(CoreError::InvalidCount(7));
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        assert!(invalid.message().contains("invalid count: 7"));
+
+        let oor = core_status(CoreError::PhysicalMsOutOfRange(1 << 47));
+        assert_eq!(oor.code(), tonic::Code::OutOfRange);
+        assert!(oor.message().contains("46-bit"));
+
+        let invalid_window = core_status(CoreError::InvalidLeadershipWindow {
+            fence_floor: 9,
+            committed_ceiling: 4,
+        });
+        assert_eq!(invalid_window.code(), tonic::Code::Internal);
+        assert!(invalid_window.message().contains("fence_floor 9"));
+        assert!(invalid_window.message().contains("committed_ceiling 4"));
+    }
+
+    #[test]
+    fn leader_hint_from_returns_endpoint_when_not_serving() {
+        // Build a Server with the in-memory fake driver so we can mutate
+        // ServingState directly; the helper just snapshots state_rx.
+        let server = Server::builder()
+            .consensus_driver(std::sync::Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .clock(std::sync::Arc::new(tsoracle_core::SystemClock))
+            .build()
+            .unwrap();
+        let _ = server.state_tx.send(ServingState::NotServing {
+            leader_endpoint: Some("http://other-node:9000".into()),
+        });
+        let hint = leader_hint_from(&server);
+        assert_eq!(
+            hint.leader_endpoint.as_deref(),
+            Some("http://other-node:9000")
+        );
+        assert!(hint.leader_epoch.is_none());
+
+        // The Serving branch flips the endpoint to None — exercises the
+        // race-window path that's otherwise only reachable when an extension
+        // observes mid-transition state_rx.
+        let _ = server.state_tx.send(ServingState::Serving);
+        let hint = leader_hint_from(&server);
+        assert!(hint.leader_endpoint.is_none());
+        // Sanity: Epoch construction itself is unrelated to this helper.
+        let _ = Epoch(1);
+    }
+}

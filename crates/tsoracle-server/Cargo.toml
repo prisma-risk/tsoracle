@@ -76,6 +76,10 @@ name = "serve_with_listener"
 required-features = ["test-support"]
 
 [[test]]
+name = "serve_shutdown"
+required-features = ["test-fakes"]
+
+[[test]]
 name = "metrics"
 required-features = ["test-support", "metrics"]
 
