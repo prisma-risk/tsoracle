@@ -30,3 +30,19 @@ publish_no_verify = false
 # Off for now; flip to `true` (and `cargo install cargo-semver-checks`) once we
 # want automated semver-compat guarding on the release PR.
 semver_check = false
+
+# tsoracle (the bin) was published to crates.io as 0.1.0 from a commit whose
+# workspace `Cargo.toml` listed `examples/embedded-server` (et al.) as members
+# before those directories existed in the tree. `cargo package` fails at that
+# historical commit, which means release-plz cannot run its file-equality
+# comparison against the published version — and that error aborts the entire
+# release-pr step for the whole workspace, not just this one crate.
+#
+# Excluding the bin from release-plz management lets the other crates ride the
+# release-pr / release pipeline normally. To re-enable: manually
+# `cargo publish` a new `tsoracle` version from a commit where the workspace
+# `cargo metadata` succeeds (i.e. anything on or after the commit that added
+# the `examples/` directories), then drop this `[[package]]` block.
+[[package]]
+name = "tsoracle"
+release = false
