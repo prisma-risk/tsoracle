@@ -78,7 +78,7 @@ sequenceDiagram
     participant Driver
     participant Server
     CallerA->>Driver: get_ts()
-    Note over Driver: enqueue A; flush window elapses
+    Note over Driver: enqueue A, flush window elapses
     Driver->>Server: GetTs(1)
     CallerB->>Driver: get_ts()
     Note over Driver: enqueue B (RPC in flight)
@@ -86,7 +86,7 @@ sequenceDiagram
     Note over Driver: enqueue C (RPC in flight)
     Server-->>Driver: [t1]
     Driver-->>CallerA: t1
-    Note over Driver: queue=[B,C]; fire next batch immediately
+    Note over Driver: queue holds B and C, fire next batch
     Driver->>Server: GetTs(2)
     Server-->>Driver: [t2, t3]
     Driver-->>CallerB: t2
