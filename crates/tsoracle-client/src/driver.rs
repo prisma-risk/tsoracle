@@ -108,6 +108,10 @@ async fn driver_task(rpc: RpcFn, mut rx: mpsc::Receiver<Waiter>, flush_interval:
                 }
             }
             if flush_interval > Duration::ZERO {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "`first_arrival` is `Some` here: `enqueue` (see fn below) sets it whenever a waiter is appended, and the branch above only runs when at least one waiter has been enqueued. Tracked by #8."
+                )]
                 let deadline = first_arrival.expect("set on enqueue") + flush_interval;
                 loop {
                     tokio::select! {

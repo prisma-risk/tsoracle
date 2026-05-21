@@ -1,5 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
+// Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
+// for the lib's own unit tests; integration tests are separate compilation units.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 #[macro_use]
 mod failpoint;

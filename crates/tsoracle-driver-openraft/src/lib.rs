@@ -6,6 +6,10 @@
 //! own `RaftNetworkFactory` and `RaftLogStorage`); this crate provides the
 //! `RaftTypeConfig`, the log-entry type, the in-memory state machine, and
 //! the trait bridge.
+
+// Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
+// for the lib's own unit tests; integration tests are separate compilation units.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 //!
 //! # Layering
 //!

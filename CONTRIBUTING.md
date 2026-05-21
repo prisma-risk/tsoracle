@@ -109,6 +109,40 @@ Coverage (library crates only — `tsoracle-bin` and `examples/` are excluded):
 make coverage   # writes lcov.info at the workspace root
 ```
 
+## Panic policy: `unwrap` and `expect`
+
+Library and binary crates avoid `.unwrap()` and `.expect(...)` in non-test code. Each library/binary crate root carries:
+
+```rust
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+```
+
+This is an inner attribute, scoped to that crate's compilation unit. Two consequences worth understanding before editing it:
+
+- **The lint is off during `cargo test --lib`.** `cfg(not(test))` is false when the lib is compiled under `--test`, so `#[cfg(test)] mod tests { ... }` blocks inside `src/` are exempt by construction. This is more reliable than `clippy.toml`'s `allow-unwrap-in-tests` setting, which has known bugs for helper functions inside test modules ([rust-clippy #9612](https://github.com/rust-lang/rust-clippy/issues/9612)).
+- **Integration tests, examples, and benches are separate compilation units.** They don't inherit the lib's inner attributes. They aren't linted, full stop — no per-file `#![allow]` needed, even for module-scope helpers in `tests/foo.rs`. This sidesteps [rust-clippy #13981](https://github.com/rust-lang/rust-clippy/issues/13981), where `allow-unwrap-in-tests` fails to cover `tests/`, `examples/`, and `benches/`.
+
+`tsoracle-proto` is excluded — it's `tonic-prost-build`-generated wire code with `#![allow(clippy::all)]`. Example and benchmark crates don't carry the attribute either; demonstration code is allowed to be terse.
+
+Because CI runs `cargo clippy ... -- -D warnings`, an unannotated `.unwrap()` or `.expect()` in runtime code is a hard build failure.
+
+When you genuinely need `.unwrap()` or `.expect(...)` in runtime code — typically because the invariant is statically guaranteed by a `const`, by surrounding control flow, or by a build-time artifact — annotate the callsite with `#[expect(clippy::expect_used, reason = "...")]` (or the `unwrap_used` variant). The `reason` field is required by convention:
+
+1. **Explain the invariant.** What makes this call unreachable in practice? Name the const, the cfg, or the upstream check that holds.
+2. **Link to a tracking issue.** If a follow-up to replace the panic with typed-error propagation exists, write `Tracked by #N.` so the marker stays connected to ongoing work.
+
+Place the `#[expect]` on the smallest enclosing item: prefer a `let`-statement attribute, fall back to the enclosing function when the call isn't bound to a `let`. `#[expect]` is preferred over `#[allow]` because it warns if the expected lint stops firing — the marker self-clears when the panic path is removed.
+
+Example:
+
+```rust
+#[expect(
+    clippy::expect_used,
+    reason = "`KEY` is a `const &'static str` of valid ASCII; `MetadataKey::from_bytes` cannot fail here. Tracked by #5."
+)]
+let key = MetadataKey::from_bytes(KEY.as_bytes()).expect("valid key");
+```
+
 ## Working with git
 
 - **Write commit messages like an email to your teammates.** This repo follows [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`), optionally with a scope (`feat(server): ...`). See [How to Write a Git Commit Message](https://cbea.ms/git-commit/) for guidance on the body itself — explain *why*, not *what*.

@@ -5,6 +5,10 @@
 //! the client driver. RPC efficiency comes from request coalescing (multiple
 //! concurrent waiters batch into one outgoing GetTs), not pre-fetching.
 
+// Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
+// for the lib's own unit tests; integration tests are separate compilation units.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 mod driver;
 mod error;
 mod leader_resolved;

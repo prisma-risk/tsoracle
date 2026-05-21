@@ -96,12 +96,20 @@ where
         })
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "`self.log_cf` is created and validated by `open` before this struct is constructed; `cf_handle` cannot return `None` here unless the DB is corrupted underneath us, in which case panicking is the right outcome."
+    )]
     pub(super) fn log_cf_handle(&self) -> Arc<BoundColumnFamily<'_>> {
         self.db
             .cf_handle(&self.log_cf)
             .expect("log CF was validated at open")
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "`self.meta_cf` is created and validated by `open` before this struct is constructed; `cf_handle` cannot return `None` here unless the DB is corrupted underneath us, in which case panicking is the right outcome."
+    )]
     pub(super) fn meta_cf_handle(&self) -> Arc<BoundColumnFamily<'_>> {
         self.db
             .cf_handle(&self.meta_cf)

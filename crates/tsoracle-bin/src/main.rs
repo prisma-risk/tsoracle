@@ -11,6 +11,10 @@
 //! CLI, use [`tsoracle_server::Server`] directly; see the
 //! `examples/embedded-server` crate for a worked example.
 
+// Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
+// for the bin's own unit tests; integration tests are separate compilation units.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};

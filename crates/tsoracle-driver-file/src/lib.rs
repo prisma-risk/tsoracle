@@ -5,6 +5,10 @@
 //! and `fsync`s the file before any timestamp in that window is handed
 //! out. That fsync is the durability boundary: a crash and restart can
 //! never rewind the issued timestamp sequence.
+
+// Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
+// for the lib's own unit tests; integration tests are separate compilation units.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 //!
 //! This is the durability story for the non-replicated configuration —
 //! one process, one disk, one fsync per window extension. The standalone

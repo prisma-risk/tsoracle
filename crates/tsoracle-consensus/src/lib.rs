@@ -3,6 +3,10 @@
 //! Consumers implement this trait against their preferred mechanism (openraft,
 //! etcd, a single-node file, etc.). The library itself does not run consensus.
 
+// Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
+// for the lib's own unit tests; integration tests are separate compilation units.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod docs;
 
 use core::pin::Pin;
