@@ -30,8 +30,18 @@ fn open_db(dir: &TempDir) -> Arc<DB> {
 async fn opens_empty_store_without_error() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
-    let _store: RocksdbLogStore<TestTypeConfig, Flat> =
+    let store: RocksdbLogStore<TestTypeConfig, Flat> =
         RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+    // The Debug impl is part of the public surface — exercise it so a future
+    // edit that breaks formatting is caught before it ships.
+    let rendered = format!("{store:?}");
+    assert!(rendered.contains("RocksdbLogStore"));
+    assert!(rendered.contains(LOG_CF));
+    assert!(rendered.contains(META_CF));
+    // Clone is also public; verify the cheap-clone contract holds and the
+    // clone produces equivalent Debug output.
+    let cloned = store.clone();
+    assert_eq!(format!("{cloned:?}"), rendered);
 }
 
 #[test]

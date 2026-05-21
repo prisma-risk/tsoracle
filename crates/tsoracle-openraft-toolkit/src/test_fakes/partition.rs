@@ -132,4 +132,11 @@ mod tests {
         // reverse direction works (not cut, not isolated)
         assert!(p.is_reachable(2, 1));
     }
+
+    #[test]
+    fn default_matches_new() {
+        let p = PartitionController::<u64>::default();
+        assert!(p.is_reachable(1, 2));
+        assert!(p.is_reachable(2, 1));
+    }
 }
