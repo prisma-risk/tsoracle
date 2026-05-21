@@ -19,7 +19,10 @@ use crate::{HISTO_MAX_US, new_histogram};
 pub struct SupervisorOutcome {
     pub violations: Vec<Violation>,
     pub high_water: Timestamp,
-    pub events_observed: u64,
+    /// Count of `SupervisorEvent::Issued` events received — i.e. real
+    /// timestamps returned to clients. Excludes `Chaos`, `Liveness`, and
+    /// `End` events, which would otherwise inflate the count under chaos.
+    pub issued_observed: u64,
     /// Per-RPC latency in microseconds. One sample per batch (recorded on the
     /// first `IssuedSample` of each batch, since all samples in a batch share
     /// the same `issued_at`/`recv_time`). Values clamped to
@@ -57,7 +60,7 @@ struct SupervisorState {
     /// grace and fence-checked, so it can't be relied on after the fact.
     chaos_history: Vec<ChaosWindow>,
     violations: Vec<Violation>,
-    events_observed: u64,
+    issued_observed: u64,
     latency: Histogram<u64>,
 }
 
@@ -71,7 +74,7 @@ impl Default for SupervisorState {
             open_windows: Vec::new(),
             chaos_history: Vec::new(),
             violations: Vec::new(),
-            events_observed: 0,
+            issued_observed: 0,
             latency: new_histogram(),
         }
     }
@@ -107,9 +110,11 @@ impl Supervisor {
 
     pub async fn run(mut self, mut rx: mpsc::Receiver<SupervisorEvent>) -> SupervisorOutcome {
         while let Some(event) = rx.recv().await {
-            self.state.events_observed += 1;
             match event {
-                SupervisorEvent::Issued(sample) => self.on_issued(sample),
+                SupervisorEvent::Issued(sample) => {
+                    self.state.issued_observed += 1;
+                    self.on_issued(sample);
+                }
                 SupervisorEvent::Chaos(ev) => self.on_chaos(ev),
                 SupervisorEvent::Liveness(incident) => self.on_liveness(incident),
                 SupervisorEvent::End => break,
@@ -119,7 +124,7 @@ impl Supervisor {
         SupervisorOutcome {
             violations: self.state.violations,
             high_water: self.state.high_water,
-            events_observed: self.state.events_observed,
+            issued_observed: self.state.issued_observed,
             latency: self.state.latency,
         }
     }
@@ -376,6 +381,57 @@ mod tests {
         drop(tx);
         let outcome = handle.await.unwrap();
         assert!(outcome.violations.is_empty(), "no violations expected");
+        assert_eq!(outcome.issued_observed, 3);
+    }
+
+    #[tokio::test]
+    async fn issued_observed_excludes_non_issued_events() {
+        use crate::chaos::{ChaosEvent, ChaosKind, ChaosOutcome, ChaosWindow};
+        use crate::sample::{LivenessIncident, LivenessIncidentKind};
+        use std::time::Duration;
+        // Mix 2 Issued with 1 Chaos + 1 Liveness; the supervisor must count
+        // only the 2 Issued events as `issued_observed`. Pre-fix, the
+        // counter incremented for every mpsc event variant, inflating the
+        // user-visible "timestamps" by every chaos and liveness signal.
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        tx.send(SupervisorEvent::Issued(sample(0, 1)))
+            .await
+            .unwrap();
+        let now = Instant::now();
+        tx.send(SupervisorEvent::Chaos(ChaosEvent {
+            window: ChaosWindow {
+                kind: ChaosKind::LeaderKill,
+                started_at: now,
+                ended_at: now + Duration::from_millis(10),
+                grace: Duration::from_millis(50),
+            },
+            outcome: ChaosOutcome::Applied,
+        }))
+        .await
+        .unwrap();
+        tx.send(SupervisorEvent::Issued(sample(0, 2)))
+            .await
+            .unwrap();
+        tx.send(SupervisorEvent::Liveness(LivenessIncident {
+            kind: LivenessIncidentKind::DeadlineExceeded {
+                client_id: ClientId(0),
+                attempts: 3,
+                last_error: "transient".into(),
+                started_at: now,
+            },
+            at: Instant::now(),
+        }))
+        .await
+        .unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert_eq!(
+            outcome.issued_observed, 2,
+            "must count only Issued events, not Chaos/Liveness"
+        );
     }
 
     #[tokio::test]

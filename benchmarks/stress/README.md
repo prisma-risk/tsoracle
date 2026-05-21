@@ -63,7 +63,7 @@ The text report ends with:
 - `outcome=Ok | InvariantViolation | ...` — the headline result. Maps to the exit code below.
 - `violations: N` — how many invariant breaks the supervisor recorded.
 - `chaos events: N` — how many nemesis ops were applied.
-- `latency per client call` — percentiles aggregated across all client tasks. (Latency stats currently read as zeros; per-client histogram recording is a known follow-up — see "Known gaps" below.)
+- `latency per client call` — percentiles aggregated across all client tasks, sourced from the supervisor's hdrhistogram (one sample per successful batch, recorded on `batch_idx == 0` so each RPC contributes once regardless of `--batch-size`). Reads as zeros when no batches completed — typically because chaos kept the system down for the entire run (e.g. continuous kills against a 1-node topology, where every kill takes the whole service down).
 
 `--json` produces a one-line JSON report on stdout. Use this for CI parsing. `outcome` is the only field a workflow needs to key off; the rest is supporting evidence.
 
