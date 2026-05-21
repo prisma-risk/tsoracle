@@ -12,6 +12,7 @@ members  = [
     "crates/openraft-toolkit",
     "examples/embedded-server",
     "examples/failover-demo",
+    "examples/openraft-piggyback",
     "examples/openraft-standalone",
     "benchmarks/minimal",
 ]
