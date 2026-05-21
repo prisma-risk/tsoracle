@@ -24,7 +24,7 @@ RELEASE_CRATES := \
     tsoracle-driver-openraft \
     tsoracle-server \
     tsoracle-client \
-    tsoracle-bin
+    tsoracle
 
 .PHONY: all ci check fmt fmt-check lint fix build test test-failpoints doc \
         proto proto-lint proto-fmt proto-fmt-check proto-breaking \
