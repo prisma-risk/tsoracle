@@ -143,6 +143,10 @@ Example:
 let key = MetadataKey::from_bytes(KEY.as_bytes()).expect("valid key");
 ```
 
+## Performance-critical-path rules
+
+A handful of files sit on the request-handling hot path. They carry a `// #[PerformanceCriticalPath]` marker as their first line, and CI's `critical-path` job ([`scripts/check-critical-path.sh`](scripts/check-critical-path.sh)) enforces a small set of source-level rules against them — no `tracing::info!`/`warn!`/`error!`, no `println!`, no synchronous I/O, no long synchronous compute. See [`docs/performance-critical-path.md`](docs/performance-critical-path.md) for the full rule set, the marker-placement contract, and the current marked-file list. If your edit touches a marked file, run `CRITICAL_PATH_STRICT=1 ./scripts/check-critical-path.sh` locally before pushing.
+
 ## Working with git
 
 - **Write commit messages like an email to your teammates.** This repo follows [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`), optionally with a scope (`feat(server): ...`). See [How to Write a Git Commit Message](https://cbea.ms/git-commit/) for guidance on the body itself — explain *why*, not *what*.
