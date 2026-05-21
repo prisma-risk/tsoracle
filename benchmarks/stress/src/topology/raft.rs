@@ -12,8 +12,10 @@
 //! elect a new leader, then heals the partition so subsequent chaos ops still
 //! have a quorum to work with. `pause_leader` runs the same partition shape
 //! for a caller-provided duration, leaving leadership intact when the window
-//! is shorter than `election_timeout_min`. The failpoint primitives are
-//! stubbed to return `Skipped` until follow-up PRs land them.
+//! is shorter than `election_timeout_min`. `arm_failpoint`/`disarm_failpoint`
+//! are feature-gated on `stress-failpoints`: enabled, they drive the
+//! process-wide `fail` registry (which affects every in-process node at once);
+//! disabled, they return `Skipped`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -279,24 +281,55 @@ impl ChaosController for RaftController {
         .await
     }
 
-    async fn arm_failpoint(&self, name: &str, _action: &str) -> ChaosEvent {
+    async fn arm_failpoint(&self, name: &str, action: &str) -> ChaosEvent {
         let kind = ChaosKind::FailpointArm { name: name.into() };
-        timed_event(kind, self.grace, || async {
-            ChaosOutcome::Skipped {
-                reason: "arm_failpoint not yet implemented for raft topology".into(),
-            }
-        })
-        .await
+        #[cfg(feature = "stress-failpoints")]
+        {
+            let name = name.to_string();
+            let action = action.to_string();
+            return timed_event(kind, self.grace, move || async move {
+                match fail::cfg(name.as_str(), action.as_str()) {
+                    Ok(()) => ChaosOutcome::Applied,
+                    Err(e) => ChaosOutcome::Failed {
+                        reason: format!("fail::cfg: {e}"),
+                    },
+                }
+            })
+            .await;
+        }
+        #[cfg(not(feature = "stress-failpoints"))]
+        {
+            let _ = (name, action);
+            timed_event(kind, self.grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "stress-failpoints feature off; failpoints not linked".into(),
+                }
+            })
+            .await
+        }
     }
 
     async fn disarm_failpoint(&self, name: &str) -> ChaosEvent {
         let kind = ChaosKind::FailpointDisarm { name: name.into() };
-        timed_event(kind, self.grace, || async {
-            ChaosOutcome::Skipped {
-                reason: "disarm_failpoint not yet implemented for raft topology".into(),
-            }
-        })
-        .await
+        #[cfg(feature = "stress-failpoints")]
+        {
+            let name = name.to_string();
+            return timed_event(kind, self.grace, move || async move {
+                fail::remove(name.as_str());
+                ChaosOutcome::Applied
+            })
+            .await;
+        }
+        #[cfg(not(feature = "stress-failpoints"))]
+        {
+            let _ = name;
+            timed_event(kind, self.grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "stress-failpoints feature off".into(),
+                }
+            })
+            .await
+        }
     }
 
     fn endpoints(&self) -> Vec<String> {
@@ -418,6 +451,43 @@ mod tests {
             "pause_leader expected Applied, got {:?}",
             event.outcome
         );
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[cfg(feature = "stress-failpoints")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arm_disarm_failpoint_round_trip() {
+        let topology = RaftTopology::spawn(3, Duration::from_millis(50))
+            .await
+            .expect("spawn 3-node raft topology");
+        let ev_arm = topology
+            .controller
+            .arm_failpoint("stress-raft-test::fp_unused", "off")
+            .await;
+        assert!(ev_arm.outcome.is_applied(), "arm: {:?}", ev_arm.outcome);
+        let ev_disarm = topology
+            .controller
+            .disarm_failpoint("stress-raft-test::fp_unused")
+            .await;
+        assert!(
+            ev_disarm.outcome.is_applied(),
+            "disarm: {:?}",
+            ev_disarm.outcome
+        );
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[cfg(not(feature = "stress-failpoints"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn failpoints_off_returns_skipped() {
+        let topology = RaftTopology::spawn(3, Duration::from_millis(50))
+            .await
+            .expect("spawn 3-node raft topology");
+        let ev = topology.controller.arm_failpoint("any", "panic").await;
+        match ev.outcome {
+            ChaosOutcome::Skipped { .. } => {}
+            other => panic!("expected Skipped, got {other:?}"),
+        }
         Box::new(topology.controller).shutdown().await;
     }
 }
