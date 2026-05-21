@@ -111,14 +111,24 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         .build()
         .context("server build")?;
 
+    let listener = tokio::net::TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("bind {}", args.listen))?;
+    let local_addr = listener.local_addr().context("listener.local_addr()")?;
+
+    // Plain-stdout contract: process supervisors (e.g. the stress harness)
+    // parse this line to discover the OS-picked port when --listen uses :0.
+    // Keep the prefix stable; downstream code does `strip_prefix("serving on ")`.
+    println!("serving on {local_addr}");
+
     tracing::info!(
-        listen = %args.listen,
+        addr = %local_addr,
         state_dir = %args.state_dir.display(),
-        "tsoracle starting"
+        "tsoracle serving"
     );
 
     server
-        .serve_with_shutdown(args.listen, async {
+        .serve_with_listener(listener, async {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutdown signal received");
         })

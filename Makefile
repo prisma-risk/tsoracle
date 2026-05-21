@@ -132,10 +132,6 @@ COV_IGNORE_OPENRAFT_LIFECYCLE := crates/tsoracle-openraft-toolkit/src/lifecycle/
 # end-to-end by `benchmarks/stress/tests/smoke.rs`.
 COV_IGNORE_STRESS_BIN := benchmarks/stress/src/bin/stress
 
-# `unimplemented!()` placeholders for topology variants not yet implemented —
-# intentionally unreachable from any current test path.
-COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/process
-
 # Shared integration-test bootstrap helper. Gated by `test-support` (and
 # `cfg(test)`); never ships in the published library. Lives in `src/` only
 # because Cargo doesn't let multiple crates share `tests/common/mod.rs`.
@@ -144,7 +140,7 @@ COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/process
 # legitimate "rare race" retry paths that local CI never trips.
 COV_IGNORE_TEST_SUPPORT := crates/tsoracle-server/src/test_support
 
-COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_STRESS_TOPO_STUBS)|$(COV_IGNORE_TEST_SUPPORT))\.rs
+COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_TEST_SUPPORT))\.rs
 
 # Shared exclude flags so `coverage` (lcov for CI) and `coverage-html` (local
 # browsable report) cannot drift apart on which crates participate.
@@ -156,8 +152,15 @@ COV_EXCLUDES := \
     --exclude example-openraft-standalone \
     --exclude bench-minimal
 
+# The process-topology smoke tests in `benchmarks/stress/tests/smoke.rs` shell
+# out to the `tsoracle` binary, but `--exclude tsoracle` above means
+# `cargo llvm-cov` never builds it into `target/llvm-cov-target/`. Build it
+# into the regular `target/debug/` first and hand the absolute path to the
+# harness via `TSORACLE_BIN`; the smoke tests check that env var before the
+# walk-up fallback.
 coverage:
-	$(CARGO) llvm-cov \
+	$(CARGO) build --bin tsoracle
+	TSORACLE_BIN="$$(pwd)/target/debug/tsoracle" $(CARGO) llvm-cov \
 	  --workspace --all-features \
 	  $(COV_EXCLUDES) \
 	  --ignore-filename-regex '$(COV_IGNORE)$$' \
@@ -166,7 +169,8 @@ coverage:
 # Local HTML report. Output at target/llvm-cov/html/index.html; `--open` opens
 # it in the default browser. Re-runs the test suite, same as `coverage`.
 coverage-html:
-	$(CARGO) llvm-cov \
+	$(CARGO) build --bin tsoracle
+	TSORACLE_BIN="$$(pwd)/target/debug/tsoracle" $(CARGO) llvm-cov \
 	  --workspace --all-features \
 	  $(COV_EXCLUDES) \
 	  --ignore-filename-regex '$(COV_IGNORE)$$' \

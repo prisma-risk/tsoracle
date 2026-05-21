@@ -92,3 +92,45 @@ fn raft_killer_loop_smoke_maintains_invariants() {
     );
     assert!(report.recorded.timestamps > 0);
 }
+
+// ---- process topology --------------------------------------------------
+//
+// The process tests shell out to the `tsoracle` binary. Cargo builds
+// workspace binaries during `cargo test --workspace` but NOT during
+// `cargo test -p stress`; in the latter case the operator must run
+// `cargo build --bin tsoracle` first or the harness will fail to locate
+// it. Gated on `cfg(unix)` because POSIX-signal chaos has no Windows
+// analogue.
+
+#[cfg(unix)]
+#[test]
+fn process_steady_smoke_completes_clean() {
+    let mut cfg = base_cfg("steady", 5);
+    cfg.topology = TopologyKind::Process;
+    cfg.nodes = 1;
+    let report = stress::run(cfg).unwrap();
+    assert!(
+        matches!(report.outcome, Outcome::Ok),
+        "got: {:?}, violations: {:?}",
+        report.outcome,
+        report.violations,
+    );
+    assert!(report.violations.is_empty(), "got: {:?}", report.violations);
+    assert!(report.recorded.timestamps > 0, "no timestamps issued");
+}
+
+#[cfg(unix)]
+#[test]
+fn process_killer_loop_smoke_maintains_invariants() {
+    let mut cfg = base_cfg("killer-loop", 10);
+    cfg.topology = TopologyKind::Process;
+    cfg.nodes = 1;
+    let report = stress::run(cfg).unwrap();
+    assert!(
+        matches!(report.outcome, Outcome::Ok),
+        "outcome: {:?}, violations: {:?}",
+        report.outcome,
+        report.violations,
+    );
+    assert!(report.recorded.timestamps > 0);
+}
