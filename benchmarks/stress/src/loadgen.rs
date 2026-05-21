@@ -234,4 +234,145 @@ mod tests {
         let _ = shutdown_tx.send(());
         let _ = server_handle.await;
     }
+
+    /// Helper: spawn a server with a driver in `leader`-or-`follower` state and
+    /// return everything the test needs to drive a `client_task` against it.
+    async fn spawn_server_with(
+        driver: Arc<InMemoryDriver>,
+    ) -> (
+        Arc<Client>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<Result<(), tsoracle_server::ServerError>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = Server::builder()
+            .consensus_driver(driver as Arc<dyn ConsensusDriver>)
+            .build()
+            .unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_handle = tokio::spawn(async move {
+            server
+                .serve_with_listener(listener, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+        let client = Arc::new(
+            Client::connect(vec![format!("http://{addr}")])
+                .await
+                .unwrap(),
+        );
+        (client, shutdown_tx, server_handle)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn warmup_propagates_non_transient_error() {
+        let driver = Arc::new(InMemoryDriver::new());
+        driver.become_leader(Epoch(1));
+        let (client, shutdown_tx, server_handle) = spawn_server_with(driver).await;
+        let (tx, _rx) = mpsc::channel::<SupervisorEvent>(8);
+        // `batch_size: 0` makes `Client::get_ts_batch` short-circuit with
+        // `InvalidCount(0)`, a non-transient error. With `warmup_iters >= 1`
+        // that error propagates out of `client_task` via the `?` on the
+        // warmup `issue_one` call — the non-transient-error path.
+        let cfg = ClientTaskCfg {
+            client_id: ClientId(0),
+            client: client.clone(),
+            batch_size: 0,
+            warmup_iters: 1,
+            liveness_deadline: Duration::from_secs(5),
+            stop: Arc::new(AtomicBool::new(false)),
+            tx,
+            transient_retries: Arc::new(AtomicU64::new(0)),
+        };
+        let result = client_task(cfg).await;
+        match result {
+            Err(ClientError::InvalidCount(0)) => {}
+            other => panic!("expected InvalidCount(0), got {other:?}"),
+        }
+        let _ = shutdown_tx.send(());
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn deadline_exceeded_emits_liveness_incident() {
+        // A follower-state driver makes the server return FailedPrecondition
+        // on every GetTs call. That code is transient per the stress
+        // classifier, so `client_task` retries until the per-call deadline
+        // budget is exhausted, then emits a `LivenessIncident::DeadlineExceeded`.
+        let driver = Arc::new(InMemoryDriver::new());
+        driver.become_follower(None);
+        let (client, shutdown_tx, server_handle) = spawn_server_with(driver).await;
+        let (tx, mut rx) = mpsc::channel::<SupervisorEvent>(64);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cfg = ClientTaskCfg {
+            client_id: ClientId(0),
+            client: client.clone(),
+            batch_size: 1,
+            warmup_iters: 0,
+            liveness_deadline: Duration::from_millis(100),
+            stop: stop.clone(),
+            tx,
+            transient_retries: Arc::new(AtomicU64::new(0)),
+        };
+        let task = tokio::spawn(client_task(cfg));
+
+        let mut saw_incident = false;
+        for _ in 0..20 {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(SupervisorEvent::Liveness(incident))) => {
+                    match incident.kind {
+                        LivenessIncidentKind::DeadlineExceeded { client_id, .. } => {
+                            assert_eq!(client_id, ClientId(0));
+                            saw_incident = true;
+                        }
+                        other => panic!("unexpected liveness kind: {other:?}"),
+                    }
+                    break;
+                }
+                Ok(Some(_)) | Ok(None) => continue,
+                Err(_) => continue,
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = task.await.unwrap();
+        let _ = shutdown_tx.send(());
+        let _ = server_handle.await;
+        assert!(
+            saw_incident,
+            "expected a DeadlineExceeded LivenessIncident from follower-state server",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_supervisor_channel_ends_task() {
+        let driver = Arc::new(InMemoryDriver::new());
+        driver.become_leader(Epoch(1));
+        let (client, shutdown_tx, server_handle) = spawn_server_with(driver).await;
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(1);
+        // Drop the receiver immediately. The next `tx.send` after the bounded
+        // channel fills will return `Err`, exercising the early-return branch
+        // in `client_task`.
+        drop(rx);
+        let cfg = ClientTaskCfg {
+            client_id: ClientId(0),
+            client: client.clone(),
+            batch_size: 1,
+            warmup_iters: 0,
+            liveness_deadline: Duration::from_secs(5),
+            stop: Arc::new(AtomicBool::new(false)),
+            tx,
+            transient_retries: Arc::new(AtomicU64::new(0)),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(2), client_task(cfg))
+            .await
+            .expect("client_task should exit after the channel closes")
+            .unwrap();
+        // No assertion on the exact count: it depends on how fast the bounded
+        // channel fills, which is racy. The contract is just "returns Ok".
+        let _ = result;
+        let _ = shutdown_tx.send(());
+        let _ = server_handle.await;
+    }
 }

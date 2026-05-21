@@ -164,4 +164,157 @@ mod tests {
         }
         assert_eq!(count, 3);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn playback_dispatches_failpoint_op_variants() {
+        // Covers the ArmFailpoint / DisarmFailpoint branches of `dispatch`,
+        // plus the matching FakeController methods.
+        let schedule = Schedule {
+            source: ScheduleSource::Named {
+                scenario: "fp-test".into(),
+            },
+            ops: vec![
+                ScheduledOp {
+                    at: Duration::from_millis(5),
+                    op: ChaosOp::ArmFailpoint {
+                        name: "fp1".into(),
+                        action: "panic".into(),
+                    },
+                },
+                ScheduledOp {
+                    at: Duration::from_millis(10),
+                    op: ChaosOp::DisarmFailpoint { name: "fp1".into() },
+                },
+            ],
+            total: Duration::from_millis(20),
+            loadgen_pause: None,
+        };
+        let controller = FakeController::new();
+        // Also exercises the unused FakeController helpers so they show up
+        // as covered.
+        assert!(controller.endpoints().is_empty());
+        assert_eq!(controller.current_leader(), Some(NodeId(0)));
+        let (tx, mut rx) = mpsc::channel::<SupervisorEvent>(8);
+        let t0 = Instant::now();
+        let handle = tokio::spawn(async move {
+            play(&schedule, &controller, tx, t0).await;
+            controller
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let controller = handle.await.unwrap();
+        let mut count = 0;
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
+        assert_eq!(count, 2, "expected 2 failpoint events forwarded");
+        // Exercises FakeController::shutdown (consumes Box<Self>).
+        Box::new(controller).shutdown().await;
+    }
+
+    /// Controller whose every op returns `ChaosOutcome::Skipped`. Used to
+    /// drive `play`'s "not applied" branch.
+    struct SkipController;
+
+    #[async_trait]
+    impl ChaosController for SkipController {
+        async fn kill_leader(&self) -> ChaosEvent {
+            skipped_event(ChaosKind::LeaderKill)
+        }
+        async fn pause_leader(&self, _: Duration) -> ChaosEvent {
+            skipped_event(ChaosKind::LeaderPause)
+        }
+        async fn arm_failpoint(&self, name: &str, _: &str) -> ChaosEvent {
+            skipped_event(ChaosKind::FailpointArm { name: name.into() })
+        }
+        async fn disarm_failpoint(&self, name: &str) -> ChaosEvent {
+            skipped_event(ChaosKind::FailpointDisarm { name: name.into() })
+        }
+        fn endpoints(&self) -> Vec<String> {
+            vec![]
+        }
+        fn current_leader(&self) -> Option<NodeId> {
+            None
+        }
+        async fn shutdown(self: Box<Self>) {}
+    }
+
+    fn skipped_event(kind: ChaosKind) -> ChaosEvent {
+        let now = Instant::now();
+        ChaosEvent {
+            window: ChaosWindow {
+                kind,
+                started_at: now,
+                ended_at: now,
+                grace: Duration::ZERO,
+            },
+            outcome: ChaosOutcome::Skipped {
+                reason: "test".into(),
+            },
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playback_skipped_outcomes_are_not_forwarded() {
+        let schedule = Schedule {
+            source: ScheduleSource::Named {
+                scenario: "skip-test".into(),
+            },
+            ops: vec![ScheduledOp {
+                at: Duration::from_millis(1),
+                op: ChaosOp::KillLeader,
+            }],
+            total: Duration::from_millis(5),
+            loadgen_pause: None,
+        };
+        let controller = SkipController;
+        let (tx, mut rx) = mpsc::channel::<SupervisorEvent>(8);
+        let t0 = Instant::now();
+        let handle = tokio::spawn(async move {
+            play(&schedule, &controller, tx, t0).await;
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        handle.await.unwrap();
+        // Skipped ops are logged via `warn!` and not forwarded to the
+        // supervisor channel.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playback_stops_when_supervisor_channel_closed() {
+        let schedule = Schedule {
+            source: ScheduleSource::Named {
+                scenario: "closed-channel".into(),
+            },
+            ops: vec![
+                ScheduledOp {
+                    at: Duration::from_millis(1),
+                    op: ChaosOp::KillLeader,
+                },
+                ScheduledOp {
+                    at: Duration::from_millis(2),
+                    op: ChaosOp::KillLeader,
+                },
+                ScheduledOp {
+                    at: Duration::from_millis(3),
+                    op: ChaosOp::KillLeader,
+                },
+            ],
+            total: Duration::from_millis(5),
+            loadgen_pause: None,
+        };
+        let controller = FakeController::new();
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(1);
+        // Drop the receiver before play starts. The very first `tx.send` will
+        // fail because the channel has no consumer, breaking the loop.
+        drop(rx);
+        let t0 = Instant::now();
+        let handle = tokio::spawn(async move {
+            play(&schedule, &controller, tx, t0).await;
+            controller
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let controller = handle.await.unwrap();
+        // Exactly one kill dispatched: after that the closed channel halts play.
+        assert_eq!(controller.kills.load(Ordering::Relaxed), 1);
+    }
 }
