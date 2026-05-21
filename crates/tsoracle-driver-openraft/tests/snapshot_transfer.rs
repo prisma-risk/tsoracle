@@ -25,9 +25,7 @@ use openraft_toolkit::{Flat, RocksdbLogStore};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 use tokio::time::timeout;
-use tsoracle_driver_openraft::{
-    HighWaterCommand, HighWaterStateMachine, OpenraftPeer, TypeConfig,
-};
+use tsoracle_driver_openraft::{HighWaterCommand, HighWaterStateMachine, OpenraftPeer, TypeConfig};
 
 use common::eventually_eq;
 
@@ -159,7 +157,9 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     for next_target in [20u64, 30, 40, 50, 60, 70, final_target] {
         nodes[leader_idx]
             .raft
-            .client_write(HighWaterCommand::Bump { target: next_target })
+            .client_write(HighWaterCommand::Bump {
+                target: next_target,
+            })
             .await
             .expect("partition-side bump");
     }
