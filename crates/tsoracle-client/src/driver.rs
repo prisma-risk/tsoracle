@@ -108,12 +108,16 @@ async fn driver_task(rpc: RpcFn, mut rx: mpsc::Receiver<Waiter>, flush_interval:
                     None => return,
                 }
             }
-            if flush_interval > Duration::ZERO {
-                #[expect(
-                    clippy::expect_used,
-                    reason = "`first_arrival` is `Some` here: `enqueue` (see fn below) sets it whenever a waiter is appended, and the branch above only runs when at least one waiter has been enqueued. Tracked by #8."
-                )]
-                let deadline = first_arrival.expect("set on enqueue") + flush_interval;
+            // `first_arrival` is `Some` whenever the queue is non-empty —
+            // `enqueue` sets it on every appended waiter, and the
+            // `queue.is_empty()` branch above guarantees one was accepted. The
+            // `if let` keeps that invariant explicit: if a future refactor
+            // breaks it, the driver skips the wait and falls through to the
+            // empty-`chunk_queue` `continue` rather than panicking.
+            if flush_interval > Duration::ZERO
+                && let Some(first) = first_arrival
+            {
+                let deadline = first + flush_interval;
                 loop {
                     tokio::select! {
                         biased;
@@ -555,5 +559,40 @@ mod tests {
         // bypassed.)
         let rpc_count = rpc_calls.load(Ordering::Relaxed);
         assert_eq!(rpc_count, 1, "fail-fast must issue exactly one RPC");
+    }
+
+    /// `queue non-empty + flush_interval > 0` is the path where the driver
+    /// task computes a deadline from `first_arrival` and waits for siblings
+    /// up to that deadline before dispatching. A lone waiter that never gets
+    /// siblings must still be served (no deadlock), and the dispatch must
+    /// not happen before the deadline — otherwise the driver isn't actually
+    /// honouring the coalescing window.
+    ///
+    /// Runs under a paused tokio clock so the timing assertion is
+    /// deterministic instead of wall-clock-dependent.
+    #[tokio::test(start_paused = true)]
+    async fn lone_waiter_dispatches_after_flush_interval() {
+        let calls: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let flush = Duration::from_millis(100);
+        let driver = Driver::spawn(recording_ok_rpc(calls.clone()), flush);
+
+        let start = Instant::now();
+        let timestamps = driver.request(5).await.expect("request must succeed");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            timestamps.len(),
+            5,
+            "lone waiter must receive its full count"
+        );
+        assert_eq!(
+            calls.lock().clone(),
+            vec![5],
+            "exactly one RPC of count 5 must be issued",
+        );
+        assert!(
+            elapsed >= flush,
+            "dispatch fired at {elapsed:?}, before the {flush:?} flush deadline",
+        );
     }
 }
