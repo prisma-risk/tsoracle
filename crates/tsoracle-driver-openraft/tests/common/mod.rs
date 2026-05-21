@@ -219,8 +219,10 @@ pub async fn build_single_node_with_config(config: Arc<Config>) -> TestCluster {
     );
     raft.initialize(mem).await.expect("initialize");
 
-    let host = StandaloneHost::new(raft.clone(), sm_clone.clone());
-    let driver = OpenraftDriver::new(host);
+    // Single-node setup exercises the `from_arc` constructor; the three-node
+    // path below covers `OpenraftDriver::new`.
+    let host = Arc::new(StandaloneHost::new(raft.clone(), sm_clone.clone()));
+    let driver = OpenraftDriver::from_arc(host);
 
     TestCluster {
         nodes: vec![TestNode {
