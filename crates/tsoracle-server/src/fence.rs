@@ -82,6 +82,8 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                 // Publish serving, then release the drain guard.
                 let _ = server.state_tx.send(ServingState::Serving);
                 drop(drain_guard);
+
+                crate::failpoint!("server::fence::after_serving_published");
             }
             LeaderState::Follower { leader_endpoint } => {
                 server.allocator.lock().on_leadership_lost();

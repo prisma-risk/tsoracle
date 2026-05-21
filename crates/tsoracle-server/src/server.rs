@@ -168,15 +168,39 @@ impl Server {
 
         let watch_server = server.clone();
         let watch_handle = tokio::spawn(async move {
-            let result = crate::fence::run_leader_watch(watch_server.clone()).await;
-            if let Err(ref _e) = result {
-                // Poison BEFORE returning so embedders who do not observe
-                // the JoinHandle still get fail-safe behavior.
-                watch_server.step_down_due_to_consensus_rejection(None);
-                #[cfg(feature = "tracing")]
-                tracing::error!(error = %_e, "leader-watch terminated; serving disabled");
+            use futures::FutureExt;
+            // catch_unwind so a panic in run_leader_watch still routes through
+            // the poisoning path. Without this, embedders who mount into_router
+            // directly and never observe the JoinHandle would see
+            // ServingState::Serving remain published while the watch task is
+            // dead — the inverse of the fail-safe guarantee documented above.
+            // The panic is re-raised after poisoning so serve / serve_with_*
+            // continue to translate it into ServerError::WatchPanic via
+            // join_to_server_result.
+            let outcome =
+                std::panic::AssertUnwindSafe(crate::fence::run_leader_watch(watch_server.clone()))
+                    .catch_unwind()
+                    .await;
+            match outcome {
+                Ok(result) => {
+                    if let Err(ref _e) = result {
+                        // Poison BEFORE returning so embedders who do not observe
+                        // the JoinHandle still get fail-safe behavior.
+                        watch_server.step_down_due_to_consensus_rejection(None);
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(error = %_e, "leader-watch terminated; serving disabled");
+                    }
+                    result
+                }
+                Err(panic_payload) => {
+                    // Mirror the Err branch: poison BEFORE re-raising so
+                    // handle-dropping embedders still observe NotServing.
+                    watch_server.step_down_due_to_consensus_rejection(None);
+                    #[cfg(feature = "tracing")]
+                    tracing::error!("leader-watch panicked; serving disabled");
+                    std::panic::resume_unwind(panic_payload);
+                }
             }
-            result
         });
 
         let service = TsoServiceImpl { server };
