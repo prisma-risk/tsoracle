@@ -97,17 +97,50 @@ impl ChaosController for MemController {
         })
         .await
     }
-    async fn arm_failpoint(&self, name: &str, _action: &str) -> ChaosEvent {
-        timed_event(ChaosKind::FailpointArm { name: name.into() }, self.grace, || async {
-            ChaosOutcome::Skipped { reason: "failpoints not yet implemented (T18)".into() }
-        })
-        .await
+    async fn arm_failpoint(&self, name: &str, action: &str) -> ChaosEvent {
+        let kind = ChaosKind::FailpointArm { name: name.into() };
+        #[cfg(feature = "stress-failpoints")]
+        {
+            let name = name.to_string();
+            let action = action.to_string();
+            return timed_event(kind, self.grace, move || async move {
+                match fail::cfg(name.as_str(), action.as_str()) {
+                    Ok(()) => ChaosOutcome::Applied,
+                    Err(e) => ChaosOutcome::Failed { reason: format!("fail::cfg: {e}") },
+                }
+            })
+            .await;
+        }
+        #[cfg(not(feature = "stress-failpoints"))]
+        {
+            let _ = (name, action);
+            timed_event(kind, self.grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "stress-failpoints feature off; failpoints not linked".into(),
+                }
+            })
+            .await
+        }
     }
     async fn disarm_failpoint(&self, name: &str) -> ChaosEvent {
-        timed_event(ChaosKind::FailpointDisarm { name: name.into() }, self.grace, || async {
-            ChaosOutcome::Skipped { reason: "failpoints not yet implemented (T18)".into() }
-        })
-        .await
+        let kind = ChaosKind::FailpointDisarm { name: name.into() };
+        #[cfg(feature = "stress-failpoints")]
+        {
+            let name = name.to_string();
+            return timed_event(kind, self.grace, move || async move {
+                fail::remove(name.as_str());
+                ChaosOutcome::Applied
+            })
+            .await;
+        }
+        #[cfg(not(feature = "stress-failpoints"))]
+        {
+            let _ = name;
+            timed_event(kind, self.grace, || async {
+                ChaosOutcome::Skipped { reason: "stress-failpoints feature off".into() }
+            })
+            .await
+        }
     }
     fn endpoints(&self) -> Vec<String> {
         vec![self.endpoint.clone()]
@@ -158,6 +191,32 @@ mod tests {
         let topo = MemTopology::spawn(Duration::from_millis(50)).await.unwrap();
         let ev = topo.controller.pause_leader(Duration::from_millis(20)).await;
         assert!(ev.outcome.is_applied());
+        Box::new(topo.controller).shutdown().await;
+    }
+
+    #[cfg(feature = "stress-failpoints")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arm_disarm_failpoint_round_trip() {
+        let topo = MemTopology::spawn(Duration::from_millis(50)).await.unwrap();
+        let ev_arm = topo
+            .controller
+            .arm_failpoint("stress-test::fp_unused", "off")
+            .await;
+        assert!(ev_arm.outcome.is_applied(), "arm: {:?}", ev_arm.outcome);
+        let ev_disarm = topo.controller.disarm_failpoint("stress-test::fp_unused").await;
+        assert!(ev_disarm.outcome.is_applied(), "disarm: {:?}", ev_disarm.outcome);
+        Box::new(topo.controller).shutdown().await;
+    }
+
+    #[cfg(not(feature = "stress-failpoints"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn failpoints_off_returns_skipped() {
+        let topo = MemTopology::spawn(Duration::from_millis(50)).await.unwrap();
+        let ev = topo.controller.arm_failpoint("any", "panic").await;
+        match ev.outcome {
+            ChaosOutcome::Skipped { .. } => {}
+            other => panic!("expected Skipped, got {other:?}"),
+        }
         Box::new(topo.controller).shutdown().await;
     }
 }
