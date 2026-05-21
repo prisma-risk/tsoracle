@@ -10,8 +10,10 @@
 //! `kill_leader` isolates the current leader on the shared `MemNetwork`'s
 //! partition controller for a short window, forcing the remaining quorum to
 //! elect a new leader, then heals the partition so subsequent chaos ops still
-//! have a quorum to work with. `pause_leader` and the failpoint primitives
-//! are stubbed to return `Skipped` until follow-up PRs land them.
+//! have a quorum to work with. `pause_leader` runs the same partition shape
+//! for a caller-provided duration, leaving leadership intact when the window
+//! is shorter than `election_timeout_min`. The failpoint primitives are
+//! stubbed to return `Skipped` until follow-up PRs land them.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -251,11 +253,28 @@ impl ChaosController for RaftController {
         .await
     }
 
-    async fn pause_leader(&self, _dur: Duration) -> ChaosEvent {
-        timed_event(ChaosKind::LeaderPause, self.grace, || async {
-            ChaosOutcome::Skipped {
-                reason: "pause_leader not yet implemented for raft topology".into(),
-            }
+    async fn pause_leader(&self, dur: Duration) -> ChaosEvent {
+        // Same shape as `kill_leader` — see its comment for why we read the
+        // openraft `u64` NodeId directly from metrics rather than going
+        // through `current_leader()`'s narrowed `NodeId(u32)`.
+        let leader_raft_id: Option<u64> = self
+            .nodes
+            .iter()
+            .find_map(|n| n.raft.metrics().borrow_watched().current_leader);
+        let Some(leader_raft_id) = leader_raft_id else {
+            return timed_event(ChaosKind::LeaderPause, self.grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "no current leader".into(),
+                }
+            })
+            .await;
+        };
+        let partitions = self.network.partitions();
+        timed_event(ChaosKind::LeaderPause, self.grace, move || async move {
+            partitions.isolate(leader_raft_id);
+            tokio::time::sleep(dur).await;
+            partitions.heal(leader_raft_id);
+            ChaosOutcome::Applied
         })
         .await
     }
@@ -382,6 +401,23 @@ mod tests {
         };
         assert_ne!(original_leader, new_leader);
 
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pause_leader_returns_applied() {
+        let topology = RaftTopology::spawn(3, Duration::from_millis(750))
+            .await
+            .expect("spawn 3-node raft topology");
+        let event = topology
+            .controller
+            .pause_leader(Duration::from_millis(200))
+            .await;
+        assert!(
+            event.outcome.is_applied(),
+            "pause_leader expected Applied, got {:?}",
+            event.outcome
+        );
         Box::new(topology.controller).shutdown().await;
     }
 }
