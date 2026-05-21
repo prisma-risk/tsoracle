@@ -41,5 +41,5 @@ The assertion that post-fence timestamps strictly dominate pre-fence ones is the
 
 ## When this example is *not* the right shape
 
-- **You want to see failover under real consensus.** Use the [openraft-cluster example](../openraft-cluster/) for a real multi-process cluster with openraft-driven elections.
+- **You want to see failover under real consensus.** Use the [`openraft-standalone` example](../openraft-standalone/) for a real multi-process cluster with openraft-driven elections.
 - **You want to embed tsoracle in your own binary.** Use the [embedded-server example](../embedded-server/) — this one isn't a server template, it's a behavior demo.

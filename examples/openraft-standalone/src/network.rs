@@ -31,7 +31,8 @@ use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
-use crate::types::{Node, NodeId, TypeConfig};
+use tsoracle_driver_openraft::{OpenraftPeer as Node, TypeConfig};
+type NodeId = u64;
 
 pub mod proto {
     tonic::include_proto!("raft.v1");

@@ -30,26 +30,46 @@ What you'll see in the output: phase 1 issues 5 timestamps at epoch 1; phase 2 t
 
 No openraft, no real network, no real disk. The `InMemoryDriver` exposes `become_leader(Epoch)` and `become_follower(Option<String>)` as test affordances, which the example calls directly to script the sequence.
 
-## openraft-cluster example
+## openraft-standalone example
 
-`examples/openraft-cluster/` is the worked HA setup: three independent processes, each running a tsoracle server backed by a `ConsensusDriver` implemented over openraft. The `ConsensusDriver` impl lives in `src/driver.rs`; the rest is plumbing (file-backed log/state in `src/store/`, tonic peer transport in `src/network.rs`, leader-state watch in `src/leader_watch.rs`).
+`examples/openraft-standalone/` is the worked HA setup: three independent processes, each running a tsoracle server backed by `tsoracle-driver-openraft`. The integration body is just three driver bindings (`StandaloneHost::new`, `OpenraftDriver::new`, `StandaloneRouter::new`) in `src/main.rs`; everything else is operational plumbing (tonic raft peer transport in `src/network.rs`, openraft `Config` + bootstrap in `src/main.rs`).
 
-See the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-cluster) for prerequisites, manual node startup, and design notes. Quickstart:
+See the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-standalone) for prerequisites, manual node startup, and design notes. Quickstart:
 
 ```bash
-examples/openraft-cluster/scripts/run.sh
+examples/openraft-standalone/scripts/run.sh
 ```
 
-starts three node processes in the background, with logs under `examples/openraft-cluster/.data/n*.log`. Node 1 carries `--bootstrap`; nodes 2 and 3 join. Issue a timestamp with `grpcurl` against any node — followers respond with a `LeaderHint` trailer pointing at the current leader's advertised tsoracle address.
+starts three node processes in the background, with logs under `examples/openraft-standalone/.data/n*.log`. Node 1 carries `--bootstrap`; nodes 2 and 3 join. Issue a timestamp with `grpcurl` against any node — followers respond with a `LeaderHint` trailer pointing at the current leader's advertised tsoracle address. The trailer is populated by `StandaloneRouter`, a small wrapper in `src/router.rs` that adds host-specific `NodeId -> tsoracle-addr` resolution to the generic `OpenraftDriver`.
 
-What the example demonstrates beyond [Worked example: openraft](consensus-integration.md#worked-example-openraft):
+What this example demonstrates:
 
-- The state machine applies `TsoExtend` requests as `max(stored, req.at_least)` unconditionally — reordered or stale-epoch entries are absorbed monotonically rather than rejected. This is the on-driver realization of [Monotonic persistence](the-allocator.md#monotonic-persistence).
-- Linearizable reads use `Raft::ensure_linearizable(ReadPolicy::ReadIndex)`, which commits a no-op heartbeat through the log before the read — the openraft 0.10 read-barrier API.
-- openraft refuses non-leader `client_write` at the propose layer, so stale leaders fail with `ConsensusError::NotLeader` rather than the trait's `Fenced` variant. The `Fenced` variant exists for weaker drivers that can detect a stale epoch only post-write.
-- `<raft-dir>/state.json` (tmp-file write + rename per apply) plus `<raft-dir>/log/` (one file per entry) form a readable tutorial storage layer. It is not a power-loss-hardened durability layer; production deployments should swap it for rocksdb, sled, fjall, or an equivalent store.
+- The minimum boot sequence: `RocksdbLogStore` (from `openraft-toolkit`) + `HighWaterStateMachine` + `StandaloneHost` + `OpenraftDriver`. The integration code is the three `let` bindings in `main.rs` plus the `StandaloneRouter` wrapper for endpoint resolution.
+- The compose-the-driver pattern: when the driver crate's generic mapping doesn't suit your `C::Node`, wrap `ConsensusDriver` and reimplement only the methods that need host-specific knowledge.
+- Snapshots are disabled (`SnapshotPolicy::Never`) because the bundled `HighWaterStateMachine` keeps state and snapshots in memory only — the raft log therefore grows unboundedly. Persisted snapshots are a planned driver-crate follow-up; until then, real deployments need either that follow-up or a persisted SM of their own.
 
 To observe failover: find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that process, watch the survivors elect, then re-issue `GetTs`. Typical re-leader latency is 2–5 seconds (election + fence).
+
+## openraft-piggyback example
+
+`examples/openraft-piggyback/` is the single-binary, in-process demonstration of piggybacking TSO onto a host service's existing raft. When your service already runs openraft for something else, you don't need a second cluster — you wrap the driver crate's `HighWaterCommand` in your `AppData` enum and add a high-water field to your state machine.
+
+```bash
+cargo run -p example-openraft-piggyback
+```
+
+The demo boots a 3-node in-process cluster via `openraft_toolkit::test_fakes::MemNetwork`, runs a tsoracle server on each (loopback ports 55561–55563), and walks through: host KV writes that land in the host SM without touching the TSO field, GetTs bursts that are allocator-served (high-water does *not* advance per call), and a failover that asserts the freshness invariant survives (`new_high_water > old_high_water` AND `next_ts > last_pre_failover_ts`). Runs in roughly 3 seconds; the same `run_demo()` function backs `tests/smoke.rs`.
+
+The envelope pattern at the heart of the example:
+
+```rust
+pub enum HostCommand {
+    Kv(KvOp),
+    Tso(tsoracle_driver_openraft::HighWaterCommand),
+}
+```
+
+Your apply path enforces TSO monotonicity (`max(prev, target)`) in a field next to your KV map; your snapshot carries both halves; your `OpenraftHighWaterHost` impl wraps `HighWaterCommand::Bump` in `HostCommand::Tso` when submitting. See [`docs/consensus-integration.md`](consensus-integration.md#openrafthighwaterhost-trait) for the trait contract and the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-piggyback) for the walkthrough.
 
 ## Testing strategy
 

@@ -30,7 +30,7 @@ The repo is a Cargo workspace. The crates under `crates/` are:
 | `tsoracle-bin`         | the `tsoracle` CLI                               |
 
 
-Runnable examples live under `examples/` (`embedded-server`, `failover-demo`, `openraft-cluster`) and are part of the default workspace members, so `cargo check` covers them too.
+Runnable examples live under `examples/` (`embedded-server`, `failover-demo`, `openraft-standalone`, `openraft-piggyback`) and are part of the default workspace members, so `cargo check` covers them too.
 
 ## Documentation
 

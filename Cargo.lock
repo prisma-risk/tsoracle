@@ -746,7 +746,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "example-openraft-cluster"
+name = "example-openraft-piggyback"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "openraft",
+ "openraft-toolkit",
+ "parking_lot",
+ "postcard",
+ "rocksdb",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tsoracle-client",
+ "tsoracle-consensus",
+ "tsoracle-core",
+ "tsoracle-driver-openraft",
+ "tsoracle-server",
+]
+
+[[package]]
+name = "example-openraft-standalone"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -754,10 +778,10 @@ dependencies = [
  "clap",
  "futures",
  "openraft",
+ "openraft-toolkit",
  "postcard",
  "prost",
- "serde",
- "serde_json",
+ "rocksdb",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -767,6 +791,7 @@ dependencies = [
  "tracing-subscriber",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-driver-openraft",
  "tsoracle-server",
 ]
 

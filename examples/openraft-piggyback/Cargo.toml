@@ -1,0 +1,34 @@
+[package]
+name                   = "example-openraft-piggyback"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description            = "tsoracle example: piggyback TSO on a host service's existing openraft cluster"
+publish                = false
+
+[[bin]]
+name = "openraft-piggyback"
+path = "src/main.rs"
+
+[dependencies]
+tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.1.0" }
+tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.0" }
+tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.1.0" }
+tsoracle-client          = { path = "../../crates/tsoracle-client", version = "0.1.0" }
+tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.1.0" }
+openraft-toolkit         = { path = "../../crates/openraft-toolkit", version = "0.1.0", features = ["rocksdb-log-store", "test-fakes"] }
+
+openraft           = { workspace = true }
+rocksdb            = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait        = { workspace = true }
+serde              = { workspace = true }
+postcard           = { workspace = true }
+anyhow             = { workspace = true }
+futures            = { workspace = true }
+tempfile           = { workspace = true }
+parking_lot        = { workspace = true }

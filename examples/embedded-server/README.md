@@ -28,5 +28,5 @@ Or from Rust using the `tsoracle-client` crate — see [Calling tsoracle from Ru
 
 ## When this example is *not* the right shape
 
-- **You want HA.** This example uses `FileDriver`, which is single-node by design. Swap it for a `ConsensusDriver` over your replicated log — see the [openraft-cluster example](../openraft-cluster/) for a worked version.
+- **You want HA.** This example uses `FileDriver`, which is single-node by design. Swap it for a `ConsensusDriver` over your replicated log — see [`examples/openraft-standalone`](../openraft-standalone/) (own raft) or [`examples/openraft-piggyback`](../openraft-piggyback/) (shared raft) for worked versions.
 - **You want to share a tonic listener with other services.** Use [`Server::into_router`](https://docs.rs/tsoracle-server/latest/tsoracle_server/struct.Server.html#method.into_router) instead of `serve_with_shutdown`; it returns a tonic `Routes` value plus a `JoinHandle<Result<(), ServerError>>` for the leader-watch task. Keep and observe that handle so watch failures are visible to your embedding process.
