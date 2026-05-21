@@ -14,6 +14,7 @@ For the **API reference**, see [docs.rs/tsoracle-server](https://docs.rs/tsoracl
 - **[The Allocator](the-allocator.md)** — allocation model, prepare-commit split, monotonic persistence, monotonicity proof.
 - **[Key Subsystems](key-subsystems.md)** — leader-watch pipeline, failover fence, leader-hint trailer, steady-state window extension.
 - **[Client API and Usage](client-api-and-usage.md)** — `Client` type, `GetTs`/`GetTsBatch`, leader discovery, configuration.
+- **[The Client Driver](the-client-driver.md)** — coalescing vs. pre-fetching, external monotonicity across clients, auto-batching dynamics, `flush_interval` correctly understood.
 - **[Consensus Integration](consensus-integration.md)** — the `ConsensusDriver` trait, per-method recipes, worked openraft example, single-leader requirement.
 - **[Operations](operations.md)** — sizing `window_ahead`/`failover_advance`, monitoring hooks, deployment topologies, client retry behavior.
 - **[Testing and Examples](testing-and-examples.md)** — walkthroughs of `embedded-server`, `failover-demo`, `openraft-standalone`, `openraft-piggyback`, plus the workspace testing strategy.
