@@ -44,6 +44,304 @@ pub fn parse_count(input: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("overflow parsing {input:?}"))
 }
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use hdrhistogram::Histogram;
+use tokio::runtime::Builder;
+use tokio::sync::mpsc;
+
+use crate::config::{ScenarioKind, StressConfig, TopologyKind};
+use crate::event::SupervisorEvent;
+use crate::git::GitInfo;
+use crate::loadgen::{ClientTaskCfg, client_task};
+use crate::nemesis::{play, random, scenario};
+use crate::report::{
+    LatencyStats, Outcome, RecordedCounts, Report, Throughput,
+};
+use crate::schedule::{RandomParams, Schedule};
+use crate::supervisor::Supervisor;
+use crate::topology::ChaosController;
+use crate::topology::mem::MemTopology;
+use crate::types::ClientId;
+
+/// Tuple returned by topology spawn helpers below: the chaos controller, the
+/// endpoint strings clients should dial, and the join handle for the spawned
+/// server task. Aliased to suppress `clippy::type_complexity`.
+type SpawnedTopology = (
+    Box<dyn ChaosController>,
+    Vec<String>,
+    tokio::task::JoinHandle<Result<(), tsoracle_server::ServerError>>,
+);
+
+/// Histogram upper bound (60 seconds, microseconds).
+const HISTO_MAX_US: u64 = 60_000_000;
+
+/// Build a histogram with the standard bounds.
+fn new_histogram() -> Histogram<u64> {
+    // Bounds are compile-time constants; failure here would indicate a bug in
+    // hdrhistogram itself. We use `unwrap_or_else` plus a fallback rather than
+    // `.expect(..)` to stay within the crate's lint policy (warn on expect_used
+    // in non-test code).
+    Histogram::new_with_bounds(1, HISTO_MAX_US, 3).unwrap_or_else(|_| {
+        // Fallback to a smaller, definitely-valid configuration. This branch
+        // is unreachable for the constants above.
+        #[allow(clippy::unwrap_used)]
+        Histogram::new(1).unwrap()
+    })
+}
+
+/// Top-level: resolve schedule, spawn topology, drive load, collect outcome.
+///
+/// Returns the `Report`. The `Outcome` carried inside maps to the exit code
+/// the CLI uses for process exit (see `Outcome::exit_code`).
+pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
+    cfg.validate().map_err(anyhow::Error::msg)?;
+
+    // --- Build runtimes (server, client, control). ---
+    let server_rt = Builder::new_multi_thread()
+        .worker_threads(cfg.server_threads)
+        .thread_name("stress-server")
+        .enable_all()
+        .build()?;
+    let client_rt = Builder::new_multi_thread()
+        .worker_threads(cfg.client_threads)
+        .thread_name("stress-client")
+        .enable_all()
+        .build()?;
+    let control_rt = Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("stress-control")
+        .enable_all()
+        .build()?;
+
+    // --- Resolve schedule. ---
+    let schedule = resolve_schedule(&cfg)?;
+    if let Some(path) = cfg.schedule_out.as_ref() {
+        let json = serde_json::to_string_pretty(&schedule)?;
+        std::fs::write(path, json)?;
+    }
+
+    // --- Spawn topology on the server runtime. ---
+    let grace = cfg.grace();
+    let (controller, endpoints, server_handle): SpawnedTopology = match cfg.topology {
+        TopologyKind::Mem => {
+            let topo = server_rt.block_on(MemTopology::spawn(grace))?;
+            let endpoints = topo.controller.endpoints();
+            let server_handle = topo.server_handle;
+            (Box::new(topo.controller), endpoints, server_handle)
+        }
+        TopologyKind::Raft => anyhow::bail!("raft topology not yet implemented (Plan B)"),
+        TopologyKind::Process => anyhow::bail!("process topology not yet implemented (Plan C)"),
+    };
+
+    // --- Supervisor channel + task on control runtime. ---
+    let (event_tx, event_rx) = mpsc::channel::<SupervisorEvent>(65_536);
+    let supervisor_handle = control_rt.spawn(Supervisor::new().run(event_rx));
+
+    // --- Loadgen on the client runtime. ---
+    let stop = Arc::new(AtomicBool::new(false));
+    let transient_retries = Arc::new(AtomicU64::new(0));
+
+    // The controller must remain alive across the loadgen `block_on` (for
+    // nemesis playback) and then be consumed by `shutdown(self: Box<Self>)`
+    // afterwards. `block_on` requires a `'static` future, which precludes
+    // borrowing `controller`; Arc<dyn ChaosController> would forbid the
+    // by-value shutdown. We park the box in `Arc<Mutex<Option<...>>>` and
+    // `.take()` it once playback finishes, then call `shutdown` on the
+    // recovered box.
+    let controller_slot: Arc<parking_lot::Mutex<Option<Box<dyn ChaosController>>>> =
+        Arc::new(parking_lot::Mutex::new(Some(controller)));
+
+    let cfg_for_client = cfg.clone();
+    let schedule_for_client = schedule.clone();
+    let stop_for_client = stop.clone();
+    let transient_retries_for_client = transient_retries.clone();
+    let event_tx_for_client = event_tx.clone();
+    let controller_for_nemesis = controller_slot.clone();
+    let endpoints_for_client = endpoints.clone();
+
+    let load_result = client_rt.block_on(async move {
+        let client = Arc::new(tsoracle_client::Client::connect(endpoints_for_client).await?);
+        let mut handles = Vec::with_capacity(cfg_for_client.clients);
+
+        for client_idx in 0..cfg_for_client.clients {
+            let task_cfg = ClientTaskCfg {
+                client_id: ClientId(client_idx as u32),
+                client: client.clone(),
+                batch_size: cfg_for_client.batch_size,
+                warmup_iters: cfg_for_client.warmup,
+                liveness_deadline: cfg_for_client.liveness_deadline,
+                stop: stop_for_client.clone(),
+                tx: event_tx_for_client.clone(),
+                transient_retries: transient_retries_for_client.clone(),
+            };
+            handles.push(tokio::spawn(client_task(task_cfg)));
+        }
+
+        let t0 = Instant::now();
+
+        // Apply burst loadgen pause if any.
+        let stop_for_burst = stop_for_client.clone();
+        let schedule_for_burst = schedule_for_client.clone();
+        let burst_fut = async move {
+            if let Some(pause) = schedule_for_burst.loadgen_pause.clone() {
+                tokio::time::sleep(pause.at).await;
+                stop_for_burst.store(true, Ordering::Relaxed);
+                tokio::time::sleep(pause.dur).await;
+                stop_for_burst.store(false, Ordering::Relaxed);
+            } else {
+                std::future::pending::<()>().await
+            }
+        };
+
+        let nemesis_fut = {
+            let schedule = schedule_for_client.clone();
+            let event_tx = event_tx_for_client.clone();
+            let controller_slot = controller_for_nemesis.clone();
+            async move {
+                // We hold the controller out of the slot for the duration of
+                // playback. After playback, we put it back so the outer
+                // function can `take()` it and call shutdown.
+                let controller_box = controller_slot.lock().take();
+                if let Some(controller_box) = controller_box {
+                    play(&schedule, controller_box.as_ref(), event_tx, t0).await;
+                    *controller_slot.lock() = Some(controller_box);
+                }
+            }
+        };
+
+        let timer_fut = async {
+            if let Some(d) = cfg_for_client.duration {
+                tokio::time::sleep(d).await;
+            } else {
+                // --ops mode is not yet wired in Plan A; sleep a placeholder.
+                // (Flagged in the plan's "Known gaps" section.)
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        };
+
+        tokio::select! {
+            _ = nemesis_fut => {},
+            _ = timer_fut => {},
+            _ = burst_fut => {},
+        }
+        stop_for_client.store(true, Ordering::Relaxed);
+
+        for handle in handles {
+            let _ = handle.await;
+        }
+        let _ = event_tx_for_client.send(SupervisorEvent::End).await;
+        drop(event_tx_for_client);
+
+        anyhow::Ok(t0)
+    })?;
+
+    let t0 = load_result;
+    let elapsed = t0.elapsed();
+
+    // Drop the outer event_tx so the supervisor sees channel closure.
+    drop(event_tx);
+
+    // Wait for supervisor to drain.
+    let supervisor_outcome = control_rt
+        .block_on(supervisor_handle)
+        .map_err(|err| anyhow::anyhow!("supervisor join: {err:?}"))?;
+
+    // Build report. (Latency stats are zero in Plan A — per-call histograms
+    // are deferred per the plan's known gaps.)
+    let timestamps = supervisor_outcome.events_observed;
+    let batch_size = cfg.batch_size.max(1) as u64;
+    let client_calls = timestamps / batch_size;
+    let elapsed_secs = elapsed.as_secs_f64().max(1e-9);
+    let throughput = Throughput {
+        client_calls_per_sec: client_calls as f64 / elapsed_secs,
+        timestamps_per_sec: timestamps as f64 / elapsed_secs,
+    };
+    let merged = new_histogram();
+    let latency = LatencyStats {
+        p50: merged.value_at_quantile(0.50),
+        p90: merged.value_at_quantile(0.90),
+        p99: merged.value_at_quantile(0.99),
+        p999: merged.value_at_quantile(0.999),
+        min: merged.min(),
+        max: merged.max(),
+        mean: merged.mean() as u64,
+    };
+    let outcome = if supervisor_outcome.violations.is_empty() {
+        Outcome::Ok
+    } else {
+        Outcome::InvariantViolation
+    };
+
+    let hostname_str = hostname().unwrap_or_else(|| "unknown".into());
+    let topology = cfg.topology;
+    let report = Report {
+        config: cfg,
+        git: GitInfo::capture(),
+        hostname: hostname_str,
+        topology,
+        elapsed,
+        recorded: RecordedCounts { client_calls, timestamps },
+        throughput,
+        latency_per_call_us: latency,
+        transient_retries: transient_retries.load(Ordering::Relaxed),
+        out_of_range_samples: 0,
+        violations: supervisor_outcome.violations,
+        chaos_events: Vec::new(),
+        schedule,
+        outcome,
+    };
+
+    // Shut topology down cleanly.
+    let final_controller = controller_slot.lock().take();
+    server_rt.block_on(async move {
+        if let Some(controller) = final_controller {
+            controller.shutdown().await;
+        }
+        let _ = server_handle.await;
+    });
+    drop(server_rt);
+    drop(client_rt);
+    drop(control_rt);
+    Ok(report)
+}
+
+fn resolve_schedule(cfg: &StressConfig) -> Result<Schedule, anyhow::Error> {
+    let total = cfg
+        .duration
+        .or_else(|| cfg.ops.map(|_| Duration::from_secs(30)))
+        .ok_or_else(|| anyhow::anyhow!("config has neither duration nor ops"))?;
+    match &cfg.scenario {
+        ScenarioKind::Named(name) => scenario::build(name, total).map_err(anyhow::Error::msg),
+        ScenarioKind::Random { seed } => {
+            let params = RandomParams {
+                mean_gap: Duration::from_millis(500),
+                total,
+                weight_kill: 1.0,
+                weight_pause: 1.0,
+                weight_failpoint: 0.5,
+            };
+            Ok(random::build(*seed, params))
+        }
+    }
+}
+
+fn hostname() -> Option<String> {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|host| !host.is_empty())
+}
+
 #[cfg(test)]
 mod parse_count_tests {
     use super::parse_count;
