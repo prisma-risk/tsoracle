@@ -1,3 +1,4 @@
+// #[PerformanceCriticalPath]
 //! The window allocator state machine. Sync, no I/O.
 
 use crate::{Epoch, LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp};

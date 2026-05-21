@@ -1,3 +1,4 @@
+// #[PerformanceCriticalPath]
 //! Coalesces concurrent waiters into one outgoing GetTs RPC.
 //!
 //! The driver never retains pre-fetched timestamps. Each waiter receives
