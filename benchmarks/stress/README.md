@@ -4,19 +4,19 @@ The tsoracle stress + chaos harness. Drives load against a tsoracle topology whi
 
 This crate is a peer of `benchmarks/minimal`, not a replacement. `bench-minimal` characterizes steady-state throughput and latency against an in-memory driver. `stress` is the invariant checker under chaos. Different consumers, different outputs.
 
-`publish = false`. Library code participates in `make coverage`; the CLI shim and the unimplemented topology stubs are filtered out via the Makefile's filename regex. Run it when you want to know whether tsoracle maintains its invariants under sustained chaos.
+`publish = false`. Library code participates in `make coverage`; the CLI shim is filtered out via the Makefile's filename regex. Run it when you want to know whether tsoracle maintains its invariants under sustained chaos.
 
 ## Features
 
 - `--topology mem`: single in-process `tsoracle-server` against `InMemoryDriver`.
+- `--topology raft`: real in-process openraft cluster sharing a `MemNetwork`.
+- `--topology process` (unix-only): spawned `tsoracle` binaries with POSIX-signal chaos and `FAILPOINTS` env propagation.
 - All four invariants (monotonicity, batch ordering, fence freshness, liveness).
 - Five named scenarios: `steady`, `burst`, `killer-loop`, `fence-stress`, `failpoint-cycle`.
 - Seeded `random` scenario.
 - `replay` subcommand.
 - `inject-violation` self-test as a positive CI control.
-- Mem-topology smoke test in `tests/smoke.rs` (≤ 30 s).
-
-`--topology raft` runs a real in-process openraft cluster sharing a `MemNetwork`. `--topology process` remains stubbed with `unimplemented!()` and will land in a follow-up change.
+- Smoke tests in `tests/smoke.rs` covering all three topologies (≤ 60 s total).
 
 ## Run
 
@@ -34,6 +34,20 @@ cargo run -p stress --release -- inject-violation --topology mem    # must exit 
 # 3-node openraft cluster, in-process, sharing a MemNetwork.
 cargo run -p stress --release -- run --topology raft --scenario killer-loop --duration 30s --nodes 3 --clients 32 --batch-size 4
 ```
+
+`--topology process` (unix-only) launches one or more `tsoracle` child processes and exercises chaos via real POSIX signals (SIGKILL, SIGSTOP/SIGCONT) plus `FAILPOINTS=…` env propagation at spawn time. Unexpected child exits (those the nemesis did not initiate) are reaped by per-child supervisor tasks and surfaced as `LivenessIncident::UnexpectedServerExit` events. Build the binary first:
+
+```bash
+cargo build --release --bin tsoracle
+cargo run -p stress --release -- run --topology process --scenario killer-loop --duration 30s --clients 16 --nodes 1
+```
+
+Process-mode caveats:
+
+- Unix-only. SIGKILL/SIGSTOP/SIGCONT have no Windows analogue; `--topology process` is `cfg(unix)`-gated in `lib::run` and bails on Windows.
+- The harness binds children to OS-assigned ports on the initial spawn (`--listen 127.0.0.1:0`); it then pins each node's port so respawns after SIGKILL rebind to the same address. Without this, single-node configurations would lose connectivity after every kill.
+- "Current leader" is best-effort: the harness has no protocol-level handle to discover the actual Raft leader, so chaos rotates through children round-robin. Monotonicity and fence-freshness invariants stay sound regardless — they are global, not per-node.
+- `arm_failpoint` / `disarm_failpoint` update an internal map but **do not affect already-running children**. Only the next respawn (e.g. after a `kill_leader`) inherits the new `FAILPOINTS=…` env. The `failpoint-cycle` scenario therefore needs at least one kill between arm and observation in process mode.
 
 Build with the `stress-failpoints` feature to enable in-process failpoint chaos (the `failpoint-cycle` scenario only does useful work with this on):
 

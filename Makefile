@@ -132,10 +132,6 @@ COV_IGNORE_OPENRAFT_LIFECYCLE := crates/tsoracle-openraft-toolkit/src/lifecycle/
 # end-to-end by `benchmarks/stress/tests/smoke.rs`.
 COV_IGNORE_STRESS_BIN := benchmarks/stress/src/bin/stress
 
-# `unimplemented!()` placeholders for topology variants not yet implemented —
-# intentionally unreachable from any current test path.
-COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/process
-
 # Shared integration-test bootstrap helper. Gated by `test-support` (and
 # `cfg(test)`); never ships in the published library. Lives in `src/` only
 # because Cargo doesn't let multiple crates share `tests/common/mod.rs`.
@@ -144,7 +140,7 @@ COV_IGNORE_STRESS_TOPO_STUBS := benchmarks/stress/src/topology/process
 # legitimate "rare race" retry paths that local CI never trips.
 COV_IGNORE_TEST_SUPPORT := crates/tsoracle-server/src/test_support
 
-COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_STRESS_TOPO_STUBS)|$(COV_IGNORE_TEST_SUPPORT))\.rs
+COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_TEST_SUPPORT))\.rs
 
 # Shared exclude flags so `coverage` (lcov for CI) and `coverage-html` (local
 # browsable report) cannot drift apart on which crates participate.
