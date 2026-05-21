@@ -35,6 +35,5 @@ tsoracle-core  = { path = "../tsoracle-core", version = "0.1.1" }
 tsoracle-proto = { path = "../tsoracle-proto", version = "0.1.1" }
 
 [dev-dependencies]
-tokio                 = { workspace = true, features = ["test-util"] }
-proptest              = { workspace = true }
-tsoracle-server       = { path = "../tsoracle-server", version = "0.1.1", features = ["test-support"] }
+tokio    = { workspace = true, features = ["test-util"] }
+proptest = { workspace = true }

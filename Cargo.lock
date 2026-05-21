@@ -2922,7 +2922,6 @@ dependencies = [
  "tracing",
  "tsoracle-core",
  "tsoracle-proto",
- "tsoracle-server",
 ]
 
 [[package]]
@@ -3037,10 +3036,23 @@ dependencies = [
  "tonic-prost",
  "tonic-reflection",
  "tracing",
- "tsoracle-client",
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-proto",
+]
+
+[[package]]
+name = "tsoracle-tests"
+version = "0.1.1"
+dependencies = [
+ "fail",
+ "futures",
+ "tokio",
+ "tonic",
+ "tsoracle-client",
+ "tsoracle-core",
+ "tsoracle-proto",
+ "tsoracle-server",
 ]
 
 [[package]]

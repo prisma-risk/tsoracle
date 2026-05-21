@@ -1,0 +1,38 @@
+[package]
+name         = "tsoracle-tests"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+publish      = false
+description  = "Private integration-test crate. Hosts the end-to-end tests that exercise tsoracle-client against tsoracle-server (and vice versa) so neither lib needs a dev-dep on the other — releasing one no longer requires the other to already be on crates.io."
+
+[features]
+default = []
+# Mirror tsoracle-server's `failpoints` feature so the failpoint-driven
+# integration tests can be opted in. `cargo test -p tsoracle-tests --features failpoints`.
+failpoints = ["tsoracle-server/failpoints", "dep:fail"]
+
+[dependencies]
+fail            = { workspace = true, optional = true }
+futures         = { workspace = true }
+tokio           = { workspace = true, features = ["test-util"] }
+tonic           = { workspace = true }
+tsoracle-client = { path = "../tsoracle-client" }
+tsoracle-core   = { path = "../tsoracle-core" }
+tsoracle-proto  = { path = "../tsoracle-proto" }
+tsoracle-server = { path = "../tsoracle-server", features = ["test-support"] }
+
+[[test]]
+name = "client_e2e"
+
+[[test]]
+name = "client_freshness"
+
+[[test]]
+name              = "server_failpoints"
+required-features = ["failpoints"]
+
+[[test]]
+name = "server_serve_with_listener"
