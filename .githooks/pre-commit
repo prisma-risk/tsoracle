@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Pre-commit hook: blocks the commit unless `cargo fmt --check` and clippy pass.
+#
+# Enable once per clone with `make install-hooks` (or
+# `git config core.hooksPath .githooks`). Bypass intentionally with
+# `git commit --no-verify`. CI runs the same checks regardless, so a bypassed
+# commit will still be caught upstream.
+
+set -euo pipefail
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "pre-commit: cargo clippy"
+cargo clippy --workspace --all-targets --all-features -- -D warnings

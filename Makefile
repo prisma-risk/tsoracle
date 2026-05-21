@@ -30,7 +30,7 @@ WORKSPACE_VERSION := $(shell grep -E '^version[[:space:]]*=' Cargo.toml | head -
 
 .PHONY: all ci check fmt fmt-check lint fix build test doc \
         proto proto-lint proto-fmt proto-fmt-check proto-breaking \
-        deny coverage clean help \
+        deny coverage clean help install-hooks \
         bench bench-throughput-sweep bench-latency \
         release-bump release-dry-run release-publish release-tag
 
@@ -70,6 +70,13 @@ doc:
 
 clean:
 	$(CARGO) clean
+
+# Point this clone's git at the tracked .githooks/ directory so the pre-commit
+# hook runs `cargo fmt --check` and clippy before every commit. One-time setup
+# per clone; the config write is local to .git/config and not tracked.
+install-hooks:
+	git config core.hooksPath .githooks
+	@echo "core.hooksPath -> .githooks (bypass with 'git commit --no-verify')"
 
 # Protobuf -------------------------------------------------------------------
 # Mirrors the `buf` job in .github/workflows/ci.yml.
@@ -255,6 +262,8 @@ help:
 	@echo "  bench            Run the bench-minimal characterization workload."
 	@echo "  bench-throughput-sweep  Run bench across clients=1..1024 (--json files)."
 	@echo "  bench-latency    Run bench at clients=1 for latency-focused output."
+	@echo ""
+	@echo "  install-hooks    Point this clone's git at .githooks/ (pre-commit fmt+lint)."
 	@echo ""
 	@echo "Release flow (run in order; see CONTRIBUTING.md):"
 	@echo "  release-bump     1) Bump workspace + intra-workspace dep refs, commit."

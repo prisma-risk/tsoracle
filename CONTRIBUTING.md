@@ -72,6 +72,16 @@ cargo build --workspace --all-features
 cargo test  --workspace --all-features
 ```
 
+### Pre-commit hook
+
+A tracked pre-commit hook in [`.githooks/pre-commit`](.githooks/pre-commit) runs the first two of those checks (`cargo fmt --check` and clippy) and blocks the commit on failure. Enable it once per clone:
+
+```bash
+make install-hooks
+```
+
+That writes `core.hooksPath = .githooks` into your local `.git/config`. Bypass with `git commit --no-verify` when you know what you're doing — CI runs the same checks regardless, so a bypassed commit will still fail upstream.
+
 If you touched anything under `crates/tsoracle-proto/proto/`:
 
 ```bash
