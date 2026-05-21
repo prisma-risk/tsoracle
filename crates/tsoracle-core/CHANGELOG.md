@@ -4,6 +4,25 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.1.0...tsoracle-core-v0.1.1) - 2026-05-21
+
+### Added
+
+- *(examples)* openraft-standalone + openraft-piggyback ([#20](https://github.com/prisma-risk/tsoracle/pull/20))
+
+### Other
+
+- *(readme)* refresh feature highlights for current capabilities ([#49](https://github.com/prisma-risk/tsoracle/pull/49))
+- pre-seed per-crate CHANGELOG.md files ([#45](https://github.com/prisma-risk/tsoracle/pull/45))
+- *(hooks)* auto-install pre-commit hook via husky-rs ([#35](https://github.com/prisma-risk/tsoracle/pull/35))
+- *(core)* drop panicking convenience wrappers from Allocator ([#34](https://github.com/prisma-risk/tsoracle/pull/34))
+- *(perf)* add performance-critical-path guard ([#30](https://github.com/prisma-risk/tsoracle/pull/30))
+- *(lints)* warn on unwrap/expect in non-test code ([#28](https://github.com/prisma-risk/tsoracle/pull/28))
+- address final-review findings ([#21](https://github.com/prisma-risk/tsoracle/pull/21))
+- correct contrib.rocks attribution in README.md
+- add contributors section in README.md
+- update badges in README.md
+
 ## [0.1.0] - 2026-05-21
 
 Initial release.
