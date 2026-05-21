@@ -2351,6 +2351,7 @@ dependencies = [
  "hdrhistogram",
  "humantime",
  "humantime-serde",
+ "parking_lot",
  "rand 0.9.4",
  "serde",
  "serde_json",
