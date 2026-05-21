@@ -9,7 +9,7 @@ use tsoracle_core::Timestamp;
 
 use crate::chaos::{ChaosEvent, ChaosKind, ChaosWindow};
 use crate::event::SupervisorEvent;
-use crate::sample::{IssuedSample, LivenessIncident};
+use crate::sample::{IssuedSample, LivenessIncident, LivenessIncidentKind};
 use crate::types::{BatchId, ClientId};
 use crate::violation::{Violation, ViolationKind};
 use crate::{HISTO_MAX_US, new_histogram};
@@ -50,6 +50,12 @@ struct SupervisorState {
     seen_timestamps: HashSet<Timestamp>,
     open_batches: HashMap<(ClientId, BatchId), OpenBatch>,
     open_windows: Vec<OpenChaosWindow>,
+    /// Every applied chaos window seen so far, never pruned. Used only by
+    /// `on_liveness` to retroactively attribute a `DeadlineExceeded`
+    /// incident to chaos that overlapped the client's retry interval —
+    /// `open_windows` gets pruned in `on_issued` once a window is past
+    /// grace and fence-checked, so it can't be relied on after the fact.
+    chaos_history: Vec<ChaosWindow>,
     violations: Vec<Violation>,
     events_observed: u64,
     latency: Histogram<u64>,
@@ -63,6 +69,7 @@ impl Default for SupervisorState {
             seen_timestamps: HashSet::new(),
             open_batches: HashMap::new(),
             open_windows: Vec::new(),
+            chaos_history: Vec::new(),
             violations: Vec::new(),
             events_observed: 0,
             latency: new_histogram(),
@@ -258,6 +265,7 @@ impl Supervisor {
             // change leadership so no fence check applies.
             ChaosKind::FailpointArm { .. } | ChaosKind::FailpointDisarm { .. } => true,
         };
+        self.state.chaos_history.push(ev.window.clone());
         self.state.open_windows.push(OpenChaosWindow {
             window: ev.window,
             pre_window_high_water,
@@ -266,12 +274,32 @@ impl Supervisor {
     }
 
     fn on_liveness(&mut self, incident: LivenessIncident) {
-        let inside_any_window = self
-            .state
-            .open_windows
-            .iter()
-            .any(|open| open.window.contains(incident.at));
-        if !inside_any_window {
+        // `DeadlineExceeded` is a retry-interval event: the client tried
+        // repeatedly across [started_at, incident.at) and never succeeded.
+        // Any applied chaos window whose live span
+        // [w.started_at, w.ended_at + w.grace) overlapped that retry
+        // interval was a legitimate cause of the unavailability — including
+        // windows that closed before the deadline fired (e.g. consecutive
+        // `killer-loop` kills whose grace tails pre-date the incident, but
+        // whose churn prevented the cluster from ever stabilizing during
+        // the retry). `UnexpectedServerExit` has no retry interval, so the
+        // point-in-time containment check is the right shape there.
+        let chaos_attributable = match &incident.kind {
+            LivenessIncidentKind::DeadlineExceeded { started_at, .. } => {
+                let retry_start = *started_at;
+                let retry_end = incident.at;
+                self.state
+                    .chaos_history
+                    .iter()
+                    .any(|w| w.started_at < retry_end && retry_start < w.ended_at + w.grace)
+            }
+            LivenessIncidentKind::UnexpectedServerExit { .. } => self
+                .state
+                .chaos_history
+                .iter()
+                .any(|w| w.contains(incident.at)),
+        };
+        if !chaos_attributable {
             self.state.violations.push(Violation {
                 kind: ViolationKind::Liveness { incident },
                 at: Instant::now(),
@@ -590,6 +618,99 @@ mod tests {
                 started_at: now,
             },
             at: now,
+        }))
+        .await
+        .unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert_eq!(outcome.violations.len(), 1);
+        assert!(matches!(
+            outcome.violations[0].kind,
+            ViolationKind::Liveness { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn liveness_deadline_exceeded_during_chaos_churn_is_tolerated() {
+        // Reproduces the raft + killer-loop scenario where a client's
+        // retry interval [started_at, incident.at) spans multiple kill
+        // windows that have all closed (past `grace`) by the time the
+        // deadline fires. The incident's instantaneous `at` falls in a
+        // chaos-window gap, so a strict point-in-time `contains` check
+        // would flag it as a violation — but the churn during the retry
+        // interval is exactly what prevented progress, so it must NOT
+        // be reported as a TSO liveness regression.
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        let t0 = Instant::now();
+        // Three kill windows at t+1s, t+3s, t+5s, each with 100ms duration
+        // and 750ms grace. After t+5.85s no window is "open" anymore.
+        for k in [1, 3, 5] {
+            let started = t0 + Duration::from_secs(k);
+            let ended = started + Duration::from_millis(100);
+            let grace = Duration::from_millis(750);
+            tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace)))
+                .await
+                .unwrap();
+        }
+        // Client started retrying at t+0.5s and deadlined at t+5.5s
+        // (5s `liveness_deadline`). Last kill window ended its grace at
+        // t+5.85s, so the deadline at t+5.5s falls within the last
+        // window — but suppose the deadline fired at t+6.0s instead,
+        // outside every window's grace. We test that case.
+        let started_at = t0 + Duration::from_millis(500);
+        let at = t0 + Duration::from_secs(6); // > last window's end+grace (5.85s)
+        tx.send(SupervisorEvent::Liveness(LivenessIncident {
+            kind: LivenessIncidentKind::DeadlineExceeded {
+                client_id: ClientId(0),
+                attempts: 1379,
+                last_error: "Rpc(Status { code: FailedPrecondition, message: \"not leader\" })"
+                    .into(),
+                started_at,
+            },
+            at,
+        }))
+        .await
+        .unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert!(
+            outcome.violations.is_empty(),
+            "got: {:?}",
+            outcome.violations,
+        );
+    }
+
+    #[tokio::test]
+    async fn liveness_deadline_exceeded_with_no_overlapping_chaos_is_violation() {
+        // A retry interval that does NOT overlap with any chaos window
+        // must still be reported as a liveness violation — the fix
+        // tolerates chaos-attributable failures, not all failures.
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        let t0 = Instant::now();
+        // One kill window early in the run.
+        let started = t0;
+        let ended = started + Duration::from_millis(100);
+        let grace = Duration::from_millis(50);
+        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace)))
+            .await
+            .unwrap();
+        // Client started retrying well after the kill's grace ended.
+        let retry_start = t0 + Duration::from_secs(1);
+        let retry_end = t0 + Duration::from_secs(6);
+        tx.send(SupervisorEvent::Liveness(LivenessIncident {
+            kind: LivenessIncidentKind::DeadlineExceeded {
+                client_id: ClientId(0),
+                attempts: 10,
+                last_error: "Unavailable".into(),
+                started_at: retry_start,
+            },
+            at: retry_end,
         }))
         .await
         .unwrap();
