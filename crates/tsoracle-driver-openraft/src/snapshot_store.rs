@@ -277,10 +277,36 @@ mod rocksdb_tests {
         opts.create_if_missing(true);
         let db = Arc::new(DB::open(&opts, dir.path()).unwrap());
         let err = RocksdbSnapshotStore::open(db, "missing_cf").unwrap_err();
-        assert!(
-            err.to_string().contains("missing_cf"),
-            "error message should name the missing CF, got: {err}",
-        );
+        let msg = err.to_string();
+        assert!(msg.contains("missing_cf"));
+    }
+
+    #[test]
+    fn rocksdb_load_errors_when_cf_dropped_after_open() {
+        // `cf_handle` validates the CF at `open` time but re-resolves on every
+        // save/load against the live DB. If the CF is dropped from underneath
+        // the store, save/load must surface a structured error (rather than
+        // panicking on a missing handle) so callers can map it to a
+        // recoverable `io::Error`.
+        let dir = TempDir::new().unwrap();
+        let db = open_db(dir.path());
+        let store = RocksdbSnapshotStore::open(db.clone(), SNAP_CF).unwrap();
+        store.save(b"prior").unwrap();
+        db.drop_cf(SNAP_CF).unwrap();
+        let err = store.load().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("disappeared"));
+        assert!(msg.contains(SNAP_CF));
+    }
+
+    #[test]
+    fn rocksdb_debug_includes_cf_and_key_len() {
+        let dir = TempDir::new().unwrap();
+        let db = open_db(dir.path());
+        let store = RocksdbSnapshotStore::open_with_key(db, SNAP_CF, b"some-key".to_vec()).unwrap();
+        let rendered = format!("{store:?}");
+        assert!(rendered.contains(SNAP_CF));
+        assert!(rendered.contains("key_len: 8"));
     }
 
     #[test]

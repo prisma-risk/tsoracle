@@ -569,20 +569,78 @@ mod tests {
             sm.build_snapshot().await.expect("build_snapshot");
         }
         let mut sm = HighWaterStateMachine::with_store(store).expect("reopened SM");
-        assert_eq!(sm.current_value().await, 99, "value must survive reopen");
+        assert_eq!(sm.current_value().await, 99);
+        // `applied_state` must report the snapshot's last_log_id after reopen —
+        // without this, openraft re-applies from index 0 and panics on missing
+        // log entries that the snapshot already covered.
         let (last, _) = sm.applied_state().await.unwrap();
-        assert_eq!(
-            last.map(|l| l.index),
-            Some(1),
-            "applied_state must report the snapshot's last_log_id after reopen — \
-             without this, openraft re-applies from index 0 and panics on missing log",
-        );
+        assert_eq!(last.map(|l| l.index), Some(1));
         let snap = sm
             .get_current_snapshot()
             .await
             .expect("get_current_snapshot")
             .expect("snapshot present after reopen");
         assert_eq!(snap.meta.last_log_id.map(|l| l.index), Some(1));
+    }
+
+    #[tokio::test]
+    async fn default_constructor_matches_new() {
+        // `Default` is the canonical "no-arg" entry point for embedders that
+        // build the SM via `..Default::default()`; pinning behavior here keeps
+        // the in-memory snapshot store as the unsurprising default.
+        let mut sm = HighWaterStateMachine::default();
+        assert_eq!(sm.current_value().await, 0);
+        let snap = sm
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot");
+        assert!(snap.is_none());
+    }
+
+    #[tokio::test]
+    async fn begin_receiving_snapshot_returns_empty_cursor() {
+        // openraft hands the returned cursor to the snapshot-receiving network
+        // path; the contract is "empty, writable buffer." Anything non-empty
+        // would corrupt the install on the receiving side.
+        let mut sm = HighWaterStateMachine::new();
+        let cursor = sm
+            .begin_receiving_snapshot()
+            .await
+            .expect("begin_receiving_snapshot");
+        assert!(cursor.into_inner().is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_store_errors_on_malformed_persisted_envelope() {
+        // Hardens the recovery path against on-disk corruption: a snapshot
+        // blob that doesn't decode as `PersistedSnapshot` must surface as a
+        // structured `io::Error` from `with_store`, not a silent reset to
+        // the default state (which would lose the value across restart).
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        store.save(b"not a postcard envelope").unwrap();
+        let Err(err) = HighWaterStateMachine::with_store(store) else {
+            panic!("with_store must reject malformed envelope");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("envelope decode"));
+    }
+
+    #[tokio::test]
+    async fn with_store_errors_on_malformed_inner_payload() {
+        // Envelope decodes but the inner `HighWaterStateMachineSnapshot` does
+        // not — also surfaces as `io::Error` rather than silent state reset.
+        let envelope = PersistedSnapshot {
+            meta: SnapMeta::default(),
+            data: b"not a postcard payload".to_vec(),
+        };
+        let bytes = postcard::to_stdvec(&envelope).unwrap();
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        store.save(&bytes).unwrap();
+        let Err(err) = HighWaterStateMachine::with_store(store) else {
+            panic!("with_store must reject malformed inner payload");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("payload decode"));
     }
 
     #[tokio::test]
