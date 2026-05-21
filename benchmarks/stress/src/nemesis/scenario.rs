@@ -111,6 +111,7 @@ pub fn build(name: &str, total: Duration) -> Result<Schedule, String> {
     Ok(Schedule {
         source,
         ops,
+        total,
         loadgen_pause,
     })
 }

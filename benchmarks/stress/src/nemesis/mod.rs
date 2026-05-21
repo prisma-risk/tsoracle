@@ -142,6 +142,7 @@ mod tests {
                     op: ChaosOp::KillLeader,
                 },
             ],
+            total: Duration::from_millis(50),
             loadgen_pause: None,
         };
         let controller = FakeController::new();

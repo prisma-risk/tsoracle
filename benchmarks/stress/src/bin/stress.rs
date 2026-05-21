@@ -192,10 +192,16 @@ fn replay_cmd(args: ReplayArgs) -> ExitCode {
             ScenarioKind::Random { seed: *seed }
         }
     };
+    // Replay duration = recorded total + a small safety margin. The margin
+    // gives the replay headroom to observe post-chaos samples even when it
+    // runs slightly slower than the original (scheduler jitter, cold caches,
+    // CI noise). 2s handles short runs (high relative jitter) without being
+    // visible on long runs.
+    let replay_margin = Duration::from_secs(2);
     let cfg = StressConfig {
         topology: TopologyKind::Mem,
         scenario,
-        duration: Some(Duration::from_secs(30)),
+        duration: Some(schedule.total + replay_margin),
         ops: None,
         clients: 16,
         batch_size: 1,

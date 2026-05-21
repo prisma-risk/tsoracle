@@ -306,6 +306,7 @@ mod tests {
                     scenario: "steady".into(),
                 },
                 ops: Vec::new(),
+                total: Duration::from_secs(20),
                 loadgen_pause: None,
             },
             outcome: Outcome::Ok,

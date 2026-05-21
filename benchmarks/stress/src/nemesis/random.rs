@@ -47,9 +47,11 @@ pub fn build(seed: u64, params: RandomParams) -> Schedule {
         };
         ops.push(ScheduledOp { at: t, op });
     }
+    let total = params.total;
     Schedule {
         source: ScheduleSource::Random { seed, params },
         ops,
+        total,
         loadgen_pause: None,
     }
 }

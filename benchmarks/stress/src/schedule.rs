@@ -10,10 +10,19 @@ use crate::chaos::ChaosOp;
 pub struct Schedule {
     pub source: ScheduleSource,
     pub ops: Vec<ScheduledOp>,
+    /// Wall-clock duration the original run was bounded to. `replay` honors
+    /// this so the replay matches the original run's length. Defaults to 30s
+    /// for schedules saved before this field existed.
+    #[serde(with = "humantime_serde", default = "default_total")]
+    pub total: Duration,
     /// `burst` and similar load-modulation scenarios carry a loadgen-side
     /// pause. `None` for pure-nemesis scenarios.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loadgen_pause: Option<LoadgenPause>,
+}
+
+fn default_total() -> Duration {
+    Duration::from_secs(30)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,11 +81,13 @@ mod tests {
                     },
                 },
             ],
+            total: Duration::from_secs(10),
             loadgen_pause: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: Schedule = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.ops.len(), 2);
+        assert_eq!(parsed.total, Duration::from_secs(10));
         match &parsed.source {
             ScheduleSource::Named { scenario } => assert_eq!(scenario, "killer-loop"),
             _ => panic!("wrong source"),
@@ -90,6 +101,7 @@ mod tests {
                 scenario: "burst".into(),
             },
             ops: vec![],
+            total: Duration::from_secs(60),
             loadgen_pause: Some(LoadgenPause {
                 at: Duration::from_secs(30),
                 dur: Duration::from_secs(5),
@@ -100,5 +112,14 @@ mod tests {
         let p = parsed.loadgen_pause.unwrap();
         assert_eq!(p.at, Duration::from_secs(30));
         assert_eq!(p.dur, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn schedule_without_total_uses_default() {
+        // Backward-compat: schedules saved before `total` existed should still
+        // deserialize cleanly, with `total` taking the serde default of 30s.
+        let legacy_json = r#"{"source":{"Named":{"scenario":"killer-loop"}},"ops":[]}"#;
+        let parsed: Schedule = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.total, Duration::from_secs(30));
     }
 }
