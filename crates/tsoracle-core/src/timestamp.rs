@@ -97,6 +97,18 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "physical_ms exceeds 46-bit timestamp field")]
+    fn pack_panics_on_out_of_range_physical_ms() {
+        let _ = Timestamp::pack(PHYSICAL_MS_MAX + 1, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "logical exceeds 18-bit timestamp field")]
+    fn pack_panics_on_out_of_range_logical() {
+        let _ = Timestamp::pack(0, LOGICAL_MAX + 1);
+    }
+
+    #[test]
     fn ordering_follows_packed_value() {
         let earliest = Timestamp::pack(1000, 5);
         let middle = Timestamp::pack(1000, 6);

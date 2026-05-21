@@ -308,6 +308,11 @@ mod tests {
             allocator.try_on_leadership_gained(PHYSICAL_MS_MAX + 1, PHYSICAL_MS_MAX + 1, Epoch(5)),
             Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
         );
+        // fence_floor in-range, ceiling out-of-range — separate guard.
+        assert_eq!(
+            allocator.try_on_leadership_gained(1_000, PHYSICAL_MS_MAX + 1, Epoch(5)),
+            Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
+        );
         assert_eq!(
             allocator.try_on_leadership_gained(5000, 4000, Epoch(5)),
             Err(CoreError::InvalidLeadershipWindow {
@@ -343,6 +348,19 @@ mod tests {
         assert_eq!(
             allocator.try_grant(1000, 0),
             Err(CoreError::InvalidCount(0))
+        );
+    }
+
+    #[test]
+    fn try_grant_oversized_count() {
+        let mut allocator = Allocator::new();
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .unwrap();
+        let oversized = LOGICAL_MAX + 2;
+        assert_eq!(
+            allocator.try_grant(1000, oversized),
+            Err(CoreError::InvalidCount(oversized))
         );
     }
 
@@ -502,6 +520,68 @@ mod tests {
             .try_commit_window_extension(9_999, Epoch(1))
             .unwrap();
         assert!(!allocator.is_leader());
+    }
+
+    #[test]
+    fn would_grant_matches_try_grant_outcome() {
+        let mut allocator = Allocator::new();
+        // Not leader: never grants.
+        assert!(!allocator.would_grant(1_000, 1));
+        // Invalid counts: never grants.
+        allocator
+            .try_on_leadership_gained(1_000, 5_000, Epoch(1))
+            .unwrap();
+        assert!(!allocator.would_grant(1_000, 0));
+        assert!(!allocator.would_grant(1_000, LOGICAL_MAX + 2));
+        // Within-window: matches try_grant. now_ms below floor still grants
+        // (clamped to floor=1_000, ceiling=5_000).
+        assert!(allocator.would_grant(0, 1));
+        // now_ms above ceiling: predicate refuses (would exhaust).
+        assert!(!allocator.would_grant(5_001, 1));
+        // Mid-window now_ms advances the predicate's internal physical_ms.
+        assert!(allocator.would_grant(2_500, 1));
+    }
+
+    #[test]
+    fn would_grant_predicts_logical_wrap_advance() {
+        // When (logical + count) overflows the per-ms logical range, the
+        // predicate (like try_grant) advances physical_ms by 1. If that
+        // advance leaves the window, would_grant must return false.
+        let mut allocator = Allocator::new();
+        allocator
+            .try_on_leadership_gained(1_000, 1_000, Epoch(1))
+            .unwrap();
+        // count >= LOGICAL_MAX + 1 forces the advance branch on a fresh
+        // window: logical(0) + count(LOGICAL_MAX+1) doesn't overflow on its
+        // own, but anything one bigger does. Use LOGICAL_MAX + 1 to land at
+        // the edge, then any non-zero issue advances physical_ms.
+        allocator.try_grant(1_000, LOGICAL_MAX + 1).unwrap();
+        // Next grant of size 1 would advance to physical_ms = 1_001, which
+        // exceeds the committed ceiling of 1_000.
+        assert!(!allocator.would_grant(1_000, 1));
+    }
+
+    #[test]
+    fn would_grant_returns_false_when_advance_exceeds_physical_max() {
+        // Construct an allocator at PHYSICAL_MS_MAX so the +1 advance
+        // crosses the 46-bit ceiling and the predicate refuses.
+        let mut allocator = Allocator::new();
+        allocator
+            .try_on_leadership_gained(PHYSICAL_MS_MAX, PHYSICAL_MS_MAX, Epoch(1))
+            .unwrap();
+        // Fill the logical range so the next would_grant call has to
+        // advance physical_ms.
+        allocator
+            .try_grant(PHYSICAL_MS_MAX, LOGICAL_MAX + 1)
+            .unwrap();
+        assert!(!allocator.would_grant(PHYSICAL_MS_MAX, 1));
+    }
+
+    #[test]
+    fn default_constructs_not_leader_allocator() {
+        let allocator = Allocator::default();
+        assert!(!allocator.is_leader());
+        assert_eq!(allocator.epoch(), None);
     }
 
     #[test]
