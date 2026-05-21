@@ -1,5 +1,4 @@
-//! Git metadata capture. MIRRORS `bench-minimal::GitInfo` — kept in sync
-//! manually; see Plan A scope note for rationale.
+//! Git metadata capture. MIRRORS `bench-minimal::GitInfo` — kept in sync manually.
 
 use std::process::Command;
 

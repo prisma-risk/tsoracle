@@ -127,8 +127,8 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
             let server_handle = topo.server_handle;
             (Box::new(topo.controller), endpoints, server_handle)
         }
-        TopologyKind::Raft => anyhow::bail!("raft topology not yet implemented (Plan B)"),
-        TopologyKind::Process => anyhow::bail!("process topology not yet implemented (Plan C)"),
+        TopologyKind::Raft => anyhow::bail!("raft topology not yet implemented"),
+        TopologyKind::Process => anyhow::bail!("process topology not yet implemented"),
     };
 
     // --- Supervisor channel + task on control runtime. ---
@@ -217,8 +217,7 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
             if let Some(d) = cfg_for_client.duration {
                 tokio::time::sleep(d).await;
             } else {
-                // --ops mode is not yet wired in Plan A; sleep a placeholder.
-                // (Flagged in the plan's "Known gaps" section.)
+                // --ops mode is not yet wired; sleep a placeholder.
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
         };
