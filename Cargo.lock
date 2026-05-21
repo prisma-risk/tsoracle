@@ -2357,6 +2357,8 @@ dependencies = [
  "hdrhistogram",
  "humantime",
  "humantime-serde",
+ "openraft",
+ "openraft-toolkit",
  "parking_lot",
  "rand 0.9.4",
  "serde",
@@ -2369,6 +2371,7 @@ dependencies = [
  "tsoracle-client",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-driver-openraft",
  "tsoracle-server",
 ]
 
