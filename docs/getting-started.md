@@ -78,7 +78,7 @@ let client = ClientBuilder::endpoints(vec!["http://127.0.0.1:50551".into()])
 
 ### The freshness invariant
 
-**The client never retains pre-fetched timestamps.** Every timestamp returned by `get_ts` or `get_ts_batch` was allocated by the server *after* the calling task entered the client driver — never from a prior RPC's leftover range. RPC efficiency comes from coalescing concurrent waiters into one outgoing `GetTs`, not from pre-fetching. This is the contract strict-consistency callers can rely on.
+**The client never retains pre-fetched timestamps.** Every timestamp returned by `get_ts` or `get_ts_batch` was allocated by the server *after* the calling task entered the client driver — never from a prior RPC's leftover range. RPC efficiency comes from coalescing concurrent waiters into one outgoing `GetTs`, not from pre-fetching. This is the contract strict-consistency callers can rely on. The full argument — why this matters for cross-client real-time ordering, how the driver structurally enforces it, and how batches grow without configuration — is in [The Client Driver](the-client-driver.md).
 
 ### Leader discovery is automatic
 
