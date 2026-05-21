@@ -74,43 +74,22 @@ Per-driver recipes:
 
 ## Worked example: openraft
 
-```rust
-// Pseudocode — adapt to your openraft TypeConfig and state machine shape.
+The canonical openraft integration ships in [`tsoracle-driver-openraft`](https://github.com/prisma-risk/tsoracle/tree/main/crates/tsoracle-driver-openraft). The crate provides `OpenraftDriver` (the generic `ConsensusDriver` bridge), `HighWaterStateMachine` (the in-memory state machine + postcard snapshot codec), and the `OpenraftHighWaterHost` trait — the integration boundary.
 
-struct OpenraftDriver {
-    raft:  openraft::Raft<TypeConfig>,
-    state: Arc<RwLock<StateMachine>>,
-    leader_events: watch::Receiver<LeaderState>,
-}
+### `OpenraftHighWaterHost` trait
 
-#[async_trait]
-impl ConsensusDriver for OpenraftDriver {
-    fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
-        Box::pin(WatchStream::new(self.leader_events.clone()).boxed())
-    }
-    async fn load_high_water(&self) -> Result<u64, ConsensusError> {
-        self.raft
-            .ensure_linearizable(ReadPolicy::ReadIndex)
-            .await
-            .map_err(|e| ConsensusError::TransientDriver(Box::new(e)))?;
-        Ok(self.state.read().high_water)
-    }
-    async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
-        let req = TsoExtend { at_least, epoch: epoch.0 };
-        match self.raft.client_write(req).await {
-            Ok(resp) => Ok(resp.data.persisted),
-            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(_))) => {
-                Err(ConsensusError::NotLeader { observed: None })
-            }
-            Err(e) => Err(ConsensusError::TransientDriver(Box::new(e))),
-        }
-    }
-}
-```
+The driver crate factors the openraft integration into two halves: the trait-surface + leadership-events boilerplate lives in `OpenraftDriver`, and the storage / submission semantics live behind `OpenraftHighWaterHost`. Implementing the host trait is what plugs the driver into *your* openraft. Three methods:
 
-The `leader_events` watch is populated by a separate task that consumes `Raft::metrics()` and maps `current_leader` + `state` into `LeaderState`. Mapping node IDs to advertised tsoracle endpoints is the driver's job; the library never sees raw node IDs.
+- `fn raft(&self) -> &Raft<Config, StateMachine>` — hand the driver a reference so it can read metrics for the leadership stream.
+- `async fn current_high_water(&self) -> Result<u64, ConsensusError>` — issue your read barrier, then read the high-water from your state machine. The bundled `StandaloneHost` does this with `Raft::ensure_linearizable(ReadPolicy::ReadIndex)`.
+- `async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError>` — submit a "bump to at_least" proposal through *your* raft log and return the new high-water after apply. Bundled hosts wrap `HighWaterCommand::Bump`; piggyback hosts wrap it in their own `AppData` envelope variant.
 
-For a real runnable version (with the supporting `network`, `store`, `types`, and `leader_watch` modules), see [`examples/openraft-cluster`](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-cluster). The walkthrough is in [openraft-cluster example](testing-and-examples.md#openraft-cluster-example).
+Two host shapes ship as worked examples:
+
+- [`examples/openraft-standalone`](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-standalone) uses the bundled `StandaloneHost`, which owns its own raft cluster + `HighWaterStateMachine`. Pick this when TSO gets its own cluster. The example shows the minimum bring-up (rocksdb log store, tonic peer transport) plus a small `StandaloneRouter` wrapper that adds `NodeId -> tsoracle-addr` resolution for `LeaderHint` follower-redirect.
+- [`examples/openraft-piggyback`](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-piggyback) implements `OpenraftHighWaterHost` against a host service's existing raft (a tiny KV in the demo). Pick this when your service already runs openraft for other state. The example shows the envelope pattern: `AppData = HostCommand::{Kv(...), Tso(HighWaterCommand)}`, with both halves applied by the same state machine.
+
+Both examples use `Config::snapshot_policy = SnapshotPolicy::Never` because the bundled / demo state machines keep state in memory only; production deployments will pair persisted snapshots with the default policy.
 
 ## Single-leader requirement
 

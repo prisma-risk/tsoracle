@@ -14,8 +14,9 @@
 //! sequence).
 //!
 //! For multi-node high availability, implement [`ConsensusDriver`] against
-//! your own replicated log instead; see the `examples/openraft-cluster`
-//! crate for a worked openraft integration.
+//! your own replicated log instead; see `examples/openraft-standalone` (own
+//! raft) or `examples/openraft-piggyback` (shared raft) for worked openraft
+//! integrations.
 //!
 //! [`ConsensusDriver`]: tsoracle_consensus::ConsensusDriver
 
