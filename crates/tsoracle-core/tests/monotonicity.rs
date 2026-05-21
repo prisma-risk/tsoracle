@@ -48,12 +48,12 @@ proptest! {
                     }
                 }
                 Op::Extend { now_ms, ahead_ms } => {
-                    let target = allocator.prepare_window_extension(now_ms, ahead_ms);
+                    let target = allocator.try_prepare_window_extension(now_ms, ahead_ms).unwrap();
                     // Simulate the driver's monotonic-advance: the driver would
                     // return max(stored, target). For this test we just commit target
                     // at the allocator's current epoch (commit is no-op if NotLeader).
                     if let Some(epoch) = allocator.epoch() {
-                        allocator.commit_window_extension(target, epoch);
+                        allocator.try_commit_window_extension(target, epoch).unwrap();
                     }
                 }
                 Op::Gain { high_water, epoch_bump } => {
@@ -68,7 +68,7 @@ proptest! {
                     };
                     // committed_ceiling must be >= fence_floor for immediate serving.
                     let committed_ceiling = fence_floor.saturating_add(30_000);
-                    allocator.on_leadership_gained(fence_floor, committed_ceiling, Epoch(epoch_counter));
+                    allocator.try_on_leadership_gained(fence_floor, committed_ceiling, Epoch(epoch_counter)).unwrap();
                 }
                 Op::Lose => {
                     allocator.on_leadership_lost();

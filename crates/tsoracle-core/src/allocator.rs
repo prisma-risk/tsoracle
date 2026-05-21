@@ -45,7 +45,7 @@ enum State {
     Leader {
         epoch: Epoch,
         /// Persisted upper bound: the allocator will not issue any timestamp with
-        /// `physical_ms` greater than this without a fresh `commit_window_extension`.
+        /// `physical_ms` greater than this without a fresh `try_commit_window_extension`.
         committed_high_water: u64,
         /// Next `physical_ms` we are willing to issue at. Initialized to
         /// `fence_floor` on leadership gain, then advances monotonically — never
@@ -103,15 +103,6 @@ impl Allocator {
             next_logical: 0,
         };
         Ok(())
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "Convenience wrapper around `try_on_leadership_gained`. Tracked by #4."
-    )]
-    pub fn on_leadership_gained(&mut self, fence_floor: u64, committed_ceiling: u64, epoch: Epoch) {
-        self.try_on_leadership_gained(fence_floor, committed_ceiling, epoch)
-            .expect("invalid leadership window");
     }
 
     pub fn on_leadership_lost(&mut self) {
@@ -221,7 +212,7 @@ impl Allocator {
     }
 
     /// Compute the high-water value the caller should durably persist before
-    /// calling `commit_window_extension`. Does not mutate.
+    /// calling `try_commit_window_extension`. Does not mutate.
     ///
     /// Returns `max(committed_high_water + 1, now_ms) + ahead_ms`. The +1 on
     /// `committed_high_water` guarantees forward progress when wall clock is
@@ -249,15 +240,6 @@ impl Allocator {
                 Ok(requested)
             }
         }
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "Convenience wrapper around `try_prepare_window_extension`. Tracked by #4."
-    )]
-    pub fn prepare_window_extension(&self, now_ms: u64, ahead_ms: u64) -> u64 {
-        self.try_prepare_window_extension(now_ms, ahead_ms)
-            .expect("window extension exceeds timestamp physical_ms range")
     }
 
     /// Apply a durably-persisted window extension. `persisted_high_water` is
@@ -290,15 +272,6 @@ impl Allocator {
         }
         Ok(())
     }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "Convenience wrapper around `try_commit_window_extension`. Tracked by #4."
-    )]
-    pub fn commit_window_extension(&mut self, persisted_high_water: u64, expected_epoch: Epoch) {
-        self.try_commit_window_extension(persisted_high_water, expected_epoch)
-            .expect("persisted high-water exceeds timestamp physical_ms range");
-    }
 }
 
 impl Default for Allocator {
@@ -321,7 +294,9 @@ mod tests {
     #[test]
     fn on_leadership_gained_sets_epoch() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(1000, 5000, Epoch(5));
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(5))
+            .unwrap();
         assert!(allocator.is_leader());
         assert_eq!(allocator.epoch(), Some(Epoch(5)));
     }
@@ -345,7 +320,9 @@ mod tests {
     #[test]
     fn on_leadership_lost_clears_state() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(1000, 5000, Epoch(5));
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(5))
+            .unwrap();
         allocator.on_leadership_lost();
         assert!(!allocator.is_leader());
         assert_eq!(allocator.epoch(), None);
@@ -360,7 +337,9 @@ mod tests {
     #[test]
     fn try_grant_zero_count() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(1000, 5000, Epoch(1));
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .unwrap();
         assert_eq!(
             allocator.try_grant(1000, 0),
             Err(CoreError::InvalidCount(0))
@@ -373,7 +352,9 @@ mod tests {
         // WindowExhausted; the server then extends.
         let mut allocator = Allocator::new();
         // fence_floor=5_000, ceiling=5_000 (tight window, no pre-extended gap).
-        allocator.on_leadership_gained(5_000, 5_000, Epoch(1));
+        allocator
+            .try_on_leadership_gained(5_000, 5_000, Epoch(1))
+            .unwrap();
         // now_ms below floor: clamps to floor=5_000, which equals the ceiling → succeeds.
         allocator.try_grant(4_999, 1).unwrap();
         // now_ms above ceiling: window exhausted.
@@ -388,7 +369,9 @@ mod tests {
         // The fence has already persisted a pre-extended window, so the allocator
         // can serve immediately. Grants start at fence_floor regardless of now_ms.
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(5_000, 10_000, Epoch(1));
+        allocator
+            .try_on_leadership_gained(5_000, 10_000, Epoch(1))
+            .unwrap();
         let grant = allocator.try_grant(1_000, 1).unwrap();
         // now_ms=1_000 < fence_floor=5_000, so next_physical_ms stays at 5_000.
         assert_eq!(grant.physical_ms, 5_000);
@@ -399,16 +382,20 @@ mod tests {
     #[test]
     fn prepare_window_extension_uses_now_ms_when_ahead_of_high_water() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(1000, 1000, Epoch(1));
-        let target = allocator.prepare_window_extension(2000, 3000);
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(1))
+            .unwrap();
+        let target = allocator.try_prepare_window_extension(2000, 3000).unwrap();
         assert_eq!(target, 5000); // max(1001, 2000) + 3000
     }
 
     #[test]
     fn prepare_window_extension_uses_high_water_floor_when_clock_behind() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(10_000, 10_000, Epoch(1));
-        let target = allocator.prepare_window_extension(500, 3000);
+        allocator
+            .try_on_leadership_gained(10_000, 10_000, Epoch(1))
+            .unwrap();
+        let target = allocator.try_prepare_window_extension(500, 3000).unwrap();
         // floor = 10_001, clock = 500. max = 10_001. + 3000 = 13_001.
         assert_eq!(target, 13_001);
     }
@@ -416,7 +403,9 @@ mod tests {
     #[test]
     fn prepare_window_extension_rejects_out_of_range_target() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(PHYSICAL_MS_MAX, PHYSICAL_MS_MAX, Epoch(1));
+        allocator
+            .try_on_leadership_gained(PHYSICAL_MS_MAX, PHYSICAL_MS_MAX, Epoch(1))
+            .unwrap();
         assert_eq!(
             allocator.try_prepare_window_extension(PHYSICAL_MS_MAX, 1),
             Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 2))
@@ -426,9 +415,13 @@ mod tests {
     #[test]
     fn commit_then_try_grant_succeeds() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(1000, 1000, Epoch(7));
-        let target = allocator.prepare_window_extension(1000, 3000);
-        allocator.commit_window_extension(target, Epoch(7));
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(7))
+            .unwrap();
+        let target = allocator.try_prepare_window_extension(1000, 3000).unwrap();
+        allocator
+            .try_commit_window_extension(target, Epoch(7))
+            .unwrap();
         let grant = allocator.try_grant(1000, 5).unwrap();
         assert_eq!(grant.count, 5);
         assert_eq!(grant.logical_start, 0);
@@ -440,9 +433,15 @@ mod tests {
     #[test]
     fn commit_with_lower_value_is_ignored() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(1000, 1000, Epoch(1));
-        allocator.commit_window_extension(5000, Epoch(1));
-        allocator.commit_window_extension(3000, Epoch(1)); // attempt to regress
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(1))
+            .unwrap();
+        allocator
+            .try_commit_window_extension(5000, Epoch(1))
+            .unwrap();
+        allocator
+            .try_commit_window_extension(3000, Epoch(1))
+            .unwrap(); // attempt to regress
         // try_grant up to physical_ms=5000 should still work.
         let grant = allocator.try_grant(4500, 1).unwrap();
         assert_eq!(grant.physical_ms, 4500);
@@ -451,7 +450,9 @@ mod tests {
     #[test]
     fn commit_rejects_out_of_range_high_water() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(1000, 1000, Epoch(1));
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(1))
+            .unwrap();
         assert_eq!(
             allocator.try_commit_window_extension(PHYSICAL_MS_MAX + 1, Epoch(1)),
             Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
@@ -461,7 +462,9 @@ mod tests {
     #[test]
     fn try_grant_rejects_out_of_range_clock() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(1000, PHYSICAL_MS_MAX, Epoch(1));
+        allocator
+            .try_on_leadership_gained(1000, PHYSICAL_MS_MAX, Epoch(1))
+            .unwrap();
         assert_eq!(
             allocator.try_grant(PHYSICAL_MS_MAX + 1, 1),
             Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
@@ -472,9 +475,13 @@ mod tests {
     fn commit_at_wrong_epoch_is_silently_dropped() {
         let mut allocator = Allocator::new();
         // fence_floor=1000, ceiling=1000: tight initial window.
-        allocator.on_leadership_gained(1000, 1000, Epoch(5));
+        allocator
+            .try_on_leadership_gained(1000, 1000, Epoch(5))
+            .unwrap();
         // A late persist from epoch 4 (the prior leader) — fenced out.
-        allocator.commit_window_extension(9_999, Epoch(4));
+        allocator
+            .try_commit_window_extension(9_999, Epoch(4))
+            .unwrap();
         // The allocator's bound did not move; a grant at now=900 clamps to
         // floor=1000, and a request with now=1_100 exhausts the window.
         allocator.try_grant(900, 1).unwrap();
@@ -487,9 +494,13 @@ mod tests {
     #[test]
     fn commit_after_leadership_lost_is_ignored() {
         let mut allocator = Allocator::new();
-        allocator.on_leadership_gained(1000, 5000, Epoch(1));
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .unwrap();
         allocator.on_leadership_lost();
-        allocator.commit_window_extension(9_999, Epoch(1));
+        allocator
+            .try_commit_window_extension(9_999, Epoch(1))
+            .unwrap();
         assert!(!allocator.is_leader());
     }
 
@@ -497,8 +508,8 @@ mod tests {
     fn logical_wraps_to_next_physical_ms() {
         let mut allocator = Allocator::new();
         // fence_floor=0, ceiling=0; extend to 10 before granting.
-        allocator.on_leadership_gained(0, 0, Epoch(1));
-        allocator.commit_window_extension(10, Epoch(1));
+        allocator.try_on_leadership_gained(0, 0, Epoch(1)).unwrap();
+        allocator.try_commit_window_extension(10, Epoch(1)).unwrap();
         // Issue LOGICAL_MAX+1 logicals at physical_ms=1, then one more should bump to 2.
         let first = allocator.try_grant(1, LOGICAL_MAX + 1).unwrap();
         assert_eq!(first.physical_ms, 1);
