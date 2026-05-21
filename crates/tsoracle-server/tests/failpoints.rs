@@ -1,47 +1,15 @@
-#![cfg(all(feature = "failpoints", feature = "test-fakes"))]
+#![cfg(all(feature = "failpoints", feature = "test-support"))]
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::watch;
-use tonic::transport::Endpoint;
 use tsoracle_core::Epoch;
 use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::test_support::{
+    boot_router, wait_for_grpc_handshake, wait_until, wait_until_serving,
+};
 use tsoracle_server::{Server, ServerError, ServingState};
 
 static FAILPOINT_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Block until `state_rx` reports the expected `ServingState`.
-async fn wait_until<F>(rx: &mut watch::Receiver<ServingState>, predicate: F)
-where
-    F: Fn(&ServingState) -> bool,
-{
-    loop {
-        if predicate(&rx.borrow_and_update()) {
-            return;
-        }
-        rx.changed()
-            .await
-            .expect("state stream closed before reaching expected state");
-    }
-}
-
-/// Bridge the residual race between "state_rx published Serving" and tonic's
-/// accept future having been polled. Probes by opening a real gRPC channel
-/// until one succeeds.
-async fn wait_for_grpc_handshake(addr: SocketAddr, budget: Duration) {
-    let deadline = Instant::now() + budget;
-    let endpoint: Endpoint = format!("http://{addr}").parse().unwrap();
-    loop {
-        if endpoint.connect().await.is_ok() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("tonic never accepted gRPC handshake within {budget:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
 
 /// `server::fence::after_load_before_persist` fires inside `run_leader_watch`,
 /// between `consensus.load_high_water()` and `consensus.persist_high_water()`.
@@ -159,24 +127,21 @@ async fn panic_after_serving_published_poisons_state_when_handle_dropped() {
     // abort — aborting would cancel the task before it ever runs.
     drop(watch_handle);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_routes(routes)
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-            .await
-    });
+    let booted = boot_router(routes).await;
 
     fail::cfg("server::fence::after_serving_published", "panic").unwrap();
     driver.become_leader(Epoch(1));
 
-    wait_for_grpc_handshake(addr, Duration::from_secs(5)).await;
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
 
-    let mut client =
-        tsoracle_proto::v1::tso_service_client::TsoServiceClient::connect(format!("http://{addr}"))
-            .await
-            .unwrap();
+    let mut client = tsoracle_proto::v1::tso_service_client::TsoServiceClient::connect(format!(
+        "http://{}",
+        booted.addr
+    ))
+    .await
+    .unwrap();
 
     // After the panic, the catch_unwind branch calls step_down, which
     // publishes NotServing. Without the fix, state would stay Serving and
@@ -204,7 +169,7 @@ async fn panic_after_serving_published_poisons_state_when_handle_dropped() {
         }
     }
 
-    serve.abort();
+    booted.abort();
 }
 
 /// `server::service::before_allocate` fires at the top of `get_ts`,
@@ -226,20 +191,15 @@ async fn before_allocate_sleep_delays_get_ts() {
     let mut state_rx = server.state_rx.clone();
     let (routes, _watch_handle) = server.into_router();
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_routes(routes)
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-            .await
-    });
+    let booted = boot_router(routes).await;
 
     driver.become_leader(Epoch(1));
-    wait_until(&mut state_rx, |s| matches!(s, ServingState::Serving)).await;
-    wait_for_grpc_handshake(addr, Duration::from_secs(5)).await;
+    wait_until_serving(&mut state_rx).await;
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
 
-    let endpoint = format!("http://{addr}");
+    let endpoint = format!("http://{}", booted.addr);
     let client = tsoracle_client::Client::connect(vec![endpoint])
         .await
         .unwrap();
@@ -261,7 +221,7 @@ async fn before_allocate_sleep_delays_get_ts() {
     );
 
     drop(client);
-    serve.abort();
+    booted.abort();
 }
 
 /// `server::service::extension_gate_held` fires at the top of the
@@ -289,20 +249,15 @@ async fn extension_gate_held_sleep_delays_get_ts() {
     let mut state_rx = server.state_rx.clone();
     let (routes, _watch_handle) = server.into_router();
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_routes(routes)
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-            .await
-    });
+    let booted = boot_router(routes).await;
 
     driver.become_leader(Epoch(1));
     wait_until(&mut state_rx, |s| matches!(s, ServingState::Serving)).await;
-    wait_for_grpc_handshake(addr, Duration::from_secs(5)).await;
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
 
-    let endpoint = format!("http://{addr}");
+    let endpoint = format!("http://{}", booted.addr);
     let client = tsoracle_client::Client::connect(vec![endpoint])
         .await
         .unwrap();
@@ -324,5 +279,5 @@ async fn extension_gate_held_sleep_delays_get_ts() {
     );
 
     drop(client);
-    serve.abort();
+    booted.abort();
 }

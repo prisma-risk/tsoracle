@@ -36,5 +36,8 @@ pub use server::{BuildError, Server, ServerBuilder, ServerError, ServingState};
 #[cfg(any(test, feature = "test-fakes"))]
 pub mod test_fakes;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 #[doc(hidden)]
 pub use leader_hint::decode_leader_hint as __priv_decode_leader_hint;

@@ -19,6 +19,7 @@ tls-rustls = ["tonic/tls-aws-lc"]
 tls-native = ["tonic/tls-native-roots"]
 tracing    = ["dep:tracing"]
 test-fakes = []
+test-support = ["test-fakes"]
 reflection = ["dep:tonic-reflection", "tsoracle-proto/reflection"]
 
 [package.metadata.docs.rs]
@@ -49,7 +50,7 @@ tsoracle-client = { path = "../tsoracle-client", version = "0.1.0" }
 
 [[test]]
 name = "e2e"
-required-features = ["test-fakes"]
+required-features = ["test-support"]
 
 [[test]]
 name = "leader_watch"
@@ -57,21 +58,21 @@ required-features = ["test-fakes"]
 
 [[test]]
 name = "embedded_router"
-required-features = ["test-fakes"]
+required-features = ["test-support"]
 
 [[test]]
 name = "extension_stampede"
-required-features = ["test-fakes"]
+required-features = ["test-support"]
 
 [[test]]
 name = "leadership_churn"
-required-features = ["test-fakes"]
+required-features = ["test-support"]
 
 [[test]]
 name = "serve_with_listener"
-required-features = ["test-fakes"]
+required-features = ["test-support"]
 
 [[test]]
 name              = "failpoints"
 path              = "tests/failpoints.rs"
-required-features = ["failpoints", "test-fakes"]
+required-features = ["failpoints", "test-support"]

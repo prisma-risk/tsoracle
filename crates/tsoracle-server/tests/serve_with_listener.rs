@@ -3,9 +3,11 @@
 //! clients connect.
 
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use std::time::Duration;
 use tsoracle_core::Epoch;
-use tsoracle_server::{Server, ServingState, test_fakes::InMemoryDriver};
+use tsoracle_server::Server;
+use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::test_support::{boot_server, wait_for_grpc_handshake, wait_until_serving};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_with_listener_uses_caller_owned_socket() {
@@ -17,34 +19,16 @@ async fn serve_with_listener_uses_caller_owned_socket() {
         .build()
         .unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let local_addr = listener.local_addr().unwrap();
-    assert_ne!(local_addr.port(), 0, "OS must have picked a real port");
+    let mut booted = boot_server(server).await;
+    assert_ne!(booted.addr.port(), 0, "OS must have picked a real port");
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    // Clone state_rx before moving server into the spawn.
-    let mut state_rx = server.state_rx.clone();
-    let server_handle = tokio::spawn(async move {
-        server
-            .serve_with_listener(listener, async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-    });
-
-    // Wait for the server to reach Serving rather than sleeping a fixed delay.
-    loop {
-        if matches!(*state_rx.borrow_and_update(), ServingState::Serving) {
-            break;
-        }
-        state_rx
-            .changed()
-            .await
-            .expect("state stream closed before Serving");
-    }
+    wait_until_serving(&mut booted.state_rx).await;
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
 
     // Make a real client call against the captured port.
-    let endpoint = format!("http://{local_addr}");
+    let endpoint = format!("http://{}", booted.addr);
     let client = tsoracle_client::Client::connect(vec![endpoint])
         .await
         .expect("client connect");
@@ -57,7 +41,5 @@ async fn serve_with_listener_uses_caller_owned_socket() {
     );
 
     drop(client);
-    let _ = shutdown_tx.send(());
-    let result = server_handle.await.expect("join");
-    assert!(result.is_ok(), "server exited Err: {result:?}");
+    booted.shutdown().await.expect("server exited Err");
 }

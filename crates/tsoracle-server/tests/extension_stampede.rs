@@ -9,18 +9,16 @@
 
 use core::pin::Pin;
 use futures::Stream;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
+use std::time::Duration;
 use tokio::sync::Barrier;
-use tokio::time::sleep;
-use tonic::transport::Endpoint;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::{Epoch, testing::MockClock};
 use tsoracle_proto::v1::{GetTsRequest, tso_service_client::TsoServiceClient};
-use tsoracle_server::{Server, ServingState, test_fakes::InMemoryDriver};
+use tsoracle_server::Server;
+use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::test_support::{boot_server, wait_for_grpc_handshake, wait_until_serving};
 
 /// Wraps `InMemoryDriver` to count `persist_high_water` calls and inject a
 /// configurable delay, so concurrent stampeders pile up inside the extension
@@ -64,39 +62,6 @@ impl ConsensusDriver for StampedeProbeDriver {
     }
 }
 
-async fn wait_until_serving(rx: &mut tokio::sync::watch::Receiver<ServingState>) {
-    loop {
-        if matches!(*rx.borrow_and_update(), ServingState::Serving) {
-            return;
-        }
-        rx.changed().await.unwrap();
-    }
-}
-
-async fn wait_for_grpc_handshake(
-    addr: SocketAddr,
-    budget: Duration,
-) -> Result<(), tonic::transport::Error> {
-    let deadline = Instant::now() + budget;
-    let endpoint: Endpoint = format!("http://{addr}").parse().unwrap();
-    let mut last_err: Option<tonic::transport::Error> = None;
-    loop {
-        match endpoint.connect().await {
-            Ok(channel) => {
-                drop(channel);
-                return Ok(());
-            }
-            Err(err) => {
-                if Instant::now() >= deadline {
-                    return Err(last_err.unwrap_or(err));
-                }
-                last_err = Some(err);
-                sleep(Duration::from_millis(25)).await;
-            }
-        }
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extension_stampede_coalesces_to_single_persist() {
     const STAMPEDE_SIZE: usize = 50;
@@ -116,23 +81,11 @@ async fn extension_stampede_coalesces_to_single_persist() {
         .build()
         .unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let local_addr = listener.local_addr().unwrap();
-    let mut state_rx = server.state_rx.clone();
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let serve_handle = tokio::spawn(async move {
-        server
-            .serve_with_listener(listener, async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .unwrap();
-    });
+    let mut booted = boot_server(server).await;
 
     in_memory.become_leader(Epoch(1));
-    wait_until_serving(&mut state_rx).await;
-    wait_for_grpc_handshake(local_addr, Duration::from_secs(5))
+    wait_until_serving(&mut booted.state_rx).await;
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
         .await
         .expect("tonic never accepted gRPC handshake");
 
@@ -143,7 +96,7 @@ async fn extension_stampede_coalesces_to_single_persist() {
     // attempt hits WindowExhausted.
     clock.set(10_000);
 
-    let client = TsoServiceClient::connect(format!("http://{local_addr}"))
+    let client = TsoServiceClient::connect(format!("http://{}", booted.addr))
         .await
         .unwrap();
     let barrier = Arc::new(Barrier::new(STAMPEDE_SIZE));
@@ -172,6 +125,5 @@ async fn extension_stampede_coalesces_to_single_persist() {
          stampeders, observed {extensions} — single-flight is not engaged"
     );
 
-    let _ = shutdown_tx.send(());
-    let _ = serve_handle.await;
+    booted.shutdown().await.unwrap();
 }
