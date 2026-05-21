@@ -13,7 +13,7 @@ This is a comment marker, not a proc macro. Enforcement is by review plus a CI g
 3. **No `println!`.** Same volume problem as info logs, plus it bypasses the `tracing` filter entirely.
 4. **No long synchronous compute.** Anything measured in milliseconds belongs on a background worker. The hot path is for routing, packing, and enqueue — not compute.
 
-Two rules calc-graph's equivalent doc enforces are delegated to other mechanisms here, rather than re-enforced by the grep guard:
+Two related rules are intentionally not enforced by this guard — they live in other layers of the build:
 
 - **No panics on recoverable paths.** Enforced at the workspace level by the [panic policy](../CONTRIBUTING.md#panic-policy-unwrap-and-expect) (`clippy::unwrap_used` + `clippy::expect_used` as `warn`, with `cargo clippy ... -- -D warnings` making the warning fatal).
 - **No `std::sync::Mutex` held across an `.await`.** Planned: enable `clippy::await_holding_lock = "deny"` workspace-wide as a follow-up. The clippy lint is precise — it knows the difference between a sync mutex held across an await point (a real bug) and one held synchronously (fine) — whereas a grep-based "no `std::sync::Mutex::new` in this file" rule false-positives on legitimate non-async uses.
