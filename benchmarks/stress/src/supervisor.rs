@@ -8,7 +8,7 @@ use tsoracle_core::Timestamp;
 
 use crate::chaos::{ChaosEvent, ChaosKind, ChaosWindow};
 use crate::event::SupervisorEvent;
-use crate::sample::IssuedSample;
+use crate::sample::{IssuedSample, LivenessIncident};
 use crate::types::{BatchId, ClientId};
 use crate::violation::{Violation, ViolationKind};
 
@@ -79,7 +79,7 @@ impl Supervisor {
             match event {
                 SupervisorEvent::Issued(sample) => self.on_issued(sample),
                 SupervisorEvent::Chaos(ev) => self.on_chaos(ev),
-                SupervisorEvent::Liveness(_) => {} // Task 9
+                SupervisorEvent::Liveness(incident) => self.on_liveness(incident),
                 SupervisorEvent::End => break,
             }
         }
@@ -176,6 +176,20 @@ impl Supervisor {
             pre_window_high_water,
             fence_freshness_checked,
         });
+    }
+
+    fn on_liveness(&mut self, incident: LivenessIncident) {
+        let inside_any_window = self
+            .state
+            .open_windows
+            .iter()
+            .any(|open| open.window.contains(incident.at));
+        if !inside_any_window {
+            self.state.violations.push(Violation {
+                kind: ViolationKind::Liveness { incident },
+                at: Instant::now(),
+            });
+        }
     }
 }
 
@@ -371,5 +385,78 @@ mod tests {
             matches!(v.kind, ViolationKind::FenceFreshness { .. })
         });
         assert!(has_fence, "expected fence violation: {:?}", outcome.violations);
+    }
+
+    use crate::sample::{LivenessIncident, LivenessIncidentKind};
+
+    #[tokio::test]
+    async fn liveness_incident_outside_window_is_violation() {
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        let now = Instant::now();
+        tx.send(SupervisorEvent::Liveness(LivenessIncident {
+            kind: LivenessIncidentKind::DeadlineExceeded {
+                client_id: ClientId(0),
+                attempts: 7,
+                last_error: "Unavailable".into(),
+                started_at: now,
+            },
+            at: now,
+        }))
+        .await
+        .unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert_eq!(outcome.violations.len(), 1);
+        assert!(matches!(outcome.violations[0].kind, ViolationKind::Liveness { .. }));
+    }
+
+    #[tokio::test]
+    async fn liveness_incident_inside_window_is_discarded() {
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        let started = Instant::now();
+        let ended = started + Duration::from_millis(100);
+        let grace = Duration::from_millis(50);
+        tx.send(SupervisorEvent::Chaos(kill_window(started, ended, grace))).await.unwrap();
+        tx.send(SupervisorEvent::Liveness(LivenessIncident {
+            kind: LivenessIncidentKind::DeadlineExceeded {
+                client_id: ClientId(0),
+                attempts: 3,
+                last_error: "Unavailable".into(),
+                started_at: started,
+            },
+            at: started + Duration::from_millis(30),
+        }))
+        .await
+        .unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert!(outcome.violations.is_empty(), "got: {:?}", outcome.violations);
+    }
+
+    #[tokio::test]
+    async fn unexpected_server_exit_becomes_liveness_violation() {
+        let (tx, rx) = mpsc::channel::<SupervisorEvent>(16);
+        let supervisor = Supervisor::new();
+        let handle = tokio::spawn(supervisor.run(rx));
+        let now = Instant::now();
+        tx.send(SupervisorEvent::Liveness(LivenessIncident {
+            kind: LivenessIncidentKind::UnexpectedServerExit {
+                pid: 12345,
+                last_log_lines: vec!["thread 'main' panicked".into()],
+            },
+            at: now,
+        }))
+        .await
+        .unwrap();
+        tx.send(SupervisorEvent::End).await.unwrap();
+        drop(tx);
+        let outcome = handle.await.unwrap();
+        assert_eq!(outcome.violations.len(), 1);
     }
 }
