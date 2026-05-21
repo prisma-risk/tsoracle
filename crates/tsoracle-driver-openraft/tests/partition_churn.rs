@@ -70,10 +70,10 @@ async fn partition_then_heal_converges_monotonically() {
         .expect("baseline bump");
     assert_eq!(v, 100);
     for i in 0..3 {
-        let driver = cluster.drivers[i].clone();
+        let sm = cluster.nodes[i].sm.clone();
         eventually_eq(100u64, Duration::from_secs(5), || {
-            let d = driver.clone();
-            async move { d.load_high_water().await.unwrap() }
+            let sm = sm.clone();
+            async move { sm.current_value().await }
         })
         .await;
     }
@@ -110,10 +110,11 @@ async fn partition_then_heal_converges_monotonically() {
     partitions.heal(l_id);
 
     // L converges on 200 (never went backwards: 100 -> 200, monotone).
-    let driver = cluster.drivers[l_idx].clone();
+    // L is now a follower after the partition heal, so read its SM directly.
+    let sm = cluster.nodes[l_idx].sm.clone();
     eventually_eq(200u64, Duration::from_secs(10), || {
-        let d = driver.clone();
-        async move { d.load_high_water().await.unwrap() }
+        let sm = sm.clone();
+        async move { sm.current_value().await }
     })
     .await;
 }

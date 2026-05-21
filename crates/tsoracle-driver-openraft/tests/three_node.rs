@@ -51,12 +51,14 @@ async fn three_node_leader_persists_and_followers_converge() {
         .unwrap();
     assert_eq!(v, 100);
 
-    // All three SMs should converge on 100 within 5 seconds.
+    // All three SMs should converge on 100 within 5 seconds. Read each
+    // node's SM directly: `load_high_water` requires a linearizable barrier
+    // that followers cannot satisfy locally.
     for i in 0..3 {
-        let driver = cluster.drivers[i].clone();
+        let sm = cluster.nodes[i].sm.clone();
         eventually_eq(100u64, Duration::from_secs(5), || {
-            let d = driver.clone();
-            async move { d.load_high_water().await.unwrap() }
+            let sm = sm.clone();
+            async move { sm.current_value().await }
         })
         .await;
     }

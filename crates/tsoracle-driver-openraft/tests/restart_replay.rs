@@ -61,11 +61,14 @@ async fn restart_replays_high_water_from_rocksdb_log() {
         tsoracle_driver_openraft::StandaloneHost::new(reopened.raft.clone(), reopened.sm.clone());
     let reopened_driver = tsoracle_driver_openraft::OpenraftDriver::new(host);
 
-    // Replay yields the last persisted value.
-    let d = reopened_driver.clone();
+    // Replay yields the last persisted value. Read the SM directly: the
+    // node may briefly be a follower/learner during post-restart election,
+    // and `load_high_water` requires a linearizable barrier the SM can't
+    // satisfy then.
+    let sm = reopened.sm.clone();
     eventually_eq(700u64, Duration::from_secs(10), || {
-        let d = d.clone();
-        async move { d.load_high_water().await.unwrap() }
+        let sm = sm.clone();
+        async move { sm.current_value().await }
     })
     .await;
 
