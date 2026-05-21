@@ -59,6 +59,8 @@ use crate::schedule::{RandomParams, Schedule};
 use crate::supervisor::Supervisor;
 use crate::topology::ChaosController;
 use crate::topology::mem::MemTopology;
+#[cfg(unix)]
+use crate::topology::process::ProcessTopology;
 use crate::topology::raft::RaftTopology;
 use crate::types::ClientId;
 
@@ -119,6 +121,12 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
         std::fs::write(path, json)?;
     }
 
+    // --- Supervisor channel. Created before topology spawn so the
+    //     process topology can wire its per-child reapers to it via
+    //     `set_liveness_tx`. Other topologies inherit the no-op default
+    //     on the trait and ignore the wiring step.
+    let (event_tx, event_rx) = mpsc::channel::<SupervisorEvent>(65_536);
+
     // --- Spawn topology on the server runtime. ---
     let grace = cfg.grace();
     let (controller, endpoints, server_handle): SpawnedTopology = match cfg.topology {
@@ -156,11 +164,40 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
                 });
             (Box::new(topo.controller), endpoints, server_handle)
         }
-        TopologyKind::Process => anyhow::bail!("process topology not yet implemented"),
+        TopologyKind::Process => {
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("process topology is unix-only");
+            }
+            #[cfg(unix)]
+            {
+                let topo = server_rt.block_on(ProcessTopology::spawn(cfg.nodes, grace))?;
+                let endpoints = topo.controller.endpoints();
+                // Wire the per-child reaper tasks to the supervisor BEFORE
+                // returning. set_liveness_tx is synchronous but spawns
+                // tokio tasks internally, so we need a runtime context;
+                // an `enter()` guard is enough — block_on isn't required
+                // because no awaiting happens here.
+                {
+                    let _enter = server_rt.enter();
+                    topo.controller.set_liveness_tx(event_tx.clone());
+                }
+                // No single server task to await — children are external
+                // processes managed by the controller. Substitute a quick
+                // Ok task so the `SpawnedTopology` tuple shape matches
+                // mem/raft. Child deaths surface through the reapers'
+                // `LivenessIncident::UnexpectedServerExit` events, not
+                // through this handle.
+                let server_handle: tokio::task::JoinHandle<
+                    Result<(), tsoracle_server::ServerError>,
+                > = server_rt.spawn(async { Ok(()) });
+                let controller: Box<dyn ChaosController> = Box::new(topo.controller);
+                (controller, endpoints, server_handle)
+            }
+        }
     };
 
-    // --- Supervisor channel + task on control runtime. ---
-    let (event_tx, event_rx) = mpsc::channel::<SupervisorEvent>(65_536);
+    // --- Supervisor task on control runtime. ---
     let supervisor_handle = control_rt.spawn(Supervisor::new().run(event_rx));
 
     // --- Loadgen on the client runtime. ---
