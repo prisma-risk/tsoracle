@@ -174,9 +174,57 @@ fn run_cmd(args: RunArgs) -> ExitCode {
 }
 
 fn replay_cmd(args: ReplayArgs) -> ExitCode {
-    eprintln!("replay not yet wired in Plan A (Task 23)");
-    let _ = args;
-    ExitCode::from(2)
+    let schedule = match stress::load_schedule(&args.schedule) {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("replay: failed to load schedule {:?}: {err:#}", args.schedule);
+            return ExitCode::from(2);
+        }
+    };
+    let scenario = match &schedule.source {
+        stress::schedule::ScheduleSource::Named { scenario } => {
+            ScenarioKind::Named(scenario.clone())
+        }
+        stress::schedule::ScheduleSource::Random { seed, .. } => {
+            ScenarioKind::Random { seed: *seed }
+        }
+    };
+    let cfg = StressConfig {
+        topology: TopologyKind::Mem,
+        scenario,
+        duration: Some(Duration::from_secs(30)),
+        ops: None,
+        clients: 16,
+        batch_size: 1,
+        warmup: 100,
+        client_threads: 1,
+        server_threads: available_parallelism().map(|n| n.get()).unwrap_or(1),
+        liveness_deadline: Duration::from_secs(5),
+        grace_mem: Duration::from_millis(100),
+        grace_raft: Duration::from_millis(750),
+        grace_process: Duration::from_secs(2),
+        nodes: 1,
+        bind: "127.0.0.1:0"
+            .parse::<SocketAddr>()
+            .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 0))),
+        json: false,
+        json_stream: false,
+        print_interval: Duration::from_secs(1),
+        seed: 0,
+        schedule_out: None,
+        ci_smoke: false,
+    };
+    match stress::run(cfg) {
+        Ok(report) => {
+            print!("{}", report.render_text());
+            let code = report.outcome.exit_code();
+            ExitCode::from(code as u8)
+        }
+        Err(err) => {
+            eprintln!("replay run failed: {err:#}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn list_scenarios_cmd() -> ExitCode {

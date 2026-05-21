@@ -314,6 +314,14 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
     Ok(report)
 }
 
+/// Re-run from a saved schedule. Pins the schedule's source (named or
+/// random-seeded) and replays the ops bit-for-bit.
+pub fn load_schedule(path: &std::path::Path) -> Result<Schedule, anyhow::Error> {
+    let raw = std::fs::read_to_string(path)?;
+    let schedule: Schedule = serde_json::from_str(&raw)?;
+    Ok(schedule)
+}
+
 fn resolve_schedule(cfg: &StressConfig) -> Result<Schedule, anyhow::Error> {
     let total = cfg
         .duration
