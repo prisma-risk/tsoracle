@@ -4,6 +4,13 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.0...tsoracle-openraft-toolkit-v0.1.1) - 2026-05-21
+
+### Other
+
+- *(readme)* refresh feature highlights for current capabilities ([#49](https://github.com/prisma-risk/tsoracle/pull/49))
+- pre-seed per-crate CHANGELOG.md files ([#45](https://github.com/prisma-risk/tsoracle/pull/45))
+
 ## [0.1.0] - 2026-05-21
 
 Initial release.
