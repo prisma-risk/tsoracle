@@ -152,8 +152,15 @@ COV_EXCLUDES := \
     --exclude example-openraft-standalone \
     --exclude bench-minimal
 
+# The process-topology smoke tests in `benchmarks/stress/tests/smoke.rs` shell
+# out to the `tsoracle` binary, but `--exclude tsoracle` above means
+# `cargo llvm-cov` never builds it into `target/llvm-cov-target/`. Build it
+# into the regular `target/debug/` first and hand the absolute path to the
+# harness via `TSORACLE_BIN`; the smoke tests check that env var before the
+# walk-up fallback.
 coverage:
-	$(CARGO) llvm-cov \
+	$(CARGO) build --bin tsoracle
+	TSORACLE_BIN="$$(pwd)/target/debug/tsoracle" $(CARGO) llvm-cov \
 	  --workspace --all-features \
 	  $(COV_EXCLUDES) \
 	  --ignore-filename-regex '$(COV_IGNORE)$$' \
@@ -162,7 +169,8 @@ coverage:
 # Local HTML report. Output at target/llvm-cov/html/index.html; `--open` opens
 # it in the default browser. Re-runs the test suite, same as `coverage`.
 coverage-html:
-	$(CARGO) llvm-cov \
+	$(CARGO) build --bin tsoracle
+	TSORACLE_BIN="$$(pwd)/target/debug/tsoracle" $(CARGO) llvm-cov \
 	  --workspace --all-features \
 	  $(COV_EXCLUDES) \
 	  --ignore-filename-regex '$(COV_IGNORE)$$' \

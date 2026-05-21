@@ -132,16 +132,29 @@ impl ProcessTopology {
     }
 }
 
-/// Locate the production `tsoracle` binary. Two lookup strategies:
-/// 1. `CARGO_BIN_EXE_tsoracle` — set by cargo for integration tests of
+/// Locate the production `tsoracle` binary. Three lookup strategies, in
+/// order of preference:
+/// 1. `TSORACLE_BIN` — explicit override. Used by `make coverage`, which
+///    runs `cargo llvm-cov … --exclude tsoracle` and so doesn't build
+///    the bin into the coverage target dir; the Makefile builds it
+///    separately and passes the absolute path through this variable.
+/// 2. `CARGO_BIN_EXE_tsoracle` — set by cargo for integration tests of
 ///    the `tsoracle-bin` crate. Not set for the stress crate's tests,
-///    so the walk-up fallback is the primary path under `cargo test`.
-/// 2. Walk parent directories from `current_exe()` looking for a sibling
+///    so this is consulted defensively for callers that happen to
+///    arrange it.
+/// 3. Walk parent directories from `current_exe()` looking for a sibling
 ///    `tsoracle` file. Works both for `cargo run -p stress` (the stress
 ///    bin sits next to tsoracle in `target/{debug,release}/`) and for
 ///    `cargo test -p stress` (the test bin sits in `target/{…}/deps/`,
 ///    one level deeper).
 fn locate_tsoracle_binary() -> anyhow::Result<PathBuf> {
+    if let Ok(path) = std::env::var("TSORACLE_BIN") {
+        let p = PathBuf::from(path);
+        if !p.is_file() {
+            anyhow::bail!("TSORACLE_BIN points at non-existent path: {}", p.display());
+        }
+        return Ok(p);
+    }
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_tsoracle") {
         return Ok(PathBuf::from(path));
     }
@@ -156,7 +169,7 @@ fn locate_tsoracle_binary() -> anyhow::Result<PathBuf> {
     }
     anyhow::bail!(
         "tsoracle binary not found; build with `cargo build --bin tsoracle` \
-         (release builds: add `--release`)"
+         or set TSORACLE_BIN to its path (release builds: add `--release`)"
     )
 }
 
