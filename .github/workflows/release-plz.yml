@@ -17,6 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Queue serial — never cancel a publish in flight (a half-done publish
+    # could leave the repo with some crates released and others not).
+    concurrency:
+      group: release-plz-release-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - uses: actions/create-github-app-token@v1
         id: app-token
