@@ -1,5 +1,6 @@
 /target
 /.worktrees/
+/.claude/
 **/*.rs.bk
 Cargo.lock.bak
 *.swp
