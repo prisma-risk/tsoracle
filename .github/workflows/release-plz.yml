@@ -18,21 +18,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Mint a short-lived installation token from a tsoracle-dedicated
-      # GitHub App. Using a non-`GITHUB_TOKEN` credential is what makes the
-      # pushes, tags, and PR created by release-plz visible to other
-      # workflows: GitHub deliberately does not cascade workflows triggered
-      # by the default `GITHUB_TOKEN`, so without this step ci.yml would
-      # never run against release-plz's commits.
-      #
-      # The App is scoped to only this repository so the credential cannot
-      # touch the org's private repos. Prerequisites (one-time setup):
-      #   1. Create a GitHub App with Contents: Read+Write and Pull
-      #      requests: Read+Write permissions; install it on
-      #      `prisma-risk/tsoracle` only.
-      #   2. Add repo-level secrets `RELEASE_PLZ_APP_ID` (the App's numeric
-      #      ID) and `RELEASE_PLZ_APP_PRIVATE_KEY` (the full PEM, including
-      #      the `-----BEGIN/END-----` lines).
       - uses: actions/create-github-app-token@v1
         id: app-token
         with:
@@ -66,8 +51,6 @@ jobs:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      # See `release` job above for the prerequisites the App token needs
-      # to mint successfully.
       - uses: actions/create-github-app-token@v1
         id: app-token
         with:
