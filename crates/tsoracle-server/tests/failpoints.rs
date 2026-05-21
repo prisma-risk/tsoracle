@@ -108,15 +108,17 @@ async fn fence_panic_after_persist_advances_durable_but_not_serving() {
 
     driver.become_leader(Epoch(1));
 
-    // The panic surfaces as a JoinError (task panicked); the wrapper in
-    // into_router catches the panic via `ServerError::WatchPanic { payload }`.
-    // tokio::spawn's JoinHandle resolves Err when the task panics. But the
-    // wrapper we have catches the inner result, returning it. Inspect what
-    // we actually get:
+    // The wrapper in into_router catches the panic, calls step_down to poison
+    // serving state, then resumes_unwind — so the panic still propagates out
+    // of the spawned task and JoinHandle resolves Err(JoinError::is_panic()).
+    // Handle observers (serve_with_shutdown / serve_with_listener) translate
+    // that into ServerError::WatchPanic via join_to_server_result; raw
+    // observers see the JoinError directly, as we do here. The poisoning
+    // guarantee for handle droppers is covered separately by
+    // panic_after_serving_published_poisons_state_when_handle_dropped.
     let result = tokio::time::timeout(Duration::from_secs(2), watch_handle)
         .await
         .expect("watch task did not terminate within 2s");
-    // A panic inside the task: JoinHandle resolves to Err(JoinError).
     assert!(
         result.is_err(),
         "expected the panic to surface as a JoinError, got {result:?}"
@@ -128,6 +130,81 @@ async fn fence_panic_after_persist_advances_durable_but_not_serving() {
         driver.current_high_water() > 0,
         "persist should have advanced the driver's stored value before the panic"
     );
+}
+
+/// `server::fence::after_serving_published` fires immediately after the
+/// fence publishes `ServingState::Serving` and releases the `extension_gate`
+/// drain guard. A `panic` action verifies the fail-safe documented on
+/// `Server::into_router`: when the leader-watch task panics from a `Serving`
+/// state, the `catch_unwind` wrapper in `into_router` calls
+/// `step_down_due_to_consensus_rejection` before resuming the unwind, so
+/// embedders who mount `into_router` directly and drop the `JoinHandle`
+/// still see serving state transition to `NotServing` and subsequent RPCs
+/// fail fast with `FAILED_PRECONDITION`. Without the wrapper, state would
+/// remain published as `Serving` and `GetTs` would succeed against the
+/// allocator seeded just before the panic — the regression this test pins.
+#[tokio::test]
+async fn panic_after_serving_published_poisons_state_when_handle_dropped() {
+    let _serial = FAILPOINT_TEST_SERIAL.lock().await;
+    let _scenario = fail::FailScenario::setup();
+
+    let driver = Arc::new(InMemoryDriver::new());
+    let server = Server::builder()
+        .consensus_driver(driver.clone())
+        .build()
+        .unwrap();
+    let (routes, watch_handle) = server.into_router();
+
+    // Drop (detach) the JoinHandle: the embedder shape #27 names. Drop, not
+    // abort — aborting would cancel the task before it ever runs.
+    drop(watch_handle);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serve = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_routes(routes)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+    });
+
+    fail::cfg("server::fence::after_serving_published", "panic").unwrap();
+    driver.become_leader(Epoch(1));
+
+    wait_for_grpc_handshake(addr, Duration::from_secs(5)).await;
+
+    let mut client =
+        tsoracle_proto::v1::tso_service_client::TsoServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+
+    // After the panic, the catch_unwind branch calls step_down, which
+    // publishes NotServing. Without the fix, state would stay Serving and
+    // GetTs would succeed against the allocator (seeded by
+    // try_on_leadership_gained before the failpoint fires). Polling rather
+    // than observing watch::Receiver transitions because rapid Serving →
+    // NotServing transitions can collapse on a slow receiver — see
+    // tokio::sync::watch's "only latest value retained" semantics.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let result = client
+            .get_ts(tsoracle_proto::v1::GetTsRequest { count: 1 })
+            .await;
+        match result {
+            Ok(_) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "GetTs continued to succeed after watch-task panic — \
+                     serving state was never poisoned (the regression #27 pins)"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(status) if status.code() == tonic::Code::FailedPrecondition => break,
+            Err(status) => panic!("unexpected gRPC status: {status:?}"),
+        }
+    }
+
+    serve.abort();
 }
 
 /// `server::service::before_allocate` fires at the top of `get_ts`,
