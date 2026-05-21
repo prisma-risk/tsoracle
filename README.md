@@ -21,8 +21,10 @@ A standalone timestamp oracle for Rust — strictly monotonic, gap-free integer 
 
 - 🔢 **Monotonic & gap-free** — every issued timestamp is strictly greater than the last; no skipped or repeated values, ever.
 - 🛡️ **Crash-safe** — window state is fsync'd before any timestamp in that window is handed out, so a restart never rewinds.
-- 🔌 **Pluggable consensus** — implement one trait (`ConsensusDriver`) to plug in openraft, raft-rs, etcd, or your own replicated log.
+- 🔌 **Pluggable consensus, openraft included** — `tsoracle-driver-openraft` ships a production-ready replicated driver; implement one trait (`ConsensusDriver`) to back tsoracle with raft-rs, etcd, or your own replicated log instead.
 - 📦 **gRPC client included** — `tsoracle-client` handles leader discovery, request coalescing, and reconnection for you.
+- 📈 **Operational metrics** — enable the `metrics` feature on `tsoracle-server` to emit allocator, leader, and request metrics through the `metrics` facade.
+- 🧪 **Hardened** — coverage-guided fuzzing on the postcard decoders, failpoint-driven crash tests, and a stress harness covering single-process and multi-process raft topologies.
 - 🧩 **Embeddable** — host the server inside your own binary with a few lines of Rust, or run the standalone CLI.
 
 ## Quickstart
