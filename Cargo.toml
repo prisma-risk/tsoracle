@@ -10,6 +10,7 @@ members  = [
     "crates/tsoracle-driver-openraft",
     "crates/tsoracle-bin",
     "crates/tsoracle-openraft-toolkit",
+    "crates/tsoracle-paxos-toolkit",
     "crates/tsoracle-tests",
     "examples/embedded-server",
     "examples/failover-demo",
@@ -34,6 +35,7 @@ default-members = [
     "crates/tsoracle-driver-openraft",
     "crates/tsoracle-bin",
     "crates/tsoracle-openraft-toolkit",
+    "crates/tsoracle-paxos-toolkit",
 ]
 
 [workspace.package]
@@ -63,7 +65,10 @@ metrics            = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 metrics-util       = "0.19"
 nix                = { version = "0.30", default-features = false, features = ["signal", "process"] }
+omnipaxos          = "0.2"
+omnipaxos_storage  = "0.2"
 parking_lot        = "0.12"
+pastey             = "0.2"
 proptest           = "1"
 prost              = "0.14"
 rand               = { version = "0.9", default-features = false, features = ["std", "std_rng"] }

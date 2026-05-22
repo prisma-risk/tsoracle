@@ -1,0 +1,24 @@
+//
+//  ░▀█▀░█▀▀░█▀█░█▀▄░█▀█░█▀▀░█░░░█▀▀
+//  ░░█░░▀▀█░█░█░█▀▄░█▀█░█░░░█░░░█▀▀
+//  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀
+//
+//  tsoracle — Distributed Timestamp Oracle
+//
+//  Copyright (c) 2026 Prisma Risk
+//  Licensed under the Apache License, Version 2.0
+//  https://github.com/prisma-risk/tsoracle
+//
+
+//! In-memory fakes for the toolkit's own tests and downstream conformance suites.
+//! Only compiled with the `test-fakes` feature or under `cfg(test)`.
+
+// Test scaffolding: `clippy::unwrap_used` / `expect_used` do not fire inside
+// `#[test]` / `#[cfg(test)]` (via `clippy.toml`), but these fakes live behind
+// a feature flag rather than under `cfg(test)` so consumer crates can pull
+// them in. Same intent — exempt the whole sub-tree.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+pub mod mem_network;
+pub mod mem_storage;
+pub mod partition;
