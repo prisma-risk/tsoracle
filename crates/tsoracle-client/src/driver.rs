@@ -79,22 +79,35 @@ impl Driver {
             + 'static,
     {
         let (tx, rx) = mpsc::channel(QUEUE_CAPACITY / 2);
-        tokio::spawn(driver_task(Arc::new(rpc), rx, flush_interval));
+        // Spawn the driver, then spawn a one-shot observer for its
+        // `JoinHandle`. The observer lives in `crate::driver_supervisor`
+        // (a non-critical-path file) because it emits an info-or-higher
+        // death-rattle log on panic; that log severity is banned from
+        // this file by the `#[PerformanceCriticalPath]` rules.
+        let handle = tokio::spawn(driver_task(Arc::new(rpc), rx, flush_interval));
+        tokio::spawn(crate::driver_supervisor::observe_driver_handle(handle));
         Driver { tx }
     }
 
     pub async fn request(&self, count: u32) -> Result<Vec<Timestamp>, ClientError> {
         let (resp_tx, resp_rx) = oneshot::channel();
+        // SendError here means the driver task's `Receiver` is gone —
+        // either the driver panicked (the observer in
+        // `crate::driver_supervisor` logs that) or it observed its last
+        // `Sender` drop. Surface that as `DriverGone` so callers can
+        // tell "local driver is dead" from
+        // "network/endpoints unreachable".
         self.tx
             .send(Waiter {
                 count,
                 respond: resp_tx,
             })
             .await
-            .map_err(|_| ClientError::NoReachableEndpoints)?;
-        resp_rx
-            .await
-            .map_err(|_| ClientError::NoReachableEndpoints)?
+            .map_err(|_| ClientError::DriverGone)?;
+        // RecvError here means our `respond` `Sender` was dropped without
+        // sending — only possible if the driver task or its chunk subtask
+        // panicked while this waiter was queued. Same reasoning as above.
+        resp_rx.await.map_err(|_| ClientError::DriverGone)?
     }
 }
 
@@ -107,12 +120,30 @@ async fn driver_task(rpc: RpcFn, mut rx: mpsc::Receiver<Waiter>, flush_interval:
         if let Some(handle) = in_flight.as_mut() {
             tokio::select! {
                 biased;
-                _completed = handle => {
+                completed = handle => {
                     // `run_chunks` already delivered each chunk's response to
                     // its waiters as that chunk's RPC completed; nothing to
                     // do here beyond clearing the in-flight slot.
                     in_flight = None;
                     set_in_flight_gauge(0);
+                    if let Err(_join_err) = completed {
+                        // The batch task panicked or was cancelled. Its
+                        // `Waiter::respond` `Sender`s drop during unwind,
+                        // so every blocked caller surfaces `DriverGone`
+                        // via the `resp_rx.await.map_err` path in
+                        // `Driver::request`. tokio's default panic hook
+                        // also writes the panic message to stderr, so
+                        // the cause isn't fully lost; this debug-level
+                        // breadcrumb adds the structured context for
+                        // operators who turn the level up. `debug!` is
+                        // the highest severity allowed on the hot path
+                        // by the performance-critical-path rules.
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            error = %_join_err,
+                            "tsoracle client batch task failed; in-flight waiters were notified via DriverGone"
+                        );
+                    }
                 }
                 next = rx.recv(), if queue.len() < QUEUE_CAPACITY / 2 => {
                     match next {
@@ -326,6 +357,7 @@ fn clone_client_error(error: &ClientError) -> ClientError {
         ClientError::InvalidEndpoint(endpoint) => ClientError::InvalidEndpoint(endpoint.clone()),
         ClientError::InvalidCount(count) => ClientError::InvalidCount(*count),
         ClientError::Connector(source) => ClientError::Connector(source.to_string().into()),
+        ClientError::DriverGone => ClientError::DriverGone,
     }
 }
 
@@ -561,6 +593,9 @@ mod tests {
             ClientError::InvalidCount(c) => assert_eq!(c, 99),
             other => panic!("expected InvalidCount, got {other:?}"),
         }
+
+        let driver_gone = clone_client_error(&ClientError::DriverGone);
+        assert!(matches!(driver_gone, ClientError::DriverGone));
     }
 
     /// `run_chunks` fail-fast: once one chunk errors, every subsequent
@@ -764,6 +799,29 @@ mod tests {
             .expect("join")
             .expect("second request must succeed");
         assert_eq!(second_timestamps.len(), (LOGICAL_MAX + 1) as usize);
+    }
+
+    /// A panic in the user-supplied RPC closure must surface to the blocked
+    /// waiter as `ClientError::DriverGone` — *not* `NoReachableEndpoints`,
+    /// since the network is fine and the bug is local. This is the
+    /// distinction that lets an operator skip a fruitless network
+    /// investigation and look at their `tracing` logs for the panic.
+    #[tokio::test]
+    async fn rpc_closure_panic_surfaces_as_driver_gone() {
+        let rpc = |_count: u32| -> futures::future::BoxFuture<
+            'static,
+            Result<Vec<Timestamp>, ClientError>,
+        > {
+            Box::pin(async {
+                panic!("synthetic panic exercising driver supervision");
+            })
+        };
+        let driver = Driver::spawn(rpc, Duration::ZERO);
+        let result = driver.request(5).await;
+        assert!(
+            matches!(result, Err(ClientError::DriverGone)),
+            "panicking RPC closure must surface as DriverGone, got {result:?}",
+        );
     }
 
     /// `queue non-empty + flush_interval > 0` is the path where the driver

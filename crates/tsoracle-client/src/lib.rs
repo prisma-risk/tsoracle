@@ -25,6 +25,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod driver;
+mod driver_supervisor;
 mod error;
 mod leader_resolved;
 mod response;
