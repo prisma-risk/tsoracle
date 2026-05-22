@@ -1,0 +1,52 @@
+[package]
+name         = "tsoracle-paxos-toolkit"
+description  = "Reusable OmniPaxos glue: RocksDB storage, lifecycle helpers, test fakes"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+readme.workspace       = true
+authors.workspace      = true
+documentation = "https://docs.rs/tsoracle-paxos-toolkit"
+keywords      = ["omnipaxos", "paxos", "consensus", "rocksdb", "storage"]
+categories    = ["asynchronous", "database-implementations"]
+
+[package.metadata.docs.rs]
+features     = ["rocksdb-storage"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default            = ["rocksdb-storage"]
+rocksdb-storage    = ["dep:rocksdb"]
+test-fakes         = []
+failpoints         = ["dep:fail", "fail/failpoints"]
+
+[dependencies]
+async-trait        = { workspace = true }
+fail               = { workspace = true, optional = true }
+futures            = { workspace = true }
+omnipaxos          = { workspace = true, features = ["serde"] }
+parking_lot        = { workspace = true }
+paste              = { workspace = true }
+postcard           = { workspace = true }
+rocksdb            = { workspace = true, optional = true, features = ["multi-threaded-cf"] }
+serde              = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-stream       = { workspace = true }
+tracing            = { workspace = true }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.3" }
+tsoracle-core      = { path = "../tsoracle-core",      version = "0.1.3" }
+
+[dev-dependencies]
+proptest         = { workspace = true }
+rocksdb          = { workspace = true }
+tempfile         = { workspace = true }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[[test]]
+name              = "failpoints"
+path              = "tests/failpoints.rs"
+required-features = ["failpoints", "rocksdb-storage"]
