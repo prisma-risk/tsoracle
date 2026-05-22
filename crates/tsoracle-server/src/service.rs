@@ -10,6 +10,8 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
+// #[PerformanceCriticalPath]
+
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tsoracle_consensus::ConsensusError;

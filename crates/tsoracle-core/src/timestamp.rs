@@ -10,6 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
+// #[PerformanceCriticalPath]
 //! 64-bit packed timestamp: 46 high bits for `physical_ms`, 18 low bits for `logical`.
 
 const LOGICAL_BITS: u32 = 18;

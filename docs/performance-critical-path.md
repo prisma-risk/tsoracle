@@ -42,13 +42,28 @@ After placing the marker, verify `CRITICAL_PATH_STRICT=1 ./scripts/check-critica
 
 ## Current critical-path files
 
-Files in this list are compliant with the rules above — the guard is green against them today.
+Files in this list are compliant with the rules above — the guard is green against them today. Grouped by subsystem; within each group, files are ordered roughly by call frequency along the per-request path.
 
+**Per-request RPC path**
+
+- [`crates/tsoracle-server/src/service.rs`](../crates/tsoracle-server/src/service.rs) — `TsoServiceImpl::get_ts`, the per-request RPC handler. Every gRPC `GetTs` enters here and dispatches into the allocator and (when a window extension is needed) the consensus driver.
 - [`crates/tsoracle-core/src/allocator.rs`](../crates/tsoracle-core/src/allocator.rs) — the window allocator state machine. Every `try_grant` and `would_grant` call goes through here.
-- [`crates/tsoracle-driver-file/src/lib.rs`](../crates/tsoracle-driver-file/src/lib.rs) — single-node fsync-durable driver. The fsync on window extension is the durability boundary for non-replicated deployments.
-- [`crates/tsoracle-driver-openraft/src/lib.rs`](../crates/tsoracle-driver-openraft/src/lib.rs) — openraft-backed driver. The propose/apply path for replicated deployments.
+- [`crates/tsoracle-core/src/clock.rs`](../crates/tsoracle-core/src/clock.rs) — the `Clock` trait and `SystemClock`. `now_ms` is read on every grant attempt and on every window-extension prepare.
+- [`crates/tsoracle-core/src/timestamp.rs`](../crates/tsoracle-core/src/timestamp.rs) — the packed `Timestamp(u64)` type. `Timestamp::pack` constructs the returned value for every issued grant.
+
+**Window-extension / consensus path**
+
+- [`crates/tsoracle-driver-file/src/driver.rs`](../crates/tsoracle-driver-file/src/driver.rs) — `FileDriver`. The fsync on window extension is the durability boundary for non-replicated deployments.
+- [`crates/tsoracle-driver-openraft/src/driver.rs`](../crates/tsoracle-driver-openraft/src/driver.rs) — `OpenraftDriver`, the bridge implementing `ConsensusDriver::persist_high_water` on top of any `OpenraftHighWaterHost`.
+- [`crates/tsoracle-driver-openraft/src/log_entry.rs`](../crates/tsoracle-driver-openraft/src/log_entry.rs) — the single command type replicated through the openraft log; encoded on every propose, decoded on every apply.
+- [`crates/tsoracle-driver-openraft/src/state_machine.rs`](../crates/tsoracle-driver-openraft/src/state_machine.rs) — `HighWaterStateMachine::apply`, which runs on every committed entry.
+
+**Client path**
+
 - [`crates/tsoracle-client/src/driver.rs`](../crates/tsoracle-client/src/driver.rs) — client-side coalescing driver. Every concurrent waiter passes through `driver_task`'s select loop.
+
+The two driver crates' `lib.rs` files are intentionally NOT marked: each has been refactored into a thin module-declaration shell, and the hot-path code now lives in the sibling files listed above. The marker is per-file, so placing it on a shell `lib.rs` would scan the wrong file — the guard does not inherit through `mod`.
 
 ## Files considered but intentionally unmarked
 
-- [`crates/tsoracle-server/src/server.rs`](../crates/tsoracle-server/src/server.rs) — contains a one-shot `tracing::error!` on the leader-watch death path (line 177 at the time of this writing). The call fires at most once per process lifetime and is not on the per-request path, but the grep-based guard cannot distinguish it from per-request logging. Mark this file in a follow-up after splitting the request handlers into their own module or after deciding to downgrade the death-rattle log.
+- [`crates/tsoracle-server/src/server.rs`](../crates/tsoracle-server/src/server.rs) — owns the leader-watch supervisor task. The task emits one-shot `tracing::error!` death-rattle messages when the watch loop returns an error or panics, so operators get a visible signal that serving has stopped. Those calls fire at most once per process lifetime and are not on the per-request path, but the grep-based guard cannot distinguish a one-shot supervisory log from per-request logging. The per-request handlers themselves live in [`service.rs`](../crates/tsoracle-server/src/service.rs), which IS marked.

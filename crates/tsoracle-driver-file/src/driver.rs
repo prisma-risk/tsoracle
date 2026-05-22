@@ -10,6 +10,8 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
+// #[PerformanceCriticalPath]
+
 use core::pin::Pin;
 use futures::{Stream, StreamExt};
 use std::fs;
