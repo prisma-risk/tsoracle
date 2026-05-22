@@ -1,0 +1,155 @@
+name: post-merge follow-ups
+
+# On merge into the default branch, parse the merged PR body for a
+# `## Post-merge follow-ups` section and open one tracking issue per
+# unchecked item, labeled `post-merge-followup`. Items the author
+# ticked before merge are skipped (already verified by hand). The
+# section is optional — PRs without one are a no-op.
+#
+# Dedup: each issue body carries a stable marker
+# `<!-- post-merge-followup:pr-<N>:item-<i> -->`. If the workflow
+# re-runs for the same merged PR, the search-by-marker step finds
+# the existing issue and skips creation.
+#
+# Security note: all PR-supplied data (body, title, author) is read
+# inside the actions/github-script JS context via the typed event
+# payload. No `${{ github.event.* }}` expansion is interpolated into
+# shell `run:` commands, so workflow-injection vectors (CRLF, command
+# substitution, etc.) are not reachable here.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  file-issues:
+    if: |
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71  # v9.0.0
+        with:
+          script: |
+            const SECTION_HEADER = '## Post-merge follow-ups';
+            const LABEL = 'post-merge-followup';
+            const MAX_TITLE_LEN = 200;
+
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+
+            // Strip HTML comments so the section delimiter and item text
+            // are not contaminated by template guidance.
+            let body = (pr.body || '').replace(/<!--[\s\S]*?-->/g, '');
+
+            const headerIdx = body.indexOf(SECTION_HEADER);
+            if (headerIdx === -1) {
+              core.info(`PR #${pr.number}: no "${SECTION_HEADER}" section; nothing to file.`);
+              return;
+            }
+
+            // Section spans from after the header to the next H1/H2 heading
+            // or end of body, whichever comes first.
+            let sectionBody = body.slice(headerIdx + SECTION_HEADER.length);
+            const nextHeading = sectionBody.search(/^#{1,2} /m);
+            if (nextHeading !== -1) {
+              sectionBody = sectionBody.slice(0, nextHeading);
+            }
+
+            // Parse top-level checkbox items. Non-checkbox indented or
+            // contiguous non-blank lines after a checkbox are treated as
+            // continuation of the prior item.
+            const lines = sectionBody.split('\n');
+            const items = [];
+            let cur = null;
+            for (const raw of lines) {
+              const m = raw.match(/^- \[( |x|X)\] ?(.*)$/);
+              if (m) {
+                if (cur) items.push(cur);
+                cur = {
+                  checked: m[1].toLowerCase() === 'x',
+                  lines: [m[2]],
+                };
+              } else if (cur && raw.trim() !== '') {
+                cur.lines.push(raw);
+              } else if (cur) {
+                items.push(cur);
+                cur = null;
+              }
+            }
+            if (cur) items.push(cur);
+
+            const targets = items.filter(
+              (it) => !it.checked && it.lines.join(' ').trim() !== ''
+            );
+
+            if (targets.length === 0) {
+              core.info(`PR #${pr.number}: no unchecked, non-empty post-merge items.`);
+              return;
+            }
+
+            core.info(`PR #${pr.number}: filing ${targets.length} follow-up issue(s).`);
+
+            const filed = [];
+            for (let i = 0; i < targets.length; i++) {
+              const item = targets[i];
+              const itemIndex = i + 1;
+              const marker = `<!-- post-merge-followup:pr-${pr.number}:item-${itemIndex} -->`;
+
+              // Dedup: a re-fired workflow finds the prior marker and skips.
+              const existing = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} in:body "${marker}"`,
+              });
+              if (existing.data.total_count > 0) {
+                const num = existing.data.items[0].number;
+                core.info(`Item ${itemIndex}: matches existing #${num}, skipping.`);
+                filed.push({ index: itemIndex, number: num, existed: true });
+                continue;
+              }
+
+              let title = item.lines[0].trim().replace(/\s+/g, ' ');
+              if (title.length > MAX_TITLE_LEN) {
+                title = title.slice(0, MAX_TITLE_LEN - 1) + '…';
+              }
+              title = `${title} (PR #${pr.number})`;
+
+              const issueBody = [
+                `Post-merge follow-up auto-filed on merge of #${pr.number}.`,
+                '',
+                item.lines.join('\n').trim(),
+                '',
+                '---',
+                `Source: ${pr.title}`,
+                `Author: @${pr.user.login}`,
+                `Merged: ${pr.merged_at}`,
+                `PR: ${pr.html_url}`,
+                '',
+                marker,
+              ].join('\n');
+
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body: issueBody,
+                labels: [LABEL],
+              });
+              core.info(`Item ${itemIndex}: created #${created.data.number}.`);
+              filed.push({ index: itemIndex, number: created.data.number, existed: false });
+            }
+
+            const fresh = filed.filter((f) => !f.existed);
+            if (fresh.length > 0) {
+              const refs = fresh.map((f) => `- #${f.number}`).join('\n');
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pr.number,
+                body: `Filed ${fresh.length} post-merge follow-up issue(s) from this PR's \`${SECTION_HEADER}\` section:\n\n${refs}`,
+              });
+            }
