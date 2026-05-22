@@ -19,7 +19,7 @@ use tokio::sync::watch;
 use tonic::service::Routes;
 use tonic::transport::Server as TonicServer;
 use tsoracle_consensus::ConsensusDriver;
-use tsoracle_core::{Allocator, Clock, SystemClock};
+use tsoracle_core::{Allocator, Bt, Clock, SystemClock};
 #[cfg(any(test, feature = "test-fakes"))]
 use tsoracle_core::{CoreError, WindowGrant};
 use tsoracle_proto::v1::tso_service_server::TsoServiceServer;
@@ -50,8 +50,8 @@ pub enum ServerError {
     /// The leader-watch task panicked. Distinct from a clean error return so
     /// operators can tell "driver returned Err" (recoverable design) from
     /// "task panicked" (programming bug).
-    #[error("leader-watch task panicked: {payload}")]
-    WatchPanic { payload: String },
+    #[error("leader-watch task panicked: {payload}{bt}")]
+    WatchPanic { payload: String, bt: Bt },
 }
 
 #[derive(Clone, Debug)]
@@ -418,7 +418,10 @@ fn join_to_server_result(
         Ok(inner) => inner,
         Err(join_err) if join_err.is_panic() => {
             let payload = panic_payload_to_string(join_err.into_panic());
-            Err(ServerError::WatchPanic { payload })
+            Err(ServerError::WatchPanic {
+                payload,
+                bt: Bt::capture(),
+            })
         }
         Err(_cancelled) => Ok(()),
     }
@@ -516,11 +519,12 @@ mod tests {
         let handle = tokio::spawn(async {
             Err::<(), ServerError>(ServerError::WatchPanic {
                 payload: "synthetic".into(),
+                bt: Bt::capture(),
             })
         });
         let join = handle.await;
         match join_to_server_result(join) {
-            Err(ServerError::WatchPanic { payload }) => assert_eq!(payload, "synthetic"),
+            Err(ServerError::WatchPanic { payload, .. }) => assert_eq!(payload, "synthetic"),
             other => panic!("expected forwarded WatchPanic, got {other:?}"),
         }
     }
@@ -536,7 +540,9 @@ mod tests {
         });
         let join = handle.await;
         match join_to_server_result(join) {
-            Err(ServerError::WatchPanic { payload }) => assert!(payload.contains("intentional")),
+            Err(ServerError::WatchPanic { payload, .. }) => {
+                assert!(payload.contains("intentional"))
+            }
             other => panic!("expected WatchPanic, got {other:?}"),
         }
     }

@@ -15,6 +15,7 @@ categories    = ["database-implementations", "filesystem"]
 [features]
 default    = []
 failpoints = ["dep:fail", "fail/failpoints"]
+bt         = ["tsoracle-core/bt", "tsoracle-consensus/bt"]
 
 [package.metadata.docs.rs]
 all-features = false

@@ -19,6 +19,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod allocator;
+mod bt;
 mod clock;
 mod epoch;
 mod timestamp;
@@ -26,6 +27,7 @@ mod timestamp;
 pub mod docs;
 
 pub use allocator::{Allocator, CoreError, WindowGrant};
+pub use bt::Bt;
 pub use clock::{Clock, SystemClock};
 pub use epoch::Epoch;
 pub use timestamp::{LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp, TimestampError};
