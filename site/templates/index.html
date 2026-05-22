@@ -51,7 +51,7 @@
     <div class="hero-frame">
         <div class="hero-frame__label">tsoracle</div>
         <p class="hero-frame__line">Strictly monotonic timestamps in Rust.</p>
-        <p class="hero-frame__line hero-frame__line--dim">Distributed · raft-replicated · embeddable.</p>
+        <p class="hero-frame__line hero-frame__line--dim">Distributed · highly-available · fault-tolerant · embeddable.</p>
     </div>
 
     <div class="hero-install">
@@ -66,7 +66,7 @@ $ tsoracle serve</pre>
     </div>
 </section>
 
-<section class="landing-section container">
+<section class="landing-section container-wide">
     <div class="landing-section__rule">── What's a TSO? ──</div>
     <p>A <em>timestamp oracle</em> is a service that hands out strictly increasing integer IDs which order events across a distributed system. You reach for one when you're building a database with MVCC, merging change-data from many shards, or maintaining audit logs with a real happens-before relation across machines.</p>
     <p>Per-host wall clocks aren't monotonic enough. Database sequences don't scale across shards. A TSO is the canonical answer — and the one Spanner, CockroachDB, and FoundationDB all use internally.</p>
@@ -95,43 +95,55 @@ $ tsoracle serve</pre>
     </div>
 </section>
 
-<section class="landing-section container">
+<section class="landing-section container-wide">
     <div class="landing-section__rule">── How it works ──</div>
-    <pre class="hero-box hero-box--diagram">client ──get_ts(batch=N)──► leader ──[fsync]──► local window
-                                │
-                                └──replicate via raft──► followers
-client ◄────window range [a, a+N)─── leader</pre>
-    <p>A single round-trip allocates a batch of <code>N</code> IDs. The leader fsyncs the new high-water mark and replicates it through raft before the range leaves the process. Clients hand out IDs from the batch locally — millions per second on commodity hardware.</p>
+    {% set get_ts_flow = load_data(path="content/diagrams/get-ts-flow.json") %}
+    <figure class="diagram" data-d3-init="sequence-flow">
+        <svg viewBox="0 0 800 360" role="img" aria-label="get_ts(batch=N) request path" preserveAspectRatio="xMidYMid meet">
+            <text x="400" y="180" text-anchor="middle" fill="#8A8A86" font-family="JetBrainsMono, ui-monospace, monospace" font-size="14">
+                {% for actor in get_ts_flow.actors %}{{ actor }}{% if not loop.last %} → {% endif %}{% endfor %}
+            </text>
+        </svg>
+        <script type="application/json">{{ get_ts_flow | json_encode | safe }}</script>
+        <figcaption>One round-trip allocates a batch of N IDs.</figcaption>
+    </figure>
+    <p>The leader fsyncs the new high-water mark and replicates it through raft before the range leaves the process. Clients hand out IDs from the batch locally — millions per second on commodity hardware.</p>
     <p>→ <a href="/how-it-works/">Read the architecture summary</a></p>
 </section>
 
 <section class="landing-section container-wide" id="get-started">
     <div class="landing-section__rule">── Get started ──</div>
     <div class="code-cols">
+        <div class="code-col">
+            <div class="code-col__title">Standalone binary</div>
 <pre><code>$ cargo install tsoracle
 $ tsoracle serve
 
 # Listens on 127.0.0.1:50551
 # Persists state to ./tsoracle-data/</code></pre>
-<pre><code>use tsoracle_client::Client;
+        </div>
+        <div class="code-col">
+            <div class="code-col__title">Embedded in your binary</div>
+<pre><code>use tsoracle_server::Server;
+use tsoracle_driver_file::FileDriver;
 
-let client = Client::connect(
-    vec!["http://127.0.0.1:50551".into()]
-).await?;
-
-let ts = client.get_ts().await?;
-let batch = client.get_ts_batch(64).await?;</code></pre>
+let driver = FileDriver::open_or_init("./data")?;
+let server = Server::builder()
+    .consensus_driver(driver)
+    .build()?;
+server.serve_with_shutdown(addr, shutdown).await?;</code></pre>
+        </div>
     </div>
-    <p>Want to embed the server in your own binary? See the <a href="{{ config.extra.github_url }}/tree/main/examples/embedded-server">embedded-server example</a>.</p>
+    <p>The embedded path runs <code>tsoracle-server</code> as a library in your process. See the <a href="{{ config.extra.github_url }}/tree/main/examples/embedded-server">embedded-server example</a> for the runnable version.</p>
 </section>
 
-<section class="landing-section container">
+<section class="landing-section container-wide">
     <div class="landing-section__rule">── Hardening ──</div>
     <p>tsoracle is tested with coverage-guided fuzzing on its postcard decoders, failpoint-driven crash tests on the storage and replication paths, and a multi-process stress harness covering single-node and replicated raft topologies. Fuzz harnesses run nightly; the stress harness runs on every PR.</p>
     <p>Details: <a href="{{ config.extra.github_url }}/tree/main/crates/tsoracle-tests">crates/tsoracle-tests</a> · <a href="{{ config.extra.github_url }}/tree/main/fuzz">fuzz/</a></p>
 </section>
 
-<section class="landing-section container">
+<section class="landing-section container-wide">
     <div class="landing-section__rule">── Recent posts ──</div>
     <ul class="posts-list">
         {% set posts_section = get_section(path="posts/_index.md") %}
@@ -151,7 +163,7 @@ let batch = client.get_ts_batch(64).await?;</code></pre>
     <p class="recent-posts__all"><a href="/posts/">View all posts →</a></p>
 </section>
 
-<section class="landing-section container">
+<section class="landing-section container-wide">
     <div class="landing-section__rule">── Documentation ──</div>
     <p><a href="/how-it-works/">How tsoracle works</a> — the architecture summary on this site.</p>
     <p><a href="{{ config.extra.deepwiki_url }}">DeepWiki</a> — prose documentation covering the window allocator, the <code>ConsensusDriver</code> contract, and operational topics (fsync cost, leader handoff, deployment topologies).</p>

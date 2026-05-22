@@ -395,7 +395,8 @@ th {
 // Section headings on landing ------------------------------------------------
 
 .landing-section {
-    margin: 4rem 0;
+    margin-top: 4rem;
+    margin-bottom: 4rem;
 }
 
 .landing-section__rule {
@@ -416,6 +417,15 @@ th {
 
 @media (max-width: 720px) {
     .code-cols { grid-template-columns: 1fr; }
+}
+
+.code-col__title {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--fg-dim);
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.04em;
+    text-transform: lowercase;
 }
 
 // Recent posts list ----------------------------------------------------------
