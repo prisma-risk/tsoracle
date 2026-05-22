@@ -18,7 +18,7 @@
 
 </div>
 
-A standalone timestamp oracle for Rust — strictly monotonic, gap-free integer timestamps over gRPC, with pluggable consensus.
+A distributed timestamp oracle for Rust — highly available and fault-tolerant, issuing strictly monotonic, gap-free integer timestamps over gRPC, Raft-replicated via openraft with pluggable consensus.
 
 ## Features
 

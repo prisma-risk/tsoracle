@@ -1,6 +1,6 @@
 # Overview
 
-tsoracle is a standalone timestamp oracle (TSO) for Rust — a service that hands out 64-bit strictly-monotonic, gap-free integer timestamps over gRPC. It is layered: a sync algorithm core (`tsoracle-core`), an async server (`tsoracle-server`) that wires the core to the network, and a pluggable consensus surface (`ConsensusDriver`) that lets you run it single-node behind one fsync or replicated on top of a consensus library of your choice.
+tsoracle is a distributed timestamp oracle (TSO) for Rust — a highly available, fault-tolerant service that hands out 64-bit strictly-monotonic, gap-free integer timestamps over gRPC. It is layered: a sync algorithm core (`tsoracle-core`), an async server (`tsoracle-server`) that wires the core to the network, and a pluggable consensus surface (`ConsensusDriver`) that lets you run it single-node behind one fsync or replicated on top of a consensus library of your choice.
 
 ```mermaid
 flowchart TB
