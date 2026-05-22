@@ -44,7 +44,13 @@ declare -a BANNED=(
 # The scan window for the marker. Files where the marker sits below this many
 # lines silently fall out of enforcement — see docs/performance-critical-path.md
 # for the placement rule.
-SCAN_WINDOW=10
+#
+# Sized to accommodate the 11-line canonical copyright header (enforced by
+# scripts/check-ts-header.py) plus a blank separator line plus the marker
+# itself, with slack for a short `#![cfg_attr(...)]` inner attribute. Bumping
+# this too high would let the marker hide under a long `//!` module doc; the
+# whole point is that the marker must sit *above* the module's own contents.
+SCAN_WINDOW=25
 
 # Locate repo root so the guard works from CI and from subdirectories.
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
