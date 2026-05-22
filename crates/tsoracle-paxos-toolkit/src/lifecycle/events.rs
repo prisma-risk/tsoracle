@@ -23,12 +23,25 @@ use tokio::sync::watch;
 use tokio_stream::wrappers::WatchStream;
 use tsoracle_consensus::LeaderState;
 
+/// Error returned by [`LeaderEventSender::send`].
+///
+/// `Closed` is the only variant for now; it means every subscribed
+/// [`LeaderEventStream`] has been dropped, so the runner can stop
+/// emitting transitions. The runner observes `Closed` and exits its
+/// tick loop on the next iteration.
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
-    #[error("receiver closed")]
+    #[error("all receivers have been dropped")]
     Closed,
 }
 
+/// Create a new leader-event channel.
+///
+/// The returned [`LeaderEventStream`] yields `LeaderState::Unknown` on its
+/// first poll (the channel's initial value) and every distinct subsequent
+/// value sent via the [`LeaderEventSender`]. Identical successive sends
+/// are debounced — receivers see one transition per unique value, not
+/// one per `send()` call.
 pub fn leader_event_channel() -> (LeaderEventSender, LeaderEventStream) {
     let (tx, rx) = watch::channel(LeaderState::Unknown);
     (
@@ -39,33 +52,55 @@ pub fn leader_event_channel() -> (LeaderEventSender, LeaderEventStream) {
     )
 }
 
+/// Sending half of the leader-event channel.
+///
+/// Cloneable: every clone shares the same underlying channel and the same
+/// debounced value. The runner clones the sender into its spawned tick
+/// task while keeping a copy for `Drop` ordering.
 #[derive(Clone)]
 pub struct LeaderEventSender {
     tx: watch::Sender<LeaderState>,
 }
 
 impl LeaderEventSender {
+    /// Send a leadership transition, debouncing if the value is unchanged.
+    ///
+    /// Returns `Err(SendError::Closed)` only when every receiver has been
+    /// dropped. The closed-channel detection is atomic with the send via
+    /// `watch::Sender::send` — there is no time-of-check / time-of-use
+    /// race between observing channel state and committing the value.
     pub fn send(&self, state: LeaderState) -> Result<(), SendError> {
-        self.tx.send_if_modified(|prev| {
-            if *prev == state {
-                false
-            } else {
-                *prev = state;
-                true
+        if *self.tx.borrow() == state {
+            // Debounce identical payload. If receivers are gone we still
+            // surface the error so callers can shut down.
+            if self.tx.is_closed() {
+                return Err(SendError::Closed);
             }
-        });
-        if self.tx.is_closed() {
-            return Err(SendError::Closed);
+            return Ok(());
         }
-        Ok(())
+        self.tx.send(state).map_err(|_| SendError::Closed)
     }
 }
 
+/// Receiving half of the leader-event channel.
+///
+/// Yields one [`LeaderState`] per distinct value pushed by the sender,
+/// starting with `LeaderState::Unknown` (the channel's initial value)
+/// on the first poll. Backed by a stored `WatchStream` whose receiver
+/// state persists across polls — recreating the stream per poll would
+/// lose the receiver's last-seen value.
 pub struct LeaderEventStream {
     inner: WatchStream<LeaderState>,
 }
 
 impl LeaderEventStream {
+    /// Box and pin the stream for trait-object use sites.
+    ///
+    /// Convenience for callers (notably `ConsensusDriver::leadership_events`)
+    /// that need a `Pin<Box<dyn Stream<Item = LeaderState> + Send>>` and
+    /// would otherwise write `Box::pin(stream)` themselves. The stream
+    /// does NOT require pinning before first poll — this is purely an
+    /// ergonomic shortcut.
     #[must_use]
     pub fn into_pin(self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
         Box::pin(self)
