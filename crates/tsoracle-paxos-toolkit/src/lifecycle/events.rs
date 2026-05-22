@@ -158,13 +158,59 @@ mod tests {
 
     #[tokio::test]
     async fn send_if_modified_accepts_repeated_payload() {
-        // The contract verified here is sender-side: send_if_modified does
-        // not error on identical payloads. Stream output cannot be used to
-        // observe debounce because watch already coalesces.
+        // The contract verified here is sender-side: send does not error
+        // on identical payloads while a receiver is alive. Stream output
+        // cannot be used to observe debounce because watch already
+        // coalesces.
         let (sender, _stream) = leader_event_channel();
         let same = LeaderState::Leader { epoch: Epoch(1) };
         assert!(sender.send(same.clone()).is_ok());
         assert!(sender.send(same).is_ok());
         assert!(sender.send(LeaderState::Leader { epoch: Epoch(2) }).is_ok());
+    }
+
+    #[tokio::test]
+    async fn send_returns_closed_after_stream_dropped() {
+        // Atomicity contract: dropping the stream makes the next send
+        // return SendError::Closed immediately. Exercises the change-path
+        // in `send` (the watch::Sender::send arm).
+        let (sender, stream) = leader_event_channel();
+        drop(stream);
+        let result = sender.send(LeaderState::Leader { epoch: Epoch(1) });
+        assert!(matches!(result, Err(SendError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn send_returns_closed_for_debounced_payload_after_drop() {
+        // Exercises the debounce-with-closed-channel arm: an unchanged
+        // payload still surfaces SendError::Closed when the receiver is
+        // gone, so the runner can shut down even when nothing changed.
+        let (sender, stream) = leader_event_channel();
+        sender
+            .send(LeaderState::Leader { epoch: Epoch(1) })
+            .expect("first send succeeds while stream alive");
+        drop(stream);
+        let result = sender.send(LeaderState::Leader { epoch: Epoch(1) });
+        assert!(matches!(result, Err(SendError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn into_pin_yields_stream_with_initial_and_changes() {
+        // Confirms that `into_pin` produces a stream functionally
+        // equivalent to the underlying LeaderEventStream — yields the
+        // initial value and subsequent changes via the boxed-pinned
+        // trait object path consumers use.
+        let (sender, stream) = leader_event_channel();
+        let mut pinned = stream.into_pin();
+        assert_eq!(pinned.next().await, Some(LeaderState::Unknown));
+
+        sender
+            .send(LeaderState::Leader { epoch: Epoch(7) })
+            .unwrap();
+        yield_now().await;
+        assert_eq!(
+            pinned.next().await,
+            Some(LeaderState::Leader { epoch: Epoch(7) }),
+        );
     }
 }

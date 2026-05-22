@@ -258,16 +258,140 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
+    use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
+    use omnipaxos_storage::memory_storage::MemoryStorage;
+    use tokio::time::sleep;
+    use tsoracle_consensus::LeaderState;
 
-    // A real runner-level integration test belongs in tests/lifecycle.rs
-    // (lands in a later sub-issue) where the in-memory test fakes
-    // (MemNetwork, MemStorage) are wired up. Here we only confirm the
-    // public API compiles correctly.
-    #[allow(dead_code)]
-    fn assert_runner_api_compiles<T, S>(_runner: PaxosRunner<T, S>)
-    where
-        T: omnipaxos::storage::Entry + Send + 'static,
-        S: omnipaxos::storage::Storage<T> + Send + 'static,
-    {
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct TestEntry;
+
+    impl Entry for TestEntry {
+        type Snapshot = TestSnapshot;
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct TestSnapshot;
+
+    impl omnipaxos::storage::Snapshot<TestEntry> for TestSnapshot {
+        fn create(_: &[TestEntry]) -> Self {
+            Self
+        }
+        fn merge(&mut self, _: Self) {}
+        fn use_snapshots() -> bool {
+            false
+        }
+    }
+
+    struct NoopSink;
+
+    #[async_trait::async_trait]
+    impl MessageSink<TestEntry> for NoopSink {
+        async fn send(&self, _message: Message<TestEntry>) {}
+    }
+
+    fn build_omnipaxos(node_id: u64) -> Arc<Mutex<OmniPaxos<TestEntry, MemoryStorage<TestEntry>>>> {
+        // OmniPaxos 0.2 rejects single-node ClusterConfigs, so build a 3-node
+        // configuration even when only one runner will exist.
+        let cluster_config = ClusterConfig {
+            configuration_id: 1,
+            nodes: vec![1, 2, 3],
+            flexible_quorum: None,
+        };
+        let server_config = ServerConfig {
+            pid: node_id,
+            ..Default::default()
+        };
+        let op_config = OmniPaxosConfig {
+            cluster_config,
+            server_config,
+        };
+        let op = op_config
+            .build(MemoryStorage::<TestEntry>::default())
+            .expect("build omnipaxos");
+        Arc::new(Mutex::new(op))
+    }
+
+    fn build_runner(node_id: u64) -> PaxosRunner<TestEntry, MemoryStorage<TestEntry>> {
+        PaxosRunner::new(
+            build_omnipaxos(node_id),
+            node_id,
+            vec![],
+            Duration::from_millis(5),
+        )
+    }
+
+    #[tokio::test]
+    async fn take_leader_stream_is_once_only() {
+        let mut runner = build_runner(1);
+        assert!(runner.take_leader_stream().is_some());
+        assert!(runner.take_leader_stream().is_none());
+    }
+
+    #[tokio::test]
+    async fn omnipaxos_handle_is_shared() {
+        let omnipaxos = build_omnipaxos(1);
+        let runner = PaxosRunner::new(omnipaxos.clone(), 1, vec![], Duration::from_millis(5));
+        assert!(Arc::ptr_eq(&omnipaxos, &runner.omnipaxos()));
+    }
+
+    #[tokio::test]
+    async fn apply_notify_handle_is_shared() {
+        let runner = build_runner(1);
+        let first = runner.apply_notify();
+        let second = runner.apply_notify();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn stop_without_start_is_noop() {
+        let mut runner = build_runner(1);
+        runner.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runner_ticks_emit_unknown_state_under_dead_network() {
+        // Boot a runner with a no-op MessageSink. Without inbound messages
+        // from the (imaginary) peer nodes, no consensus is reached and
+        // get_current_leader() returns None. The tick task still runs:
+        // it ticks, drains outbound (the messages go nowhere via NoopSink),
+        // observes leader = None, emits LeaderState::Unknown via the
+        // leader-event channel, and calls notify_waiters().
+        let mut runner = build_runner(1);
+        let mut stream = runner.take_leader_stream().expect("stream").into_pin();
+        runner.start(Arc::new(NoopSink));
+
+        // First yielded value is the initial Unknown.
+        assert_eq!(stream.next().await, Some(LeaderState::Unknown));
+
+        // Let several ticks fire. They all emit Unknown (same as initial),
+        // which the debounce arm absorbs. We don't assert on a second
+        // stream value because debounce intentionally suppresses repeats.
+        sleep(Duration::from_millis(30)).await;
+
+        // Stop the tick task. The runner struct (and its leader_sender)
+        // outlives this call — they drop at the end of the function scope.
+        // We do NOT drain the stream here because `stream.next().await`
+        // would block until the sender drops.
+        runner.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn apply_notify_fires_on_each_tick() {
+        // Park a waiter on apply_notify before the runner starts ticking;
+        // the next tick should wake it. This covers the notify_waiters()
+        // call site in the tick task body.
+        let mut runner = build_runner(1);
+        let notify = runner.apply_notify();
+        runner.start(Arc::new(NoopSink));
+
+        let woke = tokio::time::timeout(Duration::from_millis(50), notify.notified()).await;
+        assert!(
+            woke.is_ok(),
+            "apply_notify should fire within 50ms of starting"
+        );
+
+        runner.stop().await;
     }
 }
