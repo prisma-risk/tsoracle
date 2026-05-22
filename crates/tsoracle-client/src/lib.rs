@@ -176,56 +176,49 @@ mod tests {
         }
     }
 
+    // Marker payload used by both last-wins tests. The free function holds
+    // the body in one source location so coverage credit flows from the test
+    // where the closure DOES run; the test that asserts "this never runs"
+    // just calls the same helper.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+    async fn marker_connector_failure() -> Result<tonic::transport::Channel, crate::BoxError> {
+        Err("MARKER".into())
+    }
+
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     #[tokio::test]
     async fn tls_config_then_channel_connector_last_wins() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let invoked = Arc::new(AtomicBool::new(false));
-        let invoked_for_closure = invoked.clone();
+        // channel_connector is set LAST, so its path runs on get_ts. The
+        // marker error surfaces as `ClientError::Connector`, proving the
+        // builder did not silently keep the prior tls_config.
         let builder = ClientBuilder::endpoints(vec!["a:1".into()])
             .tls_config(tonic::transport::ClientTlsConfig::new())
-            .channel_connector(move |_endpoint: &str| {
-                let invoked = invoked_for_closure.clone();
-                async move {
-                    invoked.store(true, Ordering::SeqCst);
-                    Err::<tonic::transport::Channel, crate::BoxError>(
-                        std::io::Error::other("from-closure").into(),
-                    )
-                }
-            });
+            .channel_connector(|_endpoint: &str| marker_connector_failure());
         let client = builder.build().await.expect("build must not fail");
-        let _ = client.get_ts().await;
-        assert!(
-            invoked.load(Ordering::SeqCst),
-            "channel_connector closure must be the path taken when set last"
-        );
+        match client.get_ts().await {
+            Err(ClientError::Connector(inner)) => {
+                assert!(inner.to_string().contains("MARKER"));
+            }
+            other => panic!("expected Connector(MARKER), got {other:?}"),
+        }
     }
 
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     #[tokio::test]
     async fn channel_connector_then_tls_config_last_wins() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let invoked = Arc::new(AtomicBool::new(false));
-        let invoked_for_closure = invoked.clone();
+        // tls_config is set LAST, so the connector path is replaced and its
+        // marker error must NOT surface. The tls_config path produces a
+        // transport-level failure (or NoReachableEndpoints / Rpc) instead.
         let builder = ClientBuilder::endpoints(vec!["a:1".into()])
-            .channel_connector(move |_endpoint: &str| {
-                let invoked = invoked_for_closure.clone();
-                async move {
-                    invoked.store(true, Ordering::SeqCst);
-                    Err::<tonic::transport::Channel, crate::BoxError>(
-                        std::io::Error::other("from-closure").into(),
-                    )
-                }
-            })
+            .channel_connector(|_endpoint: &str| marker_connector_failure())
             .tls_config(tonic::transport::ClientTlsConfig::new());
         let client = builder.build().await.expect("build must not fail");
-        let _ = client.get_ts().await;
-        assert!(
-            !invoked.load(Ordering::SeqCst),
-            "tls_config set last must overwrite the prior channel_connector"
-        );
+        let result = client.get_ts().await;
+        if let Err(ClientError::Connector(inner)) = &result
+            && inner.to_string().contains("MARKER")
+        {
+            panic!("tls_config set last must overwrite the prior channel_connector");
+        }
     }
 
     #[tokio::test]
