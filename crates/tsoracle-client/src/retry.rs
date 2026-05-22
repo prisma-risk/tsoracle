@@ -45,7 +45,7 @@ use tokio::time::Instant;
 use tsoracle_core::Timestamp;
 
 use crate::error::ClientError;
-use crate::leader_resolved::{ChannelPool, decode_leader_hint};
+use crate::leader_resolved::{ChannelPool, LeaderHintLookup, decode_leader_hint};
 use crate::response::decode_get_ts_response;
 use crate::retry_policy::{jittered_backoff, should_backoff};
 
@@ -74,12 +74,29 @@ pub(crate) async fn issue_rpc(
         }
         let attempt_budget = (deadline - now).min(policy.per_attempt_deadline);
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            endpoint = %endpoint,
+            count,
+            attempt_index,
+            budget_ms = attempt_budget.as_millis() as u64,
+            "tsoracle-client: dispatching GetTs to endpoint",
+        );
+
         match attempt(pool, &endpoint, count, attempt_budget).await {
             AttemptOutcome::Ok(timestamps) => {
                 pool.set_leader(endpoint);
                 return Ok(timestamps);
             }
             AttemptOutcome::LeaderHint(hinted_endpoint) => {
+                #[cfg(feature = "metrics")]
+                metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    from = %endpoint,
+                    to = %hinted_endpoint,
+                    "tsoracle-client: pivoting to hinted leader",
+                );
                 pool.set_leader(hinted_endpoint.clone());
                 worklist.push_front(hinted_endpoint);
                 // No backoff: a leader hint is known progress, not a
@@ -131,8 +148,34 @@ async fn attempt(
 ) -> AttemptOutcome {
     let mut client = match tokio::time::timeout(budget, pool.client(endpoint)).await {
         Ok(Ok(client)) => client,
-        Ok(Err(err)) => return AttemptOutcome::Err(err),
+        Ok(Err(err)) => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!(
+                "tsoracle.client.retries.total",
+                "reason" => "connect_failure",
+            )
+            .increment(1);
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                endpoint = %endpoint,
+                error = %err,
+                "tsoracle-client: connect failed; advancing worklist",
+            );
+            return AttemptOutcome::Err(err);
+        }
         Err(_) => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!(
+                "tsoracle.client.retries.total",
+                "reason" => "deadline_exceeded",
+            )
+            .increment(1);
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                endpoint = %endpoint,
+                budget_ms = budget.as_millis() as u64,
+                "tsoracle-client: connect exceeded per_attempt_deadline",
+            );
             return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
                 format!("connect exceeded per_attempt_deadline of {budget:?}"),
             )));
@@ -142,16 +185,74 @@ async fn attempt(
     let response = match tokio::time::timeout(budget, rpc).await {
         Ok(Ok(resp)) => resp,
         Ok(Err(status)) if status.code() == tonic::Code::FailedPrecondition => {
-            let usable_hint = decode_leader_hint(&status)
-                .and_then(|hint| hint.leader_endpoint)
-                .filter(|hinted| !rejects_plaintext_hint(pool, hinted));
+            #[cfg(feature = "metrics")]
+            metrics::counter!("tsoracle.client.not_leader.total").increment(1);
+            #[cfg(feature = "metrics")]
+            metrics::counter!(
+                "tsoracle.client.retries.total",
+                "reason" => "not_leader",
+            )
+            .increment(1);
+
+            let hinted_endpoint = match decode_leader_hint(&status) {
+                LeaderHintLookup::Decoded(hint) => hint.leader_endpoint,
+                LeaderHintLookup::Absent => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        endpoint = %endpoint,
+                        "tsoracle-client: FAILED_PRECONDITION without leader-hint trailer; \
+                         contacted peer cannot redirect us",
+                    );
+                    None
+                }
+                LeaderHintLookup::Malformed => {
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("tsoracle.client.leader_hint.decode_failures.total")
+                        .increment(1);
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        endpoint = %endpoint,
+                        "tsoracle-client: FAILED_PRECONDITION carried a malformed \
+                         leader-hint trailer; treating as no hint",
+                    );
+                    None
+                }
+            };
+            let usable_hint =
+                hinted_endpoint.filter(|hinted| !rejects_plaintext_hint(pool, hinted));
             return match usable_hint {
                 Some(hinted) => AttemptOutcome::LeaderHint(hinted),
                 None => AttemptOutcome::HintRejected(status),
             };
         }
-        Ok(Err(status)) => return AttemptOutcome::Err(ClientError::Rpc(status)),
+        Ok(Err(status)) => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!(
+                "tsoracle.client.retries.total",
+                "reason" => "transport",
+            )
+            .increment(1);
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                endpoint = %endpoint,
+                code = ?status.code(),
+                "tsoracle-client: RPC failed; advancing worklist",
+            );
+            return AttemptOutcome::Err(ClientError::Rpc(status));
+        }
         Err(_) => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!(
+                "tsoracle.client.retries.total",
+                "reason" => "deadline_exceeded",
+            )
+            .increment(1);
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                endpoint = %endpoint,
+                budget_ms = budget.as_millis() as u64,
+                "tsoracle-client: RPC exceeded per_attempt_deadline",
+            );
             return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
                 format!("rpc exceeded per_attempt_deadline of {budget:?}"),
             )));
@@ -159,7 +260,15 @@ async fn attempt(
     };
     match decode_get_ts_response(response.into_inner(), count) {
         Ok(timestamps) => AttemptOutcome::Ok(timestamps),
-        Err(err) => AttemptOutcome::Err(err),
+        Err(err) => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!(
+                "tsoracle.client.retries.total",
+                "reason" => "decode_error",
+            )
+            .increment(1);
+            AttemptOutcome::Err(err)
+        }
     }
 }
 

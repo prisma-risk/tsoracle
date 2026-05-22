@@ -13,18 +13,20 @@ keywords      = ["tsoracle", "grpc", "client", "timestamp", "oracle"]
 categories    = ["network-programming", "database", "api-bindings"]
 
 [features]
-default    = ["tls-rustls"]
+default    = ["tls-rustls", "tracing"]
+metrics    = ["dep:metrics"]
 tls-rustls = ["tonic/tls-aws-lc"]
 tls-native = ["tonic/tls-native-roots"]
 tracing    = ["dep:tracing"]
 
 [package.metadata.docs.rs]
-features       = ["tls-rustls", "tracing"]
+features       = ["tls-rustls", "tracing", "metrics"]
 rustdoc-args   = ["--cfg", "docsrs"]
 
 [dependencies]
 async-trait    = { workspace = true }
 futures        = { workspace = true }
+metrics        = { workspace = true, optional = true }
 parking_lot    = { workspace = true }
 prost          = { workspace = true }
 rand           = { workspace = true, features = ["thread_rng"] }
@@ -36,5 +38,6 @@ tsoracle-core  = { path = "../tsoracle-core", version = "0.1.1" }
 tsoracle-proto = { path = "../tsoracle-proto", version = "0.1.1" }
 
 [dev-dependencies]
-tokio    = { workspace = true, features = ["test-util"] }
-proptest = { workspace = true }
+metrics-util = { workspace = true }
+proptest     = { workspace = true }
+tokio        = { workspace = true, features = ["test-util"] }
