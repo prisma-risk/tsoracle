@@ -100,6 +100,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: EmbarkStudios/cargo-deny-action@a531616d8ce3b9177443e48a1159bc945a099823  # v2
+        with:
+          rust-version: "1.88"
 
   critical-path:
     runs-on: ubuntu-latest
