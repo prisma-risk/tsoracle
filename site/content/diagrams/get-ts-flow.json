@@ -1,0 +1,10 @@
+{
+    "actors": ["client", "leader", "followers"],
+    "messages": [
+        {"from": "client", "to": "leader", "label": "get_ts(batch=N)"},
+        {"from": "leader", "to": "leader", "label": "fsync(hwm + N)", "kind": "self"},
+        {"from": "leader", "to": "followers", "label": "replicate"},
+        {"from": "followers", "to": "leader", "label": "quorum ack", "kind": "reply"},
+        {"from": "leader", "to": "client", "label": "[a, a+N)", "kind": "reply"}
+    ]
+}

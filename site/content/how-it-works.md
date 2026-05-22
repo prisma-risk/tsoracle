@@ -8,12 +8,7 @@ tsoracle hands out strictly monotonic integer timestamps. The architecture has t
 
 ## The request path
 
-```
-client ──get_ts(batch=N)──► leader ──[fsync]──► local window
-                                │
-                                └──replicate via raft──► followers
-client ◄────window range [a, a+N)─── leader
-```
+{{ sequence_flow(name="get-ts-flow", title="get_ts(batch=N) request path") }}
 
 A client asks the leader for a batch of `N` IDs. The leader picks the next range `[a, a+N)`, advances the on-disk high-water mark past `a+N`, fsyncs, replicates the advance via raft, and returns the range. The client hands out IDs from the range locally as fast as it likes. The next batch request triggers another fsync; the cost of the fsync is amortised across all `N` IDs.
 
