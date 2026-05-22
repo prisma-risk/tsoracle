@@ -1,0 +1,13 @@
+{
+    "nodes": ["N1", "N2", "N3"],
+    "frames": [
+        {
+            "states": {"N1": "leader", "N2": "follower", "N3": "follower"},
+            "messages": [
+                {"from": "N1", "to": "N2", "label": "heartbeat"},
+                {"from": "N1", "to": "N3", "label": "heartbeat"}
+            ],
+            "description": "3-node cluster: N1 leader, N2 + N3 followers receiving heartbeats."
+        }
+    ]
+}

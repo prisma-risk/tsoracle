@@ -22,6 +22,8 @@ The allocator owns one piece of state: the high-water mark, an integer that no f
 
 In a replicated topology, the high-water mark must survive leader failover. The `ConsensusDriver` trait is the narrow interface tsoracle uses to talk to a replicated log; the production implementation backs it with [openraft](https://github.com/databendlabs/openraft), but a small trait surface lets you wire tsoracle into raft-rs, etcd's raft, or your service's own raft if you want to piggyback. Every high-water-mark advance is proposed through the trait; the new leader after a failover only hands out IDs above the last committed advance.
 
+{{ cluster_state(name="cluster-overview", title="A 3-node tsoracle cluster.") }}
+
 ## Crash-safety contract
 
 The contract is that no ID is ever issued without first persisting (and, in a replicated cluster, replicating) the advance that covers it. The single fsync per batch is the durability proof; the raft commit is the failover proof. Together they guarantee that, across crashes and leadership changes, the issued sequence stays strictly increasing.

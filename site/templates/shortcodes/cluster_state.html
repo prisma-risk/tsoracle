@@ -1,0 +1,11 @@
+{% set data = load_data(path="content/diagrams/" ~ name ~ ".json") %}
+{% set caption = title | default(value='') %}
+<figure class="diagram" data-d3-init="cluster-state">
+    <svg viewBox="0 0 800 400" role="img" aria-label="{{ caption | default(value='Cluster diagram: ' ~ name) }}" preserveAspectRatio="xMidYMid meet">
+        <text x="400" y="200" text-anchor="middle" fill="#8A8A86" font-family="JetBrainsMono, ui-monospace, monospace" font-size="14">
+            cluster: {% for n in data.nodes %}{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+        </text>
+    </svg>
+    <script type="application/json">{{ data | json_encode | safe }}</script>
+    {% if caption %}<figcaption>{{ caption }}</figcaption>{% endif %}
+</figure>
