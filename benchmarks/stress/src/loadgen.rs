@@ -213,8 +213,27 @@ mod tests {
         let endpoint = format!("http://{addr}");
         let client = Arc::new(Client::connect(vec![endpoint]).await.unwrap());
 
-        let (tx, rx) = mpsc::channel::<SupervisorEvent>(64);
-        let supervisor_handle = tokio::spawn(Supervisor::new().run(rx));
+        // Insert a counting forwarder between the loadgen task and the
+        // Supervisor so the test can observe progress by polling instead of
+        // sleeping a fixed wall-clock budget — the latter is brittle under
+        // sanitizer or emulation slowdown where first-request latency can
+        // exceed any reasonable hand-picked duration.
+        let (tx_from_task, mut rx_from_task) = mpsc::channel::<SupervisorEvent>(64);
+        let (tx_to_supervisor, rx_to_supervisor) = mpsc::channel::<SupervisorEvent>(64);
+        let supervisor_handle = tokio::spawn(Supervisor::new().run(rx_to_supervisor));
+
+        let issued_seen = Arc::new(AtomicU64::new(0));
+        let issued_seen_for_forwarder = issued_seen.clone();
+        let forwarder_handle = tokio::spawn(async move {
+            while let Some(event) = rx_from_task.recv().await {
+                if matches!(event, SupervisorEvent::Issued(_)) {
+                    issued_seen_for_forwarder.fetch_add(1, Ordering::Relaxed);
+                }
+                if tx_to_supervisor.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
 
         let stop = Arc::new(AtomicBool::new(false));
         let cfg = ClientTaskCfg {
@@ -224,17 +243,28 @@ mod tests {
             warmup_iters: 4,
             liveness_deadline: Duration::from_secs(5),
             stop: stop.clone(),
-            tx: tx.clone(),
+            tx: tx_from_task.clone(),
             transient_retries: Arc::new(AtomicU64::new(0)),
         };
         let task = tokio::spawn(client_task(cfg));
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Poll for the first issued sample. The 30s ceiling is well above
+        // any realistic worst case; the loop exits as soon as progress
+        // shows, so fast machines pay nothing extra.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if issued_seen.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
         stop.store(true, Ordering::Relaxed);
         let issued = task.await.unwrap().unwrap();
 
-        let _ = tx.send(SupervisorEvent::End).await;
-        drop(tx);
+        let _ = tx_from_task.send(SupervisorEvent::End).await;
+        drop(tx_from_task);
+        let _ = forwarder_handle.await;
         let outcome = supervisor_handle.await.unwrap();
         assert!(issued > 0, "expected some timestamps issued, got 0");
         assert!(
