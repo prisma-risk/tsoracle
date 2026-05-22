@@ -46,6 +46,7 @@ use crate::leader_resolved::ChannelPool;
 pub struct ClientBuilder {
     endpoints: Vec<String>,
     flush_interval: Duration,
+    connector: Option<Arc<crate::transport::ChannelConnector>>,
 }
 
 impl ClientBuilder {
@@ -53,6 +54,7 @@ impl ClientBuilder {
         ClientBuilder {
             endpoints,
             flush_interval: Duration::from_millis(1),
+            connector: None,
         }
     }
 
@@ -61,11 +63,33 @@ impl ClientBuilder {
         self
     }
 
+    /// Replace the default plaintext channel construction with a caller-owned
+    /// closure. The closure is invoked on first use of each endpoint —
+    /// configured endpoints and leader-hint redirects alike. Errors returned
+    /// from the closure surface as [`ClientError::Connector`].
+    ///
+    /// See module docs for the interaction with [`Self::tls_config`]
+    /// (last-wins) and the scheme matrix.
+    pub fn channel_connector<F, Fut>(mut self, connector: F) -> Self
+    where
+        F: Fn(&str) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<tonic::transport::Channel, crate::BoxError>>
+            + Send
+            + 'static,
+    {
+        let wrapped: Arc<crate::transport::ChannelConnector> = Arc::new(move |endpoint: &str| {
+            let fut = connector(endpoint);
+            Box::pin(async move { fut.await.map_err(ClientError::Connector) })
+        });
+        self.connector = Some(wrapped);
+        self
+    }
+
     pub async fn build(self) -> Result<Client, ClientError> {
         if self.endpoints.is_empty() {
             return Err(ClientError::NoReachableEndpoints);
         }
-        let pool = Arc::new(ChannelPool::new(self.endpoints, None));
+        let pool = Arc::new(ChannelPool::new(self.endpoints, self.connector));
         let pool_for_rpc = pool.clone();
         let driver = driver::Driver::spawn(
             move |count| {
@@ -114,6 +138,25 @@ mod tests {
             Err(ClientError::NoReachableEndpoints) => {}
             Err(other) => panic!("expected NoReachableEndpoints, got {other:?}"),
             Ok(_) => panic!("expected Err, got Ok(Client)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_connector_error_surfaces_as_connector_variant() {
+        let builder = ClientBuilder::endpoints(vec!["a:1".into()]).channel_connector(
+            |_endpoint: &str| async move {
+                Err::<tonic::transport::Channel, crate::BoxError>(
+                    std::io::Error::other("boom").into(),
+                )
+            },
+        );
+        let client = builder.build().await.expect("build must not fail");
+        let result = client.get_ts().await;
+        match result {
+            Err(ClientError::Connector(inner)) => {
+                assert!(inner.to_string().contains("boom"));
+            }
+            other => panic!("expected ClientError::Connector, got {other:?}"),
         }
     }
 
