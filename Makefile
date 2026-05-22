@@ -212,7 +212,7 @@ bench-throughput-sweep:
 
 bench-latency:
 	$(CARGO) run --release -p bench-minimal --bin bench -- \
-	  --clients 1 --ops 200k --batch-size 1
+	  --clients 1 --ops 200k --batch-size 1 --warmup 5_000
 
 # Help -----------------------------------------------------------------------
 
