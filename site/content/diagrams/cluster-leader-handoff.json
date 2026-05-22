@@ -1,0 +1,32 @@
+{
+    "nodes": ["N1", "N2", "N3"],
+    "frames": [
+        {
+            "states": {"N1": "leader", "N2": "follower", "N3": "follower"},
+            "messages": [
+                {"from": "N1", "to": "N2", "label": "AppendEntries"},
+                {"from": "N1", "to": "N3", "label": "AppendEntries"}
+            ],
+            "description": "Steady state. N1 leader. Heartbeats + replication to N2 + N3."
+        },
+        {
+            "states": {"N1": "down", "N2": "follower", "N3": "follower"},
+            "messages": [],
+            "description": "N1 fails. Followers' heartbeat timeout starts running."
+        },
+        {
+            "states": {"N1": "down", "N2": "candidate", "N3": "follower"},
+            "messages": [
+                {"from": "N2", "to": "N3", "label": "RequestVote(term+1)"}
+            ],
+            "description": "N2's election timeout fires first. It increments term, votes for itself, asks N3."
+        },
+        {
+            "states": {"N1": "down", "N2": "leader", "N3": "follower"},
+            "messages": [
+                {"from": "N2", "to": "N3", "label": "AppendEntries"}
+            ],
+            "description": "N2 has quorum (its vote + N3's). It's the new leader. hwm continues strictly above last committed."
+        }
+    ]
+}
