@@ -47,19 +47,29 @@ jobs:
             // are not contaminated by template guidance.
             let body = (pr.body || '').replace(/<!--[\s\S]*?-->/g, '');
 
-            const headerIdx = body.indexOf(SECTION_HEADER);
-            if (headerIdx === -1) {
-              core.info(`PR #${pr.number}: no "${SECTION_HEADER}" section; nothing to file.`);
+            // Match the header as a real markdown heading: at line start,
+            // optional trailing whitespace, end of line. Using indexOf here
+            // would match the header substring inside code spans or table
+            // cells (e.g. a PR body that mentions `## Post-merge follow-ups`
+            // in prose), which then slices the wrong region.
+            const headerRegex = /^## Post-merge follow-ups\s*$/m;
+            const headerMatch = body.match(headerRegex);
+            if (!headerMatch) {
+              core.info(`PR #${pr.number}: no "${SECTION_HEADER}" heading; nothing to file.`);
               return;
             }
 
-            // Section spans from after the header to the next H1/H2 heading
-            // or end of body, whichever comes first.
-            let sectionBody = body.slice(headerIdx + SECTION_HEADER.length);
+            // Section spans from after the heading line to the next H1/H2
+            // heading or end of body, whichever comes first.
+            let sectionBody = body.slice(headerMatch.index + headerMatch[0].length);
             const nextHeading = sectionBody.search(/^#{1,2} /m);
             if (nextHeading !== -1) {
               sectionBody = sectionBody.slice(0, nextHeading);
             }
+            core.info(
+              `PR #${pr.number}: matched heading at offset ${headerMatch.index}, ` +
+              `section body is ${sectionBody.length} chars.`
+            );
 
             // Parse top-level checkbox items. Non-checkbox indented or
             // contiguous non-blank lines after a checkbox are treated as
@@ -86,6 +96,14 @@ jobs:
 
             const targets = items.filter(
               (it) => !it.checked && it.lines.join(' ').trim() !== ''
+            );
+            const checkedCount = items.filter((it) => it.checked).length;
+            const emptyCount = items.filter(
+              (it) => !it.checked && it.lines.join(' ').trim() === ''
+            ).length;
+            core.info(
+              `PR #${pr.number}: parsed ${items.length} item(s) ` +
+              `(${targets.length} actionable, ${checkedCount} pre-checked, ${emptyCount} empty placeholder).`
             );
 
             if (targets.length === 0) {
