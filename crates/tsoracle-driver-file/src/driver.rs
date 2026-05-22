@@ -16,6 +16,7 @@ use core::pin::Pin;
 use futures::{Stream, StreamExt};
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -205,12 +206,23 @@ fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
     crate::failpoint!("file_driver::after_rename_before_dir_fsync");
 
     // Fsync the directory so the rename is durable.
-    let dir_file = fs::File::open(dir)?;
-    let fd = dir_file.as_raw_fd();
-    // SAFETY: fd is a valid open directory descriptor for the duration of this call.
-    let rc = unsafe { libc::fsync(fd) };
-    if rc != 0 {
-        return Err(FileDriverError::Io(std::io::Error::last_os_error()));
+    //
+    // Unix-only: opening a directory fd and calling fsync on it forces the
+    // rename's metadata to disk. Windows has no portable equivalent --
+    // `FlushFileBuffers` on a directory handle is undefined for most
+    // filesystems, and NTFS already journals metadata transactions
+    // (including rename) such that the rename is recoverable across crash
+    // even without an explicit metadata flush. Best-effort on Windows;
+    // the tmpfile `sync_all` above still guarantees the data is durable.
+    #[cfg(unix)]
+    {
+        let dir_file = fs::File::open(dir)?;
+        let fd = dir_file.as_raw_fd();
+        // SAFETY: fd is a valid open directory descriptor for the duration of this call.
+        let rc = unsafe { libc::fsync(fd) };
+        if rc != 0 {
+            return Err(FileDriverError::Io(std::io::Error::last_os_error()));
+        }
     }
     Ok(())
 }
