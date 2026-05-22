@@ -282,6 +282,130 @@ async fn leadership_events_resolves_follower_leader_when_in_membership() {
     }
 }
 
+// Regression test for the term-coalesce bug fixed in #77.
+//
+// Scenario: this node is Leader(term=N). Quorum churn causes a fast
+// Leader → Follower(term=M) → Leader(term=K) sequence on a higher term.
+// All three updates land on the watch channel before the stream's next
+// poll. The watch only stores the latest value, so the receiver sees
+// Leader(term=K) directly — the intermediate Follower(term=M) is gone.
+//
+// Under the previous `RoleClass`-keyed dedup the new `Leader(term=K)`
+// compared equal to the prior `Leader(term=N)` ("both are Leader") and
+// was silently suppressed. Downstream of `tsoracle-driver-openraft`'s
+// `leadership_events`, that means `tsoracle-server`'s failover fence
+// never runs for term K, and this node continues issuing timestamps
+// from the term-N allocator floor — a global ordering regression.
+//
+// Under full-value dedup, `Leader(term=K)` is not equal to
+// `Leader(term=N)`, so the next poll emits the new Leader and the
+// fence runs.
+#[tokio::test]
+async fn leadership_events_emits_leader_after_coalesced_term_change() {
+    use futures::StreamExt;
+    use openraft::RaftMetrics;
+    use openraft::ServerState;
+    use openraft::WatchSender;
+    use openraft::type_config::TypeConfigExt;
+    use tsoracle_openraft_toolkit::LeadershipState;
+
+    // Initial value is Leader(term=1) so the first poll establishes the
+    // last-emitted projection without any pre-roll transitions.
+    let mut initial: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
+    initial.state = ServerState::Leader;
+    initial.current_term = 1;
+    let (tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(initial);
+
+    let mut stream = std::pin::pin!(
+        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
+    );
+
+    let first = stream.next().await.expect("initial Leader");
+    assert!(
+        matches!(first, LeadershipState::Leader { term: 1 }),
+        "expected initial Leader {{ term: 1 }}; got {first:?}",
+    );
+
+    // Push Follower(term=2) and Leader(term=3) before the next poll.
+    // The watch coalesces: receiver's next borrow yields Leader(term=3).
+    let mut as_follower: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
+    as_follower.state = ServerState::Follower;
+    as_follower.current_term = 2;
+    tx.send(as_follower).unwrap();
+
+    let mut as_leader_again: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
+    as_leader_again.state = ServerState::Leader;
+    as_leader_again.current_term = 3;
+    tx.send(as_leader_again).unwrap();
+
+    // Drop the sender so a broken dedup that suppresses the term change
+    // falls through to `changed().await` → Err → `None`, instead of
+    // hanging the test forever.
+    drop(tx);
+
+    let next = stream.next().await;
+    assert!(
+        matches!(next, Some(LeadershipState::Leader { term: 3 })),
+        "expected Leader {{ term: 3 }} after coalesced Follower(2)/Leader(3); \
+         got {next:?} — a None here means the dedup suppressed the new term, \
+         which is the bug this test exists to prevent",
+    );
+
+    // Once the new leader is emitted, the stream terminates (sender dropped).
+    assert!(stream.next().await.is_none());
+}
+
+// Acceptance-criteria guard: same-shape projections (identical role, term,
+// and leader identity) must continue to be suppressed. Under the previous
+// `RoleClass`-keyed dedup this was trivially true; under full-value dedup
+// it still holds because `LeadershipState<C>` derives `PartialEq`.
+//
+// The send goes through the channel rather than being a no-op so the test
+// would also catch a (hypothetical) future change that emits on every
+// sender-side notification regardless of value equality.
+#[tokio::test]
+async fn leadership_events_suppresses_identical_projection() {
+    use futures::StreamExt;
+    use openraft::RaftMetrics;
+    use openraft::WatchSender;
+    use openraft::type_config::TypeConfigExt;
+    use tsoracle_openraft_toolkit::LeadershipState;
+
+    let initial: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
+    let (tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(initial);
+
+    let mut stream = std::pin::pin!(
+        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
+    );
+
+    let first = stream.next().await.expect("initial Follower");
+    assert!(
+        matches!(
+            first,
+            LeadershipState::Follower {
+                term: 0,
+                leader: None,
+            },
+        ),
+        "expected initial Follower {{ term: 0, leader: None }}; got {first:?}",
+    );
+
+    // Send an identical projection. Channel coalescing isn't the suppressor
+    // here — only one send happens — so any emission would come from the
+    // dedup logic letting an equal value through.
+    let identical: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
+    tx.send(identical).unwrap();
+    drop(tx);
+
+    // With identical-projection suppression the stream sees no new emit and
+    // terminates when the sender drops.
+    assert!(
+        stream.next().await.is_none(),
+        "identical projection must be suppressed; stream should terminate \
+         on sender drop without re-emitting",
+    );
+}
+
 // Counterpart to the test above: when `current_leader` is set but the node id
 // isn't present in `membership_config.nodes()` (e.g. the leader was just
 // removed from the config), `resolve_leader` returns `None` and the Follower
