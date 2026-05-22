@@ -1,7 +1,7 @@
 <div align="center">
     <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/tsoracle-dark.svg">
-        <img alt="tsoracle" src="assets/tsoracle-light.svg" width="360">
+        <source media="(prefers-color-scheme: dark)" srcset="site/static/tsoracle-dark.svg">
+        <img alt="tsoracle" src="site/static/tsoracle-light.svg" width="360">
     </picture>
     <h4>
         Strictly monotonic timestamps in 🦀 Rust. Please ⭐ on <a href="https://github.com/prisma-risk/tsoracle">GitHub</a>!
