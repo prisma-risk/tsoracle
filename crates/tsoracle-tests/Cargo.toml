@@ -9,7 +9,9 @@ publish      = false
 description  = "Private integration-test crate. Hosts the end-to-end tests that exercise tsoracle-client against tsoracle-server (and vice versa) so neither lib needs a dev-dep on the other — releasing one no longer requires the other to already be on crates.io."
 
 [features]
-default = []
+default    = ["tls-rustls"]
+tls-rustls = ["tsoracle-server/tls-rustls", "tsoracle-client/tls-rustls"]
+tls-native = ["tsoracle-server/tls-native", "tsoracle-client/tls-native"]
 # Mirror tsoracle-server's `failpoints` feature so the failpoint-driven
 # integration tests can be opted in. `cargo test -p tsoracle-tests --features failpoints`.
 failpoints = ["tsoracle-server/failpoints", "dep:fail"]
@@ -37,3 +39,6 @@ required-features = ["failpoints"]
 
 [[test]]
 name = "server_serve_with_listener"
+
+[[test]]
+name = "client_tls"
