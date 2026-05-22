@@ -4,6 +4,21 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.1.2...tsoracle-client-v0.1.3) - 2026-05-22
+
+### Added
+
+- *(client)* add RetryPolicy with deadlines, keepalive, and jittered backoff ([#114](https://github.com/prisma-risk/tsoracle/pull/114))
+- tsoracle.rs marketing site ([#111](https://github.com/prisma-risk/tsoracle/pull/111))
+
+### Fixed
+
+- *(client)* reject plaintext leader-hint under tls_config ([#108](https://github.com/prisma-risk/tsoracle/pull/108))
+
+### Other
+
+- *(client,server)* close coverage gaps in TLS plumbing ([#83](https://github.com/prisma-risk/tsoracle/pull/83))
+
 ## [0.1.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.1.1...tsoracle-client-v0.1.2) - 2026-05-22
 
 ### Added

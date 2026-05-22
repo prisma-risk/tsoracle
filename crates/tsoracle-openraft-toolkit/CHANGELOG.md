@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.2...tsoracle-openraft-toolkit-v0.1.3) - 2026-05-22
+
+### Added
+
+- tsoracle.rs marketing site ([#111](https://github.com/prisma-risk/tsoracle/pull/111))
+
+### Fixed
+
+- *(openraft-toolkit)* dedup leadership_events by full value ([#117](https://github.com/prisma-risk/tsoracle/pull/117))
+
 ## [0.1.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.0...tsoracle-openraft-toolkit-v0.1.1) - 2026-05-21
 
 ### Other

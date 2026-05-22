@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.1.2...tsoracle-core-v0.1.3) - 2026-05-22
+
+### Added
+
+- tsoracle.rs marketing site ([#111](https://github.com/prisma-risk/tsoracle/pull/111))
+
+### Other
+
+- *(critical-path)* mark per-request and consensus files; drop shell lib.rs markers ([#113](https://github.com/prisma-risk/tsoracle/pull/113))
+
 ## [0.1.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.1.0...tsoracle-core-v0.1.1) - 2026-05-21
 
 ### Added
