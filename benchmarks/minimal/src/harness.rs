@@ -55,7 +55,8 @@ pub fn is_transient(err: &ClientError) -> bool {
         ClientError::NoReachableEndpoints
         | ClientError::InvalidEndpoint(_)
         | ClientError::InvalidCount(_)
-        | ClientError::Connector(_) => false,
+        | ClientError::Connector(_)
+        | ClientError::DriverGone => false,
     }
 }
 

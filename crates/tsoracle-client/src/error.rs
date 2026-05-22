@@ -24,6 +24,13 @@ pub enum ClientError {
     InvalidCount(u32),
     #[error("custom channel connector failed: {0}")]
     Connector(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+    /// Local driver task has terminated (typically a panic in the user-supplied
+    /// RPC closure) and can no longer serve requests. Distinct from
+    /// [`Self::NoReachableEndpoints`]: the network is fine, the in-process
+    /// driver is dead. Operators should look for a panic in their `tracing`
+    /// logs, not a network issue.
+    #[error("client driver task is gone; subsequent requests cannot be served by this Client")]
+    DriverGone,
 }
 
 #[cfg(test)]

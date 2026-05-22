@@ -105,7 +105,8 @@ pub(crate) fn should_backoff(error: &crate::error::ClientError) -> bool {
         ClientError::NoReachableEndpoints
         | ClientError::InvalidEndpoint(_)
         | ClientError::InvalidCount(_)
-        | ClientError::Connector(_) => false,
+        | ClientError::Connector(_)
+        | ClientError::DriverGone => false,
     }
 }
 
@@ -236,5 +237,10 @@ mod tests {
         assert!(!should_backoff(&ClientError::NoReachableEndpoints));
         assert!(!should_backoff(&ClientError::InvalidEndpoint("e".into())));
         assert!(!should_backoff(&ClientError::InvalidCount(0)));
+        // `DriverGone` is deterministic: the local driver task is dead,
+        // so retrying without sleeping wouldn't gain anything (every
+        // retry returns `DriverGone` immediately until the `Client` is
+        // rebuilt). Sleeping would just delay the inevitable.
+        assert!(!should_backoff(&ClientError::DriverGone));
     }
 }
