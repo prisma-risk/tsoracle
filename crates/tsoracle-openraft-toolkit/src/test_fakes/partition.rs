@@ -17,7 +17,8 @@
 
 use std::collections::HashSet;
 use std::hash::Hash;
-use std::sync::RwLock;
+
+use parking_lot::RwLock;
 
 /// Controls reachability between simulated cluster nodes for partition tests.
 ///
@@ -49,31 +50,31 @@ where
 
     /// Isolate `node`: every (node, *) and (*, node) edge becomes unreachable.
     pub fn isolate(&self, node: NodeId) {
-        self.isolated.write().unwrap().insert(node);
+        self.isolated.write().insert(node);
     }
 
     /// Restore `node`: removes the node-level block. Per-edge cuts still apply.
     pub fn heal(&self, node: NodeId) {
-        self.isolated.write().unwrap().remove(&node);
+        self.isolated.write().remove(&node);
     }
 
     /// Cut a single directed edge `from -> to`.
     pub fn cut_edge(&self, from: NodeId, to: NodeId) {
-        self.cut_edges.write().unwrap().insert((from, to));
+        self.cut_edges.write().insert((from, to));
     }
 
     /// Restore a previously cut directed edge.
     pub fn restore_edge(&self, from: NodeId, to: NodeId) {
-        self.cut_edges.write().unwrap().remove(&(from, to));
+        self.cut_edges.write().remove(&(from, to));
     }
 
     /// True iff neither endpoint is isolated and the directed edge is not cut.
     pub fn is_reachable(&self, from: NodeId, to: NodeId) -> bool {
-        let isolated = self.isolated.read().unwrap();
+        let isolated = self.isolated.read();
         if isolated.contains(&from) || isolated.contains(&to) {
             return false;
         }
-        !self.cut_edges.read().unwrap().contains(&(from, to))
+        !self.cut_edges.read().contains(&(from, to))
     }
 }
 
@@ -150,5 +151,50 @@ mod tests {
         let p = PartitionController::<u64>::default();
         assert!(p.is_reachable(1, 2));
         assert!(p.is_reachable(2, 1));
+    }
+
+    /// Regression: a panic that unwinds through a lock guard must not mask the
+    /// original failure on subsequent calls. With `std::sync::RwLock` the lock
+    /// would poison and every later operation would panic with `PoisonError`,
+    /// hiding the real cause — this test pins us to a non-poisoning lock.
+    #[test]
+    fn lock_does_not_poison_when_a_panic_occurs_inside_a_critical_section() {
+        use std::hash::{Hash, Hasher};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        // NodeId whose `Hash` impl panics for a sentinel value, triggering a
+        // panic from inside `HashSet::insert` — i.e., while the write guard
+        // returned by `RwLock::write()` is still alive.
+        #[derive(Clone, Copy, Eq)]
+        struct Node(u64);
+
+        impl PartialEq for Node {
+            fn eq(&self, other: &Self) -> bool {
+                self.0 == other.0
+            }
+        }
+
+        impl Hash for Node {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                assert_ne!(self.0, 0xDEAD, "simulated downstream panic inside hash()");
+                self.0.hash(state);
+            }
+        }
+
+        let p = PartitionController::<Node>::new();
+
+        // First call panics while the write guard is held.
+        let outcome = catch_unwind(AssertUnwindSafe(|| p.isolate(Node(0xDEAD))));
+        assert!(
+            outcome.is_err(),
+            "expected the simulated panic to propagate"
+        );
+
+        // With a poisoning lock these calls would re-panic with `PoisonError`,
+        // masking the original failure. parking_lot must leave the controller
+        // usable so the real panic is what gets reported.
+        p.isolate(Node(7));
+        assert!(!p.is_reachable(Node(7), Node(1)));
+        assert!(p.is_reachable(Node(1), Node(2)));
     }
 }

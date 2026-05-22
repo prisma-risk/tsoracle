@@ -20,7 +20,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default            = ["rocksdb-log-store"]
 rocksdb-log-store  = ["dep:rocksdb"]
-test-fakes         = []
+test-fakes         = ["dep:parking_lot"]
 failpoints         = ["dep:fail", "fail/failpoints"]
 
 [dependencies]
@@ -28,6 +28,7 @@ async-trait      = { workspace = true }
 postcard         = { workspace = true }
 futures          = { workspace = true }
 openraft         = { workspace = true }
+parking_lot      = { workspace = true, optional = true }
 rocksdb          = { workspace = true, optional = true, features = ["multi-threaded-cf"] }
 serde            = { workspace = true }
 thiserror        = { workspace = true }
