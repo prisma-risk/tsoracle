@@ -26,7 +26,7 @@ jobs:
           - snapshot_payload_decode
           - toolkit_codec_decode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install pinned nightly toolchain
         # The pin lives in fuzz/rust-toolchain.toml; this step installs the
@@ -50,7 +50,7 @@ jobs:
         # key would silently discard newly-discovered corpus entries).
         # restore-keys does prefix-match fallback to the most recent matching
         # entry; the last fallback line catches harness refactors.
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', format('fuzz/fuzz_targets/{0}.rs', matrix.target)) }}-${{ github.run_id }}
@@ -87,7 +87,7 @@ jobs:
 
       - name: Upload crash artifact
         if: failure() && steps.fuzz.outputs.exit_code != '0'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
           path: fuzz/artifacts/${{ matrix.target }}/
@@ -111,7 +111,7 @@ jobs:
 
       - name: Save working corpus (even on failure)
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', format('fuzz/fuzz_targets/{0}.rs', matrix.target)) }}-${{ github.run_id }}

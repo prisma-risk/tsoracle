@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install pinned nightly toolchain
         # Match the pin used by fuzz/rust-toolchain.toml so the two nightly
