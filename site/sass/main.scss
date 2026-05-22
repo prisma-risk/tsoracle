@@ -211,6 +211,7 @@ th {
 .site-nav a {
     color: var(--fg);
     border-bottom: none;
+    white-space: nowrap;
 }
 
 .site-nav a:hover { color: var(--accent); }
@@ -483,6 +484,11 @@ th {
     .hero { padding: 2rem 0 1rem; }
     h1 { font-size: 1.5rem; }
     h2 { font-size: 1.25rem; }
+}
+
+@media (max-width: 400px) {
+    .site-nav { gap: 0.7rem; }
+    .site-nav a[href="/how-it-works/"] { display: none; }
 }
 
 // Syntax highlighting retint -------------------------------------------------
