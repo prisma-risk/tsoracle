@@ -27,14 +27,15 @@ use openraft::async_runtime::watch::WatchReceiver;
 use openraft::{Config, Raft, SnapshotPolicy};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
-use tokio::time::{Instant, sleep};
+use tokio::sync::watch;
+use tokio::time::{Instant, sleep, timeout};
 use tracing::info;
 use tsoracle_client::Client as TsoClient;
 use tsoracle_core::Timestamp;
 use tsoracle_driver_openraft::OpenraftDriver;
 use tsoracle_openraft_toolkit::test_fakes::MemNetwork;
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
-use tsoracle_server::Server as TsoServer;
+use tsoracle_server::{Server as TsoServer, ServingState};
 
 use crate::host_service::{
     HostCommand, HostPeer, HostStateMachine, HostTypeConfig, KvOp, PiggybackHost,
@@ -49,6 +50,11 @@ struct Node {
     raft: Raft<HostTypeConfig, HostStateMachine>,
     sm: HostStateMachine,
     tso_port: u16,
+    /// Watch receiver for this node's `tsoracle-server` serving state. The
+    /// fence flips this to `Serving` only after `persist_high_water` has
+    /// committed and applied via raft, so a `Serving` observation is a
+    /// race-free signal that the SM's high-water reflects the new epoch.
+    serving_state_rx: watch::Receiver<ServingState>,
     /// `Some(_)` until we shut it down (for the failover step).
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     /// Holds the rocksdb dir open for the node's lifetime.
@@ -120,6 +126,7 @@ async fn build_cluster() -> anyhow::Result<(Vec<Node>, Arc<MemNetwork<HostTypeCo
         let host = PiggybackHost::new(raft.clone(), sm_for_host.clone());
         let driver = OpenraftDriver::new(host);
         let server = TsoServer::builder().consensus_driver(driver).build()?;
+        let serving_state_rx = server.state_rx.clone();
 
         // Bind on port 0 so the OS assigns a free port, avoiding conflicts when
         // the smoke test runs alongside other services or in parallel CI jobs.
@@ -140,6 +147,7 @@ async fn build_cluster() -> anyhow::Result<(Vec<Node>, Arc<MemNetwork<HostTypeCo
             raft,
             sm: sm_for_host,
             tso_port,
+            serving_state_rx,
             shutdown: Some(shutdown_tx),
             _log_dir: log_dir,
         });
@@ -349,19 +357,36 @@ pub async fn run_demo() -> anyhow::Result<DemoOutcome> {
     }?;
     println!("  new leader: node {new_leader_id}");
 
-    // Wait for the new leader's fence to fire.
-    let mut post_failover_high_water = 0u64;
-    let fence_deadline = Instant::now() + Duration::from_secs(5);
-    while post_failover_high_water <= pre_failover_high_water && Instant::now() < fence_deadline {
-        for survivor in &survivors {
-            if survivor.id == new_leader_id {
-                post_failover_high_water = survivor.sm.high_water().await;
+    // Wait for the new leader's fence to publish ServingState::Serving. The
+    // fence flips state_tx to Serving only after persist_high_water has
+    // committed and applied the bump via raft (fence.rs:91-108), so this is
+    // a race-free proof that the SM's high_water already reflects the new
+    // epoch — no SM polling required. The timeout is generous so a slow CI
+    // runner doesn't trip on the raft round-trips inside the fence.
+    let new_leader_node: &Node = survivors
+        .iter()
+        .copied()
+        .find(|n| n.id == new_leader_id)
+        .context("new leader missing from survivors")?;
+    let mut serving_rx = new_leader_node.serving_state_rx.clone();
+    let fence_timeout = Duration::from_secs(10);
+    timeout(fence_timeout, async {
+        loop {
+            if matches!(*serving_rx.borrow_and_update(), ServingState::Serving) {
+                return Ok::<(), anyhow::Error>(());
             }
+            serving_rx
+                .changed()
+                .await
+                .context("new leader's serving-state stream closed before reaching Serving")?;
         }
-        if post_failover_high_water <= pre_failover_high_water {
-            sleep(Duration::from_millis(25)).await;
-        }
-    }
+    })
+    .await
+    .with_context(|| {
+        format!("node {new_leader_id} did not reach Serving within {fence_timeout:?}")
+    })??;
+
+    let post_failover_high_water = new_leader_node.sm.high_water().await;
     println!("  post-failover high-water: {post_failover_high_water}");
     assert!(
         post_failover_high_water > pre_failover_high_water,
@@ -369,9 +394,9 @@ pub async fn run_demo() -> anyhow::Result<DemoOutcome> {
     );
 
     // Issue one more GetTs through the client; should land on the new leader.
-    // The new leader's tsoracle server transitions to Serving shortly after the
-    // SM high-water advance we polled above; retry with backoff to bridge that
-    // small window.
+    // The server is already Serving (we waited above), but the client may have
+    // cached the dead leader's endpoint and need a LeaderHint redirect on the
+    // first attempt; retry with backoff to bridge that small window.
     let post_failover_first_ts = {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
