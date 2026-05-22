@@ -1,7 +1,7 @@
 +++
 title = "When you need a TSO (and when you don't)"
 description = "A decision framework for picking a distributed ID strategy. Most systems do not need a timestamp oracle. The ones that do can't substitute anything weaker. This post walks through the cases on both sides and shows where TSOs, HLCs, database sequences, UUIDv7, and Snowflake-style IDs each belong on the cost/correctness frontier."
-date = 2026-05-23
+weight = 3
 [taxonomies]
 tags = ["distributed-systems", "tso", "ids", "decisions"]
 +++

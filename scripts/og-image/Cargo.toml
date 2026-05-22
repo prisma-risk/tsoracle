@@ -6,6 +6,7 @@ version     = "0.1.0"
 edition     = "2021"
 publish     = false
 description = "Generates social-card og:image PNGs for tsoracle.rs."
+default-run = "tsoracle-og-image"
 
 [[bin]]
 name = "tsoracle-og-image"

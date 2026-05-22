@@ -21,8 +21,8 @@
         {
             "@type": "BlogPosting",
             "headline": {{ page.title | json_encode | safe }},
-            "url": {{ page.permalink | json_encode | safe }},
-            "datePublished": "{{ page.date | date(format='%Y-%m-%d') }}"
+            "url": {{ page.permalink | json_encode | safe }}{% if page.date %},
+            "datePublished": "{{ page.date | date(format='%Y-%m-%d') }}"{% endif %}
         }{% if not loop.last %},{% endif %}
         {% endfor %}
     ]
@@ -42,7 +42,7 @@
         <li>
             <a class="post-title" href="{{ page.permalink }}">{{ page.title }}</a>
             <div class="post-meta">
-                <span class="post-meta__date">{{ page.date | date(format="%Y-%m-%d") }}</span>
+                {% if page.date %}<span class="post-meta__date">{{ page.date | date(format="%Y-%m-%d") }}</span>{% endif %}
                 <span class="post-meta__reading-time">{{ page.reading_time }} min read</span>
                 {% if page.taxonomies.tags %}
                 <ul class="post-meta__tags" aria-label="Tags">

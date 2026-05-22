@@ -1,7 +1,7 @@
 +++
 title = "Why distributed systems need a timestamp oracle"
 description = "Cross-machine event ordering is one of the foundational problems in distributed systems. Wall clocks don't solve it, database sequences don't scale, and consensus algorithms only get you partway. Here's what a timestamp oracle is, why Spanner / CockroachDB / FoundationDB all use one internally, and when you should reach for one yourself."
-date = 2026-05-21
+weight = 1
 [taxonomies]
 tags = ["distributed-systems", "tso", "ordering"]
 +++

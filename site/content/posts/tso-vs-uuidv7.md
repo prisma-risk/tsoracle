@@ -1,7 +1,7 @@
 +++
 title = "TSO vs UUIDv7"
 description = "UUIDv7 and a timestamp oracle solve overlapping problems with very different tradeoffs. UUIDv7 is locally generated and k-sortable. A TSO is globally strictly monotonic. This post is an honest comparison — when each is correct, where UUIDv7 silently fails to meet a requirement, and a decision tree for picking."
-date = 2026-05-22
+weight = 2
 [taxonomies]
 tags = ["distributed-systems", "tso", "uuidv7", "ids"]
 +++

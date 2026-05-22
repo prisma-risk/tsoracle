@@ -19,7 +19,7 @@
         <li>
             <a class="post-title" href="{{ page.permalink }}">{{ page.title }}</a>
             <div class="post-meta">
-                <span class="post-meta__date">{{ page.date | date(format="%Y-%m-%d") }}</span>
+                {% if page.date %}<span class="post-meta__date">{{ page.date | date(format="%Y-%m-%d") }}</span>{% endif %}
                 <span class="post-meta__reading-time">{{ page.reading_time }} min read</span>
             </div>
             {% if page.description %}
