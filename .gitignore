@@ -21,3 +21,6 @@ flamegraph.svg
 # (subdirectories, generated artifacts, scratch files).
 docs/*
 !docs/*.md
+
+# Zola site build output
+site/public/

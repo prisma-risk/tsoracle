@@ -1,0 +1,27 @@
+base_url = "https://tsoracle.rs"
+title = "tsoracle"
+description = "Strictly monotonic timestamps in Rust. Distributed, raft-replicated, embeddable."
+default_language = "en"
+compile_sass = true
+build_search_index = false
+generate_feeds = true
+feed_filenames = ["rss.xml"]
+minify_html = true
+
+taxonomies = [
+    { name = "tags", feed = false },
+]
+
+[markdown]
+external_links_target_blank = true
+external_links_no_referrer = true
+external_links_no_follow = false
+smart_punctuation = true
+render_emoji = false
+bottom_footnotes = true
+
+[extra]
+github_url = "https://github.com/prisma-risk/tsoracle"
+crates_url = "https://crates.io/crates/tsoracle"
+docsrs_url = "https://docs.rs/tsoracle-server"
+deepwiki_url = "https://deepwiki.com/prisma-risk/tsoracle"
