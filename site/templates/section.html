@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}{{ section.title }} — tsoracle{% endblock %}
+{% block description %}{{ section.description | default(value="Long-form posts on distributed timestamps, monotonic ordering, and tsoracle internals.") }}{% endblock %}
+{% block og_title %}{{ section.title }} — tsoracle{% endblock %}
+{% block og_description %}{{ section.description | default(value="Long-form posts on distributed timestamps, monotonic ordering, and tsoracle internals.") }}{% endblock %}
+{% block twitter_title %}{{ section.title }} — tsoracle{% endblock %}
+{% block twitter_description %}{{ section.description | default(value="Long-form posts on distributed timestamps, monotonic ordering, and tsoracle internals.") }}{% endblock %}
+
+{% block content %}
+<section class="container">
+    <header class="post-header">
+        <h1 class="post-header__title">{{ section.title }}</h1>
+    </header>
+
+    <ul class="posts-list">
+        {% for page in section.pages %}
+        <li>
+            <a class="post-title" href="{{ page.permalink }}">{{ page.title }}</a>
+            <span class="post-date">{{ page.date | date(format="%Y-%m-%d") }}</span>
+            {% if page.description %}
+            <p class="post-excerpt">{{ page.description }}</p>
+            {% endif %}
+        </li>
+        {% else %}
+        <li><p class="post-excerpt">No posts yet.</p></li>
+        {% endfor %}
+    </ul>
+</section>
+{% endblock %}
