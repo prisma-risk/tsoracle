@@ -8,10 +8,11 @@
 [![Crates.io](https://img.shields.io/crates/v/tsoracle-server.svg)](https://crates.io/crates/tsoracle-server)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-tsoracle-blue.svg)](https://deepwiki.com/prisma-risk/tsoracle)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
-<br/>
-[![CI](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml/badge.svg)](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml)
-[![Coverage Status](https://coveralls.io/repos/github/prisma-risk/tsoracle/badge.svg?branch=main)](https://coveralls.io/github/prisma-risk/tsoracle?branch=main)
 ![Crates.io](https://img.shields.io/crates/d/tsoracle-core.svg)
+<br/>
+[![CI](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml)
+[![stress](https://github.com/prisma-risk/tsoracle/actions/workflows/stress-nightly.yml/badge.svg?branch=main)](https://github.com/prisma-risk/tsoracle/actions/workflows/stress-nightly.yml)
+[![Coverage Status](https://coveralls.io/repos/github/prisma-risk/tsoracle/badge.svg?branch=main)](https://coveralls.io/github/prisma-risk/tsoracle?branch=main)
     
 </div>
 
