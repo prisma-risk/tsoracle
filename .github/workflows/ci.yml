@@ -60,6 +60,13 @@ jobs:
       - name: guard
         run: CRITICAL_PATH_STRICT=1 ./scripts/check-critical-path.sh
 
+  header-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: guard
+        run: python3 scripts/check-ts-header.py
+
   coverage:
     runs-on: ubuntu-latest
     steps:
