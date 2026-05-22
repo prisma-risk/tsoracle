@@ -16,6 +16,22 @@
 //! `http://host:port` or `https://host:port` depending on whether a TLS
 //! transport is configured; explicit schemes are always preserved.
 
+use std::future::Future;
+use std::pin::Pin;
+use tonic::transport::Channel;
+
+use crate::error::ClientError;
+
+/// Boxed error returned by user-supplied connector closures.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// Stored channel-construction strategy, shared by the built-in TLS path
+/// and any user-supplied closure. Errors are normalized to `ClientError`
+/// before storage so the pool's execution path is a single `await?`.
+pub(crate) type ChannelConnector = dyn Fn(&str) -> Pin<Box<dyn Future<Output = Result<Channel, ClientError>> + Send>>
+    + Send
+    + Sync;
+
 /// Apply the scheme rule to an endpoint string.
 ///
 /// - Explicit `http://...` and `https://...` are returned verbatim.
@@ -25,7 +41,6 @@
 /// "Explicit beats configured" is universal: callers wanting plaintext on a
 /// per-endpoint basis even when a TLS transport is configured can pass
 /// `http://host:port` and the rule returns it untouched.
-#[allow(dead_code)]
 pub(crate) fn normalize_uri(endpoint: &str, tls: bool) -> String {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()

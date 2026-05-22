@@ -36,14 +36,19 @@ pub struct ChannelPool {
     configured: Vec<String>,
     channels: Mutex<HashMap<String, Channel>>,
     leader: Mutex<Option<String>>,
+    connector: Option<std::sync::Arc<crate::transport::ChannelConnector>>,
 }
 
 impl ChannelPool {
-    pub fn new(endpoints: Vec<String>) -> Self {
+    pub fn new(
+        endpoints: Vec<String>,
+        connector: Option<std::sync::Arc<crate::transport::ChannelConnector>>,
+    ) -> Self {
         ChannelPool {
             configured: endpoints,
             channels: Mutex::new(HashMap::new()),
             leader: Mutex::new(None),
+            connector,
         }
     }
 
@@ -64,15 +69,16 @@ impl ChannelPool {
         if let Some(channel) = self.channels.lock().get(endpoint).cloned() {
             return Ok(TsoServiceClient::new(channel));
         }
-        let uri = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-            endpoint.to_string()
-        } else {
-            format!("http://{endpoint}")
+        let channel = match &self.connector {
+            Some(connector) => connector(endpoint).await?,
+            None => {
+                let uri = crate::transport::normalize_uri(endpoint, false);
+                let transport_endpoint: Endpoint = uri
+                    .parse()
+                    .map_err(|_| ClientError::InvalidEndpoint(endpoint.into()))?;
+                transport_endpoint.connect().await?
+            }
         };
-        let transport_endpoint: Endpoint = uri
-            .parse()
-            .map_err(|_| ClientError::InvalidEndpoint(endpoint.into()))?;
-        let channel = transport_endpoint.connect().await?;
         self.channels
             .lock()
             .insert(endpoint.to_string(), channel.clone());
@@ -97,10 +103,12 @@ impl ChannelPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn iter_starts_with_cached_leader() {
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()]);
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()], None);
         pool.set_leader("b:1".into());
         let order = pool.iter_round_robin();
         assert_eq!(order, vec!["b:1", "a:1", "c:1"]);
@@ -108,20 +116,76 @@ mod tests {
 
     #[test]
     fn iter_without_cache_is_configured_order() {
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()]);
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()], None);
         let order = pool.iter_round_robin();
         assert_eq!(order, vec!["a:1", "b:1", "c:1"]);
     }
 
     #[test]
     fn clear_leader_drops_cached_leader() {
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()]);
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None);
         pool.set_leader("b:1".into());
         assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
         pool.clear_leader();
-        assert!(pool.cached_leader().is_none());
         // With the cache cleared, round-robin order falls back to the
         // configured order — the cleared leader is not re-prepended.
+        assert!(pool.cached_leader().is_none());
         assert_eq!(pool.iter_round_robin(), vec!["a:1", "b:1"]);
+    }
+
+    #[tokio::test]
+    async fn pool_with_custom_connector_invokes_closure_per_endpoint() {
+        let captured = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let captured_for_closure = captured.clone();
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(move |endpoint: &str| {
+            captured_for_closure.lock().push(endpoint.to_string());
+            let endpoint_owned = endpoint.to_string();
+            Box::pin(async move { Err(crate::error::ClientError::InvalidEndpoint(endpoint_owned)) })
+        });
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], Some(connector));
+        let _ = pool.client("a:1").await;
+        let _ = pool.client("b:1").await;
+        let seen = captured.lock().clone();
+        assert_eq!(seen, vec!["a:1".to_string(), "b:1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn pool_caches_channel_from_custom_connector() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_for_closure = call_count.clone();
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let n = call_count_for_closure.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(n, 0, "connector must only be invoked once per endpoint");
+                Box::pin(async {
+                    let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
+                        .connect_lazy();
+                    Ok(channel)
+                })
+            });
+        let pool = ChannelPool::new(vec!["a:1".into()], Some(connector));
+        let _ = pool
+            .client("a:1")
+            .await
+            .expect("first client() must succeed");
+        let _ = pool
+            .client("a:1")
+            .await
+            .expect("second client() must hit cache");
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn leader_hint_endpoint_goes_through_same_connector() {
+        let captured = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let captured_for_closure = captured.clone();
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(move |endpoint: &str| {
+            captured_for_closure.lock().push(endpoint.to_string());
+            Box::pin(async { Err(crate::error::ClientError::InvalidEndpoint("x".into())) })
+        });
+        let pool = ChannelPool::new(vec!["a:1".into()], Some(connector));
+        let _ = pool.client("hinted:1").await;
+        let seen = captured.lock().clone();
+        assert_eq!(seen, vec!["hinted:1".to_string()]);
     }
 }

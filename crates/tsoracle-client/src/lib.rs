@@ -29,6 +29,7 @@ mod retry;
 mod transport;
 
 pub use error::ClientError;
+pub use transport::BoxError;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,7 +65,7 @@ impl ClientBuilder {
         if self.endpoints.is_empty() {
             return Err(ClientError::NoReachableEndpoints);
         }
-        let pool = Arc::new(ChannelPool::new(self.endpoints));
+        let pool = Arc::new(ChannelPool::new(self.endpoints, None));
         let pool_for_rpc = pool.clone();
         let driver = driver::Driver::spawn(
             move |count| {
