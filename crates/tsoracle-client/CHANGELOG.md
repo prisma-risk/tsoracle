@@ -4,6 +4,27 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.1.2...tsoracle-client-v0.1.3) - 2026-05-22
+
+### Added
+
+- *(client)* instrument retry, driver, and connect signals ([#116](https://github.com/prisma-risk/tsoracle/pull/116))
+- add opt-in bt cargo feature for error backtraces ([#120](https://github.com/prisma-risk/tsoracle/pull/120))
+- *(client)* add RetryPolicy with deadlines, keepalive, and jittered backoff ([#114](https://github.com/prisma-risk/tsoracle/pull/114))
+- tsoracle.rs marketing site ([#111](https://github.com/prisma-risk/tsoracle/pull/111))
+
+### Fixed
+
+- *(client)* honor LeaderHint.leader_epoch and TTL the cached leader ([#126](https://github.com/prisma-risk/tsoracle/pull/126))
+- *(client)* surface driver-task death as DriverGone ([#118](https://github.com/prisma-risk/tsoracle/pull/118))
+- *(client)* bound coalescing driver waiters and stream chunk delivery ([#115](https://github.com/prisma-risk/tsoracle/pull/115))
+- *(client)* reject plaintext leader-hint under tls_config ([#108](https://github.com/prisma-risk/tsoracle/pull/108))
+
+### Other
+
+- *(client)* dedupe MAX_TIMESTAMPS_PER_RPC into lib.rs ([#122](https://github.com/prisma-risk/tsoracle/pull/122))
+- *(client,server)* close coverage gaps in TLS plumbing ([#83](https://github.com/prisma-risk/tsoracle/pull/83))
+
 ## [0.1.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.1.1...tsoracle-client-v0.1.2) - 2026-05-22
 
 ### Added

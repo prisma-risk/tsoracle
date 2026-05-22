@@ -9,9 +9,9 @@ description            = "tsoracle example: embed the server with the metrics fe
 publish                = false
 
 [dependencies]
-tsoracle-server      = { path = "../../crates/tsoracle-server", version = "0.1.2", features = ["metrics"] }
-tsoracle-driver-file = { path = "../../crates/tsoracle-driver-file", version = "0.1.1" }
-tsoracle-client      = { path = "../../crates/tsoracle-client", version = "0.1.2" }
+tsoracle-server      = { path = "../../crates/tsoracle-server", version = "0.1.3", features = ["metrics"] }
+tsoracle-driver-file = { path = "../../crates/tsoracle-driver-file", version = "0.1.3" }
+tsoracle-client      = { path = "../../crates/tsoracle-client", version = "0.1.3" }
 metrics-exporter-prometheus = { workspace = true }
 tokio                = { workspace = true, features = ["signal"] }
 tracing              = { workspace = true }
