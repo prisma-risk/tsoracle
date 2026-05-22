@@ -136,42 +136,57 @@ async fn first_chunk_delivers_before_slow_second_chunk_e2e() {
     driver.stall_from(baseline_persist_calls + 1);
 
     // Each request is at the per-RPC cap, so `chunk_queue` produces one
-    // chunk per waiter — exactly the shape this test needs.
-    let first = {
+    // chunk per waiter — exactly the shape this test needs. The client
+    // driver assigns waiters to chunks in mpsc-arrival order, which is
+    // independent of `tokio::spawn` order under multi-threaded scheduling
+    // (the gap widens further under coverage instrumentation). Identify
+    // the chunk-1 (allowed) vs chunk-2 (stalled) batch by completion order
+    // rather than by spawn name so this test is not racy.
+    let count = LOGICAL_MAX + 1;
+    let handle_a = {
         let client = client.clone();
-        tokio::spawn(async move { client.get_ts_batch(LOGICAL_MAX + 1).await })
+        tokio::spawn(async move { client.get_ts_batch(count).await })
     };
-    let second = {
+    let handle_b = {
         let client = client.clone();
-        tokio::spawn(async move { client.get_ts_batch(LOGICAL_MAX + 1).await })
+        tokio::spawn(async move { client.get_ts_batch(count).await })
     };
 
-    // `first` must complete promptly. If the driver accumulated both
-    // chunks' responses before delivering, `first` would block on the
-    // stalled second chunk and this timeout would fire.
-    let first_timestamps = timeout(Duration::from_secs(5), first)
-        .await
-        .expect("first chunk must deliver before the stalled second chunk")
+    // Exactly one batch's RPC corresponds to the chunk whose persist was
+    // allowed (`baseline`); that batch must arrive promptly. If the driver
+    // accumulated both chunks' responses before delivering, neither would
+    // resolve until release and this timeout would fire.
+    let outcome = timeout(
+        Duration::from_secs(5),
+        futures::future::select(handle_a, handle_b),
+    )
+    .await
+    .expect("the chunk-1 batch must deliver before the stalled chunk-2 batch");
+    let (early_join, mut stalled_handle) = match outcome {
+        futures::future::Either::Left((joined, other))
+        | futures::future::Either::Right((joined, other)) => (joined, other),
+    };
+    let early_timestamps = early_join
         .expect("join")
-        .expect("first batch must succeed");
-    assert_eq!(first_timestamps.len(), (LOGICAL_MAX + 1) as usize);
+        .expect("chunk-1 batch must succeed");
+    assert_eq!(early_timestamps.len(), count as usize);
 
-    // The second caller is still waiting on the stalled persist call —
+    // The chunk-2 caller is still waiting on the stalled persist call —
     // give the runtime a beat to be sure no spurious wake landed and then
     // observe the JoinHandle is not finished.
     sleep(Duration::from_millis(100)).await;
     assert!(
-        !second.is_finished(),
-        "second caller must remain pending while its chunk's persist is stalled",
+        !stalled_handle.is_finished(),
+        "chunk-2 caller must remain pending while its chunk's persist is stalled",
     );
 
     driver.release();
-    let second_timestamps = timeout(Duration::from_secs(5), second)
+    let stalled_timestamps = timeout(Duration::from_secs(5), &mut stalled_handle)
         .await
-        .expect("second chunk must complete after release")
+        .expect("chunk-2 batch must complete after release")
         .expect("join")
-        .expect("second batch must succeed");
-    assert_eq!(second_timestamps.len(), (LOGICAL_MAX + 1) as usize);
+        .expect("chunk-2 batch must succeed");
+    assert_eq!(stalled_timestamps.len(), count as usize);
 
     booted.shutdown().await.unwrap();
 }
