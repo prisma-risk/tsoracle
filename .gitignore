@@ -7,6 +7,7 @@ Cargo.lock.bak
 .DS_Store
 /examples/openraft-cluster/.data/
 /examples/embedded-server/tsoracle-embedded-data/
+/examples/metrics-prometheus/tsoracle-prometheus-data/
 /lcov.info
 
 # bench-minimal flamegraph artifacts (written to CWD by the bench binary

@@ -13,6 +13,7 @@ members  = [
     "crates/tsoracle-tests",
     "examples/embedded-server",
     "examples/failover-demo",
+    "examples/metrics-prometheus",
     "examples/openraft-piggyback",
     "examples/openraft-standalone",
     "benchmarks/minimal",
@@ -58,6 +59,7 @@ humantime          = "2"
 humantime-serde    = "1"
 husky-rs           = "0.3"
 metrics            = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 metrics-util       = "0.19"
 nix                = { version = "0.30", default-features = false, features = ["signal", "process"] }
 parking_lot        = "0.12"
