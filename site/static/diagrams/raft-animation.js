@@ -59,7 +59,7 @@ export default function init(figure) {
             .attr('dominant-baseline', 'middle')
             .attr('fill', fg)
             .attr('font-family', 'JetBrainsMono, ui-monospace, monospace')
-            .attr('font-size', 14)
+            .attr('font-size', 16)
             .attr('font-weight', 700)
             .style('transition', 'fill 250ms ease')
             .text(name);
@@ -72,10 +72,10 @@ export default function init(figure) {
         .attr('text-anchor', 'middle')
         .attr('fill', fg)
         .attr('font-family', 'JetBrainsMono, ui-monospace, monospace')
-        .attr('font-size', 14);
+        .attr('font-size', 16);
 
-    const annotationMaxWidth = 660;
-    const annotationCharsPerLine = 78;
+    const annotationMaxWidth = 680;
+    const annotationCharsPerLine = 68;
 
     function setAnnotationText(text) {
         annotationText.selectAll('tspan').remove();
@@ -95,7 +95,7 @@ export default function init(figure) {
         if (currentLine) lines.push(currentLine);
 
         // Position the block so the last line lands above the progress bar.
-        const lineHeight = 18;
+        const lineHeight = 26;
         const blockHeight = lines.length * lineHeight;
         const startY = height - 60 - blockHeight + lineHeight;
         lines.forEach(function (line, i) {
@@ -106,18 +106,15 @@ export default function init(figure) {
         });
     }
 
-    // State table (top-right corner)
-    const tableX = width - 200;
-    const tableY = 24;
-    const tableGroup = svg.append('g').attr('class', 'term-table');
-    const tableBg = tableGroup.append('rect')
-        .attr('x', tableX - 12).attr('y', tableY - 18)
-        .attr('width', 180).attr('height', 140)
-        .attr('fill', codeBg)
-        .attr('stroke', ruleColor)
-        .attr('stroke-width', 1)
-        .attr('rx', 2);
-    const tableRows = tableGroup.append('g').attr('class', 'table-rows');
+    // Term indicator (top-right corner). Just the current term number.
+    const termGroup = svg.append('g').attr('class', 'term-indicator');
+    const termLabel = termGroup.append('text')
+        .attr('x', width - 30).attr('y', 38)
+        .attr('text-anchor', 'end')
+        .attr('fill', fgDim)
+        .attr('font-family', 'JetBrainsMono, ui-monospace, monospace')
+        .attr('font-size', 14)
+        .attr('font-weight', 700);
 
     // Cluster state tracking — declared up-front because applyState references them
     // before the simulation loop runs, when initializing default node states.
@@ -201,66 +198,7 @@ export default function init(figure) {
     }
 
     function renderTermTable() {
-        tableRows.selectAll('*').remove();
-
-        const rows = [];
-        rows.push({ label: 'term:', value: String(currentTerm), accent: true });
-
-        let leader = null;
-        const candidates = [];
-        const followers = [];
-        const down = [];
-        data.nodes.forEach(function (name) {
-            const state = nodeStateMap[name] || 'follower';
-            if (state === 'leader') leader = name;
-            else if (state === 'candidate') candidates.push(name);
-            else if (state === 'down') down.push(name);
-            else followers.push(name);
-        });
-
-        if (leader) {
-            rows.push({ label: 'leader:', value: leader });
-            if (followers.length > 0) rows.push({ label: 'followers:', value: followers.join(', ') });
-            if (down.length > 0) rows.push({ label: 'down:', value: down.join(', ') });
-        } else if (candidates.length > 0) {
-            rows.push({ label: 'election', value: '' });
-            rows.push({ label: 'candidates:', value: candidates.join(', ') });
-            if (currentVotes.length > 0) {
-                rows.push({ label: 'votes:', value: '' });
-                currentVotes.forEach(function (vote) {
-                    rows.push({ label: '  ' + vote.voter, value: '→ ' + vote.candidate, indented: true });
-                });
-            }
-        } else {
-            rows.push({ label: 'no leader', value: '' });
-        }
-
-        const rowHeight = 18;
-        let y = tableY;
-        rows.forEach(function (row, i) {
-            const isHeader = i === 0;
-            const g = tableRows.append('g').attr('transform', `translate(${tableX}, ${y})`);
-            g.append('text')
-                .attr('fill', row.accent ? accent : fgDim)
-                .attr('font-family', 'JetBrainsMono, ui-monospace, monospace')
-                .attr('font-size', isHeader ? 12 : 11)
-                .attr('font-weight', isHeader || row.accent ? 700 : 400)
-                .text(row.label);
-            if (row.value) {
-                g.append('text')
-                    .attr('x', 85)
-                    .attr('fill', fg)
-                    .attr('font-family', 'JetBrainsMono, ui-monospace, monospace')
-                    .attr('font-size', isHeader ? 12 : 11)
-                    .attr('font-weight', isHeader || row.accent ? 700 : 400)
-                    .text(row.value);
-            }
-            y += rowHeight + (isHeader ? 2 : 0);
-        });
-
-        // Resize background to fit content
-        const totalHeight = (rows.length * rowHeight) + 16;
-        tableBg.attr('height', totalHeight);
+        termLabel.text('term: ' + currentTerm);
     }
 
     function reset() {
