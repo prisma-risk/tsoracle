@@ -1,3 +1,15 @@
+//
+//  ░▀█▀░█▀▀░█▀█░█▀▄░█▀█░█▀▀░█░░░█▀▀
+//  ░░█░░▀▀█░█░█░█▀▄░█▀█░█░░░█░░░█▀▀
+//  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀
+//
+//  tsoracle — Distributed Timestamp Oracle
+//
+//  Copyright (c) 2026 Prisma Risk
+//  Licensed under the Apache License, Version 2.0
+//  https://github.com/prisma-risk/tsoracle
+//
+
 //! Shared test scaffolding for `tsoracle-driver-openraft` integration tests.
 //!
 //! Each `tests/*.rs` declares `mod common;` and imports via `use common::*;`.

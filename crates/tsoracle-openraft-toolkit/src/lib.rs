@@ -1,3 +1,15 @@
+//
+//  ░▀█▀░█▀▀░█▀█░█▀▄░█▀█░█▀▀░█░░░█▀▀
+//  ░░█░░▀▀█░█░█░█▀▄░█▀█░█░░░█░░░█▀▀
+//  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀
+//
+//  tsoracle — Distributed Timestamp Oracle
+//
+//  Copyright (c) 2026 Prisma Risk
+//  Licensed under the Apache License, Version 2.0
+//  https://github.com/prisma-risk/tsoracle
+//
+
 #![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 // Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint

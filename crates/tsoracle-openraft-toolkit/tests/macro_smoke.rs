@@ -1,3 +1,15 @@
+//
+//  ░▀█▀░█▀▀░█▀█░█▀▄░█▀█░█▀▀░█░░░█▀▀
+//  ░░█░░▀▀█░█░█░█▀▄░█▀█░█░░░█░░░█▀▀
+//  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀
+//
+//  tsoracle — Distributed Timestamp Oracle
+//
+//  Copyright (c) 2026 Prisma Risk
+//  Licensed under the Apache License, Version 2.0
+//  https://github.com/prisma-risk/tsoracle
+//
+
 //! Smoke test for `declare_raft_types_ext!`: the macro must produce a type
 //! that satisfies `openraft::RaftTypeConfig` with the minimum-required four
 //! slots filled in.

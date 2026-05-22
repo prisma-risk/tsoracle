@@ -1,3 +1,15 @@
+//
+//  ░▀█▀░█▀▀░█▀█░█▀▄░█▀█░█▀▀░█░░░█▀▀
+//  ░░█░░▀▀█░█░█░█▀▄░█▀█░█░░░█░░░█▀▀
+//  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀
+//
+//  tsoracle — Distributed Timestamp Oracle
+//
+//  Copyright (c) 2026 Prisma Risk
+//  Licensed under the Apache License, Version 2.0
+//  https://github.com/prisma-risk/tsoracle
+//
+
 //! Bootstrap helpers for integration tests that spin up a [`crate::Server`]
 //! on `127.0.0.1:0`, drive it to a known state, and tear it down explicitly.
 //!

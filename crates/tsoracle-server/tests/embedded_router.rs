@@ -1,3 +1,15 @@
+//
+//  ░▀█▀░█▀▀░█▀█░█▀▄░█▀█░█▀▀░█░░░█▀▀
+//  ░░█░░▀▀█░█░█░█▀▄░█▀█░█░░░█░░░█▀▀
+//  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀
+//
+//  tsoracle — Distributed Timestamp Oracle
+//
+//  Copyright (c) 2026 Prisma Risk
+//  Licensed under the Apache License, Version 2.0
+//  https://github.com/prisma-risk/tsoracle
+//
+
 use std::{sync::Arc, time::Duration};
 use tsoracle_core::Epoch;
 use tsoracle_proto::v1::{GetTsRequest, tso_service_client::TsoServiceClient};
