@@ -1,5 +1,109 @@
 {% extends "base.html" %}
+
+{% block title %}tsoracle — strictly monotonic timestamps in Rust{% endblock %}
+{% block description %}tsoracle is a distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering.{% endblock %}
+{% block og_title %}tsoracle — strictly monotonic timestamps in Rust{% endblock %}
+{% block og_description %}tsoracle is a distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering.{% endblock %}
+{% block twitter_title %}tsoracle — strictly monotonic timestamps in Rust{% endblock %}
+{% block twitter_description %}tsoracle is a distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering.{% endblock %}
+
 {% block content %}
-<h1>Hello tsoracle</h1>
-<p>{{ section.content | safe }}</p>
+
+<section class="hero container-wide">
+<pre class="hero-box">┌─ tsoracle ────────────────────────────────────────┐
+│                                                   │
+│   Strictly monotonic timestamps in Rust.          │
+│                                                   │
+│   Distributed, raft-replicated, embeddable.       │
+│                                                   │
+└───────────────────────────────────────────────────┘</pre>
+
+    <div class="hero-install">
+        <pre>$ cargo install tsoracle
+$ tsoracle serve</pre>
+    </div>
+
+    <div class="cta-group">
+        <a class="cta" href="#get-started">Get started →</a>
+        <a class="cta" href="{{ config.extra.github_url }}">GitHub →</a>
+    </div>
+</section>
+
+<section class="landing-section container-wide">
+    <div class="landing-section__rule">── Features ──</div>
+    <div class="features">
+        <div class="feature">
+            <div class="feature__head">Strictly monotonic</div>
+            <p class="feature__body">Every issued timestamp is strictly greater than every previously issued one. No duplicates, no regression — ever.</p>
+        </div>
+        <div class="feature">
+            <div class="feature__head">Crash-safe</div>
+            <p class="feature__body">Window state is fsync'd before any timestamp in that window is handed out. A restart never rewinds.</p>
+        </div>
+        <div class="feature">
+            <div class="feature__head">Pluggable consensus</div>
+            <p class="feature__body">Production-ready openraft driver included. Implement one trait to back tsoracle with raft-rs, etcd, or your own log.</p>
+        </div>
+        <div class="feature">
+            <div class="feature__head">gRPC client included</div>
+            <p class="feature__body">Leader discovery, request coalescing, reconnection — handled. Just call <code>get_ts()</code>.</p>
+        </div>
+    </div>
+</section>
+
+<section class="landing-section container">
+    <div class="landing-section__rule">── What's a TSO? ──</div>
+    <p>A <em>timestamp oracle</em> is a service that hands out strictly increasing integer IDs which order events across a distributed system. You reach for one when you're building a database with MVCC, merging change-data from many shards, or maintaining audit logs with a real happens-before relation across machines.</p>
+    <p>Per-host wall clocks aren't monotonic enough. Database sequences don't scale across shards. A TSO is the canonical answer — and the one Spanner, CockroachDB, and FoundationDB all use internally.</p>
+    <p>→ <a href="/posts/why-distributed-systems-need-a-tso/">Read: Why distributed systems need a TSO</a></p>
+</section>
+
+<section class="landing-section container-wide" id="get-started">
+    <div class="landing-section__rule">── Get started ──</div>
+    <div class="code-cols">
+<pre><code>$ cargo install tsoracle
+$ tsoracle serve
+
+# Listens on 127.0.0.1:50551
+# Persists state to ./tsoracle-data/</code></pre>
+<pre><code>use tsoracle_client::Client;
+
+let client = Client::connect(
+    vec!["http://127.0.0.1:50551".into()]
+).await?;
+
+let ts = client.get_ts().await?;
+let batch = client.get_ts_batch(64).await?;</code></pre>
+    </div>
+    <p>Want to embed the server in your own binary instead? See the <a href="{{ config.extra.github_url }}/tree/main/examples/embedded-server">embedded-server example</a>.</p>
+</section>
+
+<section class="landing-section container">
+    <div class="landing-section__rule">── Hardening ──</div>
+    <p>tsoracle is tested with coverage-guided fuzzing on its postcard decoders, failpoint-driven crash tests on the storage and replication paths, and a multi-process stress harness covering single-node and replicated raft topologies. The fuzz harnesses run nightly; the stress harness runs on every PR.</p>
+    <p>Details: <a href="{{ config.extra.github_url }}/tree/main/crates/tsoracle-tests">crates/tsoracle-tests</a> · <a href="{{ config.extra.github_url }}/tree/main/fuzz">fuzz/</a></p>
+</section>
+
+<section class="landing-section container">
+    <div class="landing-section__rule">── Recent posts ──</div>
+    <ul class="posts-list">
+        {% set posts_section = get_section(path="posts/_index.md") %}
+        {% for page in posts_section.pages | slice(end=3) %}
+        <li>
+            <a class="post-title" href="{{ page.permalink }}">{{ page.title }}</a>
+            <span class="post-date">{{ page.date | date(format="%Y-%m-%d") }}</span>
+            {% if page.description %}
+            <p class="post-excerpt">{{ page.description }}</p>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+
+<section class="landing-section container">
+    <div class="landing-section__rule">── Documentation ──</div>
+    <p><a href="{{ config.extra.deepwiki_url }}">DeepWiki</a> — prose documentation covering the window allocator, the <code>ConsensusDriver</code> contract, and operational topics (fsync cost, leader handoff, deployment topologies).</p>
+    <p><a href="{{ config.extra.docsrs_url }}">docs.rs/tsoracle-server</a> — generated API reference.</p>
+</section>
+
 {% endblock %}
