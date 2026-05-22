@@ -325,10 +325,9 @@ mod tests {
         assert!(!pool.accept_hint(Some(4)));
         assert!(pool.accept_hint(Some(5)));
         assert!(pool.accept_hint(Some(6)));
-        assert!(
-            pool.accept_hint(None),
-            "no-epoch hint must remain acceptable while the server has not been upgraded"
-        );
+        // Old-server fallback: a hint without an epoch must remain
+        // acceptable until the server is upgraded to populate one.
+        assert!(pool.accept_hint(None));
 
         // Promoting via a higher-epoch hint must not allow the older
         // epoch to flap the cache backward on a later arrival.
@@ -385,25 +384,17 @@ mod tests {
             false,
             policy,
         );
+        // Fresh cache prepends the leader.
         pool.record_success("b:1", 1);
-        assert_eq!(
-            pool.iter_round_robin(),
-            vec!["b:1", "a:1", "c:1"],
-            "fresh cache prepends the leader"
-        );
+        assert_eq!(pool.iter_round_robin(), vec!["b:1", "a:1", "c:1"]);
         // Advance virtual time past the TTL. `start_paused = true`
         // makes this deterministic — no real wall-clock sleep, no
         // flake on slow CI runners.
         tokio::time::advance(std::time::Duration::from_millis(75)).await;
-        assert!(
-            pool.cached_leader().is_none(),
-            "TTL-expired cache must read as absent"
-        );
-        assert_eq!(
-            pool.iter_round_robin(),
-            vec!["a:1", "b:1", "c:1"],
-            "TTL-expired cache must not be prepended"
-        );
+        // TTL-expired cache reads as absent and falls back to the
+        // configured order.
+        assert!(pool.cached_leader().is_none());
+        assert_eq!(pool.iter_round_robin(), vec!["a:1", "b:1", "c:1"]);
     }
 
     /// A successful RPC against the cached leader refreshes the TTL
@@ -426,11 +417,7 @@ mod tests {
         // Total elapsed since the original record_success is 120ms,
         // past TTL — but the touch reset the clock 60ms ago, so the
         // cache must still report `b:1` as fresh.
-        assert_eq!(
-            pool.cached_leader().as_deref(),
-            Some("b:1"),
-            "touch must reset the TTL clock"
-        );
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
     }
 
     #[tokio::test]
