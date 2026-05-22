@@ -29,7 +29,7 @@ fail               = { workspace = true, optional = true }
 futures            = { workspace = true }
 omnipaxos          = { workspace = true, features = ["serde"] }
 parking_lot        = { workspace = true }
-paste              = { workspace = true }
+pastey             = { workspace = true }
 postcard           = { workspace = true }
 rocksdb            = { workspace = true, optional = true, features = ["multi-threaded-cf"] }
 serde              = { workspace = true }
