@@ -128,4 +128,21 @@ mod tests {
         // therefore must occupy some space.
         assert!(core::mem::size_of::<Bt>() > 0);
     }
+
+    #[cfg(feature = "bt")]
+    #[test]
+    fn display_renders_captured_backtrace() {
+        // Exercise the `BacktraceStatus::Captured` branch of `Display::fmt`
+        // without relying on `RUST_BACKTRACE` at test time (coverage runs
+        // don't set it). `force_capture` ignores the env var and always
+        // produces a `Captured` status, which is what gates the `write!`.
+        let bt = Bt(std::backtrace::Backtrace::force_capture());
+        let rendered = format!("{bt}");
+        assert!(
+            rendered.starts_with('\n'),
+            "captured backtrace must render with a leading newline so it sits \
+             beneath the error message; got {rendered:?}",
+        );
+        assert!(rendered.len() > 1, "captured backtrace must be non-empty");
+    }
 }
