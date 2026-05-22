@@ -185,9 +185,17 @@ where
 
     fn set_promise(
         &mut self,
-        _n_prom: omnipaxos::ballot_leader_election::Ballot,
+        n_prom: omnipaxos::ballot_leader_election::Ballot,
     ) -> omnipaxos::storage::StorageResult<()> {
-        unimplemented!("set_promise: implemented in a later commit")
+        use crate::storage::key_space::meta_promise_key;
+        use crate::storage::meta::encode_ballot;
+        let bytes = encode_ballot(&n_prom).map_err(box_err)?;
+        self.batch_with(|cf, batch| {
+            batch.put_cf(&cf, meta_promise_key(), bytes);
+            Ok(())
+        })
+        .map_err(box_err)?;
+        Ok(())
     }
 
     fn set_decided_idx(&mut self, _ld: u64) -> omnipaxos::storage::StorageResult<()> {
@@ -200,15 +208,33 @@ where
 
     fn set_accepted_round(
         &mut self,
-        _na: omnipaxos::ballot_leader_election::Ballot,
+        na: omnipaxos::ballot_leader_election::Ballot,
     ) -> omnipaxos::storage::StorageResult<()> {
-        unimplemented!("set_accepted_round: implemented in a later commit")
+        use crate::storage::key_space::meta_accepted_round_key;
+        use crate::storage::meta::encode_ballot;
+        let bytes = encode_ballot(&na).map_err(box_err)?;
+        self.batch_with(|cf, batch| {
+            batch.put_cf(&cf, meta_accepted_round_key(), bytes);
+            Ok(())
+        })
+        .map_err(box_err)?;
+        Ok(())
     }
 
     fn get_accepted_round(
         &self,
     ) -> omnipaxos::storage::StorageResult<Option<omnipaxos::ballot_leader_election::Ballot>> {
-        unimplemented!("get_accepted_round: implemented in a later commit")
+        use crate::storage::key_space::meta_accepted_round_key;
+        use crate::storage::meta::decode_ballot;
+        let cf = self.cf().map_err(box_err)?;
+        match self
+            .db
+            .get_cf(&cf, meta_accepted_round_key())
+            .map_err(box_err)?
+        {
+            Some(bytes) => Ok(Some(decode_ballot(&bytes).map_err(box_err)?)),
+            None => Ok(None),
+        }
     }
 
     fn get_entries(&self, from: u64, to: u64) -> omnipaxos::storage::StorageResult<Vec<T>> {
@@ -271,7 +297,13 @@ where
     fn get_promise(
         &self,
     ) -> omnipaxos::storage::StorageResult<Option<omnipaxos::ballot_leader_election::Ballot>> {
-        unimplemented!("get_promise: implemented in a later commit")
+        use crate::storage::key_space::meta_promise_key;
+        use crate::storage::meta::decode_ballot;
+        let cf = self.cf().map_err(box_err)?;
+        match self.db.get_cf(&cf, meta_promise_key()).map_err(box_err)? {
+            Some(bytes) => Ok(Some(decode_ballot(&bytes).map_err(box_err)?)),
+            None => Ok(None),
+        }
     }
 
     fn set_stopsign(
@@ -483,5 +515,58 @@ mod log_tests {
         assert_eq!(all[0].value, 1);
         assert_eq!(all[1].value, 9);
         assert_eq!(all[2].value, 8);
+    }
+}
+
+#[cfg(all(test, feature = "rocksdb-storage"))]
+mod ballot_tests {
+    use super::log_tests::fresh_storage;
+    use omnipaxos::ballot_leader_election::Ballot;
+    use omnipaxos::storage::Storage;
+    use tempfile::TempDir;
+
+    fn ballot(config_id: u32, n: u32, pid: u64) -> Ballot {
+        Ballot {
+            config_id,
+            n,
+            priority: 0,
+            pid,
+        }
+    }
+
+    #[test]
+    fn promise_is_none_initially() {
+        let dir = TempDir::new().unwrap();
+        let storage = fresh_storage(&dir);
+        assert!(storage.get_promise().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_promise_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        let b = ballot(1, 5, 2);
+        storage.set_promise(b).unwrap();
+        let got = storage.get_promise().unwrap().expect("present");
+        assert_eq!(got.n, b.n);
+        assert_eq!(got.pid, b.pid);
+        assert_eq!(got.config_id, b.config_id);
+    }
+
+    #[test]
+    fn accepted_round_is_none_initially() {
+        let dir = TempDir::new().unwrap();
+        let storage = fresh_storage(&dir);
+        assert!(storage.get_accepted_round().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_accepted_round_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        let b = ballot(1, 7, 3);
+        storage.set_accepted_round(b).unwrap();
+        let got = storage.get_accepted_round().unwrap().expect("present");
+        assert_eq!(got.n, b.n);
     }
 }
