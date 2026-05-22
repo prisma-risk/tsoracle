@@ -222,3 +222,35 @@ pub async fn wait_for_grpc_handshake(
         }
     }
 }
+
+/// TLS-aware counterpart to [`wait_for_grpc_handshake`]. Probes the server
+/// by dialing `https://{addr}` with the provided `ClientTlsConfig` so the
+/// readiness check actually completes a TLS handshake.
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+pub async fn wait_for_grpc_handshake_tls(
+    addr: SocketAddr,
+    tls_config: tonic::transport::ClientTlsConfig,
+    budget: Duration,
+) -> Result<(), tonic::transport::Error> {
+    let deadline = Instant::now() + budget;
+    let endpoint: Endpoint = format!("https://{addr}")
+        .parse()
+        .expect("constructed endpoint URI must parse");
+    let endpoint = endpoint.tls_config(tls_config)?;
+    let mut last_err: Option<tonic::transport::Error> = None;
+    loop {
+        match endpoint.connect().await {
+            Ok(channel) => {
+                drop(channel);
+                return Ok(());
+            }
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(last_err.unwrap_or(err));
+                }
+                last_err = Some(err);
+                sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
+}
