@@ -21,7 +21,9 @@ use tonic::transport::{Channel, Endpoint};
 use tsoracle_proto::v1::LeaderHint;
 use tsoracle_proto::v1::tso_service_client::TsoServiceClient;
 
+use crate::RetryPolicy;
 use crate::error::ClientError;
+use crate::transport::apply_endpoint_config;
 
 const LEADER_HINT_KEY: &str = "tsoracle-leader-hint-bin";
 
@@ -43,6 +45,11 @@ pub struct ChannelPool {
     /// operator-supplied endpoints; those use the documented scheme rule
     /// ("explicit beats configured") unchanged.
     tls_required: bool,
+    /// Frozen at builder time. The pool uses `per_attempt_deadline` plus
+    /// the keepalive constants to build each `Endpoint`; the retry loop
+    /// reads the same policy via [`Self::retry_policy`] to drive its
+    /// per-attempt and overall deadlines.
+    retry_policy: RetryPolicy,
 }
 
 impl ChannelPool {
@@ -50,6 +57,7 @@ impl ChannelPool {
         endpoints: Vec<String>,
         connector: Option<std::sync::Arc<crate::transport::ChannelConnector>>,
         tls_required: bool,
+        retry_policy: RetryPolicy,
     ) -> Self {
         ChannelPool {
             configured: endpoints,
@@ -57,6 +65,7 @@ impl ChannelPool {
             leader: Mutex::new(None),
             connector,
             tls_required,
+            retry_policy,
         }
     }
 
@@ -65,6 +74,10 @@ impl ChannelPool {
     /// `crate::retry::issue_rpc`.
     pub fn tls_required(&self) -> bool {
         self.tls_required
+    }
+
+    pub fn retry_policy(&self) -> &RetryPolicy {
+        &self.retry_policy
     }
 
     pub fn cached_leader(&self) -> Option<String> {
@@ -91,6 +104,8 @@ impl ChannelPool {
                 let transport_endpoint: Endpoint = uri
                     .parse()
                     .map_err(|_| ClientError::InvalidEndpoint(endpoint.into()))?;
+                let transport_endpoint =
+                    apply_endpoint_config(transport_endpoint, &self.retry_policy);
                 transport_endpoint.connect().await?
             }
         };
@@ -118,12 +133,18 @@ impl ChannelPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RetryPolicy;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn iter_starts_with_cached_leader() {
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()], None, false);
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into(), "c:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
         pool.set_leader("b:1".into());
         let order = pool.iter_round_robin();
         assert_eq!(order, vec!["b:1", "a:1", "c:1"]);
@@ -131,14 +152,24 @@ mod tests {
 
     #[test]
     fn iter_without_cache_is_configured_order() {
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()], None, false);
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into(), "c:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
         let order = pool.iter_round_robin();
         assert_eq!(order, vec!["a:1", "b:1", "c:1"]);
     }
 
     #[test]
     fn clear_leader_drops_cached_leader() {
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None, false);
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
         pool.set_leader("b:1".into());
         assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
         pool.clear_leader();
@@ -157,7 +188,12 @@ mod tests {
             let endpoint_owned = endpoint.to_string();
             Box::pin(async move { Err(crate::error::ClientError::InvalidEndpoint(endpoint_owned)) })
         });
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], Some(connector), false);
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            Some(connector),
+            false,
+            RetryPolicy::default(),
+        );
         let _ = pool.client("a:1").await;
         let _ = pool.client("b:1").await;
         let seen = captured.lock().clone();
@@ -178,7 +214,12 @@ mod tests {
                     Ok(channel)
                 })
             });
-        let pool = ChannelPool::new(vec!["a:1".into()], Some(connector), false);
+        let pool = ChannelPool::new(
+            vec!["a:1".into()],
+            Some(connector),
+            false,
+            RetryPolicy::default(),
+        );
         let _ = pool
             .client("a:1")
             .await
@@ -198,7 +239,12 @@ mod tests {
             captured_for_closure.lock().push(endpoint.to_string());
             Box::pin(async { Err(crate::error::ClientError::InvalidEndpoint("x".into())) })
         });
-        let pool = ChannelPool::new(vec!["a:1".into()], Some(connector), false);
+        let pool = ChannelPool::new(
+            vec!["a:1".into()],
+            Some(connector),
+            false,
+            RetryPolicy::default(),
+        );
         let _ = pool.client("hinted:1").await;
         let seen = captured.lock().clone();
         assert_eq!(seen, vec!["hinted:1".to_string()]);
