@@ -69,17 +69,8 @@ impl OpenraftHighWaterHost for StandaloneHost {
         // `tsoracle-server/src/fence.rs` is the load-bearing reader; a stale
         // value there would let a new leader's `serving_floor + 1` land below
         // a timestamp the prior leader could have served.
-        //
-        // `ForwardToLeader` maps to `NotLeader` so the server's step-down
-        // path triggers cleanly (same shape as `submit_advance` below); any
-        // other RaftError is transient (quorum loss, leadership churn).
         if let Err(e) = self.raft.ensure_linearizable(ReadPolicy::ReadIndex).await {
-            return match e {
-                RaftError::APIError(LinearizableReadError::ForwardToLeader(_)) => {
-                    Err(ConsensusError::NotLeader { observed: None })
-                }
-                _ => Err(ConsensusError::TransientDriver(Box::new(e))),
-            };
+            return Err(classify_read_error(e));
         }
         Ok(self.state_machine.current_value().await)
     }
@@ -91,10 +82,62 @@ impl OpenraftHighWaterHost for StandaloneHost {
             .await
         {
             Ok(resp) => Ok(resp.data.value),
-            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(_))) => {
-                Err(ConsensusError::NotLeader { observed: None })
-            }
-            Err(e) => Err(ConsensusError::TransientDriver(Box::new(e))),
+            Err(e) => Err(classify_client_write_error(e)),
         }
+    }
+}
+
+// `ForwardToLeader` maps to `NotLeader` so the server's step-down path
+// triggers cleanly. `RaftError::Fatal` is the unrecoverable case — storage
+// failure, raft-task panic, explicit shutdown — and must surface as
+// `PermanentDriver` so the service layer returns `INTERNAL` rather than the
+// retryable `UNAVAILABLE` (see the classification table on `ConsensusError`).
+// Everything else (quorum loss, leadership churn) is transient.
+fn classify_read_error(
+    err: RaftError<TypeConfig, LinearizableReadError<TypeConfig>>,
+) -> ConsensusError {
+    match err {
+        RaftError::APIError(LinearizableReadError::ForwardToLeader(_)) => {
+            ConsensusError::NotLeader { observed: None }
+        }
+        RaftError::Fatal(_) => ConsensusError::PermanentDriver(Box::new(err)),
+        _ => ConsensusError::TransientDriver(Box::new(err)),
+    }
+}
+
+fn classify_client_write_error(
+    err: RaftError<TypeConfig, ClientWriteError<TypeConfig>>,
+) -> ConsensusError {
+    match err {
+        RaftError::APIError(ClientWriteError::ForwardToLeader(_)) => {
+            ConsensusError::NotLeader { observed: None }
+        }
+        RaftError::Fatal(_) => ConsensusError::PermanentDriver(Box::new(err)),
+        _ => ConsensusError::TransientDriver(Box::new(err)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openraft::error::Fatal;
+
+    #[test]
+    fn fatal_read_error_classifies_as_permanent_driver() {
+        let err =
+            RaftError::<TypeConfig, LinearizableReadError<TypeConfig>>::Fatal(Fatal::Panicked);
+        assert!(matches!(
+            classify_read_error(err),
+            ConsensusError::PermanentDriver(_)
+        ));
+    }
+
+    #[test]
+    fn fatal_client_write_error_classifies_as_permanent_driver() {
+        let err = RaftError::<TypeConfig, ClientWriteError<TypeConfig>>::Fatal(Fatal::Stopped);
+        assert!(matches!(
+            classify_client_write_error(err),
+            ConsensusError::PermanentDriver(_)
+        ));
     }
 }
