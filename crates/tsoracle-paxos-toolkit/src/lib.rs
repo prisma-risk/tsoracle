@@ -17,11 +17,13 @@
 //! test fakes. The paxos driver crate consumes this crate; this crate itself
 //! does not depend on the driver.
 
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
-#![cfg_attr(docsrs, feature(doc_cfg))]
+
+#[macro_use]
+mod failpoint;
 
 pub mod codec;
-pub mod failpoint;
 pub mod lifecycle;
 pub mod macros;
 pub mod storage;
