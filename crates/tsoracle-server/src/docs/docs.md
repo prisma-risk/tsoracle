@@ -1,6 +1,6 @@
 # tsoracle guide
 
-Long-form reference for [tsoracle][repo] — a distributed, highly available timestamp oracle issuing strictly monotonic, gap-free integer timestamps over gRPC.
+Long-form reference for [tsoracle][repo] — a distributed, highly available timestamp oracle issuing strictly monotonic integer timestamps over gRPC.
 
 This guide complements the crate-level API documentation. For auto-indexed, "ask the wiki" style lookups, see [DeepWiki](https://deepwiki.com/prisma-risk/tsoracle).
 

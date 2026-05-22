@@ -4,7 +4,7 @@
         <img alt="tsoracle" src="assets/tsoracle-light.svg" width="360">
     </picture>
     <h4>
-        Strictly monotonic, gap-free timestamps in 🦀 Rust. Please ⭐ on <a href="https://github.com/prisma-risk/tsoracle">GitHub</a>!
+        Strictly monotonic timestamps in 🦀 Rust. Please ⭐ on <a href="https://github.com/prisma-risk/tsoracle">GitHub</a>!
     </h4>
 
 
@@ -18,11 +18,11 @@
 
 </div>
 
-A distributed timestamp oracle for Rust — highly available and fault-tolerant, issuing strictly monotonic, gap-free integer timestamps over gRPC, Raft-replicated via openraft with pluggable consensus.
+A distributed timestamp oracle for Rust — highly available and fault-tolerant, issuing strictly monotonic integer timestamps over gRPC, Raft-replicated via openraft with pluggable consensus.
 
 ## Features
 
-- 🔢 **Monotonic & gap-free** — every issued timestamp is strictly greater than the last; no skipped or repeated values, ever.
+- 🔢 **Strictly monotonic** — every issued timestamp is strictly greater than every previously issued one; no duplicates and no regression, ever. The packed integer space is not dense (logical resets when `physical_ms` advances, so some integer values are unused), but the issued sequence is total-ordered and unique.
 - 🛡️ **Crash-safe** — window state is fsync'd before any timestamp in that window is handed out, so a restart never rewinds.
 - 🔌 **Pluggable consensus, openraft included** — `tsoracle-driver-openraft` ships a production-ready replicated driver; implement one trait (`ConsensusDriver`) to back tsoracle with raft-rs, etcd, or your own replicated log instead.
 - 📦 **gRPC client included** — `tsoracle-client` handles leader discovery, request coalescing, and reconnection for you.

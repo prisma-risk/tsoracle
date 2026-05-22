@@ -1,6 +1,6 @@
 # tsoracle documentation
 
-The long-form prose guide to tsoracle — strictly monotonic, gap-free timestamps over gRPC.
+The long-form prose guide to tsoracle — strictly monotonic timestamps over gRPC.
 
 This directory is the **deep dive** covering everything from getting started through the allocator's monotonicity proof, consensus integration patterns, deployment topologies, and per-example walkthroughs. Browsable on GitHub and indexed by [DeepWiki](https://deepwiki.com/prisma-risk/tsoracle).
 
