@@ -52,7 +52,10 @@
             <a href="/posts/">Posts</a>
             <a href="{{ config.extra.github_url }}">GitHub →</a>
             <a href="{{ config.extra.crates_url }}">Crates.io →</a>
-            <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">theme</button>
+            <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme" type="button">
+                <span class="theme-toggle__moon" aria-hidden="true">☾</span>
+                <span class="theme-toggle__sun" aria-hidden="true">☀</span>
+            </button>
         </nav>
     </div>
 </header>

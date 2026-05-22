@@ -10,13 +10,11 @@
 {% block content %}
 
 <section class="hero container-wide">
-<pre class="hero-box">┌─ tsoracle ────────────────────────────────────────┐
-│                                                   │
-│   Strictly monotonic timestamps in Rust.          │
-│                                                   │
-│   Distributed, raft-replicated, embeddable.       │
-│                                                   │
-└───────────────────────────────────────────────────┘</pre>
+    <div class="hero-frame">
+        <div class="hero-frame__label">tsoracle</div>
+        <p class="hero-frame__line">Strictly monotonic timestamps in Rust.</p>
+        <p class="hero-frame__line hero-frame__line--dim">Distributed · raft-replicated · embeddable.</p>
+    </div>
 
     <div class="hero-install">
         <pre>$ cargo install tsoracle
@@ -25,6 +23,7 @@ $ tsoracle serve</pre>
 
     <div class="cta-group">
         <a class="cta" href="#get-started">Get started →</a>
+        <a class="cta" href="/how-it-works/">How it works →</a>
         <a class="cta" href="{{ config.extra.github_url }}">GitHub →</a>
     </div>
 </section>

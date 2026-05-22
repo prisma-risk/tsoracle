@@ -220,13 +220,24 @@ th {
     border: 1px solid var(--rule);
     color: var(--fg);
     font-family: var(--font-mono);
-    font-size: 0.85rem;
-    padding: 0.25rem 0.6rem;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0.35rem 0.55rem;
     border-radius: 2px;
     cursor: pointer;
+    min-width: 2rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+.theme-toggle__moon,
+.theme-toggle__sun { display: none; }
+
+:root:not([data-theme="light"]) .theme-toggle__moon { display: inline; }
+[data-theme="light"] .theme-toggle__sun { display: inline; }
 
 // Footer ----------------------------------------------------------------------
 
@@ -254,17 +265,47 @@ th {
     overflow-x: auto;
 }
 
-.hero-tagline {
+.hero-frame {
+    border: 1px solid var(--accent);
+    border-radius: 2px;
+    padding: 1.5rem 1.75rem;
+    margin-bottom: 1.75rem;
     font-family: var(--font-mono);
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--fg);
-    margin-bottom: 0.5rem;
+    position: relative;
 }
 
-.hero-sub {
+.hero-frame__label {
+    position: absolute;
+    top: 0;
+    left: 1.25rem;
+    transform: translateY(-50%);
+    background: var(--bg);
+    color: var(--accent);
+    padding: 0 0.5rem;
+    font-weight: 700;
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+}
+
+.hero-frame__line {
+    color: var(--fg);
+    font-size: 1.15rem;
+    font-weight: 700;
+    line-height: 1.45;
+    margin: 0;
+}
+
+.hero-frame__line + .hero-frame__line { margin-top: 0.45rem; }
+
+.hero-frame__line--dim {
     color: var(--fg-dim);
-    margin-bottom: 2rem;
+    font-weight: 400;
+}
+
+@media (max-width: 540px) {
+    .hero-frame { padding: 1.25rem 1rem 1.25rem 1.1rem; }
+    .hero-frame__line { font-size: 1.02rem; }
+    .hero-frame__label { font-size: 0.85rem; }
 }
 
 .hero-install pre {
@@ -420,6 +461,7 @@ th {
 
 @media (max-width: 540px) {
     .site-nav { gap: 0.9rem; font-size: 0.85rem; }
+    .site-nav a[href^="https://"] { display: none; }
     .hero { padding: 2rem 0 1rem; }
     h1 { font-size: 1.5rem; }
     h2 { font-size: 1.25rem; }
