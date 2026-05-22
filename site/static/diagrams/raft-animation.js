@@ -13,11 +13,11 @@ export default function init(figure) {
     svg.selectAll('*').remove();
 
     const width = 800;
-    const height = 480;
+    const height = 540;
     svg.attr('viewBox', `0 0 ${width} ${height}`);
 
     const centerX = width / 2;
-    const centerY = 230;
+    const centerY = 220;
     const nodeRadius = 36;
     const layoutRadius = 140;
 
@@ -63,7 +63,15 @@ export default function init(figure) {
             .attr('font-weight', 700)
             .style('transition', 'fill 250ms ease')
             .text(name);
-        nodeGroups[name] = { circle: circle, label: label };
+        // Per-node value badge below the circle. Empty by default; set by node_value events.
+        const valueBadge = g.append('text')
+            .attr('text-anchor', 'middle')
+            .attr('y', nodeRadius + 22)
+            .attr('fill', fgDim)
+            .attr('font-family', 'JetBrainsMono, ui-monospace, monospace')
+            .attr('font-size', 13)
+            .style('transition', 'fill 250ms ease');
+        nodeGroups[name] = { circle: circle, label: label, valueBadge: valueBadge };
     });
 
     // Annotation text below the cluster. Manual line-wrap via tspans, since SVG
@@ -94,10 +102,11 @@ export default function init(figure) {
         }
         if (currentLine) lines.push(currentLine);
 
-        // Position the block so the last line lands above the progress bar.
+        // Position the block so there's breathing room between the last line and
+        // the progress bar (bar at y = height - 50).
         const lineHeight = 26;
         const blockHeight = lines.length * lineHeight;
-        const startY = height - 60 - blockHeight + lineHeight;
+        const startY = height - 90 - blockHeight + lineHeight;
         lines.forEach(function (line, i) {
             annotationText.append('tspan')
                 .attr('x', width / 2)
@@ -136,13 +145,6 @@ export default function init(figure) {
         .attr('width', 0).attr('height', 4)
         .attr('rx', 2)
         .attr('fill', accent);
-    const timeText = svg.append('text')
-        .attr('x', width / 2)
-        .attr('y', height - 18)
-        .attr('text-anchor', 'middle')
-        .attr('fill', fgDim)
-        .attr('font-family', 'JetBrainsMono, ui-monospace, monospace')
-        .attr('font-size', 11);
 
     // Arc generator for timeout indicators
     const arcGen = d3.arc()
@@ -205,7 +207,12 @@ export default function init(figure) {
         simTime = 0;
         nextEventIdx = 0;
         clearActiveVisuals();
-        data.nodes.forEach(function (name) { applyState(name, 'follower'); });
+        data.nodes.forEach(function (name) {
+            applyState(name, 'follower');
+            if (nodeGroups[name].valueBadge) {
+                nodeGroups[name].valueBadge.text('').style('fill', fgDim).style('font-weight', 400);
+            }
+        });
         currentTerm = '—';
         currentVotes = [];
         renderTermTable();
@@ -213,7 +220,6 @@ export default function init(figure) {
         processEventsUpTo(0);
         setAnnotationText(currentAnnotation(0));
         barFill.attr('width', 0);
-        timeText.text(`0 / ${(totalDuration / 1000).toFixed(1)}s`);
     }
 
     function processEventsUpTo(t) {
@@ -246,6 +252,18 @@ export default function init(figure) {
         } else if (ev.type === 'vote') {
             currentVotes.push({ voter: ev.voter, candidate: ev.candidate });
             renderTermTable();
+        } else if (ev.type === 'node_value') {
+            const node = nodeGroups[ev.node];
+            if (node) {
+                node.valueBadge.text(ev.value || '');
+                node.valueBadge
+                    .style('fill', accent)
+                    .style('font-weight', 700)
+                    .transition()
+                    .duration(800)
+                    .style('fill', fgDim)
+                    .style('font-weight', 400);
+            }
         } else if (ev.type === 'message') {
             const fromPos = nodePos[ev.from];
             const toPos = nodePos[ev.to];
@@ -340,7 +358,6 @@ export default function init(figure) {
 
         setAnnotationText(currentAnnotation(t));
         barFill.attr('width', barWidth * Math.min(1, t / totalDuration));
-        timeText.text(`${(t / 1000).toFixed(1)} / ${(totalDuration / 1000).toFixed(1)}s`);
     }
 
     function showPlayBtn() {

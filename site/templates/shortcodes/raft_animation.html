@@ -1,8 +1,8 @@
 {% set data = load_data(path="content/diagrams/" ~ name ~ ".json") %}
 {% set caption = title | default(value='') %}
 <figure class="diagram diagram--raft" data-d3-init="raft-animation">
-    <svg viewBox="0 0 800 480" role="img" aria-label="{{ caption | default(value='Raft animation: ' ~ name) }}" preserveAspectRatio="xMidYMid meet">
-        <text x="400" y="240" text-anchor="middle" fill="#8A8A86" font-family="JetBrainsMono, ui-monospace, monospace" font-size="14">
+    <svg viewBox="0 0 800 540" role="img" aria-label="{{ caption | default(value='Raft animation: ' ~ name) }}" preserveAspectRatio="xMidYMid meet">
+        <text x="400" y="270" text-anchor="middle" fill="#8A8A86" font-family="JetBrainsMono, ui-monospace, monospace" font-size="14">
             cluster: {% for n in data.nodes %}{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
         </text>
     </svg>
