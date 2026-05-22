@@ -35,14 +35,14 @@ Useful flags:
 
 ```bash
 tsoracle serve \
-    --listen 0.0.0.0:50551 \
+    --listen 127.0.0.1:50551 \
     --state-dir /var/lib/tsoracle \
     --window-ahead 3s \
     --failover-advance 1s \
     --log info
 ```
 
-- `--listen` — gRPC bind address.
+- `--listen` — gRPC bind address. The default `127.0.0.1:50551` is appropriate for embedded sidecar deployments. Binding to a non-loopback address (e.g. `0.0.0.0:50551` to serve cluster peers or application clients) exposes the unauthenticated `GetTs` RPC to anything that can reach the socket; tsoracle ships no built-in authn, authz, TLS, or rate limiting, so only do this behind trusted network controls (private VPC/subnet, firewall, service mesh with mTLS, or an authorizing reverse proxy). A reachable caller can consume the ordering namespace and force window-extension work.
 - `--state-dir` — where to keep the fsync'd state file.
 - `--window-ahead` — how far ahead the allocator extends `H` on each extension. See [Sizing window_ahead](operations.md#sizing-window_ahead) for sizing guidance.
 - `--failover-advance` — how far past `serving_floor = max(prior_max + 1, now_ms)` the failover fence advances `H` on every leadership gain. See [Sizing failover_advance](operations.md#sizing-failover_advance).

@@ -36,13 +36,15 @@ metrics-exporter-prometheus = "0.16"
 use metrics_exporter_prometheus::PrometheusBuilder;
 
 PrometheusBuilder::new()
-    .with_http_listener(([0, 0, 0, 0], 9100))
+    .with_http_listener(([127, 0, 0, 1], 9100))
     .install()
     .expect("install Prometheus recorder");
 
 // Build and serve `tsoracle_server::Server` as usual; emissions now flow
 // through the installed recorder.
 ```
+
+The exporter has no built-in authentication and the `/metrics` body discloses operational signals an attacker can use to fingerprint leader transitions, window-extension cadence, and load. Bind to loopback for same-host scrapers (Prometheus agent / node_exporter sidecar); when the scraper lives on a different host, prefer a unix-socket or use a non-loopback bind only behind trusted network controls (private subnet, firewall, mTLS at the scrape layer).
 
 ## Advertised endpoints in multi-node deployments
 
