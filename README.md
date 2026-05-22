@@ -3,18 +3,16 @@
         <source media="(prefers-color-scheme: dark)" srcset="site/static/tsoracle-dark.svg">
         <img alt="tsoracle" src="site/static/tsoracle-light.svg" width="360">
     </picture>
-    <h4>
-        Strictly monotonic timestamps in 🦀 Rust. Please ⭐ on <a href="https://github.com/prisma-risk/tsoracle">GitHub</a>!
-    </h4>
-
+    <br /><br />
 
 [![Crates.io](https://img.shields.io/crates/v/tsoracle-server.svg)](https://crates.io/crates/tsoracle-server)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-tsoracle-blue.svg)](https://deepwiki.com/prisma-risk/tsoracle)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 <br/>
 [![CI](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml/badge.svg)](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/prisma-risk/tsoracle/badge.svg?branch=main)](https://coveralls.io/github/prisma-risk/tsoracle?branch=main)
-![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
-
+![Crates.io](https://img.shields.io/crates/d/tsoracle-core.svg)
+    
 </div>
 
 A distributed timestamp oracle for Rust — highly available and fault-tolerant, issuing strictly monotonic integer timestamps over gRPC, Raft-replicated via openraft with pluggable consensus.
