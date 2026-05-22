@@ -65,6 +65,8 @@ pub struct ServerBuilder {
     clock: Option<Arc<dyn Clock>>,
     window_ahead: Duration,
     failover_advance: Duration,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+    tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
 
 impl Default for ServerBuilder {
@@ -74,6 +76,8 @@ impl Default for ServerBuilder {
             clock: None,
             window_ahead: Duration::from_secs(3),
             failover_advance: Duration::from_secs(1),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+            tls_config: None,
         }
     }
 }
@@ -95,6 +99,18 @@ impl ServerBuilder {
         self.failover_advance = failover_advance;
         self
     }
+
+    /// Configure TLS termination for this server. Applied inside
+    /// [`Server::serve`], [`Server::serve_with_shutdown`], and
+    /// [`Server::serve_with_listener`]. Not applied to [`Server::into_router`] —
+    /// embedders mounting tsoracle alongside their own services control TLS
+    /// on their own tonic builder.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+    pub fn tls_config(mut self, cfg: tonic::transport::ServerTlsConfig) -> Self {
+        self.tls_config = Some(cfg);
+        self
+    }
+
     pub fn build(self) -> Result<Server, BuildError> {
         crate::leader_hint::validate_key()?;
         let consensus = self.consensus.ok_or(BuildError::MissingConsensusDriver)?;
@@ -112,6 +128,8 @@ impl ServerBuilder {
             state_rx,
             extension_lock: Arc::new(tokio::sync::Mutex::new(())),
             extension_gate: Arc::new(tokio::sync::RwLock::new(())),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+            tls_config: self.tls_config,
         })
     }
 }
@@ -136,6 +154,8 @@ pub struct Server {
     /// which drains all in-flight extensions started under the prior epoch
     /// before the fence proceeds.
     pub(crate) extension_gate: Arc<tokio::sync::RwLock<()>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+    pub(crate) tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
 
 impl Server {
@@ -264,6 +284,9 @@ impl Server {
         addr: SocketAddr,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ServerError> {
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+        let tls_config = self.tls_config.clone();
+
         let (routes, mut watch_handle) = self.into_router();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -276,7 +299,12 @@ impl Server {
             }
         };
 
-        let serve = TonicServer::builder()
+        let mut tonic = TonicServer::builder();
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+        if let Some(cfg) = tls_config {
+            tonic = tonic.tls_config(cfg).map_err(ServerError::Transport)?;
+        }
+        let serve = tonic
             .add_routes(routes)
             .serve_with_shutdown(addr, combined_shutdown);
         tokio::pin!(serve);
@@ -334,6 +362,9 @@ impl Server {
         listener: tokio::net::TcpListener,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ServerError> {
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+        let tls_config = self.tls_config.clone();
+
         let (routes, mut watch_handle) = self.into_router();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -346,7 +377,12 @@ impl Server {
 
         let incoming = tonic::transport::server::TcpIncoming::from(listener);
 
-        let serve = TonicServer::builder()
+        let mut tonic = TonicServer::builder();
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+        if let Some(cfg) = tls_config {
+            tonic = tonic.tls_config(cfg).map_err(ServerError::Transport)?;
+        }
+        let serve = tonic
             .add_routes(routes)
             .serve_with_incoming_shutdown(incoming, combined_shutdown);
         tokio::pin!(serve);
@@ -445,6 +481,24 @@ mod tests {
         assert_eq!(
             panic_payload_to_string(payload),
             "watch task panicked with non-string payload",
+        );
+    }
+
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+    #[test]
+    fn builder_stores_tls_config() {
+        use crate::test_fakes::InMemoryDriver;
+
+        let driver = Arc::new(InMemoryDriver::new());
+        let cfg = tonic::transport::ServerTlsConfig::new();
+        let server = Server::builder()
+            .consensus_driver(driver)
+            .tls_config(cfg)
+            .build()
+            .expect("build with tls_config must succeed");
+        assert!(
+            server.tls_config.is_some(),
+            "tls_config must be stored on Server"
         );
     }
 
