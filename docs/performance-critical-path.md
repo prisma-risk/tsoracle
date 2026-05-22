@@ -1,6 +1,6 @@
 # Performance-critical-path rules
 
-A handful of files in this workspace sit on the request-handling hot path: every `GetTs` / `GetTsBatch` RPC, every window extension, every Raft propose/apply touches them. Regressions in these files surface as elevated end-to-end latency or reduced batch throughput, not as test failures, so we enforce a small set of source-level rules on top of the regular clippy/build checks. Files on the critical path carry this marker as the first line of the file:
+A handful of files in this workspace sit on the request-handling hot path: every `GetTs` / `GetTsBatch` RPC, every window extension, every Raft propose/apply touches them. Regressions in these files surface as elevated end-to-end latency or reduced batch throughput, not as test failures, so we enforce a small set of source-level rules on top of the regular clippy/build checks. Files on the critical path carry this marker on the first non-blank line below the [canonical copyright header](../scripts/check-ts-header.py) — above any module-level doc, inner attribute, or `use`:
 
     // #[PerformanceCriticalPath]
 
@@ -22,7 +22,7 @@ Two related rules are intentionally not enforced by this guard — they live in 
 
 [`scripts/check-critical-path.sh`](../scripts/check-critical-path.sh) runs in CI as the `critical-path` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). It:
 
-- Finds every `crates/**/*.rs` whose first 10 lines contain `#[PerformanceCriticalPath]`.
+- Finds every `crates/**/*.rs` whose first 25 lines contain `#[PerformanceCriticalPath]` — wide enough to clear the 11-line canonical copyright header plus a separator, narrow enough that a marker buried under a long `//!` module doc still falls out of enforcement.
 - For each, greps for the banned patterns listed in the script (the `BANNED` array).
 - Prints violations with line numbers.
 
@@ -34,7 +34,7 @@ To adjust the list of banned patterns or the strict-mode toggle, edit the script
 
 ## Marker placement
 
-Place the marker on line 1, above any module-level doc comment (`//!`), any inner attribute (`#![...]`), and any `use` statement. The guard only scans the first 10 lines, so the marker must sit at the top — pushing it below a long module doc silently disables enforcement. The marker is a plain `//` line comment, not Rust syntax; it does not interfere with the file's `//!` module doc (which still attaches to the module) or with any `#![cfg_attr(...)]` inner attribute (such as the [panic-policy attribute](../CONTRIBUTING.md#panic-policy-unwrap-and-expect) in each library crate's `lib.rs`).
+Place the marker on the first non-blank line below the 11-line canonical copyright header — typically line 13, with one blank line separating header and marker — and above any module-level doc comment (`//!`), any inner attribute (`#![...]`), and any `use` statement. The guard scans the first 25 lines, so the marker must sit at the top — pushing it below a long module doc silently disables enforcement. The marker is a plain `//` line comment, not Rust syntax; it does not interfere with the file's `//!` module doc (which still attaches to the module) or with any `#![cfg_attr(...)]` inner attribute (such as the [panic-policy attribute](../CONTRIBUTING.md#panic-policy-unwrap-and-expect) in each library crate's `lib.rs`).
 
 The marker is per-file. If you split a marked module into child files, mark every child file that remains on the hot path — the guard does not inherit markers through `mod`.
 
