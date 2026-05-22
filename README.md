@@ -10,7 +10,6 @@
 
 [![Crates.io](https://img.shields.io/crates/v/tsoracle-server.svg)](https://crates.io/crates/tsoracle-server)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-tsoracle-blue.svg)](https://deepwiki.com/prisma-risk/tsoracle)
-[![guide](https://img.shields.io/badge/guide-%E2%86%97-brightgreen)](https://docs.rs/tsoracle-server/latest/tsoracle_server/docs/index.html)
 <br/>
 [![CI](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml/badge.svg)](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/prisma-risk/tsoracle/badge.svg?branch=main)](https://coveralls.io/github/prisma-risk/tsoracle?branch=main)
