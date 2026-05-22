@@ -19,7 +19,7 @@ reflection = ["tsoracle-server/reflection"]
 [dependencies]
 tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.1.1" }
 tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.1" }
-tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.1.1" }
+tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.1.2" }
 tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.1.1" }
 tsoracle-openraft-toolkit         = { path = "../../crates/tsoracle-openraft-toolkit", version = "0.1.1", features = ["rocksdb-log-store"] }
 
