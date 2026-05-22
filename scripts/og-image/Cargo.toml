@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name        = "tsoracle-og-image"
+version     = "0.1.0"
+edition     = "2021"
+publish     = false
+description = "Generates social-card og:image PNGs for tsoracle.rs."
+
+[[bin]]
+name = "tsoracle-og-image"
+path = "src/main.rs"
+
+[dependencies]
+resvg     = "0.45"
+tiny-skia = "0.11"
+usvg      = "0.45"
+toml      = "0.8"
+serde     = { version = "1", features = ["derive"] }
+walkdir   = "2"
+anyhow    = "1"
