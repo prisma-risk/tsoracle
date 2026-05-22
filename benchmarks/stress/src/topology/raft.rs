@@ -463,11 +463,13 @@ mod tests {
             event.outcome
         );
 
-        // Poll for a different leader; election timeout is 300-600ms, so up
-        // to 2s of polling is comfortably above the worst case while still
-        // failing fast if no re-election occurs.
+        // Poll for a different leader; election timeout is 300-600ms. The
+        // wall-clock cap is generous to tolerate sanitizer or emulation
+        // slowdown — the loop exits as soon as a new leader is observed, so
+        // fast machines pay nothing extra.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut new_leader = None;
-        for _ in 0..40 {
+        while std::time::Instant::now() < deadline {
             if let Some(candidate) = topology.controller.current_leader() {
                 if candidate != original_leader {
                     new_leader = Some(candidate);
@@ -713,13 +715,16 @@ mod tests {
 
     #[test]
     fn open_log_store_errors_on_bad_path() {
-        // Pointing rocksdb at a path it cannot create (parent doesn't exist
-        // and we don't have permission to create it) exercises the error
-        // propagation from `DB::open_cf_descriptors`.
-        let bad = std::path::PathBuf::from("/nonexistent-root/stress-raft-test/log");
+        // Place a regular file in the ancestor chain so directory creation
+        // beneath it fails with ENOTDIR for any uid (including root inside
+        // a container, where DAC permission checks are bypassed).
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"").expect("create blocker file");
+        let bad = blocker.join("stress-raft-test").join("log");
         match open_log_store(&bad) {
             Err(_) => {}
-            Ok(_) => panic!("open_log_store should fail on unreadable path"),
+            Ok(_) => panic!("open_log_store should fail when an ancestor is not a directory"),
         }
     }
 
