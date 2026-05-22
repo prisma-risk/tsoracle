@@ -845,6 +845,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-tls-mtls"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rcgen",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "tsoracle-client",
+ "tsoracle-driver-file",
+ "tsoracle-server",
+]
+
+[[package]]
 name = "fail"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

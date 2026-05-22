@@ -16,6 +16,7 @@ members  = [
     "examples/metrics-prometheus",
     "examples/openraft-piggyback",
     "examples/openraft-standalone",
+    "examples/tls-mtls",
     "benchmarks/minimal",
     "benchmarks/stress",
 ]
