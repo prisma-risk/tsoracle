@@ -1,0 +1,228 @@
+{
+  "repo_notes": [
+    {
+      "content": "tsoracle is a distributed timestamp oracle (TSO) for Rust. It hands out 64-bit strictly-monotonic integer timestamps over gRPC, with a pluggable consensus surface (`ConsensusDriver`). The repository is a Cargo workspace; treat each crate under `crates/` as a separate layer of the architecture. The canonical reading order for the system, top-down, is: `tsoracle-proto` (wire format) → `tsoracle-core` (sync window allocator) → `tsoracle-consensus` (driver trait) → `tsoracle-driver-file` and `tsoracle-driver-openraft` (concrete drivers) → `tsoracle-openraft-toolkit` (envelope pattern helpers) → `tsoracle-server` (async tonic server, leader-watch, failover fence) → `tsoracle-client` (leader discovery, request coalescing, reconnection) → `tsoracle-bin` (the standalone `tsoracle` CLI) → `tsoracle-tests` (cross-crate integration/stress harness)."
+    },
+    {
+      "content": "The maintainer-curated prose documentation in `docs/*.md` is the source of truth for *what to document and how to frame it*. Each file there corresponds to one wiki page in the `pages` list below; prefer quoting and structurally mirroring those docs over re-deriving topics from code. Specifically: `docs/overview.md`, `docs/getting-started.md`, `docs/architecture-deep-dive.md`, `docs/the-allocator.md`, `docs/performance-critical-path.md`, `docs/consensus-integration.md`, `docs/client-api-and-usage.md`, `docs/the-client-driver.md`, `docs/operations.md`, `docs/stress-testing.md`, `docs/failpoint-testing.md`, `docs/testing-and-examples.md`, `docs/key-subsystems.md`, `docs/why-distributed-systems-need-a-tso.md`, `docs/uuidv7-vs-tso.md`."
+    },
+    {
+      "content": "Do NOT generate pages from the following paths — they are not user-facing documentation: `docs/superpowers/` (internal agent skill content, must not be referenced anywhere in the wiki), `target/`, `lcov.info`, `.worktrees/`, `.husky/`, `.claude/`, `fuzz/corpus/`, `fuzz/artifacts/`, `assets/` (just logos), `Cargo.lock`. Treat `release-plz.toml`, `deny.toml`, `rust-toolchain.toml`, the `Makefile`, and `ci/` as supporting infrastructure — mention them in the Operations or Contributing context if relevant, but do not give them dedicated pages."
+    },
+    {
+      "content": "Two invariants are load-bearing and must be stated correctly anywhere they come up: (1) every issued timestamp is strictly greater than every previously issued one — no duplicates and no regression, including across leader failover and process restart; (2) the packed 64-bit integer space is NOT dense — the logical sequence resets each time `physical_ms` advances, so some integer values are skipped, but the *issued* sequence is still total-ordered and unique. Wording that implies a dense counter is wrong. The mechanism that protects (1) across failover is the 'failover fence' in `tsoracle-server`; the mechanism that protects (1) across restart is the fsync'd high-water-mark written through `ConsensusDriver` before any timestamp inside a window is handed out."
+    },
+    {
+      "content": "tsoracle is explicitly not a clock-synchronization system, not a consensus implementation (it consumes one through `ConsensusDriver`), and not a partitioned/multi-shard TSO (one instance issues one monotonic sequence). When DeepWiki is tempted to compare tsoracle to Spanner TrueTime, HLCs, or sharded sequencers, frame those as things that should be *layered over* tsoracle rather than expected inside it. The `docs/why-distributed-systems-need-a-tso.md` and `docs/uuidv7-vs-tso.md` pages exist specifically to handle these comparisons — defer to them."
+    },
+    {
+      "content": "Examples under `examples/` are pedagogical and each is its own crate (`example-embedded-server`, `example-failover-demo`, `example-openraft-standalone`, `example-openraft-piggyback`, `example-metrics-prometheus`). They are the best entry point for readers who want runnable code. The two openraft examples illustrate the two integration patterns: 'standalone' = dedicated raft for tsoracle alone; 'piggyback' = envelope pattern where the host service's existing openraft carries both its own `AppData` and tsoracle's `HighWaterCommand` on a single log, with one snapshot covering both halves. The toolkit crate `tsoracle-openraft-toolkit` is what makes the piggyback pattern ergonomic."
+    },
+    {
+      "content": "Stylistic guidance for generated prose: do not hard-wrap markdown paragraphs (write each paragraph/bullet as one long line); use descriptive identifier names when paraphrasing code (`driver`, `listener`, `dir` — never single-letter stand-ins for nouns); never include AI-attribution trailers, 'Generated with' notices, or references to internal agent skills/plans. Do not invent file paths or APIs — if a symbol can't be located in `crates/*/src/` or the public docs, omit it rather than guessing."
+    }
+  ],
+  "pages": [
+    {
+      "title": "Overview",
+      "purpose": "What tsoracle is in one screen: a Rust TSO that issues strictly-monotonic 64-bit integer timestamps over gRPC with a pluggable consensus surface. Establish the layered architecture (core → consensus driver → server → client) and the 'what this is not' boundary (not a clock-sync system, not a consensus impl, not partitioned). Mirror `docs/overview.md` including the top-level mermaid diagram.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/overview.md`. Keep the strict-monotonicity statement AND the 'packed integer space is not dense' caveat together — they always travel as a pair."
+        }
+      ]
+    },
+    {
+      "title": "Getting Started",
+      "purpose": "First-run path for a new user: install the standalone binary (`cargo install tsoracle`), run `tsoracle serve`, and call it from Rust with `tsoracle_client::Client`. Cover the default listen address (`127.0.0.1:50551`) and the on-disk state directory (`./tsoracle-data/`). Show both single-timestamp and batch APIs.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/getting-started.md` and the Quickstart section of the top-level `README.md`. The Rust snippets in these two should stay in sync; quote them verbatim rather than rewriting."
+        }
+      ]
+    },
+    {
+      "title": "Architecture Deep Dive",
+      "purpose": "Mid-level architectural tour: how `tsoracle-core` (sync allocator) plugs into `tsoracle-server` (async tonic server) and consumes a `ConsensusDriver` for durability/replication. Cover the request lifecycle from gRPC ingress through the allocator to the consensus driver and back, including where the failover fence sits and where fsync happens.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/architecture-deep-dive.md` and `docs/key-subsystems.md`. Cross-link to the Allocator child page for the packed-integer format and to Consensus Integration for the driver trait."
+        }
+      ]
+    },
+    {
+      "title": "The Window Allocator",
+      "parent": "Architecture Deep Dive",
+      "purpose": "Document the sync allocator in `tsoracle-core`: the windowed high-water-mark scheme, the packed `(physical_ms, logical)` 64-bit timestamp format, when the logical counter resets, why the integer space is not dense, and what it costs (one fsync per window, not per timestamp).",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/the-allocator.md`. Code lives under `crates/tsoracle-core/src/`. Be explicit that the issued *sequence* is total-ordered and unique even though the integer *space* is sparse — this distinction is the most common point of reader confusion."
+        }
+      ]
+    },
+    {
+      "title": "Performance: Critical Path",
+      "parent": "Architecture Deep Dive",
+      "purpose": "Explain what is and is not on the per-request critical path: the allocator is sync and lock-protected; the consensus driver is only hit at window-boundary refills (not per timestamp); batching amortizes RPC cost via `get_ts_batch`. Cover the benchmarks under `benchmarks/` and how to run them.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/performance-critical-path.md`. Benchmarks live in `benchmarks/`. Do not claim specific latency numbers unless they are in the doc — hardware-dependent figures rot quickly."
+        }
+      ]
+    },
+    {
+      "title": "Consensus Integration",
+      "purpose": "Document the `ConsensusDriver` trait surface in `tsoracle-consensus` — what a driver must guarantee (durable, linearizable advances of the high-water mark; leader identity), and the contract for `HighWaterCommand`. This is the page a user reads when they want to back tsoracle with a consensus system other than the two we ship.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/consensus-integration.md`. Trait definition lives in `crates/tsoracle-consensus/src/`. List the two shipped drivers (file, openraft) as cross-links to their child pages; do not duplicate their content here."
+        }
+      ]
+    },
+    {
+      "title": "File Driver (single-node)",
+      "parent": "Consensus Integration",
+      "purpose": "Document `tsoracle-driver-file`: a single-node `ConsensusDriver` backed by an fsync'd on-disk high-water-mark file. Cover the on-disk layout, `FileDriver::open_or_init`, crash-safety guarantees, and when this driver is the right choice (single-process deployments, embedded usage, tests).",
+      "page_notes": [
+        {
+          "content": "Source: `crates/tsoracle-driver-file/src/`. The runnable reference is `examples/embedded-server`."
+        }
+      ]
+    },
+    {
+      "title": "Openraft Driver",
+      "parent": "Consensus Integration",
+      "purpose": "Document `tsoracle-driver-openraft`: the production-ready replicated `ConsensusDriver` built on `openraft`. Cover cluster bring-up, peer transport (tonic), leader handoff behavior, and the `LeaderHint`-driven follower-redirect path that the client uses.",
+      "page_notes": [
+        {
+          "content": "Source: `crates/tsoracle-driver-openraft/src/`. Runnable reference: `examples/openraft-standalone` (multi-process, three-node cluster on a dedicated openraft)."
+        }
+      ]
+    },
+    {
+      "title": "Openraft Toolkit — envelope pattern",
+      "parent": "Consensus Integration",
+      "purpose": "Document `tsoracle-openraft-toolkit`: helpers that let a host service's existing openraft carry both the host's own `AppData` and tsoracle's `HighWaterCommand` on a single replicated log, with one snapshot covering both halves. This is the 'piggyback' integration pattern.",
+      "page_notes": [
+        {
+          "content": "Source: `crates/tsoracle-openraft-toolkit/src/`. Runnable reference: `examples/openraft-piggyback`. Be explicit about the trade-off vs. the standalone pattern: one log/snapshot instead of two, at the cost of coupling tsoracle's availability to the host's raft."
+        }
+      ]
+    },
+    {
+      "title": "Client",
+      "purpose": "Document `tsoracle-client`: the gRPC client used by callers. Cover `Client::connect` with multiple endpoints, leader discovery via `LeaderHint`, automatic reconnection, request coalescing (multiple in-flight `get_ts` calls coalesced into one RPC), and the difference between `get_ts` and `get_ts_batch`. Include the public API surface and a section on internals (driver task, channel multiplexing) for readers integrating the client deeply.",
+      "page_notes": [
+        {
+          "content": "Sources of truth: `docs/client-api-and-usage.md` (user-facing API) and `docs/the-client-driver.md` (internals). Code: `crates/tsoracle-client/src/`."
+        }
+      ]
+    },
+    {
+      "title": "Server",
+      "purpose": "Document `tsoracle-server`: the async tonic server that wires `tsoracle-core` to the network and consumes a `ConsensusDriver`. Cover the `Server::builder` surface, embedding via `Server::into_router` (to mount inside an existing tonic server), and graceful shutdown via `serve_with_shutdown`.",
+      "page_notes": [
+        {
+          "content": "Source: `crates/tsoracle-server/src/`. The embedded-host pattern is shown in `examples/embedded-server`."
+        }
+      ]
+    },
+    {
+      "title": "gRPC Service and Wire Format",
+      "parent": "Server",
+      "purpose": "Document the gRPC service surface defined in `tsoracle-proto`: the `Timestamp` message, the RPCs (`GetTs`, `GetTsBatch`), and the `LeaderHint` mechanism that lets followers redirect clients to the current leader.",
+      "page_notes": [
+        {
+          "content": "Source: `crates/tsoracle-proto/`. Keep this page focused on the wire contract — server-side handling lives in the parent Server page, client-side behavior in the Client page."
+        }
+      ]
+    },
+    {
+      "title": "Failover Fence",
+      "parent": "Server",
+      "purpose": "Document the failover fence in `tsoracle-server`: the mechanism that guarantees no two leaders can issue overlapping timestamps across a leadership change. Explain the leader-watch loop, the role of the consensus driver's leader-epoch signal, and why the fence is the linchpin of the strict-monotonicity invariant across failover.",
+      "page_notes": [
+        {
+          "content": "Source: `crates/tsoracle-server/src/`. The pedagogical reference is `examples/failover-demo`, which simulates leadership changes in-process to show the fence keeping timestamps monotonic."
+        }
+      ]
+    },
+    {
+      "title": "TLS and mTLS",
+      "parent": "Server",
+      "purpose": "Document the TLS and mTLS transport configuration on both server and client: how to enable, how identities are provided (file paths vs. in-memory bytes), and what verification mode applies to peer certificates.",
+      "page_notes": [
+        {
+          "content": "TLS plumbing landed recently (see commits `b098336` and `04db211`). Source: `crates/tsoracle-server/src/` and `crates/tsoracle-client/src/`. Document only what the public builder API exposes — do not infer flags that don't exist."
+        }
+      ]
+    },
+    {
+      "title": "Operations",
+      "purpose": "Operator-facing guide: deployment topologies (single-node-with-fsync vs. replicated-with-openraft), state directory layout, fsync cost characteristics, leader handoff behavior under network partitions, and what to monitor.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/operations.md`. Cross-link to Metrics for the observability story."
+        }
+      ]
+    },
+    {
+      "title": "Metrics",
+      "parent": "Operations",
+      "purpose": "Document the optional `metrics` feature on `tsoracle-server`: which allocator, leader, and request metrics are emitted through the `metrics` facade, and how to install a recorder (e.g. `metrics-exporter-prometheus`) before the server starts.",
+      "page_notes": [
+        {
+          "content": "Runnable reference: `examples/metrics-prometheus`. Recorder must be installed *before* `Server::serve_with_shutdown` for early metrics to be captured."
+        }
+      ]
+    },
+    {
+      "title": "Testing",
+      "purpose": "Tour of the test infrastructure: unit tests inside each crate, the cross-crate integration harness in `tsoracle-tests`, fuzzing under `fuzz/`, plus the dedicated stress and failpoint test suites. Explain when a contributor should reach for each layer.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/testing-and-examples.md`. Cross-link to the three child pages for the specialized harnesses."
+        }
+      ]
+    },
+    {
+      "title": "Stress Testing",
+      "parent": "Testing",
+      "purpose": "Document the stress harness: single-process and multi-process raft topologies, what invariants it asserts (notably strict monotonicity under churn), and how to run it locally.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/stress-testing.md`. Harness code lives under `crates/tsoracle-tests/`."
+        }
+      ]
+    },
+    {
+      "title": "Failpoint Testing",
+      "parent": "Testing",
+      "purpose": "Document the failpoint-driven crash tests: how failpoints are injected to simulate crashes at specific points (notably around fsync and high-water-mark commits), and what each scenario is designed to prove about crash safety.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/failpoint-testing.md`."
+        }
+      ]
+    },
+    {
+      "title": "Fuzzing",
+      "parent": "Testing",
+      "purpose": "Document the coverage-guided fuzz targets under `fuzz/`, focused on the `postcard` decoders. Cover how to run a target, where corpora live, and how findings are triaged.",
+      "page_notes": [
+        {
+          "content": "Source: `fuzz/`. Do not enumerate corpus contents — corpora are not user-facing artifacts."
+        }
+      ]
+    },
+    {
+      "title": "Examples",
+      "purpose": "Index of the runnable examples under `examples/`, each its own crate. Cover all five — `embedded-server`, `failover-demo`, `openraft-standalone`, `openraft-piggyback`, `metrics-prometheus` — with one short paragraph each on what the example demonstrates and the command to run it (`cargo run -p example-<name>`).",
+      "page_notes": [
+        {
+          "content": "Be explicit about which examples are pedagogical (in-process, single-binary, designed to teach) vs. HA-shaped (multi-process, closer to a real deployment). `failover-demo` and `openraft-piggyback` are in-process; `openraft-standalone` is the multi-process one."
+        }
+      ]
+    }
+  ]
+}
