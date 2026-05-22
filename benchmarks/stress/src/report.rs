@@ -185,7 +185,7 @@ impl Report {
             "transient_retries": self.transient_retries,
             "out_of_range_samples": self.out_of_range_samples,
             "violations": self.violations.iter().map(violation_summary).collect::<Vec<_>>(),
-            "chaos_events": self.chaos_events.len(),
+            "chaos_events": self.chaos_events.iter().map(chaos_event_summary).collect::<Vec<_>>(),
             "schedule_summary": {
                 "source": match &self.schedule.source {
                     crate::schedule::ScheduleSource::Named { scenario } => format!("named:{scenario}"),
@@ -196,6 +196,40 @@ impl Report {
         });
         value.to_string()
     }
+}
+
+fn chaos_event_summary(ev: &crate::chaos::ChaosEvent) -> serde_json::Value {
+    use crate::chaos::{ChaosKind, ChaosOutcome};
+    // `Instant` isn't serializable and ms-since-Unix-epoch isn't recoverable
+    // from `Instant`. We surface only what's useful for triage: the kind
+    // (KillLeader / PauseLeader / FailpointArm{name} / FailpointDisarm{name})
+    // and the outcome label. Window timing is implicit in the schedule.
+    let kind = match &ev.window.kind {
+        ChaosKind::LeaderKill => serde_json::json!({ "kind": "LeaderKill" }),
+        ChaosKind::LeaderPause => serde_json::json!({ "kind": "LeaderPause" }),
+        ChaosKind::FailpointArm { name } => {
+            serde_json::json!({ "kind": "FailpointArm", "name": name })
+        }
+        ChaosKind::FailpointDisarm { name } => {
+            serde_json::json!({ "kind": "FailpointDisarm", "name": name })
+        }
+    };
+    let outcome = match &ev.outcome {
+        ChaosOutcome::Applied => serde_json::json!({ "outcome": "Applied" }),
+        ChaosOutcome::Skipped { reason } => {
+            serde_json::json!({ "outcome": "Skipped", "reason": reason })
+        }
+        ChaosOutcome::Failed { reason } => {
+            serde_json::json!({ "outcome": "Failed", "reason": reason })
+        }
+    };
+    let mut out = kind;
+    if let (Some(out_obj), Some(outcome_obj)) = (out.as_object_mut(), outcome.as_object()) {
+        for (k, v) in outcome_obj {
+            out_obj.insert(k.clone(), v.clone());
+        }
+    }
+    out
 }
 
 fn violation_summary(v: &crate::violation::Violation) -> serde_json::Value {
@@ -434,6 +468,72 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::from_str(&r.render_json()).unwrap();
         assert_eq!(v["schedule_summary"]["source"], "random:7");
+    }
+
+    #[test]
+    fn chaos_event_summary_covers_all_kinds_and_outcomes() {
+        // Before this PR, `render_json` emitted `chaos_events: <len>` —
+        // hiding everything that actually fired. The artifact in run
+        // 26268395168 showed `chaos_events: 0` despite an `op_count: 612`
+        // schedule, which made root-causing the failure harder. This test
+        // pins the typed-list shape and exercises every variant.
+        use crate::chaos::{ChaosEvent, ChaosKind, ChaosOutcome, ChaosWindow};
+        use std::time::Instant;
+
+        let now = Instant::now();
+        let make = |kind, outcome| ChaosEvent {
+            window: ChaosWindow {
+                kind,
+                started_at: now,
+                ended_at: now,
+                grace: Duration::from_millis(50),
+            },
+            outcome,
+        };
+
+        let mut r = sample_report();
+        r.chaos_events = vec![
+            make(ChaosKind::LeaderKill, ChaosOutcome::Applied),
+            make(
+                ChaosKind::LeaderPause,
+                ChaosOutcome::Skipped {
+                    reason: "no leader".into(),
+                },
+            ),
+            make(
+                ChaosKind::FailpointArm {
+                    name: "stress::fp_x".into(),
+                },
+                ChaosOutcome::Applied,
+            ),
+            make(
+                ChaosKind::FailpointDisarm {
+                    name: "stress::fp_x".into(),
+                },
+                ChaosOutcome::Failed {
+                    reason: "fail::remove failed".into(),
+                },
+            ),
+        ];
+
+        let v: serde_json::Value = serde_json::from_str(&r.render_json()).unwrap();
+        let arr = v["chaos_events"]
+            .as_array()
+            .expect("chaos_events is a list");
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0]["kind"], "LeaderKill");
+        assert_eq!(arr[0]["outcome"], "Applied");
+        assert_eq!(arr[1]["kind"], "LeaderPause");
+        assert_eq!(arr[1]["outcome"], "Skipped");
+        assert_eq!(arr[1]["reason"], "no leader");
+        assert_eq!(arr[2]["kind"], "FailpointArm");
+        assert_eq!(arr[2]["name"], "stress::fp_x");
+        assert_eq!(arr[3]["kind"], "FailpointDisarm");
+        assert_eq!(arr[3]["outcome"], "Failed");
+
+        // Text renderer keeps a count-only line; preserve it.
+        let text = r.render_text();
+        assert!(text.contains("chaos events: 4"), "{text}");
     }
 
     #[test]

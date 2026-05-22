@@ -46,7 +46,7 @@ use tokio::time::{Instant, sleep};
 use tsoracle_driver_openraft::{
     HighWaterStateMachine, OpenraftDriver, OpenraftPeer, StandaloneHost, TypeConfig,
 };
-use tsoracle_openraft_toolkit::test_fakes::MemNetwork;
+use tsoracle_openraft_toolkit::test_fakes::{MemNetwork, PartitionController};
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 use tsoracle_server::Server;
 
@@ -289,6 +289,23 @@ async fn wait_for_leader(nodes: &[RaftNode], timeout: Duration) -> anyhow::Resul
     }
 }
 
+/// RAII guard that heals a node-level partition on drop. Used to make
+/// `kill_leader` / `pause_leader` cancel-safe: if the harness's outer
+/// `select!` (e.g. the `--duration` timer) drops the chaos future while
+/// it is parked at the mid-window `sleep`, the guard's `Drop` still fires
+/// and restores reachability — without this, the cluster would remain
+/// partitioned for the rest of the run.
+struct HealOnDrop {
+    partitions: Arc<PartitionController<u64>>,
+    node: u64,
+}
+
+impl Drop for HealOnDrop {
+    fn drop(&mut self) {
+        self.partitions.heal(self.node);
+    }
+}
+
 #[async_trait]
 impl ChaosController for RaftController {
     async fn kill_leader(&self) -> ChaosEvent {
@@ -312,13 +329,20 @@ impl ChaosController for RaftController {
         let partitions = self.network.partitions();
         timed_event(ChaosKind::LeaderKill, self.grace, move || async move {
             partitions.isolate(leader_raft_id);
+            // Heal-on-drop guarantees reachability is restored even if the
+            // outer future is cancelled at the `sleep` below — see
+            // `HealOnDrop`'s doc.
+            let _guard = HealOnDrop {
+                partitions,
+                node: leader_raft_id,
+            };
             // Election timeout is 300-600ms; openraft can also need a few
             // heartbeat-interval ticks (100ms each) before followers escalate
             // to a candidate after losing the leader. 1500ms keeps the chaos
             // window short while reliably producing a re-election in CI; the
             // 750ms baseline from the sketch was tight enough to flake.
             tokio::time::sleep(Duration::from_millis(1500)).await;
-            partitions.heal(leader_raft_id);
+            // `_guard` drops here on the happy path too, performing the heal.
             ChaosOutcome::Applied
         })
         .await
@@ -343,8 +367,12 @@ impl ChaosController for RaftController {
         let partitions = self.network.partitions();
         timed_event(ChaosKind::LeaderPause, self.grace, move || async move {
             partitions.isolate(leader_raft_id);
+            // Cancel-safety guard; see `kill_leader` for the rationale.
+            let _guard = HealOnDrop {
+                partitions,
+                node: leader_raft_id,
+            };
             tokio::time::sleep(dur).await;
-            partitions.heal(leader_raft_id);
             ChaosOutcome::Applied
         })
         .await
@@ -505,6 +533,47 @@ mod tests {
         };
         assert_ne!(original_leader, new_leader);
 
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn kill_leader_heals_on_cancel() {
+        // The outer `--duration` timer in the stress harness wins the
+        // top-level `select!` and drops the in-flight chaos future. Before
+        // the `HealOnDrop` guard, that cancellation parked at the
+        // mid-window `sleep` and `heal` never ran, stranding the cluster
+        // partitioned for the rest of the run. The guard's `Drop` impl is
+        // what makes this test pass: the partition is healed even though
+        // the chaos future never reached its end-of-window heal site.
+        let topology = RaftTopology::spawn(3, Duration::from_millis(750))
+            .await
+            .expect("spawn 3-node raft topology");
+        let leader_raft_id: u64 = topology
+            .controller
+            .nodes
+            .iter()
+            .find_map(|n| n.raft.metrics().borrow_watched().current_leader)
+            .expect("a leader at boot");
+        let partitions = topology.controller.network.partitions();
+        // The mid-window sleep in `kill_leader` is 1500ms; cancelling at
+        // 50ms reliably lands us inside it on any reasonable machine.
+        match tokio::time::timeout(Duration::from_millis(50), topology.controller.kill_leader())
+            .await
+        {
+            Err(_elapsed) => {} // expected — future was dropped mid-sleep
+            Ok(event) => panic!(
+                "kill_leader should not have finished within 50ms; got {:?}",
+                event.outcome,
+            ),
+        }
+        // `is_reachable(x, x)` returns true iff `x` is NOT isolated, so this
+        // probe directly reports the node-level partition state we care
+        // about without needing to pick a peer id.
+        assert!(
+            partitions.is_reachable(leader_raft_id, leader_raft_id),
+            "partition for node {leader_raft_id} must be healed after the \
+             chaos future is dropped; the node is still in the isolated set",
+        );
         Box::new(topology.controller).shutdown().await;
     }
 

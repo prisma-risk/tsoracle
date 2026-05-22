@@ -40,6 +40,14 @@ pub struct SupervisorOutcome {
     /// the same `issued_at`/`recv_time`). Values clamped to
     /// `[1, HISTO_MAX_US]` to stay within histogram bounds.
     pub latency: Histogram<u64>,
+    /// Every Applied chaos event the supervisor observed during the run, in
+    /// arrival order. Carried out of the supervisor so the final `Report`
+    /// can surface what chaos actually fired — the dedup/triage step in
+    /// `.github/actions/stress-auto-issue` and on-call repro both depend
+    /// on this. Skipped/Failed events never reach the supervisor (the
+    /// nemesis `play` loop drops them), so this matches the supervisor's
+    /// fence-freshness/liveness gating sets exactly.
+    pub chaos_events: Vec<ChaosEvent>,
 }
 
 pub struct Supervisor {
@@ -71,6 +79,12 @@ struct SupervisorState {
     /// `open_windows` gets pruned in `on_issued` once a window is past
     /// grace and fence-checked, so it can't be relied on after the fact.
     chaos_history: Vec<ChaosWindow>,
+    /// Full `ChaosEvent`s (window + outcome) for every Applied event the
+    /// supervisor observed, in arrival order. Distinct from
+    /// `chaos_history`: that one is `ChaosWindow`-only (the shape the
+    /// liveness attribution needs); this one carries the outcome too so
+    /// the final report can surface it.
+    chaos_events: Vec<ChaosEvent>,
     violations: Vec<Violation>,
     issued_observed: u64,
     latency: Histogram<u64>,
@@ -85,6 +99,7 @@ impl Default for SupervisorState {
             open_batches: HashMap::new(),
             open_windows: Vec::new(),
             chaos_history: Vec::new(),
+            chaos_events: Vec::new(),
             violations: Vec::new(),
             issued_observed: 0,
             latency: new_histogram(),
@@ -138,6 +153,7 @@ impl Supervisor {
             high_water: self.state.high_water,
             issued_observed: self.state.issued_observed,
             latency: self.state.latency,
+            chaos_events: self.state.chaos_events,
         }
     }
 
@@ -271,7 +287,8 @@ impl Supervisor {
 
     fn on_chaos(&mut self, ev: ChaosEvent) {
         // Only Applied windows participate in invariant checks. Skipped/Failed
-        // are recorded by the caller (in chaos_events vec); supervisor ignores.
+        // never reach the supervisor — `nemesis::play` only forwards Applied
+        // events — so this guard is defensive belt-and-braces.
         if !ev.outcome.is_applied() {
             return;
         }
@@ -283,6 +300,9 @@ impl Supervisor {
             ChaosKind::FailpointArm { .. } | ChaosKind::FailpointDisarm { .. } => true,
         };
         self.state.chaos_history.push(ev.window.clone());
+        // Retain the full event (window + outcome) for the final report so
+        // an operator triaging an artifact can see what actually fired.
+        self.state.chaos_events.push(ev.clone());
         self.state.open_windows.push(OpenChaosWindow {
             window: ev.window,
             pre_window_high_water,

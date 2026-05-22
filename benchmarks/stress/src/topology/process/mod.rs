@@ -13,24 +13,20 @@
 //! Process topology: spawned `tsoracle` binaries, POSIX-signal chaos,
 //! `FAILPOINTS` env propagation. Unix-only.
 //!
+//! `tsoracle serve` is single-node, so this topology runs exactly one
+//! child: it exercises SIGKILL/respawn against the file driver's persisted
+//! high water (validated by `StressConfig::validate` rejecting `nodes != 1`).
+//! Multi-node coordination requires raft topology.
+//!
 //! Architecture:
-//! - Each child runs the production `tsoracle` binary bound to an
+//! - The child runs the production `tsoracle` binary bound to an
 //!   OS-assigned port. The binary prints `serving on 127.0.0.1:NNNN` on
 //!   stdout after binding; the harness scans for that line to learn the
-//!   actual port.
-//! - The harness owns a per-child reaper task (one tokio task per PID)
-//!   that calls `child.wait()` and either swallows the exit
-//!   (nemesis-initiated) or pushes a `LivenessIncident::UnexpectedServerExit`
-//!   to the supervisor.
-//! - Best-effort "current leader": round-robin over children. The harness
-//!   has no protocol handle to discover the actual Raft leader; the
-//!   supervisor's invariants stay correct because monotonicity is global
-//!   and fence freshness is keyed on chaos windows rather than which
-//!   specific PID was targeted.
-//!
-//! Chaos ops (`kill_leader`, `pause_leader`, `arm_failpoint`,
-//! `disarm_failpoint`) land in follow-up commits; this one wires the
-//! topology surface that doesn't need POSIX signals.
+//!   actual port. A respawned child rebinds to the same port so client
+//!   endpoint lists handed out before the first chaos op stay valid.
+//! - The harness owns a per-child reaper task that calls `child.wait()`
+//!   and either swallows the exit (nemesis-initiated) or pushes a
+//!   `LivenessIncident::UnexpectedServerExit` to the supervisor.
 
 mod child;
 mod failpoints_env;
@@ -100,8 +96,14 @@ pub struct ProcessController {
 
 impl ProcessTopology {
     pub async fn spawn(node_count: usize, grace: Duration) -> anyhow::Result<Self> {
-        if node_count < 1 {
-            anyhow::bail!("--nodes must be >= 1 for process topology");
+        // `StressConfig::validate` rejects this combination at the CLI, but
+        // the topology layer also asserts it so direct test callers cannot
+        // construct an incoherent multi-process oracle setup.
+        if node_count != 1 {
+            anyhow::bail!(
+                "process topology requires exactly 1 node (got {node_count}); \
+                 tsoracle serve is single-node, multi-node needs raft topology"
+            );
         }
         let binary = locate_tsoracle_binary()?;
         let tmp_root = tempfile::tempdir()?;

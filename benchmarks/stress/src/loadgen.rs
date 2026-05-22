@@ -69,9 +69,34 @@ pub struct ClientTaskCfg {
 /// exceeding the deadline budget emitting a `LivenessIncident` and the call
 /// being abandoned (loop continues with the next call).
 pub async fn client_task(cfg: ClientTaskCfg) -> Result<u64, tsoracle_client::ClientError> {
-    // Warmup: discard results.
+    // Warmup: discard results. Honors `stop` between iterations and inside
+    // each retry loop so the harness's `--duration` timer can always end
+    // the run promptly — even if the cluster is in a degraded state that
+    // makes warmup calls keep failing transient.
     for _ in 0..cfg.warmup_iters {
-        let _ = issue_one(&cfg.client, cfg.batch_size, &cfg.transient_retries).await?;
+        if cfg.stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match issue_one(
+            &cfg.client,
+            cfg.batch_size,
+            &cfg.transient_retries,
+            &cfg.stop,
+        )
+        .await
+        {
+            Ok(_) => {}
+            // Stop-driven abort surfaces as `NoReachableEndpoints`. Treat it
+            // as a clean break from warmup rather than a task failure: the
+            // outer harness will call `for handle in handles { _ = h.await }`
+            // and ignore the result.
+            Err(tsoracle_client::ClientError::NoReachableEndpoints)
+                if cfg.stop.load(Ordering::Relaxed) =>
+            {
+                break;
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     let mut batch_counter: BatchId = 0;
@@ -137,8 +162,18 @@ async fn issue_one(
     client: &Client,
     batch_size: u32,
     transient_retries: &AtomicU64,
+    stop: &AtomicBool,
 ) -> Result<u64, tsoracle_client::ClientError> {
     loop {
+        // Cooperative cancellation point. Without this, a persistently
+        // unavailable cluster (e.g. a chaos op that never healed) would
+        // spin in retries past the harness's `--duration` deadline and
+        // strand the job at its 30-minute hard timeout. The caller treats
+        // `NoReachableEndpoints` returned while `stop` is set as a clean
+        // warmup-abort signal.
+        if stop.load(Ordering::Relaxed) {
+            return Err(tsoracle_client::ClientError::NoReachableEndpoints);
+        }
         let result = if batch_size == 1 {
             client.get_ts().await.map(|_| 1u64)
         } else {
@@ -387,6 +422,45 @@ mod tests {
             saw_incident,
             "expected a DeadlineExceeded LivenessIncident from follower-state server",
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn warmup_aborts_on_stop_against_unavailable_cluster() {
+        // Follower-state driver returns FailedPrecondition forever (transient
+        // per the stress classifier). Before the stop-aware warmup, this
+        // would loop indefinitely and pin a 30-minute CI timeout. With the
+        // fix, flipping `stop` mid-flight breaks out of warmup promptly so
+        // the harness can drain client handles and finish on schedule.
+        let driver = Arc::new(InMemoryDriver::new());
+        driver.become_follower(None);
+        let (client, shutdown_tx, server_handle) = spawn_server_with(driver).await;
+        let (tx, _rx) = mpsc::channel::<SupervisorEvent>(8);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cfg = ClientTaskCfg {
+            client_id: ClientId(0),
+            client: client.clone(),
+            batch_size: 1,
+            // Large enough that the loop would never naturally finish under
+            // a follower-state server within the test's wall-clock budget.
+            warmup_iters: 1_000_000,
+            liveness_deadline: Duration::from_secs(5),
+            stop: stop.clone(),
+            tx,
+            transient_retries: Arc::new(AtomicU64::new(0)),
+        };
+        let task = tokio::spawn(client_task(cfg));
+        // Give warmup a chance to enter the retry loop, then signal stop.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stop.store(true, Ordering::Relaxed);
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("client_task must exit promptly after stop is set");
+        // `client_task` returns Ok with zero issued (warmup aborted, main
+        // loop saw stop immediately and skipped).
+        let issued = result.unwrap().unwrap();
+        assert_eq!(issued, 0, "expected no issued samples; got {issued}");
+        let _ = shutdown_tx.send(());
+        let _ = server_handle.await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
