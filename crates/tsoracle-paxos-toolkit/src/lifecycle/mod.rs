@@ -259,8 +259,9 @@ where
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use omnipaxos::ballot_leader_election::Ballot;
+    use omnipaxos::storage::{Snapshot, StopSign, StorageResult};
     use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
-    use omnipaxos_storage::memory_storage::MemoryStorage;
     use tokio::time::sleep;
     use tsoracle_consensus::LeaderState;
 
@@ -274,13 +275,97 @@ mod tests {
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     struct TestSnapshot;
 
-    impl omnipaxos::storage::Snapshot<TestEntry> for TestSnapshot {
+    impl Snapshot<TestEntry> for TestSnapshot {
         fn create(_: &[TestEntry]) -> Self {
             Self
         }
         fn merge(&mut self, _: Self) {}
         fn use_snapshots() -> bool {
             false
+        }
+    }
+
+    /// Minimal in-memory `Storage<TestEntry>` for runner-loop coverage tests.
+    ///
+    /// We do not depend on `omnipaxos_storage::MemoryStorage` because it
+    /// pulls `sled` transitively, which brings unmaintained `bincode`,
+    /// `fxhash`, and `instant` advisories that `cargo deny` rejects.
+    /// A richer `MemStorage` lands in a follow-up sub-issue under
+    /// `test_fakes/`; this stub is only enough for OmniPaxos to call
+    /// the tick path without panicking on an empty log.
+    #[derive(Default)]
+    struct StubStorage {
+        promise: Option<Ballot>,
+        accepted_round: Option<Ballot>,
+        decided_idx: u64,
+        compacted_idx: u64,
+        snapshot: Option<TestSnapshot>,
+        stopsign: Option<StopSign>,
+    }
+
+    impl Storage<TestEntry> for StubStorage {
+        fn append_entry(&mut self, _: TestEntry) -> StorageResult<u64> {
+            Ok(0)
+        }
+        fn append_entries(&mut self, _: Vec<TestEntry>) -> StorageResult<u64> {
+            Ok(0)
+        }
+        fn append_on_prefix(&mut self, _: u64, _: Vec<TestEntry>) -> StorageResult<u64> {
+            Ok(0)
+        }
+        fn get_entries(&self, _: u64, _: u64) -> StorageResult<Vec<TestEntry>> {
+            Ok(Vec::new())
+        }
+        fn get_log_len(&self) -> StorageResult<u64> {
+            Ok(0)
+        }
+        fn get_suffix(&self, _: u64) -> StorageResult<Vec<TestEntry>> {
+            Ok(Vec::new())
+        }
+        fn set_promise(&mut self, ballot: Ballot) -> StorageResult<()> {
+            self.promise = Some(ballot);
+            Ok(())
+        }
+        fn get_promise(&self) -> StorageResult<Option<Ballot>> {
+            Ok(self.promise)
+        }
+        fn set_accepted_round(&mut self, ballot: Ballot) -> StorageResult<()> {
+            self.accepted_round = Some(ballot);
+            Ok(())
+        }
+        fn get_accepted_round(&self) -> StorageResult<Option<Ballot>> {
+            Ok(self.accepted_round)
+        }
+        fn set_decided_idx(&mut self, idx: u64) -> StorageResult<()> {
+            self.decided_idx = idx;
+            Ok(())
+        }
+        fn get_decided_idx(&self) -> StorageResult<u64> {
+            Ok(self.decided_idx)
+        }
+        fn trim(&mut self, _: u64) -> StorageResult<()> {
+            Ok(())
+        }
+        fn set_compacted_idx(&mut self, idx: u64) -> StorageResult<()> {
+            self.compacted_idx = idx;
+            Ok(())
+        }
+        fn get_compacted_idx(&self) -> StorageResult<u64> {
+            Ok(self.compacted_idx)
+        }
+        fn set_snapshot(&mut self, snapshot: Option<TestSnapshot>) -> StorageResult<()> {
+            self.snapshot = snapshot;
+            Ok(())
+        }
+        fn get_snapshot(&self) -> StorageResult<Option<TestSnapshot>> {
+            Ok(self.snapshot.clone())
+        }
+        fn set_stopsign(&mut self, stopsign: Option<StopSign>) -> StorageResult<()> {
+            self.stopsign = stopsign;
+            Ok(())
+        }
+        fn get_stopsign(&self) -> StorageResult<Option<StopSign>> {
+            Ok(self.stopsign.clone())
         }
     }
 
@@ -291,7 +376,7 @@ mod tests {
         async fn send(&self, _message: Message<TestEntry>) {}
     }
 
-    fn build_omnipaxos(node_id: u64) -> Arc<Mutex<OmniPaxos<TestEntry, MemoryStorage<TestEntry>>>> {
+    fn build_omnipaxos(node_id: u64) -> Arc<Mutex<OmniPaxos<TestEntry, StubStorage>>> {
         // OmniPaxos 0.2 rejects single-node ClusterConfigs, so build a 3-node
         // configuration even when only one runner will exist.
         let cluster_config = ClusterConfig {
@@ -308,12 +393,12 @@ mod tests {
             server_config,
         };
         let op = op_config
-            .build(MemoryStorage::<TestEntry>::default())
+            .build(StubStorage::default())
             .expect("build omnipaxos");
         Arc::new(Mutex::new(op))
     }
 
-    fn build_runner(node_id: u64) -> PaxosRunner<TestEntry, MemoryStorage<TestEntry>> {
+    fn build_runner(node_id: u64) -> PaxosRunner<TestEntry, StubStorage> {
         PaxosRunner::new(
             build_omnipaxos(node_id),
             node_id,
