@@ -17,7 +17,7 @@ use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio_stream::wrappers::WatchStream;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
@@ -98,21 +98,17 @@ impl ConsensusDriver for InMemoryDriver {
 #[derive(Clone)]
 pub struct StallableDriver {
     inner: InMemoryDriver,
-    stall_threshold_tx: watch::Sender<u64>,
-    // Held purely so the `watch::Sender` always has at least one live
-    // receiver — without this, `send` returns an error and the value is
-    // never observed by future `subscribe()` calls.
-    _stall_threshold_keepalive_rx: watch::Receiver<u64>,
+    stall_threshold: Arc<AtomicU64>,
+    threshold_wake: Arc<Notify>,
     persist_calls: Arc<AtomicU64>,
 }
 
 impl Default for StallableDriver {
     fn default() -> Self {
-        let (stall_threshold_tx, _stall_threshold_keepalive_rx) = watch::channel(u64::MAX);
         StallableDriver {
             inner: InMemoryDriver::new(),
-            stall_threshold_tx,
-            _stall_threshold_keepalive_rx,
+            stall_threshold: Arc::new(AtomicU64::new(u64::MAX)),
+            threshold_wake: Arc::new(Notify::new()),
             persist_calls: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -127,31 +123,19 @@ impl StallableDriver {
         self.inner.become_leader(epoch);
     }
 
-    pub fn become_follower(&self, hint: Option<String>) {
-        self.inner.become_follower(hint);
-    }
-
-    pub fn current_high_water(&self) -> u64 {
-        self.inner.current_high_water()
-    }
-
     /// Cause every `persist_high_water` invocation whose call index is at
     /// or above `threshold` to block until [`Self::release`] is called.
     /// Calls with index `< threshold` (whether already in flight or yet to
     /// arrive) are unaffected.
     pub fn stall_from(&self, threshold: u64) {
-        // `send` only fails when every receiver has been dropped, which
-        // cannot happen here — `_stall_threshold_keepalive_rx` is owned by
-        // this struct and lives as long as the sender does. Drop the
-        // result rather than `.expect()`-ing it so the strict
-        // `clippy::expect_used` lint stays clean.
-        let _ = self.stall_threshold_tx.send(threshold);
+        self.stall_threshold.store(threshold, Ordering::SeqCst);
     }
 
     /// Unblock every pending stalled persist call and disable stalling for
     /// future calls.
     pub fn release(&self) {
-        let _ = self.stall_threshold_tx.send(u64::MAX);
+        self.stall_threshold.store(u64::MAX, Ordering::SeqCst);
+        self.threshold_wake.notify_waiters();
     }
 
     /// Number of `persist_high_water` calls that have started so far,
@@ -173,19 +157,20 @@ impl ConsensusDriver for StallableDriver {
 
     async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
         let call_idx = self.persist_calls.fetch_add(1, Ordering::SeqCst);
-        let mut threshold_rx = self.stall_threshold_tx.subscribe();
         let mut was_stalled = false;
         loop {
-            let threshold = *threshold_rx.borrow_and_update();
-            if call_idx < threshold {
+            // Race-free `Notify` pattern: register the wake future *before*
+            // checking the threshold. If `release` fires between the check
+            // and the await, the future is already armed and resolves
+            // immediately at `.await` instead of missing the wake.
+            let notified = self.threshold_wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if call_idx < self.stall_threshold.load(Ordering::SeqCst) {
                 break;
             }
             was_stalled = true;
-            threshold_rx.changed().await.map_err(|err| {
-                ConsensusError::TransientDriver(Box::<dyn std::error::Error + Send + Sync>::from(
-                    format!("stall sender dropped: {err}"),
-                ))
-            })?;
+            notified.as_mut().await;
         }
         // The documented persist contract lets a driver commit to more
         // than `at_least`. When a call has been stalled, wall-clock time

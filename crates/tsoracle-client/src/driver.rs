@@ -688,11 +688,10 @@ mod tests {
 
         let observed = calls.lock().clone();
         let max_count = *observed.iter().max().expect("at least one rpc was issued");
+        let batches = observed.len();
         assert!(
             max_count <= QUEUE_CAPACITY as u32,
-            "max batch count ({max_count}) exceeded documented bound ({QUEUE_CAPACITY}); \
-             fired {total} requests, observed {} batches",
-            observed.len(),
+            "max batch count ({max_count}) exceeded documented bound ({QUEUE_CAPACITY}); fired {total} requests, observed {batches} batches"
         );
     }
 
@@ -861,13 +860,9 @@ mod tests {
                         let timestamps = result
                             .expect("join must succeed")
                             .expect("request must succeed");
-                        assert_eq!(
-                            timestamps.len(),
-                            *requested as usize,
-                            "request {idx} requested {requested}, served {}",
-                            timestamps.len(),
-                        );
-                        total_served += timestamps.len() as u64;
+                        let served = timestamps.len();
+                        assert_eq!(served, *requested as usize, "request {idx} requested {requested}, served {served}");
+                        total_served += served as u64;
                     }
 
                     let observed = calls.lock().clone();
@@ -876,11 +871,7 @@ mod tests {
                     // violation here would point at a refactor that
                     // accidentally produced an over-sized chunk.
                     for rpc_count in &observed {
-                        assert!(
-                            *rpc_count <= MAX_TIMESTAMPS_PER_RPC,
-                            "rpc dispatched with count {rpc_count} > per-call cap \
-                             {MAX_TIMESTAMPS_PER_RPC}; observed: {observed:?}"
-                        );
+                        assert!(*rpc_count <= MAX_TIMESTAMPS_PER_RPC, "rpc dispatched with count {rpc_count} > per-call cap {MAX_TIMESTAMPS_PER_RPC}; observed: {observed:?}");
                         assert!(*rpc_count > 0, "rpc dispatched with count 0");
                     }
 
@@ -888,14 +879,8 @@ mod tests {
                     // duplicate timestamps relative to the schedule.
                     let total_requested: u64 = counts.iter().map(|c| u64::from(*c)).sum();
                     let total_rpc: u64 = observed.iter().map(|c| u64::from(*c)).sum();
-                    assert_eq!(
-                        total_served, total_requested,
-                        "served {total_served} timestamps, requested {total_requested}"
-                    );
-                    assert_eq!(
-                        total_rpc, total_requested,
-                        "rpc-side total {total_rpc} != requested {total_requested}"
-                    );
+                    assert_eq!(total_served, total_requested, "served {total_served} timestamps, requested {total_requested}");
+                    assert_eq!(total_rpc, total_requested, "rpc-side total {total_rpc} != requested {total_requested}");
                 });
             }
         }
