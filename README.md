@@ -91,7 +91,9 @@ tsoracle is a small, embeddable Rust implementation. The consensus layer is left
 
 - [examples/embedded-server](examples/embedded-server) — embed `tsoracle-server` with the file driver in your own binary, with graceful shutdown.
 - [examples/failover-demo](examples/failover-demo) — pedagogy: watch the failover fence keep timestamps strictly monotonic across simulated leadership changes, in-process, no openraft.
-- For HA, use [`tsoracle-driver-openraft`](crates/tsoracle-driver-openraft/); see [`examples/openraft-standalone`](examples/openraft-standalone/) (your own dedicated raft) and [`examples/openraft-piggyback`](examples/openraft-piggyback/) (share your service's existing raft).
+- [examples/openraft-standalone](examples/openraft-standalone) — HA: three-node multi-process cluster on a dedicated openraft, wired through [`tsoracle-driver-openraft`](crates/tsoracle-driver-openraft/) with a tonic peer transport and follower-redirect via `LeaderHint`.
+- [examples/openraft-piggyback](examples/openraft-piggyback) — HA: in-process three-node demo of the envelope pattern, where your service's existing openraft carries both your `AppData` and the tsoracle `HighWaterCommand` on a single log, with one snapshot covering both halves.
+- [examples/metrics-prometheus](examples/metrics-prometheus) — embed `tsoracle-server` with `metrics-exporter-prometheus` installed before the server starts, exposing `/metrics` on a separate port for Prometheus to scrape; swap recorders with a one-line change.
 
 Each example is its own crate. Build with `cargo run -p example-<name>`.
 
