@@ -41,10 +41,10 @@ tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.3" }
 tsoracle-core      = { path = "../tsoracle-core",      version = "0.1.3" }
 
 [dev-dependencies]
-proptest         = { workspace = true }
-rocksdb          = { workspace = true }
-tempfile         = { workspace = true }
-tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+proptest           = { workspace = true }
+rocksdb            = { workspace = true }
+tempfile           = { workspace = true }
+tokio              = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [[test]]
 name              = "failpoints"
