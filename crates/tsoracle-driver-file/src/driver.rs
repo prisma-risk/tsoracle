@@ -16,6 +16,7 @@ use core::pin::Pin;
 use futures::{Stream, StreamExt};
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,6 +36,12 @@ pub enum FileDriverError {
     Decode(#[from] record::RecordError),
     #[error("physical_ms {0} exceeds 46-bit maximum")]
     PhysicalMsOutOfRange(u64),
+    #[error("state directory {path} is already locked by another FileDriver: {source}")]
+    AlreadyLocked {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug)]
@@ -49,15 +56,42 @@ pub struct FileDriver {
     #[allow(dead_code)]
     leader_tx: watch::Sender<LeaderState>,
     leader_rx: watch::Receiver<LeaderState>,
+    // Holds the OS-level exclusive lock on `dir/LOCK` for the driver's
+    // lifetime. The kernel releases the flock when this file is closed —
+    // on graceful Drop, on panic unwind, and on hard process death — so
+    // there is no stale-lock cleanup path to maintain.
+    _lock: fs::File,
 }
 
 impl FileDriver {
     /// Open the state directory. Creates it if missing. Reads and validates the
     /// state file if present. Single-node deployments serve `Leader { epoch: 0 }`
     /// continuously.
+    ///
+    /// Acquires an exclusive OS-level lock on the `LOCK` sentinel file under
+    /// `dir` before reading state, and holds it for the lifetime of the
+    /// returned driver. A second concurrent `open_or_init` against the same
+    /// directory returns [`FileDriverError::AlreadyLocked`] immediately —
+    /// `FileDriver` enforces its one-writer-per-directory precondition rather
+    /// than trusting the operator to. The lock is released by the kernel when
+    /// the driver is dropped or the process exits (including crash).
     pub fn open_or_init(dir: impl AsRef<Path>) -> Result<Arc<Self>, FileDriverError> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
+
+        // Lock BEFORE reading state so the in-memory snapshot can't race a
+        // concurrent writer in another process. The sentinel is a stable
+        // inode — `write_record` replaces `state` via atomic rename, so a
+        // lock held on `state` itself would not cover the post-rename file.
+        let lock_path = dir.join("LOCK");
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        acquire_exclusive_lock(&lock_file, &lock_path)?;
+
         let state_path = dir.join("state");
         let current = if state_path.exists() {
             let bytes = fs::read(&state_path)?;
@@ -76,6 +110,7 @@ impl FileDriver {
             write_lock: tokio::sync::Mutex::new(()),
             leader_tx: tx,
             leader_rx: rx,
+            _lock: lock_file,
         }))
     }
 
@@ -104,6 +139,31 @@ impl FileDriver {
         }
         write_record(dir, seed_physical_ms)?;
         Ok(())
+    }
+}
+
+/// Try-acquire an exclusive flock on `lock_file`. Classify the contended
+/// case (another live `FileDriver` holds it) as
+/// [`FileDriverError::AlreadyLocked`]; any other I/O error becomes
+/// [`FileDriverError::Io`].
+///
+/// We don't trust `io::Error::kind()` alone here: on Unix the contended
+/// errno is `EWOULDBLOCK` (mapped to `ErrorKind::WouldBlock`), but on
+/// Windows `LockFileEx` returns `ERROR_LOCK_VIOLATION`, which stdlib does
+/// not necessarily map to `WouldBlock`. `fs2::lock_contended_error()`
+/// returns the exact `io::Error` shape the platform uses, so we match on
+/// `raw_os_error()` for a portable check.
+fn acquire_exclusive_lock(lock_file: &fs::File, lock_path: &Path) -> Result<(), FileDriverError> {
+    use fs2::FileExt;
+    match lock_file.try_lock_exclusive() {
+        Ok(()) => Ok(()),
+        Err(err) if err.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Err(FileDriverError::AlreadyLocked {
+                path: lock_path.to_path_buf(),
+                source: err,
+            })
+        }
+        Err(err) => Err(FileDriverError::Io(err)),
     }
 }
 
@@ -146,12 +206,23 @@ fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
     crate::failpoint!("file_driver::after_rename_before_dir_fsync");
 
     // Fsync the directory so the rename is durable.
-    let dir_file = fs::File::open(dir)?;
-    let fd = dir_file.as_raw_fd();
-    // SAFETY: fd is a valid open directory descriptor for the duration of this call.
-    let rc = unsafe { libc::fsync(fd) };
-    if rc != 0 {
-        return Err(FileDriverError::Io(std::io::Error::last_os_error()));
+    //
+    // Unix-only: opening a directory fd and calling fsync on it forces the
+    // rename's metadata to disk. Windows has no portable equivalent --
+    // `FlushFileBuffers` on a directory handle is undefined for most
+    // filesystems, and NTFS already journals metadata transactions
+    // (including rename) such that the rename is recoverable across crash
+    // even without an explicit metadata flush. Best-effort on Windows;
+    // the tmpfile `sync_all` above still guarantees the data is durable.
+    #[cfg(unix)]
+    {
+        let dir_file = fs::File::open(dir)?;
+        let fd = dir_file.as_raw_fd();
+        // SAFETY: fd is a valid open directory descriptor for the duration of this call.
+        let rc = unsafe { libc::fsync(fd) };
+        if rc != 0 {
+            return Err(FileDriverError::Io(std::io::Error::last_os_error()));
+        }
     }
     Ok(())
 }

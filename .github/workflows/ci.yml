@@ -46,6 +46,33 @@ jobs:
       - name: test
         run: cargo test --workspace --all-features --locked
 
+  # Validates `tsoracle-driver-file` (the only crate whose correctness depends on
+  # OS-level primitives that differ across platforms — flock on Unix vs LockFileEx
+  # on Windows, both reached through the `fs2` crate). Scoped to a single crate
+  # so we don't pay rocksdb/openraft build costs on macOS and Windows runners,
+  # and so a failure here clearly indicates a driver-level cross-platform bug
+  # rather than an unrelated workspace dependency.
+  cross-platform-driver-file:
+    name: cross-platform / driver-file (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-platform-driver-file-${{ matrix.os }}
+      - name: build
+        run: cargo build -p tsoracle-driver-file --all-features --locked
+      # `--all-features` enables the `failpoints` feature, so this run covers
+      # the unit tests, crash_recovery, lock, lock_child_abort, and failpoints
+      # integration test binaries in a single invocation.
+      - name: test
+        run: cargo test -p tsoracle-driver-file --all-features --locked
+
   buf:
     runs-on: ubuntu-latest
     steps:
