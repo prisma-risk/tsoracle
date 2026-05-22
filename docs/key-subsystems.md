@@ -73,6 +73,8 @@ Encoding and decoding live in `crates/tsoracle-server/src/leader_hint.rs` and `c
 
 When the trailer is present, the client moves the hinted endpoint to the front of its retry worklist and immediately tries it. When absent (e.g., the server itself only knows `LeaderState::Unknown`), the client falls back to round-robin across its configured endpoints. The full client-side algorithm is in [Leader discovery and retries](client-api-and-usage.md#leader-discovery-and-retries).
 
+The hinted endpoint is wire input from a contacted peer, so it is treated with less trust than operator-supplied configuration. When the client was built with `ClientBuilder::tls_config(...)`, an explicit `http://...` hint is dropped (and logged at `warn` level under the `tracing` feature); the retry surfaces the underlying `FAILED_PRECONDITION` instead. This prevents a malicious or misconfigured peer from downgrading a TLS-configured client onto a plaintext leader. Bare-host hints (`host:port`) are still rewritten under the configured scheme rule and dialed; explicit `https://...` hints are honored. See [Leader-hint trailers (wire input)](client-api-and-usage.md#leader-hint-trailers-wire-input) for the full matrix.
+
 ## Steady-state window extension
 
 During steady-state serving, a `get_ts` call that finds the allocator's `physical_ms` window exhausted joins a single-flight extension path before retrying. Concurrent callers serialize on `extension_lock`; the first caller persists a new high-water, and later callers recheck the allocator before touching consensus so a stampede normally produces one extension, not one extension per waiter. The path in `tsoracle-server/src/service.rs`:

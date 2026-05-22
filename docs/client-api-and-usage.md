@@ -77,13 +77,27 @@ Setting both `.tls_config(...)` and `.channel_connector(...)` is allowed; the la
 
 ### Scheme rule
 
+The matrix below applies to *operator-supplied* endpoint strings — the entries passed to `ClientBuilder::endpoints`. The wire-input case (leader-hint trailers) is covered immediately after.
+
 | Configured state | Bare `host:port` becomes | `http://...` | `https://...` |
 | --- | --- | --- | --- |
 | No transport config (default) | `http://host:port` | plaintext | TLS (requires a `tls-*` feature to actually connect) |
 | `.tls_config(cfg)` set | `https://host:port` | plaintext (explicit beats configured) | TLS using `cfg` |
 | `.channel_connector(closure)` set | passed verbatim to the closure | passed verbatim | passed verbatim |
 
-"Explicit beats configured" is universal — including for leader-hint trailers. If the server emits a bare-host hint like `node-b:50551`, the client's rewrite rule applies (bare → https when `tls_config` is set; bare → http otherwise). If the server emits a fully-qualified scheme, that scheme is honored.
+"Explicit beats configured" applies to operator-supplied entries above: passing `http://host:port` to `endpoints` deliberately dials that one endpoint as plaintext even when `tls_config` is otherwise set, which is useful for mixed deployments (e.g., a loopback sidecar over plaintext alongside TLS-terminated peers).
+
+### Leader-hint trailers (wire input)
+
+`FAILED_PRECONDITION` responses can carry a `tsoracle-leader-hint-bin` trailer with a `leader_endpoint` string the client uses to redirect. That string is wire input from a contacted peer, not operator configuration, and the rule is tighter:
+
+| Configured state | Bare `host:port` hint | `http://...` hint | `https://...` hint |
+| --- | --- | --- | --- |
+| No transport config (default) | rewritten to `http://host:port` and dialed | dialed as plaintext | dialed as TLS (requires a `tls-*` feature) |
+| `.tls_config(cfg)` set | rewritten to `https://host:port` and dialed with `cfg` | **dropped** — logged at `warn` level (with the `tracing` feature); retry continues without redirecting | dialed as TLS with `cfg` |
+| `.channel_connector(closure)` set | passed verbatim to the closure | passed verbatim to the closure | passed verbatim to the closure |
+
+Under `tls_config`, an explicit `http://` hint from the wire is refused so a contacted peer cannot downgrade the transport. The `channel_connector` escape hatch owns its own scheme policy — the closure receives every endpoint string the retry loop produces and is responsible for whatever filtering it wants. If a caller wants TLS plus a custom connector with leader-hint-downgrade protection, set `.tls_config(...)` first, then build the connector inside the closure.
 
 ### Minimal TLS example
 

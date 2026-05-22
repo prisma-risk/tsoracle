@@ -37,19 +37,34 @@ pub struct ChannelPool {
     channels: Mutex<HashMap<String, Channel>>,
     leader: Mutex<Option<String>>,
     connector: Option<std::sync::Arc<crate::transport::ChannelConnector>>,
+    /// Set by `ClientBuilder::tls_config`; cleared by `channel_connector`.
+    /// Tells the retry loop to drop wire-supplied `http://` leader hints so
+    /// a contacted peer cannot downgrade the transport. Has no effect on
+    /// operator-supplied endpoints; those use the documented scheme rule
+    /// ("explicit beats configured") unchanged.
+    tls_required: bool,
 }
 
 impl ChannelPool {
     pub fn new(
         endpoints: Vec<String>,
         connector: Option<std::sync::Arc<crate::transport::ChannelConnector>>,
+        tls_required: bool,
     ) -> Self {
         ChannelPool {
             configured: endpoints,
             channels: Mutex::new(HashMap::new()),
             leader: Mutex::new(None),
             connector,
+            tls_required,
         }
+    }
+
+    /// True when the built-in TLS connector is in use. The retry loop uses
+    /// this to refuse wire-supplied `http://` leader hints; see
+    /// `crate::retry::issue_rpc`.
+    pub fn tls_required(&self) -> bool {
+        self.tls_required
     }
 
     pub fn cached_leader(&self) -> Option<String> {
@@ -108,7 +123,7 @@ mod tests {
 
     #[test]
     fn iter_starts_with_cached_leader() {
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()], None);
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()], None, false);
         pool.set_leader("b:1".into());
         let order = pool.iter_round_robin();
         assert_eq!(order, vec!["b:1", "a:1", "c:1"]);
@@ -116,14 +131,14 @@ mod tests {
 
     #[test]
     fn iter_without_cache_is_configured_order() {
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()], None);
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into(), "c:1".into()], None, false);
         let order = pool.iter_round_robin();
         assert_eq!(order, vec!["a:1", "b:1", "c:1"]);
     }
 
     #[test]
     fn clear_leader_drops_cached_leader() {
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None);
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None, false);
         pool.set_leader("b:1".into());
         assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
         pool.clear_leader();
@@ -142,7 +157,7 @@ mod tests {
             let endpoint_owned = endpoint.to_string();
             Box::pin(async move { Err(crate::error::ClientError::InvalidEndpoint(endpoint_owned)) })
         });
-        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], Some(connector));
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], Some(connector), false);
         let _ = pool.client("a:1").await;
         let _ = pool.client("b:1").await;
         let seen = captured.lock().clone();
@@ -163,7 +178,7 @@ mod tests {
                     Ok(channel)
                 })
             });
-        let pool = ChannelPool::new(vec!["a:1".into()], Some(connector));
+        let pool = ChannelPool::new(vec!["a:1".into()], Some(connector), false);
         let _ = pool
             .client("a:1")
             .await
@@ -183,7 +198,7 @@ mod tests {
             captured_for_closure.lock().push(endpoint.to_string());
             Box::pin(async { Err(crate::error::ClientError::InvalidEndpoint("x".into())) })
         });
-        let pool = ChannelPool::new(vec!["a:1".into()], Some(connector));
+        let pool = ChannelPool::new(vec!["a:1".into()], Some(connector), false);
         let _ = pool.client("hinted:1").await;
         let seen = captured.lock().clone();
         assert_eq!(seen, vec!["hinted:1".to_string()]);

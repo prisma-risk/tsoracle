@@ -15,6 +15,13 @@
 //! `normalize_uri` enforces the scheme rule: bare `host:port` becomes
 //! `http://host:port` or `https://host:port` depending on whether a TLS
 //! transport is configured; explicit schemes are always preserved.
+//!
+//! "Explicit beats configured" governs *operator-supplied* endpoint
+//! strings — those passed to `ClientBuilder::endpoints`. The
+//! `crate::retry::issue_rpc` loop applies a tighter rule to *wire-supplied*
+//! `tsoracle-leader-hint-bin` trailers under `tls_config`: explicit
+//! `http://...` hints are dropped so a contacted peer cannot downgrade the
+//! transport. See `crate::retry::rejects_plaintext_hint`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -54,9 +61,15 @@ pub(crate) fn normalize_uri(endpoint: &str, tls: bool) -> String {
 /// Construct the built-in TLS-aware channel connector.
 ///
 /// Bare endpoints are rewritten to `https://` via [`normalize_uri`].
-/// Explicit `http://...` endpoints are honored as plaintext even when this
+/// Explicit `http://...` endpoints supplied via
+/// `ClientBuilder::endpoints` are honored as plaintext even when this
 /// connector is in use ("explicit beats configured"). The TLS config is
 /// attached only when the resolved URI uses the `https` scheme.
+///
+/// Explicit `http://...` endpoints arriving via the
+/// `tsoracle-leader-hint-bin` trailer are filtered out one layer up in
+/// `crate::retry::issue_rpc` and never reach this connector — they would
+/// otherwise dial plaintext here, downgrading a TLS-configured client.
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(crate) fn tls_connector(
     cfg: tonic::transport::ClientTlsConfig,
