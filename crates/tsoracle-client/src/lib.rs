@@ -26,6 +26,7 @@ mod error;
 mod leader_resolved;
 mod response;
 mod retry;
+mod transport;
 
 pub use error::ClientError;
 
