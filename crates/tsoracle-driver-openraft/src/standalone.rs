@@ -119,8 +119,13 @@ fn classify_client_write_error(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use openraft::error::{
+        ChangeMembershipError, EmptyMembership, Fatal, ForwardToLeader, QuorumNotEnough,
+    };
+
     use super::*;
-    use openraft::error::Fatal;
 
     #[test]
     fn fatal_read_error_classifies_as_permanent_driver() {
@@ -138,6 +143,44 @@ mod tests {
         assert!(matches!(
             classify_client_write_error(err),
             ConsensusError::PermanentDriver(_)
+        ));
+    }
+
+    #[test]
+    fn forward_to_leader_read_error_classifies_as_not_leader() {
+        let err = RaftError::<TypeConfig, LinearizableReadError<TypeConfig>>::APIError(
+            LinearizableReadError::ForwardToLeader(ForwardToLeader::empty()),
+        );
+        assert!(matches!(
+            classify_read_error(err),
+            ConsensusError::NotLeader { observed: None }
+        ));
+    }
+
+    #[test]
+    fn quorum_not_enough_read_error_classifies_as_transient_driver() {
+        let err = RaftError::<TypeConfig, LinearizableReadError<TypeConfig>>::APIError(
+            LinearizableReadError::QuorumNotEnough(QuorumNotEnough {
+                cluster: String::new(),
+                got: BTreeSet::new(),
+            }),
+        );
+        assert!(matches!(
+            classify_read_error(err),
+            ConsensusError::TransientDriver(_)
+        ));
+    }
+
+    #[test]
+    fn change_membership_client_write_error_classifies_as_transient_driver() {
+        let err = RaftError::<TypeConfig, ClientWriteError<TypeConfig>>::APIError(
+            ClientWriteError::ChangeMembershipError(ChangeMembershipError::EmptyMembership(
+                EmptyMembership {},
+            )),
+        );
+        assert!(matches!(
+            classify_client_write_error(err),
+            ConsensusError::TransientDriver(_)
         ));
     }
 }
