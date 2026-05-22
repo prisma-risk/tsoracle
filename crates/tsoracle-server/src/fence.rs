@@ -128,5 +128,10 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
             }
         }
     }
-    Ok(())
+    // The leadership stream is contracted to live for the life of the server;
+    // reaching here means the driver dropped it (shutdown, lost session,
+    // partition recovery). Surface that as an explicit error so the watch-task
+    // termination always routes through the poisoning branch in `into_router`
+    // and is observable to callers of `serve_with_*`. See #72.
+    Err(ServerError::WatchStreamClosed)
 }

@@ -73,8 +73,9 @@ async fn serve_method_resolves_when_watch_task_terminates() {
     // watch task. Use a driver whose leadership stream closes immediately
     // (no leader ever published) to drive that exit deterministically.
     //
-    // The driver-leadership-stream-closed branch returns Ok per
-    // `run_leader_watch`'s contract, so the outer `serve` returns Ok.
+    // Per #72, an EOF on the leadership stream is anomalous: the watch task
+    // poisons serving state and returns `ServerError::WatchStreamClosed`.
+    // `serve` forwards that verbatim.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
@@ -92,10 +93,10 @@ async fn serve_method_resolves_when_watch_task_terminates() {
         .await
         .expect("serve must return after watch stream closes")
         .expect("spawned task panicked");
-    // Either Ok (clean watch close) or Err(WatchPanic) depending on whether
-    // the closed-stream branch is interpreted as a clean exit. Both exercise
-    // `serve` itself; the more-specific watch-panic path has its own test.
-    let _ = outcome;
+    match outcome {
+        Err(ServerError::WatchStreamClosed) => {}
+        other => panic!("expected WatchStreamClosed, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
