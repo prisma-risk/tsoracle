@@ -50,6 +50,7 @@ pub struct ClientBuilder {
     endpoints: Vec<String>,
     flush_interval: Duration,
     connector: Option<Arc<crate::transport::ChannelConnector>>,
+    tls_required: bool,
 }
 
 impl ClientBuilder {
@@ -58,6 +59,7 @@ impl ClientBuilder {
             endpoints,
             flush_interval: Duration::from_millis(1),
             connector: None,
+            tls_required: false,
         }
     }
 
@@ -67,15 +69,24 @@ impl ClientBuilder {
     }
 
     /// Configure the client to dial bare endpoints with TLS. Bare `host:port`
-    /// becomes `https://host:port`; explicit `http://...` endpoints remain
-    /// plaintext; explicit `https://...` endpoints use the provided TLS
-    /// config.
+    /// becomes `https://host:port`; explicit `http://...` endpoints supplied
+    /// in [`Self::endpoints`] remain plaintext; explicit `https://...`
+    /// endpoints use the provided TLS config.
+    ///
+    /// Wire-supplied `http://...` leader-hint trailers are NOT honored under
+    /// `tls_config` — they are dropped to prevent a contacted peer from
+    /// downgrading the transport. Operator-supplied configuration still wins;
+    /// untrusted wire input does not.
     ///
     /// Setting both [`Self::channel_connector`] and `tls_config` is allowed;
-    /// the last call wins (standard builder semantics).
+    /// the last call wins (standard builder semantics). Calling
+    /// `channel_connector` after `tls_config` also clears the
+    /// reject-plaintext-hint policy, since the caller-owned connector owns
+    /// its own scheme policy.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub fn tls_config(mut self, cfg: tonic::transport::ClientTlsConfig) -> Self {
         self.connector = Some(crate::transport::tls_connector(cfg));
+        self.tls_required = true;
         self
     }
 
@@ -85,7 +96,10 @@ impl ClientBuilder {
     /// from the closure surface as [`ClientError::Connector`].
     ///
     /// See module docs for the interaction with [`Self::tls_config`]
-    /// (last-wins) and the scheme matrix.
+    /// (last-wins) and the scheme matrix. A caller-owned connector replaces
+    /// the built-in TLS plumbing entirely, including the
+    /// reject-plaintext-leader-hint policy — the closure is responsible for
+    /// whatever scheme policy it wants to enforce.
     pub fn channel_connector<F, Fut>(mut self, connector: F) -> Self
     where
         F: Fn(&str) -> Fut + Send + Sync + 'static,
@@ -98,6 +112,7 @@ impl ClientBuilder {
             Box::pin(async move { fut.await.map_err(ClientError::Connector) })
         });
         self.connector = Some(wrapped);
+        self.tls_required = false;
         self
     }
 
@@ -105,7 +120,11 @@ impl ClientBuilder {
         if self.endpoints.is_empty() {
             return Err(ClientError::NoReachableEndpoints);
         }
-        let pool = Arc::new(ChannelPool::new(self.endpoints, self.connector));
+        let pool = Arc::new(ChannelPool::new(
+            self.endpoints,
+            self.connector,
+            self.tls_required,
+        ));
         let pool_for_rpc = pool.clone();
         let driver = driver::Driver::spawn(
             move |count| {

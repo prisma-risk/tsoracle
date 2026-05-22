@@ -60,7 +60,7 @@ The consensus driver owns the mapping from consensus leader identity to tsoracle
 
 ## Client retry behavior
 
-The client gives `FAILED_PRECONDITION` special handling: it parses the `tsoracle-leader-hint-bin` trailer (see [The leader-hint trailer](key-subsystems.md#the-leader-hint-trailer)) and moves the hinted leader to the front of the current retry worklist. Other gRPC errors, including `UNAVAILABLE` and `INTERNAL`, are recorded and the client continues through the configured endpoints once for that call. Configure `endpoints` with all known servers so cold-start works even when the cached leader is unreachable.
+The client gives `FAILED_PRECONDITION` special handling: it parses the `tsoracle-leader-hint-bin` trailer (see [The leader-hint trailer](key-subsystems.md#the-leader-hint-trailer)) and moves the hinted leader to the front of the current retry worklist. Other gRPC errors, including `UNAVAILABLE` and `INTERNAL`, are recorded and the client continues through the configured endpoints once for that call. Configure `endpoints` with all known servers so cold-start works even when the cached leader is unreachable. Under `ClientBuilder::tls_config`, explicit `http://` leader-hint endpoints are dropped to prevent a contacted peer from downgrading the transport — emit hints with bare-host `host:port` (which the client rewrites to `https://` under TLS) or explicit `https://` only.
 
 ## TLS termination
 

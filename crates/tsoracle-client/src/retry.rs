@@ -61,10 +61,11 @@ pub(crate) async fn issue_rpc(
                 }
             }
             Err(status) if status.code() == tonic::Code::FailedPrecondition => {
-                if let Some(hint) = decode_leader_hint(&status)
-                    && let Some(hinted_endpoint) = hint.leader_endpoint
-                    && !visited.contains(&hinted_endpoint)
-                {
+                let usable_hint = decode_leader_hint(&status)
+                    .and_then(|hint| hint.leader_endpoint)
+                    .filter(|hinted_endpoint| !visited.contains(hinted_endpoint))
+                    .filter(|hinted_endpoint| !rejects_plaintext_hint(pool, hinted_endpoint));
+                if let Some(hinted_endpoint) = usable_hint {
                     pool.set_leader(hinted_endpoint.clone());
                     worklist.push_front(hinted_endpoint);
                     continue;
@@ -82,6 +83,31 @@ pub(crate) async fn issue_rpc(
     Err(last_err.unwrap_or(ClientError::NoReachableEndpoints))
 }
 
+/// Refuse a wire-supplied leader hint that would downgrade the transport.
+///
+/// Under `ClientBuilder::tls_config`, a malicious or misconfigured peer
+/// could otherwise feed the client an `http://...` leader endpoint via the
+/// `tsoracle-leader-hint-bin` trailer and route the next RPC over plaintext.
+/// The check is scoped to wire input: operator-supplied `endpoints` carrying
+/// an explicit `http://` scheme are still honored ("explicit beats configured"
+/// remains true for caller-controlled config).
+///
+/// Match shape mirrors `normalize_uri`: ASCII lowercase `http://` prefix.
+/// Uppercase variants would already fail to parse after the bare→https
+/// rewrite, so checking the lowercase form is sufficient.
+fn rejects_plaintext_hint(pool: &ChannelPool, hint: &str) -> bool {
+    let reject = pool.tls_required() && hint.starts_with("http://");
+    #[cfg(feature = "tracing")]
+    if reject {
+        tracing::warn!(
+            hinted_endpoint = %hint,
+            "tsoracle-client: dropping plaintext leader-hint under tls_config; \
+             refusing to downgrade transport"
+        );
+    }
+    reject
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +122,7 @@ mod tests {
         let pool = ChannelPool::new(
             vec!["http://127.0.0.1:1".into(), "http://127.0.0.1:1".into()],
             None,
+            false,
         );
         let result = issue_rpc(&pool, 1).await;
         assert!(result.is_err(), "no live endpoint must surface as Err");
@@ -107,8 +134,36 @@ mod tests {
     /// continue path that's not reached by the happy-path integration tests.
     #[tokio::test]
     async fn unreachable_endpoints_surface_last_error() {
-        let pool = ChannelPool::new(vec!["http://127.0.0.1:1".into()], None);
+        let pool = ChannelPool::new(vec!["http://127.0.0.1:1".into()], None, false);
         let result = issue_rpc(&pool, 1).await;
         assert!(result.is_err(), "expected Err from unreachable pool");
+    }
+
+    /// Direct table-test for the wire-hint policy. The integration test in
+    /// `crates/tsoracle-tests/tests/client_tls.rs` exercises the full
+    /// FAILED_PRECONDITION→trailer→retry path end-to-end; this unit test
+    /// pins down the predicate itself so a refactor cannot quietly flip
+    /// the policy.
+    #[test]
+    fn plaintext_hint_policy_matches_scheme_and_tls_state() {
+        let tls = ChannelPool::new(vec!["a:1".into()], None, true);
+        let plain = ChannelPool::new(vec!["a:1".into()], None, false);
+
+        assert!(
+            rejects_plaintext_hint(&tls, "http://attacker:1"),
+            "http:// hint must be rejected under tls_required"
+        );
+        assert!(
+            !rejects_plaintext_hint(&tls, "https://peer:1"),
+            "https:// hint must be allowed under tls_required"
+        );
+        assert!(
+            !rejects_plaintext_hint(&tls, "peer:1"),
+            "bare host:port hint must be allowed under tls_required (gets rewritten to https)"
+        );
+        assert!(
+            !rejects_plaintext_hint(&plain, "http://peer:1"),
+            "http:// hint must be allowed when tls is not required"
+        );
     }
 }

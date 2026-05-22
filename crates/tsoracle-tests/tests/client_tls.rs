@@ -321,6 +321,74 @@ async fn leader_hint_redirect_under_tls() {
     booted_follower.shutdown().await.expect("follower exit");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leader_hint_rejects_plaintext_under_tls_config() {
+    // A TLS-configured client must not be redirected onto a plaintext
+    // `http://` endpoint by a leader-hint trailer from the wire. Setup:
+    // a fully functional plaintext leader, plus a TLS follower whose
+    // FAILED_PRECONDITION trailer hints at `http://<plaintext-leader>`.
+    // The client trusts ONLY the TLS follower's address; if the http://
+    // hint were honored, the client would dial the plaintext leader
+    // (not in its configured list) and accept the timestamp. The fix
+    // drops the hint, so the call surfaces the follower's
+    // FAILED_PRECONDITION instead.
+    let bundle = mint_certs();
+
+    let plaintext_leader_driver = Arc::new(InMemoryDriver::new());
+    plaintext_leader_driver.become_leader(Epoch(1));
+    let plaintext_leader = Server::builder()
+        .consensus_driver(plaintext_leader_driver.clone())
+        .build()
+        .expect("plaintext leader build");
+    let mut booted_plaintext = boot_server(plaintext_leader).await;
+    wait_until_serving(&mut booted_plaintext.state_rx).await;
+    wait_for_grpc_handshake(booted_plaintext.addr, Duration::from_secs(5))
+        .await
+        .expect("plaintext leader ready");
+
+    let plaintext_endpoint = format!("http://127.0.0.1:{}", booted_plaintext.addr.port());
+    let follower_driver = Arc::new(InMemoryDriver::new());
+    follower_driver.become_follower(Some(plaintext_endpoint.clone()));
+    let follower = Server::builder()
+        .consensus_driver(follower_driver.clone())
+        .tls_config(server_tls_config(&bundle))
+        .build()
+        .expect("follower build");
+    let booted_follower = boot_server(follower).await;
+    wait_for_grpc_handshake_tls(
+        booted_follower.addr,
+        client_tls_config_with_ca(&bundle),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("follower port ready");
+
+    let client = tsoracle_client::ClientBuilder::endpoints(vec![format!(
+        "127.0.0.1:{}",
+        booted_follower.addr.port()
+    )])
+    .tls_config(client_tls_config_with_ca(&bundle))
+    .build()
+    .await
+    .expect("client connect");
+
+    let result = client.get_ts().await;
+    match result {
+        Err(tsoracle_client::ClientError::Rpc(status))
+            if status.code() == tonic::Code::FailedPrecondition => {}
+        Err(tsoracle_client::ClientError::NoReachableEndpoints) => {}
+        Ok(ts) => panic!(
+            "TLS-configured client accepted plaintext leader hint and got timestamp {ts:?} \
+             — leader-hint downgrade defense is missing"
+        ),
+        Err(other) => panic!("expected FailedPrecondition or NoReachableEndpoints, got {other:?}"),
+    }
+
+    drop(client);
+    booted_plaintext.shutdown().await.expect("plaintext exit");
+    booted_follower.shutdown().await.expect("follower exit");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mtls_handshake_succeeds_with_client_identity() {
     let bundle = mint_certs();
