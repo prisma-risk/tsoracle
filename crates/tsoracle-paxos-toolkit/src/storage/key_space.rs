@@ -44,8 +44,8 @@ pub fn log_key(idx: u64) -> Vec<u8> {
 
 #[must_use]
 pub fn log_key_range() -> (Vec<u8>, Vec<u8>) {
-    // For iteration: scan `LOG_PREFIX/0..META_PREFIX`. The upper bound is
-    // `META_PREFIX` because `M` > `L` lexicographically and any byte beyond
+    // For iteration: scan `log_key(0)..META_PREFIX`. The upper bound is
+    // `META_PREFIX` because `M` > `L` lexicographically, so any byte beyond
     // a full LOG_PREFIX-keyed entry falls into META.
     (log_key(0), META_PREFIX.to_vec())
 }

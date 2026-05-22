@@ -45,18 +45,22 @@ pub fn decode_u64(bytes: &[u8]) -> Result<u64, MetaError> {
     Ok(u64::from_le_bytes(arr))
 }
 
-pub fn encode_ballot(b: &Ballot) -> Result<Vec<u8>, MetaError> {
-    Ok(codec_encode(b)?)
+#[must_use = "encoded ballot bytes must be persisted or the encode call had no effect"]
+pub fn encode_ballot(ballot: &Ballot) -> Result<Vec<u8>, MetaError> {
+    Ok(codec_encode(ballot)?)
 }
 
+#[must_use = "decoded ballot must be inspected; discarding it discards the read"]
 pub fn decode_ballot(bytes: &[u8]) -> Result<Ballot, MetaError> {
     Ok(codec_decode(bytes)?)
 }
 
+#[must_use = "encoded bytes must be persisted or the encode call had no effect"]
 pub fn encode_postcard<T: Serialize>(value: &T) -> Result<Vec<u8>, MetaError> {
     Ok(codec_encode(value)?)
 }
 
+#[must_use = "decoded value must be inspected; discarding it discards the read"]
 pub fn decode_postcard<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MetaError> {
     Ok(codec_decode(bytes)?)
 }

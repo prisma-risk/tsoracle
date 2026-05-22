@@ -56,11 +56,14 @@ mod tests {
 
     #[test]
     fn decode_rejects_truncated_input() {
+        // Use a payload long enough that bytes.len() / 2 cuts through an
+        // interior field boundary rather than the trivially-small minimum.
         let original = Sample {
-            idx: 7,
-            name: "x".into(),
+            idx: u64::MAX,
+            name: "hello-world-paxos-storage-roundtrip".into(),
         };
         let bytes = encode(&original).expect("encode");
+        assert!(bytes.len() >= 16, "payload should be non-trivial");
         let truncated = &bytes[..bytes.len() / 2];
         assert!(decode::<Sample>(truncated).is_err());
     }

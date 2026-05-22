@@ -16,18 +16,26 @@
 //! invoke a single symbol regardless of feature state.
 
 #[cfg(feature = "failpoints")]
-#[allow(unused_imports)]
-pub use fail::fail_point;
+#[macro_export]
+macro_rules! fail_point {
+    ($name:expr) => {
+        fail::fail_point!($name)
+    };
+    ($name:expr, $closure:expr) => {
+        fail::fail_point!($name, $closure)
+    };
+}
 
 #[cfg(not(feature = "failpoints"))]
 #[macro_export]
 macro_rules! fail_point {
-    ($($tt:tt)*) => {};
+    ($name:expr) => {
+        ()
+    };
+    ($name:expr, $closure:expr) => {
+        ()
+    };
 }
-
-#[cfg(not(feature = "failpoints"))]
-#[allow(unused_imports)]
-pub use crate::fail_point;
 
 #[cfg(test)]
 mod tests {
@@ -35,10 +43,11 @@ mod tests {
     #[test]
     fn fail_point_is_reachable() {
         // When the feature is enabled, the macro expands to a call site
-        // the `fail` registry can match against. We verify the symbol
-        // exists by referencing it; actual injection is exercised in
-        // `tests/failpoints.rs` under the real RocksDB code path.
-        super::fail_point!("test::point");
+        // the `fail` registry can match against. The closure form needs a
+        // Result-returning context to compile (because `fail::fail_point!`
+        // can early-return) and is exercised in `tests/failpoints.rs`
+        // under the real RocksDB code path.
+        crate::fail_point!("test::point");
     }
 
     #[cfg(not(feature = "failpoints"))]
@@ -46,6 +55,6 @@ mod tests {
     fn fail_point_is_a_noop() {
         // When the feature is disabled, the macro must compile to nothing
         // measurable. Simply invoking it must not panic.
-        super::fail_point!("test::point");
+        crate::fail_point!("test::point");
     }
 }
