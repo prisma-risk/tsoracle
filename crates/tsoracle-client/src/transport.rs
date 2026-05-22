@@ -51,6 +51,36 @@ pub(crate) fn normalize_uri(endpoint: &str, tls: bool) -> String {
     }
 }
 
+/// Construct the built-in TLS-aware channel connector.
+///
+/// Bare endpoints are rewritten to `https://` via [`normalize_uri`].
+/// Explicit `http://...` endpoints are honored as plaintext even when this
+/// connector is in use ("explicit beats configured"). The TLS config is
+/// attached only when the resolved URI uses the `https` scheme.
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+pub(crate) fn tls_connector(
+    cfg: tonic::transport::ClientTlsConfig,
+) -> std::sync::Arc<ChannelConnector> {
+    use tonic::transport::Endpoint;
+    std::sync::Arc::new(move |endpoint: &str| {
+        let uri = normalize_uri(endpoint, true);
+        let cfg = cfg.clone();
+        let endpoint_owned = endpoint.to_string();
+        Box::pin(async move {
+            let ep: Endpoint = uri
+                .parse()
+                .map_err(|_| ClientError::InvalidEndpoint(endpoint_owned))?;
+            let ep = if ep.uri().scheme_str() == Some("https") {
+                ep.tls_config(cfg).map_err(ClientError::from)?
+            } else {
+                ep
+            };
+            let channel = ep.connect().await.map_err(ClientError::from)?;
+            Ok(channel)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

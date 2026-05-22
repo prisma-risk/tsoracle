@@ -63,6 +63,19 @@ impl ClientBuilder {
         self
     }
 
+    /// Configure the client to dial bare endpoints with TLS. Bare `host:port`
+    /// becomes `https://host:port`; explicit `http://...` endpoints remain
+    /// plaintext; explicit `https://...` endpoints use the provided TLS
+    /// config.
+    ///
+    /// Setting both [`Self::channel_connector`] and `tls_config` is allowed;
+    /// the last call wins (standard builder semantics).
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+    pub fn tls_config(mut self, cfg: tonic::transport::ClientTlsConfig) -> Self {
+        self.connector = Some(crate::transport::tls_connector(cfg));
+        self
+    }
+
     /// Replace the default plaintext channel construction with a caller-owned
     /// closure. The closure is invoked on first use of each endpoint —
     /// configured endpoints and leader-hint redirects alike. Errors returned
@@ -158,6 +171,58 @@ mod tests {
             }
             other => panic!("expected ClientError::Connector, got {other:?}"),
         }
+    }
+
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+    #[tokio::test]
+    async fn tls_config_then_channel_connector_last_wins() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let invoked = Arc::new(AtomicBool::new(false));
+        let invoked_for_closure = invoked.clone();
+        let builder = ClientBuilder::endpoints(vec!["a:1".into()])
+            .tls_config(tonic::transport::ClientTlsConfig::new())
+            .channel_connector(move |_endpoint: &str| {
+                let invoked = invoked_for_closure.clone();
+                async move {
+                    invoked.store(true, Ordering::SeqCst);
+                    Err::<tonic::transport::Channel, crate::BoxError>(
+                        std::io::Error::other("from-closure").into(),
+                    )
+                }
+            });
+        let client = builder.build().await.expect("build must not fail");
+        let _ = client.get_ts().await;
+        assert!(
+            invoked.load(Ordering::SeqCst),
+            "channel_connector closure must be the path taken when set last"
+        );
+    }
+
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+    #[tokio::test]
+    async fn channel_connector_then_tls_config_last_wins() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let invoked = Arc::new(AtomicBool::new(false));
+        let invoked_for_closure = invoked.clone();
+        let builder = ClientBuilder::endpoints(vec!["a:1".into()])
+            .channel_connector(move |_endpoint: &str| {
+                let invoked = invoked_for_closure.clone();
+                async move {
+                    invoked.store(true, Ordering::SeqCst);
+                    Err::<tonic::transport::Channel, crate::BoxError>(
+                        std::io::Error::other("from-closure").into(),
+                    )
+                }
+            })
+            .tls_config(tonic::transport::ClientTlsConfig::new());
+        let client = builder.build().await.expect("build must not fail");
+        let _ = client.get_ts().await;
+        assert!(
+            !invoked.load(Ordering::SeqCst),
+            "tls_config set last must overwrite the prior channel_connector"
+        );
     }
 
     #[tokio::test]
