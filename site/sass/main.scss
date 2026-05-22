@@ -194,11 +194,20 @@ th {
 }
 
 .site-header__brand {
-    font-family: var(--font-mono);
-    font-weight: 700;
-    color: var(--fg);
+    display: inline-flex;
+    align-items: center;
     border-bottom: none;
+    line-height: 0;
 }
+
+.site-header__logo {
+    height: 28px;
+    width: auto;
+    display: none;
+}
+
+:root:not([data-theme="light"]) .site-header__logo--dark { display: block; }
+[data-theme="light"] .site-header__logo--light { display: block; }
 
 .site-nav {
     display: flex;
@@ -687,26 +696,6 @@ th {
     color: var(--accent);
     border-color: var(--accent);
     opacity: 1;
-}
-
-// Edit on GitHub link --------------------------------------------------------
-
-.edit-on-github {
-    font-family: var(--font-mono);
-    font-size: 0.88rem;
-    color: var(--fg-dim);
-    margin: 3rem 0 0;
-    text-align: right;
-}
-
-.edit-on-github a {
-    color: var(--fg-dim);
-    border-bottom: 1px solid transparent;
-}
-
-.edit-on-github a:hover {
-    color: var(--accent);
-    border-bottom-color: var(--accent);
 }
 
 // Visually-hidden utility (for landing h1, etc.) -----------------------------

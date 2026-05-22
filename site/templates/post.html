@@ -83,10 +83,6 @@
             {{ page.content | safe }}
         </div>
 
-        <p class="edit-on-github">
-            <a href="{{ config.extra.github_url }}/edit/main/site/content/posts/{{ page.relative_path | split(pat='/') | last }}">Edit this page on GitHub →</a>
-        </p>
-
         <nav class="post-nav">
             {% if page.lower %}
             <a href="{{ page.lower.permalink }}">← {{ page.lower.title }}</a>

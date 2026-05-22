@@ -1,32 +1,50 @@
 {
     "nodes": ["N1", "N2", "N3"],
-    "frames": [
-        {
-            "states": {"N1": "leader", "N2": "follower", "N3": "follower"},
-            "messages": [
-                {"from": "N1", "to": "N2", "label": "AppendEntries"},
-                {"from": "N1", "to": "N3", "label": "AppendEntries"}
-            ],
-            "description": "Steady state. N1 leader. Heartbeats + replication to N2 + N3."
-        },
-        {
-            "states": {"N1": "down", "N2": "follower", "N3": "follower"},
-            "messages": [],
-            "description": "N1 fails. Followers' heartbeat timeout starts running."
-        },
-        {
-            "states": {"N1": "down", "N2": "candidate", "N3": "follower"},
-            "messages": [
-                {"from": "N2", "to": "N3", "label": "RequestVote(term+1)"}
-            ],
-            "description": "N2's election timeout fires first. It increments term, votes for itself, asks N3."
-        },
-        {
-            "states": {"N1": "down", "N2": "leader", "N3": "follower"},
-            "messages": [
-                {"from": "N2", "to": "N3", "label": "AppendEntries"}
-            ],
-            "description": "N2 has quorum (its vote + N3's). It's the new leader. hwm continues strictly above last committed."
-        }
+    "duration": 9500,
+    "events": [
+        {"t": 0,    "type": "term",       "term": 5},
+        {"t": 0,    "type": "state",      "node": "N1", "state": "leader"},
+        {"t": 0,    "type": "state",      "node": "N2", "state": "follower"},
+        {"t": 0,    "type": "state",      "node": "N3", "state": "follower"},
+        {"t": 0,    "type": "node_value", "node": "N1", "value": "hwm=50"},
+        {"t": 0,    "type": "node_value", "node": "N2", "value": "hwm=50"},
+        {"t": 0,    "type": "node_value", "node": "N3", "value": "hwm=50"},
+
+        {"t": 400,  "type": "message",    "from": "N1", "to": "N2", "label": "AppendEntries"},
+        {"t": 400,  "type": "message",    "from": "N1", "to": "N3", "label": "AppendEntries"},
+
+        {"t": 1800, "type": "state",      "node": "N1", "state": "down"},
+
+        {"t": 2100, "type": "timeout",    "node": "N2", "duration": 1300},
+        {"t": 2100, "type": "timeout",    "node": "N3", "duration": 2000},
+
+        {"t": 3400, "type": "term",       "term": 6},
+        {"t": 3400, "type": "state",      "node": "N2", "state": "candidate"},
+        {"t": 3400, "type": "vote",       "voter": "N2", "candidate": "N2"},
+
+        {"t": 3600, "type": "message",    "from": "N2", "to": "N3", "label": "RequestVote(6)"},
+
+        {"t": 4600, "type": "message",    "from": "N3", "to": "N2", "label": "VoteGranted", "kind": "reply"},
+        {"t": 5300, "type": "vote",       "voter": "N3", "candidate": "N2"},
+
+        {"t": 5600, "type": "state",      "node": "N2", "state": "leader"},
+
+        {"t": 6200, "type": "message",    "from": "N2", "to": "N3", "label": "AppendEntries(hwm=64)"},
+        {"t": 7500, "type": "message",    "from": "N3", "to": "N2", "label": "Ack", "kind": "reply"},
+        {"t": 8200, "type": "node_value", "node": "N2", "value": "hwm=64"},
+
+        {"t": 8400, "type": "message",    "from": "N2", "to": "N3", "label": "Commit(hwm=64)"},
+        {"t": 9100, "type": "node_value", "node": "N3", "value": "hwm=64"}
+    ],
+    "annotations": [
+        {"t": 0,    "text": "Term 5. N1 is leader, all nodes agree hwm=50. The window allocator on N1 issues IDs above 50."},
+        {"t": 1800, "text": "N1 fails. Its window allocator stops issuing the moment its propose_advance calls error."},
+        {"t": 2100, "text": "N2 and N3 start randomized election timeouts."},
+        {"t": 3400, "text": "N2's timeout fires first. Term 6. Votes for itself, asks N3."},
+        {"t": 4600, "text": "N3 grants the vote. N2's log is at least as up-to-date as N3's (both hwm=50)."},
+        {"t": 5600, "text": "N2 is the new leader in term 6. The hwm floor is still 50 — no new ID can ever land below it."},
+        {"t": 6200, "text": "N2 advances hwm to 64. Replicates via AppendEntries to N3."},
+        {"t": 8200, "text": "Quorum (N2 + N3). hwm=64 commits on the new leader."},
+        {"t": 9100, "text": "All nodes converged at hwm=64. The handoff preserved strict monotonicity."}
     ]
 }

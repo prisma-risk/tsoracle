@@ -72,7 +72,7 @@ The serialization format is your choice (postcard, bincode, JSON — whatever yo
 
 The semantics of leader change are the most subtle part. The invariant tsoracle defends is that no ID is ever issued without first being covered by a durably-committed advance to the mark. A leader change must preserve that across the gap between the old leader's last commit and the new leader's first one.
 
-{{ cluster_state(name="cluster-leader-handoff", title="A leader handoff. Click to step through the four states.") }}
+{{ raft_animation(name="cluster-leader-handoff", title="Leader handoff. Step through the failure, election, and recovery — and watch hwm cannot regress.") }}
 
 The mechanism is two-sided.
 
