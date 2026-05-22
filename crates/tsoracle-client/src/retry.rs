@@ -12,12 +12,21 @@
 
 //! Endpoint retry policy for client RPCs.
 //!
-//! The worklist starts with the cached leader (if any) followed by configured
-//! endpoints. On a NOT_LEADER response carrying a LeaderHint pointing at an
-//! unvisited endpoint, that endpoint is pushed to the FRONT of the worklist
-//! so we retry the hinted leader immediately — not at the end of the
-//! round-robin pass, which would leave the current call to fail if the
-//! hinted endpoint wasn't otherwise in the queue.
+//! The worklist starts with the cached leader (if any, and only while
+//! still inside `RetryPolicy::leader_ttl`) followed by configured
+//! endpoints. On a NOT_LEADER response carrying a LeaderHint pointing
+//! at an unvisited endpoint, that endpoint is pushed to the FRONT of
+//! the worklist so we retry the hinted leader immediately — not at
+//! the end of the round-robin pass, which would leave the current
+//! call to fail if the hinted endpoint wasn't otherwise in the queue.
+//!
+//! A LeaderHint that carries `leader_epoch` is honored only when the
+//! cache permits it: a strictly lower-epoch hint is dropped silently
+//! (counted, traced) so a delayed NOT_LEADER from an old epoch cannot
+//! flap the cache backward. Hints with no epoch (the current server's
+//! wire output) and hints arriving when the cache has no epoch yet
+//! are accepted unconditionally so a transition-state deployment is
+//! not left without leader discovery.
 //!
 //! Three deadlines bound the loop, governed by [`crate::RetryPolicy`]:
 //!
@@ -84,23 +93,38 @@ pub(crate) async fn issue_rpc(
         );
 
         match attempt(pool, &endpoint, count, attempt_budget).await {
-            AttemptOutcome::Ok(timestamps) => {
-                pool.set_leader(endpoint);
+            AttemptOutcome::Ok { timestamps, epoch } => {
+                pool.record_success(&endpoint, epoch);
                 return Ok(timestamps);
             }
-            AttemptOutcome::LeaderHint(hinted_endpoint) => {
+            AttemptOutcome::LeaderHint {
+                endpoint: hinted_endpoint,
+                epoch: hint_epoch,
+            } => {
                 #[cfg(feature = "metrics")]
                 metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
                     from = %endpoint,
                     to = %hinted_endpoint,
+                    hint_epoch = ?hint_epoch,
                     "tsoracle-client: pivoting to hinted leader",
                 );
-                pool.set_leader(hinted_endpoint.clone());
+                pool.set_leader_with(hinted_endpoint.clone(), hint_epoch);
                 worklist.push_front(hinted_endpoint);
                 // No backoff: a leader hint is known progress, not a
                 // failure to throttle.
+                attempt_index = attempt_index.saturating_add(1);
+                continue;
+            }
+            AttemptOutcome::StaleLeaderHint => {
+                #[cfg(feature = "metrics")]
+                metrics::counter!("tsoracle.client.leader_hint.stale.total").increment(1);
+                // A stale hint means the contacted peer is out of date,
+                // not that our cache is wrong. Keep the cache, advance
+                // the worklist without backoff (this is still a
+                // FAILED_PRECONDITION redirect attempt — just one we
+                // refuse to follow).
                 attempt_index = attempt_index.saturating_add(1);
                 continue;
             }
@@ -130,12 +154,29 @@ pub(crate) async fn issue_rpc(
 }
 
 /// Per-attempt outcome. Surfaces FAILED_PRECONDITION redirects as
-/// their own variant so the caller can preserve the existing "no
+/// their own variants so the caller can preserve the existing "no
 /// backoff on hint" behaviour while still applying backoff to other
-/// retriable failures.
+/// retriable failures. `StaleLeaderHint` carries no payload because
+/// it neither mutates the cache nor surfaces an error — it is purely
+/// the "skip this hint, keep going" signal.
+#[cfg_attr(test, derive(Debug))]
 enum AttemptOutcome {
-    Ok(Vec<Timestamp>),
-    LeaderHint(String),
+    Ok {
+        timestamps: Vec<Timestamp>,
+        /// Leader epoch carried in `GetTsResponse.epoch`. Plumbed to
+        /// `ChannelPool::record_success` so the cache can compare it
+        /// against future `LeaderHint.leader_epoch` values.
+        epoch: u64,
+    },
+    LeaderHint {
+        endpoint: String,
+        /// `None` only when the server omitted `leader_epoch` from the
+        /// `LeaderHint` payload (current server behaviour; tracked as
+        /// a follow-up). Once populated, the cache uses it as the
+        /// upper bound future hints must meet to be honored.
+        epoch: Option<u64>,
+    },
+    StaleLeaderHint,
     HintRejected(tonic::Status),
     Err(ClientError),
 }
@@ -194,36 +235,7 @@ async fn attempt(
             )
             .increment(1);
 
-            let hinted_endpoint = match decode_leader_hint(&status) {
-                LeaderHintLookup::Decoded(hint) => hint.leader_endpoint,
-                LeaderHintLookup::Absent => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        endpoint = %endpoint,
-                        "tsoracle-client: FAILED_PRECONDITION without leader-hint trailer; \
-                         contacted peer cannot redirect us",
-                    );
-                    None
-                }
-                LeaderHintLookup::Malformed => {
-                    #[cfg(feature = "metrics")]
-                    metrics::counter!("tsoracle.client.leader_hint.decode_failures.total")
-                        .increment(1);
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        endpoint = %endpoint,
-                        "tsoracle-client: FAILED_PRECONDITION carried a malformed \
-                         leader-hint trailer; treating as no hint",
-                    );
-                    None
-                }
-            };
-            let usable_hint =
-                hinted_endpoint.filter(|hinted| !rejects_plaintext_hint(pool, hinted));
-            return match usable_hint {
-                Some(hinted) => AttemptOutcome::LeaderHint(hinted),
-                None => AttemptOutcome::HintRejected(status),
-            };
+            return classify_not_leader_hint(pool, endpoint, status);
         }
         Ok(Err(status)) => {
             #[cfg(feature = "metrics")]
@@ -258,8 +270,13 @@ async fn attempt(
             )));
         }
     };
-    match decode_get_ts_response(response.into_inner(), count) {
-        Ok(timestamps) => AttemptOutcome::Ok(timestamps),
+    let inner = response.into_inner();
+    // Capture before `decode_get_ts_response` consumes the message —
+    // it returns only the timestamp vector, but the cache needs the
+    // epoch from the same response to gate future `LeaderHint` arrivals.
+    let epoch = inner.epoch;
+    match decode_get_ts_response(inner, count) {
+        Ok(timestamps) => AttemptOutcome::Ok { timestamps, epoch },
         Err(err) => {
             #[cfg(feature = "metrics")]
             metrics::counter!(
@@ -269,6 +286,68 @@ async fn attempt(
             .increment(1);
             AttemptOutcome::Err(err)
         }
+    }
+}
+
+/// Decide what `issue_rpc` should do with a `FAILED_PRECONDITION` reply.
+///
+/// Pulled out of `attempt` so the decision tree — hint decoding,
+/// plaintext-downgrade rejection, and the epoch-monotone gate — is
+/// unit-testable without standing up a real gRPC peer. The production
+/// path goes through here too, so the integration and unit tests
+/// exercise the same code.
+fn classify_not_leader_hint(
+    pool: &ChannelPool,
+    endpoint: &str,
+    status: tonic::Status,
+) -> AttemptOutcome {
+    // Silence the unused-variable warning when `tracing` is off; the
+    // parameter only flows into log fields below.
+    let _ = endpoint;
+    let (hinted_endpoint, hint_epoch) = match decode_leader_hint(&status) {
+        LeaderHintLookup::Decoded(hint) => (hint.leader_endpoint, hint.leader_epoch),
+        LeaderHintLookup::Absent => {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                endpoint = %endpoint,
+                "tsoracle-client: FAILED_PRECONDITION without leader-hint trailer; \
+                 contacted peer cannot redirect us",
+            );
+            (None, None)
+        }
+        LeaderHintLookup::Malformed => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!("tsoracle.client.leader_hint.decode_failures.total").increment(1);
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                endpoint = %endpoint,
+                "tsoracle-client: FAILED_PRECONDITION carried a malformed \
+                 leader-hint trailer; treating as no hint",
+            );
+            (None, None)
+        }
+    };
+    let usable_endpoint = hinted_endpoint.filter(|hinted| !rejects_plaintext_hint(pool, hinted));
+    match usable_endpoint {
+        Some(hinted) => {
+            if pool.accept_hint(hint_epoch) {
+                AttemptOutcome::LeaderHint {
+                    endpoint: hinted,
+                    epoch: hint_epoch,
+                }
+            } else {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    from = %endpoint,
+                    to = %hinted,
+                    hint_epoch = ?hint_epoch,
+                    "tsoracle-client: dropping stale leader hint with epoch \
+                     behind the cached leader's epoch",
+                );
+                AttemptOutcome::StaleLeaderHint
+            }
+        }
+        None => AttemptOutcome::HintRejected(status),
     }
 }
 
@@ -312,6 +391,7 @@ mod tests {
             per_attempt_deadline: Duration::from_millis(100),
             overall_deadline: Duration::from_millis(300),
             base_backoff: Duration::from_millis(1),
+            leader_ttl: Duration::from_secs(30),
         }
     }
 
@@ -393,6 +473,7 @@ mod tests {
             per_attempt_deadline: Duration::from_millis(100),
             overall_deadline: Duration::from_millis(200),
             base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
         };
         let pool = ChannelPool::new(
             vec![
@@ -429,6 +510,7 @@ mod tests {
             per_attempt_deadline: Duration::from_millis(50),
             overall_deadline: Duration::from_secs(10),
             base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
         };
         let pool = ChannelPool::new(
             vec![
@@ -451,5 +533,153 @@ mod tests {
             elapsed < Duration::from_secs(1),
             "max_attempts=2 must cap iteration; took {elapsed:?}"
         );
+    }
+
+    /// Build a `FAILED_PRECONDITION` status with a `LeaderHint`
+    /// trailer encoded under the same key the server uses. Mirrors
+    /// the production encoding in `crates/tsoracle-server/src/leader_hint.rs`
+    /// so the unit tests exercise the exact wire shape the client
+    /// will see in production.
+    fn make_status_with_hint(hint: tsoracle_proto::v1::LeaderHint) -> tonic::Status {
+        use prost::Message;
+        use tonic::metadata::{BinaryMetadataValue, MetadataKey};
+        let mut buf = Vec::new();
+        hint.encode(&mut buf)
+            .expect("LeaderHint encode is infallible");
+        let mut status = tonic::Status::failed_precondition("not leader");
+        let key =
+            MetadataKey::from_bytes(b"tsoracle-leader-hint-bin").expect("static ASCII key parses");
+        status
+            .metadata_mut()
+            .insert_bin(key, BinaryMetadataValue::from_bytes(&buf));
+        status
+    }
+
+    /// A `FAILED_PRECONDITION` carrying no trailer at all surfaces as
+    /// `HintRejected` so the retry loop preserves the status to return
+    /// to the caller once the worklist is exhausted. Covers the
+    /// `LeaderHintLookup::Absent` arm.
+    #[test]
+    fn classify_absent_hint_returns_hint_rejected() {
+        let pool = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
+        let status = tonic::Status::failed_precondition("not leader");
+        match classify_not_leader_hint(&pool, "a:1", status) {
+            AttemptOutcome::HintRejected(_) => {}
+            other => panic!("expected HintRejected, got {other:?}"),
+        }
+    }
+
+    /// A trailer containing bytes that don't decode as a `LeaderHint`
+    /// (here: 0xff repeated — never a valid protobuf prefix) must
+    /// route to `HintRejected`, not panic, and must bump the
+    /// decode-failures metric. Covers `LeaderHintLookup::Malformed`.
+    #[test]
+    fn classify_malformed_hint_returns_hint_rejected() {
+        use tonic::metadata::{BinaryMetadataValue, MetadataKey};
+        let pool = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
+        let mut status = tonic::Status::failed_precondition("not leader");
+        let key = MetadataKey::from_bytes(b"tsoracle-leader-hint-bin").unwrap();
+        status.metadata_mut().insert_bin(
+            key,
+            BinaryMetadataValue::from_bytes(&[0xff, 0xff, 0xff, 0xff]),
+        );
+        match classify_not_leader_hint(&pool, "a:1", status) {
+            AttemptOutcome::HintRejected(_) => {}
+            other => panic!("expected HintRejected, got {other:?}"),
+        }
+    }
+
+    /// A well-formed hint with a higher `leader_epoch` than the
+    /// cached leader's must be followed. This is the bread-and-butter
+    /// case: a freshly-elected leader supersedes our cached one.
+    #[test]
+    fn classify_higher_epoch_hint_returns_leader_hint() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.record_success("a:1", 5);
+        let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+            leader_endpoint: Some("b:1".into()),
+            leader_epoch: Some(7),
+        });
+        match classify_not_leader_hint(&pool, "a:1", status) {
+            AttemptOutcome::LeaderHint { endpoint, epoch } => {
+                assert_eq!(endpoint, "b:1");
+                assert_eq!(epoch, Some(7));
+            }
+            other => panic!("expected LeaderHint, got {other:?}"),
+        }
+    }
+
+    /// A well-formed hint whose `leader_epoch` is strictly less than
+    /// the cached leader's epoch must be dropped — that is the whole
+    /// point of the epoch-monotone gate. The retry loop's
+    /// `StaleLeaderHint` arm consumes this outcome and continues
+    /// without mutating the cache.
+    #[test]
+    fn classify_stale_epoch_hint_returns_stale_leader_hint() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.record_success("a:1", 10);
+        let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+            leader_endpoint: Some("b:1".into()),
+            leader_epoch: Some(5),
+        });
+        match classify_not_leader_hint(&pool, "a:1", status) {
+            AttemptOutcome::StaleLeaderHint => {}
+            other => panic!("expected StaleLeaderHint, got {other:?}"),
+        }
+        // Cache must be untouched.
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+    }
+
+    /// A hint that carries no `leader_epoch` (the current server's
+    /// behaviour, until #125 lands) is accepted unconditionally so
+    /// the client remains useful during a mixed-version deployment.
+    #[test]
+    fn classify_no_epoch_hint_returns_leader_hint() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.record_success("a:1", 10);
+        let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+            leader_endpoint: Some("b:1".into()),
+            leader_epoch: None,
+        });
+        match classify_not_leader_hint(&pool, "a:1", status) {
+            AttemptOutcome::LeaderHint { endpoint, epoch } => {
+                assert_eq!(endpoint, "b:1");
+                assert_eq!(epoch, None);
+            }
+            other => panic!("expected LeaderHint, got {other:?}"),
+        }
+    }
+
+    /// Under `tls_required = true`, a hint with an explicit `http://`
+    /// scheme must be refused so a malicious or misconfigured peer
+    /// cannot downgrade the transport. The outcome is `HintRejected`
+    /// (not `StaleLeaderHint`) because the cache is still valid; the
+    /// hint just wasn't usable.
+    #[test]
+    fn classify_plaintext_hint_under_tls_returns_hint_rejected() {
+        let pool = ChannelPool::new(vec!["a:1".into()], None, true, RetryPolicy::default());
+        let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+            leader_endpoint: Some("http://attacker:1".into()),
+            leader_epoch: Some(7),
+        });
+        match classify_not_leader_hint(&pool, "a:1", status) {
+            AttemptOutcome::HintRejected(_) => {}
+            other => panic!("expected HintRejected, got {other:?}"),
+        }
     }
 }

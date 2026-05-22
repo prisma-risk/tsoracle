@@ -15,6 +15,7 @@
 use parking_lot::Mutex;
 use prost::Message;
 use std::collections::HashMap;
+use tokio::time::Instant;
 use tonic::Status;
 use tonic::metadata::MetadataKey;
 use tonic::transport::{Channel, Endpoint};
@@ -55,10 +56,24 @@ pub fn decode_leader_hint(status: &Status) -> LeaderHintLookup {
     }
 }
 
+/// Cached pointer to the endpoint that most recently behaved like the
+/// leader, along with the epoch that confirmed it and the instant the
+/// cache was last validated. `epoch` is `Option<u64>` so an old server
+/// that emits NOT_LEADER hints without `leader_epoch` (or a wire
+/// payload arriving before any successful GetTs has populated the
+/// epoch) can still seat a cache entry; once any source provides an
+/// epoch, monotone-forward comparisons take over.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedLeader {
+    pub endpoint: String,
+    pub epoch: Option<u64>,
+    pub last_used: Instant,
+}
+
 pub struct ChannelPool {
     configured: Vec<String>,
     channels: Mutex<HashMap<String, Channel>>,
-    leader: Mutex<Option<String>>,
+    leader: Mutex<Option<CachedLeader>>,
     connector: Option<std::sync::Arc<crate::transport::ChannelConnector>>,
     /// Set by `ClientBuilder::tls_config`; cleared by `channel_connector`.
     /// Tells the retry loop to drop wire-supplied `http://` leader hints so
@@ -101,12 +116,77 @@ impl ChannelPool {
         &self.retry_policy
     }
 
+    /// The currently-cached leader endpoint, or `None` if no leader has
+    /// been observed yet or the cache has aged past `leader_ttl`. The
+    /// TTL check is lazy: an expired entry is treated as absent on
+    /// read; the underlying slot is cleared on the next mutation.
     pub fn cached_leader(&self) -> Option<String> {
-        self.leader.lock().clone()
+        self.fresh_leader().map(|cached| cached.endpoint)
     }
 
-    pub fn set_leader(&self, endpoint: String) {
-        *self.leader.lock() = Some(endpoint);
+    /// Internal helper returning the full `CachedLeader` only when it is
+    /// within the configured `leader_ttl`. Used by `iter_round_robin`,
+    /// `accept_hint`, and the test surface.
+    pub(crate) fn fresh_leader(&self) -> Option<CachedLeader> {
+        let guard = self.leader.lock();
+        match &*guard {
+            Some(cached) if cached.last_used.elapsed() < self.retry_policy.leader_ttl => {
+                Some(cached.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Install or refresh the cached leader entry. `epoch` may be `None`
+    /// only when the source did not carry one (old-server `NOT_LEADER`
+    /// hints). Successful RPCs always carry the leader's epoch via
+    /// `GetTsResponse.epoch` and go through `record_success`.
+    pub(crate) fn set_leader_with(&self, endpoint: String, epoch: Option<u64>) {
+        *self.leader.lock() = Some(CachedLeader {
+            endpoint,
+            epoch,
+            last_used: Instant::now(),
+        });
+    }
+
+    /// Record a successful RPC against `endpoint` that observed the
+    /// leader at `epoch`. Touches `last_used` (resetting the TTL clock)
+    /// when the cache already points at `endpoint`, and installs a
+    /// fresh entry otherwise. Also upgrades a previously-unknown epoch
+    /// to the observed one without disturbing TTL semantics.
+    pub(crate) fn record_success(&self, endpoint: &str, epoch: u64) {
+        let mut guard = self.leader.lock();
+        match &mut *guard {
+            Some(cached) if cached.endpoint == endpoint => {
+                cached.epoch = Some(epoch);
+                cached.last_used = Instant::now();
+            }
+            _ => {
+                *guard = Some(CachedLeader {
+                    endpoint: endpoint.to_string(),
+                    epoch: Some(epoch),
+                    last_used: Instant::now(),
+                });
+            }
+        }
+    }
+
+    /// Decide whether to honor a `LeaderHint` carrying `hint_epoch`.
+    /// The rule is monotone-forward: a hint is rejected only when the
+    /// cache is fresh (within `leader_ttl`), both epochs are known, and
+    /// the hint's epoch is strictly less than the cached one. All
+    /// other combinations accept the hint — including the bootstrap
+    /// cases where either side has no epoch yet, so a delayed
+    /// NOT_LEADER from an old epoch cannot flap the cache backward
+    /// once a higher epoch has been observed.
+    pub(crate) fn accept_hint(&self, hint_epoch: Option<u64>) -> bool {
+        match self.fresh_leader() {
+            None => true,
+            Some(cached) => match (cached.epoch, hint_epoch) {
+                (Some(cached_epoch), Some(hint_epoch)) => hint_epoch >= cached_epoch,
+                _ => true,
+            },
+        }
     }
 
     pub fn clear_leader(&self) {
@@ -261,7 +341,7 @@ mod tests {
             false,
             RetryPolicy::default(),
         );
-        pool.set_leader("b:1".into());
+        pool.record_success("b:1", 1);
         let order = pool.iter_round_robin();
         assert_eq!(order, vec!["b:1", "a:1", "c:1"]);
     }
@@ -286,13 +366,134 @@ mod tests {
             false,
             RetryPolicy::default(),
         );
-        pool.set_leader("b:1".into());
+        pool.record_success("b:1", 1);
         assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
         pool.clear_leader();
         // With the cache cleared, round-robin order falls back to the
         // configured order — the cleared leader is not re-prepended.
         assert!(pool.cached_leader().is_none());
         assert_eq!(pool.iter_round_robin(), vec!["a:1", "b:1"]);
+    }
+
+    /// Direct table-test of the epoch-monotone rule. The rule is the
+    /// safety predicate quoted in the cache-invalidation issue — once
+    /// the cache pins a leader at some epoch, a delayed hint from a
+    /// lower epoch must be rejected regardless of arrival order. The
+    /// bootstrap cases (no cache, no cached epoch, no hint epoch) all
+    /// accept so the client remains useful against the current server
+    /// that does not populate `leader_epoch`.
+    #[test]
+    fn accept_hint_enforces_monotone_forward_epoch() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        // Empty cache: any hint is accepted, including a `None` epoch.
+        assert!(pool.accept_hint(None));
+        assert!(pool.accept_hint(Some(7)));
+
+        // Pin the cache at epoch 5. A lower-epoch hint is now stale;
+        // an equal-or-higher hint, or a hint that carries no epoch at
+        // all (old-server fallback), is accepted.
+        pool.record_success("b:1", 5);
+        assert!(!pool.accept_hint(Some(4)));
+        assert!(pool.accept_hint(Some(5)));
+        assert!(pool.accept_hint(Some(6)));
+        // Old-server fallback: a hint without an epoch must remain
+        // acceptable until the server is upgraded to populate one.
+        assert!(pool.accept_hint(None));
+
+        // Promoting via a higher-epoch hint must not allow the older
+        // epoch to flap the cache backward on a later arrival.
+        pool.set_leader_with("a:1".into(), Some(9));
+        assert!(!pool.accept_hint(Some(4)));
+        assert!(!pool.accept_hint(Some(8)));
+    }
+
+    /// A higher-epoch hint must win regardless of arrival order — the
+    /// `accept_hint` gate plus `set_leader_with` is what enforces this.
+    /// Two orderings of the same pair of hints are exercised here; both
+    /// must land the pool on the higher-epoch endpoint.
+    #[test]
+    fn higher_epoch_hint_wins_regardless_of_arrival_order() {
+        for (first_endpoint, first_epoch, second_endpoint, second_epoch, winner) in [
+            ("a:1", 7u64, "b:1", 5u64, "a:1"), // higher arrives first
+            ("a:1", 5u64, "b:1", 7u64, "b:1"), // higher arrives second
+        ] {
+            let pool = ChannelPool::new(
+                vec!["a:1".into(), "b:1".into()],
+                None,
+                false,
+                RetryPolicy::default(),
+            );
+            if pool.accept_hint(Some(first_epoch)) {
+                pool.set_leader_with(first_endpoint.into(), Some(first_epoch));
+            }
+            if pool.accept_hint(Some(second_epoch)) {
+                pool.set_leader_with(second_endpoint.into(), Some(second_epoch));
+            }
+            assert_eq!(
+                pool.cached_leader().as_deref(),
+                Some(winner),
+                "ordering {first_endpoint}@{first_epoch} then {second_endpoint}@{second_epoch}"
+            );
+        }
+    }
+
+    /// Per the cache-invalidation issue's acceptance criterion: a cached
+    /// leader that has aged past `leader_ttl` must not be re-prepended
+    /// to `iter_round_robin`. The next RPC falls back to the configured
+    /// endpoint order. Uses a small TTL plus a real sleep — the entry
+    /// is still in the slot, but `cached_leader()` reports `None` once
+    /// the elapsed time crosses the threshold.
+    #[tokio::test(start_paused = true)]
+    async fn cached_leader_past_ttl_is_not_prepended_to_worklist() {
+        let policy = RetryPolicy {
+            leader_ttl: std::time::Duration::from_millis(50),
+            ..RetryPolicy::default()
+        };
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into(), "c:1".into()],
+            None,
+            false,
+            policy,
+        );
+        // Fresh cache prepends the leader.
+        pool.record_success("b:1", 1);
+        assert_eq!(pool.iter_round_robin(), vec!["b:1", "a:1", "c:1"]);
+        // Advance virtual time past the TTL. `start_paused = true`
+        // makes this deterministic — no real wall-clock sleep, no
+        // flake on slow CI runners.
+        tokio::time::advance(std::time::Duration::from_millis(75)).await;
+        // TTL-expired cache reads as absent and falls back to the
+        // configured order.
+        assert!(pool.cached_leader().is_none());
+        assert_eq!(pool.iter_round_robin(), vec!["a:1", "b:1", "c:1"]);
+    }
+
+    /// A successful RPC against the cached leader refreshes the TTL
+    /// clock rather than leaving the entry to age out. Without this,
+    /// a continuously-busy steady-state leader would re-evaluate the
+    /// worklist on a fixed interval and burn the configured-list
+    /// prefix on every TTL boundary.
+    #[tokio::test(start_paused = true)]
+    async fn record_success_against_cached_leader_refreshes_ttl() {
+        let policy = RetryPolicy {
+            leader_ttl: std::time::Duration::from_millis(100),
+            ..RetryPolicy::default()
+        };
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None, false, policy);
+        pool.record_success("b:1", 1);
+        tokio::time::advance(std::time::Duration::from_millis(60)).await;
+        // 60ms in: still fresh. Touch the cache.
+        pool.record_success("b:1", 2);
+        tokio::time::advance(std::time::Duration::from_millis(60)).await;
+        // Total elapsed since the original record_success is 120ms,
+        // past TTL — but the touch reset the clock 60ms ago, so the
+        // cache must still report `b:1` as fresh.
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
     }
 
     #[tokio::test]

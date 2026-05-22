@@ -288,6 +288,7 @@ mod tests {
             per_attempt_deadline: Duration::from_millis(11),
             overall_deadline: Duration::from_millis(13),
             base_backoff: Duration::from_millis(17),
+            leader_ttl: Duration::from_millis(19),
         };
         let builder = ClientBuilder::endpoints(vec!["http://127.0.0.1:1".into()])
             .retry_policy(policy.clone());
@@ -301,6 +302,7 @@ mod tests {
             policy.overall_deadline
         );
         assert_eq!(builder.retry_policy.base_backoff, policy.base_backoff);
+        assert_eq!(builder.retry_policy.leader_ttl, policy.leader_ttl);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -316,6 +318,7 @@ mod tests {
             per_attempt_deadline: Duration::from_millis(100),
             overall_deadline: Duration::from_millis(300),
             base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
         };
         let client = ClientBuilder::endpoints(vec![
             "http://127.0.0.1:1".into(),

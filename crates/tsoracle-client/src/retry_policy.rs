@@ -24,7 +24,10 @@
 //! to limit pathological leader-hint redirect chains. `base_backoff` is
 //! the unit for the jittered exponential backoff applied between
 //! attempts when the previous attempt returned `Unavailable` or
-//! `DeadlineExceeded` — see `crate::retry::issue_rpc`.
+//! `DeadlineExceeded` — see `crate::retry::issue_rpc`. `leader_ttl`
+//! caps how long a cached leader endpoint may be retained without a
+//! successful RPC against it; past the TTL the cache is treated as
+//! empty and the worklist falls back to the configured endpoint order.
 
 use std::time::Duration;
 
@@ -62,6 +65,14 @@ pub struct RetryPolicy {
     /// `base_backoff` plus a high attempt count cannot consume the
     /// overall deadline in a single sleep.
     pub base_backoff: Duration,
+    /// Freshness bound on the cached leader endpoint. The cache is
+    /// touched on every successful RPC against the cached leader, so a
+    /// busy steady-state leader is retained indefinitely. The TTL only
+    /// bites when the leader falls quiet — past it, the next RPC
+    /// re-evaluates the configured endpoint list rather than pinning to
+    /// a possibly-dead endpoint that has not been re-validated within
+    /// the window.
+    pub leader_ttl: Duration,
 }
 
 impl RetryPolicy {
@@ -73,16 +84,22 @@ impl RetryPolicy {
 
 impl Default for RetryPolicy {
     /// `max_attempts = 5`, `per_attempt_deadline = 2s`,
-    /// `overall_deadline = 10s`, `base_backoff = 50ms`. Five attempts at
-    /// the per-attempt cap plus modest backoff fit inside the overall
-    /// deadline for the common case; the loop returns
-    /// `NoReachableEndpoints` (or the last status) once exhausted.
+    /// `overall_deadline = 10s`, `base_backoff = 50ms`,
+    /// `leader_ttl = 30s`. Five attempts at the per-attempt cap plus
+    /// modest backoff fit inside the overall deadline for the common
+    /// case; the loop returns `NoReachableEndpoints` (or the last
+    /// status) once exhausted. The 30-second TTL is roughly 3× the
+    /// overall deadline — long enough that a steady-state leader is
+    /// retained across normal request gaps, short enough that a leader
+    /// that fell silent at startup is re-evaluated before too many
+    /// callers fail-fast on the cached pin.
     fn default() -> Self {
         RetryPolicy {
             max_attempts: 5,
             per_attempt_deadline: Duration::from_secs(2),
             overall_deadline: Duration::from_secs(10),
             base_backoff: Duration::from_millis(50),
+            leader_ttl: Duration::from_secs(30),
         }
     }
 }
@@ -144,6 +161,7 @@ mod tests {
         assert_eq!(policy.per_attempt_deadline, Duration::from_secs(2));
         assert_eq!(policy.overall_deadline, Duration::from_secs(10));
         assert_eq!(policy.base_backoff, Duration::from_millis(50));
+        assert_eq!(policy.leader_ttl, Duration::from_secs(30));
     }
 
     #[test]
