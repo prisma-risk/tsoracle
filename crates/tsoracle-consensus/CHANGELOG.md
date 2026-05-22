@@ -4,6 +4,13 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.2...tsoracle-consensus-v0.1.3) - 2026-05-22
+
+### Added
+
+- add opt-in bt cargo feature for error backtraces ([#120](https://github.com/prisma-risk/tsoracle/pull/120))
+- tsoracle.rs marketing site ([#111](https://github.com/prisma-risk/tsoracle/pull/111))
+
 ## [0.1.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.0...tsoracle-consensus-v0.1.1) - 2026-05-21
 
 ### Added
