@@ -1,26 +1,29 @@
 {% extends "base.html" %}
 
-{% block title %}{{ taxonomy.name | capitalize }} — tsoracle{% endblock %}
-{% block description %}Browse posts by {{ taxonomy.name }}.{% endblock %}
-{% block og_title %}{{ taxonomy.name | capitalize }} — tsoracle{% endblock %}
-{% block og_description %}Browse posts by {{ taxonomy.name }}.{% endblock %}
-{% block twitter_title %}{{ taxonomy.name | capitalize }} — tsoracle{% endblock %}
-{% block twitter_description %}Browse posts by {{ taxonomy.name }}.{% endblock %}
+{% block title %}Tags — tsoracle{% endblock %}
+{% block description %}Browse posts on tsoracle by tag.{% endblock %}
+{% block og_title %}Tags — tsoracle{% endblock %}
+{% block og_description %}Browse posts on tsoracle by tag.{% endblock %}
+{% block twitter_title %}Tags — tsoracle{% endblock %}
+{% block twitter_description %}Browse posts on tsoracle by tag.{% endblock %}
 
 {% block content %}
 <section class="container">
     <header class="post-header">
-        <h1 class="post-header__title">{{ taxonomy.name | capitalize }}</h1>
+        <h1 class="post-header__title">Tags</h1>
+        <div class="post-header__meta">Browse posts by tag.</div>
     </header>
 
     <ul class="posts-list">
         {% for term in terms %}
         <li>
             <a class="post-title" href="{{ term.permalink }}">{{ term.name }}</a>
-            <span class="post-date">{{ term.pages | length }} post{% if term.pages | length != 1 %}s{% endif %}</span>
+            <div class="post-meta">
+                <span class="post-meta__date">{{ term.pages | length }} post{% if term.pages | length != 1 %}s{% endif %}</span>
+            </div>
         </li>
         {% else %}
-        <li><p class="post-excerpt">No {{ taxonomy.name }} yet.</p></li>
+        <li><p class="post-excerpt">No tags yet.</p></li>
         {% endfor %}
     </ul>
 </section>
