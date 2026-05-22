@@ -92,6 +92,14 @@ $ tsoracle serve</pre>
             <div class="feature__head">gRPC client included</div>
             <p class="feature__body">Leader discovery, request coalescing, reconnection — handled. Just call <code>get_ts()</code>.</p>
         </div>
+        <div class="feature">
+            <div class="feature__head">Operational metrics</div>
+            <p class="feature__body">Allocator, leader, and request metrics emitted through the <code>metrics</code> facade. Prometheus-ready.</p>
+        </div>
+        <div class="feature">
+            <div class="feature__head">Embeddable</div>
+            <p class="feature__body">Run the standalone CLI, or embed <code>tsoracle-server</code> in your own binary with a few lines of Rust.</p>
+        </div>
     </div>
 </section>
 

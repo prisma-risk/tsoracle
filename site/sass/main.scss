@@ -436,12 +436,12 @@ th {
     margin: 0;
 }
 
-.posts-list li {
+.posts-list > li {
     padding: 1rem 0;
     border-bottom: 1px solid var(--rule);
 }
 
-.posts-list li:last-child { border-bottom: none; }
+.posts-list > li:last-child { border-bottom: none; }
 
 .posts-list .post-title {
     font-family: var(--font-mono);
