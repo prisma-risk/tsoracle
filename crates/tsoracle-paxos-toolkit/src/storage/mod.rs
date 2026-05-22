@@ -45,6 +45,19 @@ pub enum StorageError {
     LogIntegrity(String),
 }
 
+/// RocksDB-backed implementation of [`omnipaxos::storage::Storage`].
+///
+/// The caller owns the `Arc<DB>` and the lifetime of the column family. This
+/// crate never opens or closes a database; constructing a `RocksdbStorage`
+/// only validates that the requested column family is present. Sharing the
+/// same `Arc<DB>` with other column families (e.g., a snapshot store) is
+/// supported and is the intended pattern.
+///
+/// The type parameter `T` is the OmniPaxos `Entry` type the log will hold;
+/// the implementation persists log entries via `postcard` and meta fields
+/// via fixed-shape encoders in [`crate::storage::meta`].
+///
+/// Construct with [`RocksdbStorage::open_in`].
 #[cfg(feature = "rocksdb-storage")]
 pub struct RocksdbStorage<T: Entry> {
     db: Arc<DB>,
@@ -54,6 +67,16 @@ pub struct RocksdbStorage<T: Entry> {
 
 #[cfg(feature = "rocksdb-storage")]
 impl<T: Entry> RocksdbStorage<T> {
+    /// Build a storage handle backed by an existing column family.
+    ///
+    /// The column family must already exist in `db`. The constructor only
+    /// validates presence — it does NOT create the CF. Callers typically
+    /// open the database with the appropriate `ColumnFamilyDescriptor`s
+    /// for both the paxos log and any peer column families (snapshot
+    /// store, application state) before invoking this.
+    ///
+    /// Returns [`StorageError::ColumnFamilyNotFound`] if `cf_name` is not
+    /// registered on the supplied database.
     pub fn open_in(db: Arc<DB>, cf_name: &str) -> Result<Self, StorageError> {
         if db.cf_handle(cf_name).is_none() {
             return Err(StorageError::ColumnFamilyNotFound(cf_name.to_string()));
@@ -71,18 +94,52 @@ impl<T: Entry> RocksdbStorage<T> {
             .ok_or_else(|| StorageError::ColumnFamilyNotFound(self.cf_name.clone()))
     }
 
-    pub(crate) fn write_opts() -> WriteOptions {
+    /// Write options for Paxos safety-critical writes.
+    ///
+    /// `sync = true` forces fsync of the WAL on every call. Used for
+    /// [`Storage::set_promise`], [`Storage::set_accepted_round`],
+    /// [`Storage::append_entry`], [`Storage::append_entries`], and
+    /// [`Storage::append_on_prefix`] — a node that promises ballot N or
+    /// accepts a log entry must not forget that promise across a crash, or
+    /// Paxos safety is violated.
+    pub(crate) fn write_sync_opts() -> WriteOptions {
+        let mut opts = WriteOptions::default();
+        opts.set_sync(true);
+        opts
+    }
+
+    /// Write options for non-safety-critical writes.
+    ///
+    /// Used for [`Storage::set_decided_idx`], [`Storage::set_compacted_idx`],
+    /// [`Storage::trim`], [`Storage::set_snapshot`], and
+    /// [`Storage::set_stopsign`] — these fields can be reconstructed or
+    /// recovered after a crash (decided_idx is monotonic from the log
+    /// contents; compacted_idx is bounded by the trimmed range; snapshot
+    /// and stopsign can be re-derived). Avoiding fsync on the hot apply
+    /// path keeps throughput sane.
+    pub(crate) fn write_async_opts() -> WriteOptions {
         WriteOptions::default()
     }
 
-    pub(crate) fn batch_with<F>(&self, f: F) -> Result<(), StorageError>
+    pub(crate) fn batch_sync<F>(&self, f: F) -> Result<(), StorageError>
     where
         F: FnOnce(Arc<BoundColumnFamily<'_>>, &mut WriteBatch) -> Result<(), StorageError>,
     {
         let cf = self.cf()?;
         let mut batch = WriteBatch::default();
         f(cf, &mut batch)?;
-        self.db.write_opt(batch, &Self::write_opts())?;
+        self.db.write_opt(batch, &Self::write_sync_opts())?;
+        Ok(())
+    }
+
+    pub(crate) fn batch_async<F>(&self, f: F) -> Result<(), StorageError>
+    where
+        F: FnOnce(Arc<BoundColumnFamily<'_>>, &mut WriteBatch) -> Result<(), StorageError>,
+    {
+        let cf = self.cf()?;
+        let mut batch = WriteBatch::default();
+        f(cf, &mut batch)?;
+        self.db.write_opt(batch, &Self::write_async_opts())?;
         Ok(())
     }
 }
@@ -142,7 +199,7 @@ where
 {
     fn append_entry(&mut self, entry: T) -> omnipaxos::storage::StorageResult<u64> {
         let next = self.next_log_idx().map_err(box_err)?;
-        self.batch_with(|cf, batch| self.store_log_entry(batch, &cf, next, &entry))
+        self.batch_sync(|cf, batch| self.store_log_entry(batch, &cf, next, &entry))
             .map_err(box_err)?;
         let compacted = self.get_compacted_idx()?;
         Ok((next + 1).saturating_sub(compacted))
@@ -151,7 +208,7 @@ where
     fn append_entries(&mut self, entries: Vec<T>) -> omnipaxos::storage::StorageResult<u64> {
         let start = self.next_log_idx().map_err(box_err)?;
         let count = entries.len() as u64;
-        self.batch_with(|cf, batch| {
+        self.batch_sync(|cf, batch| {
             for (offset, entry) in entries.iter().enumerate() {
                 self.store_log_entry(batch, &cf, start + offset as u64, entry)?;
             }
@@ -170,7 +227,7 @@ where
         use crate::storage::key_space::{log_key, log_key_range};
         let (_, upper) = log_key_range();
         let count = entries.len() as u64;
-        self.batch_with(|cf, batch| {
+        self.batch_sync(|cf, batch| {
             let lower = log_key(from_idx);
             batch.delete_range_cf(&cf, &lower, &upper);
             for (offset, entry) in entries.iter().enumerate() {
@@ -190,7 +247,7 @@ where
         use crate::storage::key_space::meta_promise_key;
         use crate::storage::meta::encode_ballot;
         let bytes = encode_ballot(&n_prom).map_err(box_err)?;
-        self.batch_with(|cf, batch| {
+        self.batch_sync(|cf, batch| {
             batch.put_cf(&cf, meta_promise_key(), bytes);
             Ok(())
         })
@@ -202,7 +259,7 @@ where
         use crate::storage::key_space::meta_decided_idx_key;
         use crate::storage::meta::encode_u64;
         let bytes = encode_u64(ld);
-        self.batch_with(|cf, batch| {
+        self.batch_async(|cf, batch| {
             batch.put_cf(&cf, meta_decided_idx_key(), bytes);
             Ok(())
         })
@@ -231,7 +288,7 @@ where
         use crate::storage::key_space::meta_accepted_round_key;
         use crate::storage::meta::encode_ballot;
         let bytes = encode_ballot(&na).map_err(box_err)?;
-        self.batch_with(|cf, batch| {
+        self.batch_sync(|cf, batch| {
             batch.put_cf(&cf, meta_accepted_round_key(), bytes);
             Ok(())
         })
@@ -257,21 +314,37 @@ where
 
     fn get_entries(&self, from: u64, to: u64) -> omnipaxos::storage::StorageResult<Vec<T>> {
         use crate::codec::decode as codec_decode;
-        use crate::storage::key_space::log_key;
+        use crate::storage::key_space::{LOG_PREFIX, log_key};
+        use rocksdb::IteratorMode;
+
         if from >= to {
             return Ok(Vec::new());
         }
         let cf = self.cf().map_err(box_err)?;
-        let mut out = Vec::with_capacity((to - from) as usize);
-        for idx in from..to {
-            let key = log_key(idx);
-            match self.db.get_cf(&cf, &key).map_err(box_err)? {
-                Some(bytes) => {
-                    let entry: T = codec_decode(&bytes).map_err(box_err)?;
-                    out.push(entry);
-                }
-                None => return Ok(Vec::new()),
+        let start = log_key(from);
+        let end = log_key(to);
+        let expected = (to - from) as usize;
+        let iter = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&start, rocksdb::Direction::Forward));
+        let mut out = Vec::with_capacity(expected);
+        for result in iter {
+            let (key, value) = result.map_err(box_err)?;
+            if !key.starts_with(LOG_PREFIX) || key.as_ref() >= end.as_slice() {
+                break;
             }
+            let entry: T = codec_decode(&value).map_err(box_err)?;
+            out.push(entry);
+            if out.len() == expected {
+                break;
+            }
+        }
+        // Gap contract: any missing index in [from, to) yields an empty Vec
+        // rather than a partial prefix. The iterator returns entries in
+        // ascending log-index order, so if the count is short, at least
+        // one index in the requested range is missing.
+        if out.len() < expected {
+            return Ok(Vec::new());
         }
         Ok(out)
     }
@@ -284,9 +357,13 @@ where
 
     fn get_suffix(&self, from: u64) -> omnipaxos::storage::StorageResult<Vec<T>> {
         use crate::codec::decode as codec_decode;
-        use crate::storage::key_space::{LOG_PREFIX, log_key, parse_log_key};
+        use crate::storage::key_space::{LOG_PREFIX, log_key};
         use rocksdb::IteratorMode;
 
+        // `IteratorMode::From(log_key(from), Forward)` seeks to the first
+        // key `>= log_key(from)`. Because log keys are big-endian u64,
+        // every key yielded by the iterator has an index `>= from`, so we
+        // do not need to re-check the index after decoding.
         let cf = self.cf().map_err(box_err)?;
         let start = log_key(from);
         let iter = self
@@ -297,14 +374,6 @@ where
             let (key, value) = result.map_err(box_err)?;
             if !key.starts_with(LOG_PREFIX) {
                 break;
-            }
-            let idx = parse_log_key(&key).ok_or_else(|| {
-                box_err(StorageError::LogIntegrity(format!(
-                    "malformed log key: {key:?}"
-                )))
-            })?;
-            if idx < from {
-                continue;
             }
             let entry: T = codec_decode(&value).map_err(box_err)?;
             out.push(entry);
@@ -326,21 +395,21 @@ where
 
     fn set_stopsign(
         &mut self,
-        s: Option<omnipaxos::storage::StopSign>,
+        stopsign: Option<omnipaxos::storage::StopSign>,
     ) -> omnipaxos::storage::StorageResult<()> {
         use crate::storage::key_space::meta_stopsign_key;
         use crate::storage::meta::encode_postcard;
-        match s {
-            Some(stopsign) => {
-                let bytes = encode_postcard(&stopsign).map_err(box_err)?;
-                self.batch_with(|cf, batch| {
+        match stopsign {
+            Some(inner) => {
+                let bytes = encode_postcard(&inner).map_err(box_err)?;
+                self.batch_async(|cf, batch| {
                     batch.put_cf(&cf, meta_stopsign_key(), bytes);
                     Ok(())
                 })
                 .map_err(box_err)?;
             }
             None => {
-                self.batch_with(|cf, batch| {
+                self.batch_async(|cf, batch| {
                     batch.delete_cf(&cf, meta_stopsign_key());
                     Ok(())
                 })
@@ -364,7 +433,7 @@ where
 
     fn trim(&mut self, idx: u64) -> omnipaxos::storage::StorageResult<()> {
         use crate::storage::key_space::log_key;
-        self.batch_with(|cf, batch| {
+        self.batch_async(|cf, batch| {
             let lower = log_key(0);
             let upper = log_key(idx);
             batch.delete_range_cf(&cf, &lower, &upper);
@@ -378,7 +447,7 @@ where
         use crate::storage::key_space::meta_compacted_idx_key;
         use crate::storage::meta::encode_u64;
         let bytes = encode_u64(idx);
-        self.batch_with(|cf, batch| {
+        self.batch_async(|cf, batch| {
             batch.put_cf(&cf, meta_compacted_idx_key(), bytes);
             Ok(())
         })
@@ -409,14 +478,14 @@ where
         match snapshot {
             Some(snap) => {
                 let bytes = encode_postcard(&snap).map_err(box_err)?;
-                self.batch_with(|cf, batch| {
+                self.batch_async(|cf, batch| {
                     batch.put_cf(&cf, meta_snapshot_key(), bytes);
                     Ok(())
                 })
                 .map_err(box_err)?;
             }
             None => {
-                self.batch_with(|cf, batch| {
+                self.batch_async(|cf, batch| {
                     batch.delete_cf(&cf, meta_snapshot_key());
                     Ok(())
                 })
@@ -637,12 +706,12 @@ mod ballot_tests {
     fn set_promise_round_trip() {
         let dir = TempDir::new().unwrap();
         let mut storage = fresh_storage(&dir);
-        let b = ballot(1, 5, 2);
-        storage.set_promise(b).unwrap();
+        let expected = ballot(1, 5, 2);
+        storage.set_promise(expected).unwrap();
         let got = storage.get_promise().unwrap().expect("present");
-        assert_eq!(got.n, b.n);
-        assert_eq!(got.pid, b.pid);
-        assert_eq!(got.config_id, b.config_id);
+        assert_eq!(got.n, expected.n);
+        assert_eq!(got.pid, expected.pid);
+        assert_eq!(got.config_id, expected.config_id);
     }
 
     #[test]
@@ -656,10 +725,10 @@ mod ballot_tests {
     fn set_accepted_round_round_trip() {
         let dir = TempDir::new().unwrap();
         let mut storage = fresh_storage(&dir);
-        let b = ballot(1, 7, 3);
-        storage.set_accepted_round(b).unwrap();
+        let expected = ballot(1, 7, 3);
+        storage.set_accepted_round(expected).unwrap();
         let got = storage.get_accepted_round().unwrap().expect("present");
-        assert_eq!(got.n, b.n);
+        assert_eq!(got.n, expected.n);
     }
 }
 
