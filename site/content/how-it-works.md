@@ -16,6 +16,8 @@ A client asks the leader for a batch of `N` IDs. The leader picks the next range
 
 The allocator owns one piece of state: the high-water mark, an integer that no future ID may equal or fall below. A batch request asks the allocator for `N` IDs; the allocator picks the start `a` (`>= current high-water mark`), advances the high-water mark past `a+N`, persists the new high-water mark, and returns the range. Crash semantics are simple by construction: if the process dies before the fsync, no ID from the batch has been handed out; if it dies after, the new high-water mark is on disk and the batch is committed. There is no torn state to recover.
 
+{{ window_timeline(name="window-allocator", title="Three consecutive window flips. Click to step through.") }}
+
 ## ConsensusDriver trait
 
 In a replicated topology, the high-water mark must survive leader failover. The `ConsensusDriver` trait is the narrow interface tsoracle uses to talk to a replicated log; the production implementation backs it with [openraft](https://github.com/databendlabs/openraft), but a small trait surface lets you wire tsoracle into raft-rs, etcd's raft, or your service's own raft if you want to piggyback. Every high-water-mark advance is proposed through the trait; the new leader after a failover only hands out IDs above the last committed advance.
