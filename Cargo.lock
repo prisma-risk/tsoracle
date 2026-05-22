@@ -3130,6 +3130,7 @@ dependencies = [
  "parking_lot",
  "proptest",
  "prost",
+ "rand 0.9.4",
  "thiserror",
  "tokio",
  "tonic",

@@ -25,12 +25,44 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 use tonic::transport::Channel;
 
+use crate::RetryPolicy;
 use crate::error::ClientError;
 
 /// Boxed error returned by user-supplied connector closures.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// HTTP/2 keepalive ping interval. Hardcoded rather than exposed on
+/// [`RetryPolicy`] because no realistic deployment needs to tune it
+/// independently of the per-attempt deadline — 30 s is well below the
+/// idle-connection cull window of common L4 load balancers and NATs
+/// (AWS NLB: 350 s, AWS ALB: 60 s default, GCP: 600 s, conntrack:
+/// 432 000 s but earlier eviction under pressure). Callers needing a
+/// different value can use [`crate::ClientBuilder::channel_connector`]
+/// and build the `Endpoint` themselves.
+pub(crate) const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Apply the four `Endpoint` knobs the [`RetryPolicy`] dictates:
+/// `connect_timeout`, `timeout` (both seeded from
+/// `per_attempt_deadline`), `keep_alive_while_idle(true)`, and
+/// `http2_keep_alive_interval`. Called from the built-in default and
+/// built-in TLS paths so a blackholed peer surfaces a tonic transport
+/// error within `per_attempt_deadline` instead of parking on the
+/// OS-default TCP timeout. User-supplied
+/// [`crate::ClientBuilder::channel_connector`] closures own their own
+/// `Endpoint` config and do not go through this helper.
+pub(crate) fn apply_endpoint_config(
+    endpoint: tonic::transport::Endpoint,
+    policy: &RetryPolicy,
+) -> tonic::transport::Endpoint {
+    endpoint
+        .connect_timeout(policy.per_attempt_deadline)
+        .timeout(policy.per_attempt_deadline)
+        .keep_alive_while_idle(true)
+        .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+}
 
 /// Stored channel-construction strategy, shared by the built-in TLS path
 /// and any user-supplied closure. Errors are normalized to `ClientError`
@@ -73,11 +105,13 @@ pub(crate) fn normalize_uri(endpoint: &str, tls: bool) -> String {
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(crate) fn tls_connector(
     cfg: tonic::transport::ClientTlsConfig,
+    policy: RetryPolicy,
 ) -> std::sync::Arc<ChannelConnector> {
     use tonic::transport::Endpoint;
     std::sync::Arc::new(move |endpoint: &str| {
         let uri = normalize_uri(endpoint, true);
         let cfg = cfg.clone();
+        let policy = policy.clone();
         let endpoint_owned = endpoint.to_string();
         Box::pin(async move {
             let ep: Endpoint = uri
@@ -88,6 +122,7 @@ pub(crate) fn tls_connector(
             } else {
                 ep
             };
+            let ep = apply_endpoint_config(ep, &policy);
             let channel = ep.connect().await.map_err(ClientError::from)?;
             Ok(channel)
         })

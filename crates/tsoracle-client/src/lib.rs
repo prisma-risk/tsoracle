@@ -29,9 +29,11 @@ mod error;
 mod leader_resolved;
 mod response;
 mod retry;
+mod retry_policy;
 mod transport;
 
 pub use error::ClientError;
+pub use retry_policy::RetryPolicy;
 pub use transport::BoxError;
 
 use std::sync::Arc;
@@ -51,6 +53,7 @@ pub struct ClientBuilder {
     flush_interval: Duration,
     connector: Option<Arc<crate::transport::ChannelConnector>>,
     tls_required: bool,
+    retry_policy: RetryPolicy,
 }
 
 impl ClientBuilder {
@@ -60,11 +63,28 @@ impl ClientBuilder {
             flush_interval: Duration::from_millis(1),
             connector: None,
             tls_required: false,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
     pub fn batch_flush_interval(mut self, flush_interval: Duration) -> Self {
         self.flush_interval = flush_interval;
+        self
+    }
+
+    /// Override the default [`RetryPolicy`].
+    ///
+    /// The policy controls per-attempt deadlines, the overall deadline
+    /// across all candidate endpoints, the cap on attempts, and the
+    /// jittered backoff base. The per-attempt deadline is also pushed
+    /// down to `tonic::transport::Endpoint::connect_timeout` and
+    /// `Endpoint::timeout` for the built-in default and TLS transport
+    /// paths so a blackholed peer fails fast at the transport layer.
+    /// User-supplied [`Self::channel_connector`] closures own their
+    /// own Endpoint config; the policy still bounds the retry loop's
+    /// outer `tokio::time::timeout` around them.
+    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
         self
     }
 
@@ -85,7 +105,10 @@ impl ClientBuilder {
     /// its own scheme policy.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub fn tls_config(mut self, cfg: tonic::transport::ClientTlsConfig) -> Self {
-        self.connector = Some(crate::transport::tls_connector(cfg));
+        self.connector = Some(crate::transport::tls_connector(
+            cfg,
+            self.retry_policy.clone(),
+        ));
         self.tls_required = true;
         self
     }
@@ -124,6 +147,7 @@ impl ClientBuilder {
             self.endpoints,
             self.connector,
             self.tls_required,
+            self.retry_policy,
         ));
         let pool_for_rpc = pool.clone();
         let driver = driver::Driver::spawn(
@@ -250,5 +274,64 @@ mod tests {
         let builder = ClientBuilder::endpoints(vec!["http://127.0.0.1:1".into()])
             .batch_flush_interval(custom);
         assert_eq!(builder.flush_interval, custom);
+    }
+
+    #[tokio::test]
+    async fn retry_policy_override_propagates_to_builder() {
+        // The builder field is what `build` hands to the pool and retry
+        // loop. If `retry_policy()` ever silently stops storing the
+        // override, the loop reverts to defaults; this test pins the
+        // override path against that.
+        let policy = RetryPolicy {
+            max_attempts: 7,
+            per_attempt_deadline: Duration::from_millis(11),
+            overall_deadline: Duration::from_millis(13),
+            base_backoff: Duration::from_millis(17),
+        };
+        let builder = ClientBuilder::endpoints(vec!["http://127.0.0.1:1".into()])
+            .retry_policy(policy.clone());
+        assert_eq!(builder.retry_policy.max_attempts, policy.max_attempts);
+        assert_eq!(
+            builder.retry_policy.per_attempt_deadline,
+            policy.per_attempt_deadline
+        );
+        assert_eq!(
+            builder.retry_policy.overall_deadline,
+            policy.overall_deadline
+        );
+        assert_eq!(builder.retry_policy.base_backoff, policy.base_backoff);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_ts_returns_within_overall_deadline_when_all_endpoints_unreachable() {
+        // End-to-end test of the issue's acceptance criterion: with no
+        // listener bound at the configured endpoints, a `get_ts` call
+        // must return well before the OS-default TCP timeout (~75 s on
+        // Linux). The bound here is generous enough to absorb CI
+        // scheduler jitter — the assertion is "fast", not "exactly the
+        // configured deadline".
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            per_attempt_deadline: Duration::from_millis(100),
+            overall_deadline: Duration::from_millis(300),
+            base_backoff: Duration::ZERO,
+        };
+        let client = ClientBuilder::endpoints(vec![
+            "http://127.0.0.1:1".into(),
+            "http://127.0.0.1:2".into(),
+            "http://127.0.0.1:3".into(),
+        ])
+        .retry_policy(policy)
+        .build()
+        .await
+        .expect("builder must accept the policy");
+        let start = std::time::Instant::now();
+        let result = client.get_ts().await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "no listener can reply: {result:?}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "deadline must short-circuit; took {elapsed:?}"
+        );
     }
 }

@@ -18,69 +18,149 @@
 //! so we retry the hinted leader immediately — not at the end of the
 //! round-robin pass, which would leave the current call to fail if the
 //! hinted endpoint wasn't otherwise in the queue.
+//!
+//! Three deadlines bound the loop, governed by [`crate::RetryPolicy`]:
+//!
+//! - `per_attempt_deadline`: each `(pool.client, client.get_ts)` pair is
+//!   wrapped in `tokio::time::timeout`. Same value is pushed to the
+//!   tonic `Endpoint::connect_timeout` / `Endpoint::timeout` for the
+//!   built-in transport paths so the transport layer also fails fast.
+//! - `overall_deadline`: hard wall-clock cap on the whole call. The
+//!   loop exits before starting any attempt that would push past it,
+//!   even when `max_attempts` and the worklist still have headroom.
+//! - `max_attempts`: tighter cap than the visited-set (which already
+//!   prevents revisiting an endpoint). Bites only when leader-hint
+//!   redirects expand the effective worklist.
+//!
+//! Between attempts whose last error is `Unavailable`,
+//! `DeadlineExceeded`, or a transport-layer failure, the loop sleeps a
+//! jittered exponential backoff. FAILED_PRECONDITION-with-hint redirects
+//! do not back off — the next endpoint is known and the redirect is
+//! part of normal discovery.
 
 use std::collections::{HashSet, VecDeque};
+use std::time::Duration;
 
+use tokio::time::Instant;
 use tsoracle_core::Timestamp;
 
 use crate::error::ClientError;
 use crate::leader_resolved::{ChannelPool, decode_leader_hint};
 use crate::response::decode_get_ts_response;
+use crate::retry_policy::{jittered_backoff, should_backoff};
 
 pub(crate) async fn issue_rpc(
     pool: &ChannelPool,
     count: u32,
 ) -> Result<Vec<Timestamp>, ClientError> {
+    let policy = pool.retry_policy().clone();
+    let start = Instant::now();
+    let deadline = start + policy.overall_deadline;
     let mut worklist: VecDeque<String> = pool.iter_round_robin().into();
     let mut visited: HashSet<String> = HashSet::new();
     let mut last_err: Option<ClientError> = None;
+    let mut attempt_index: u32 = 0;
 
     while let Some(endpoint) = worklist.pop_front() {
         if !visited.insert(endpoint.clone()) {
             continue;
         }
-        let mut client = match pool.client(&endpoint).await {
-            Ok(c) => c,
-            Err(e) => {
-                last_err = Some(e);
+        if attempt_index as usize >= policy.max_attempts {
+            break;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let attempt_budget = (deadline - now).min(policy.per_attempt_deadline);
+
+        match attempt(pool, &endpoint, count, attempt_budget).await {
+            AttemptOutcome::Ok(timestamps) => {
+                pool.set_leader(endpoint);
+                return Ok(timestamps);
+            }
+            AttemptOutcome::LeaderHint(hinted_endpoint) => {
+                pool.set_leader(hinted_endpoint.clone());
+                worklist.push_front(hinted_endpoint);
+                // No backoff: a leader hint is known progress, not a
+                // failure to throttle.
+                attempt_index = attempt_index.saturating_add(1);
                 continue;
             }
-        };
-        match client
-            .get_ts(tsoracle_proto::v1::GetTsRequest { count })
-            .await
-        {
-            Ok(resp) => {
-                pool.set_leader(endpoint);
-                match decode_get_ts_response(resp.into_inner(), count) {
-                    Ok(timestamps) => return Ok(timestamps),
-                    Err(e) => {
-                        last_err = Some(e);
-                        continue;
-                    }
-                }
-            }
-            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
-                let usable_hint = decode_leader_hint(&status)
-                    .and_then(|hint| hint.leader_endpoint)
-                    .filter(|hinted_endpoint| !visited.contains(hinted_endpoint))
-                    .filter(|hinted_endpoint| !rejects_plaintext_hint(pool, hinted_endpoint));
-                if let Some(hinted_endpoint) = usable_hint {
-                    pool.set_leader(hinted_endpoint.clone());
-                    worklist.push_front(hinted_endpoint);
-                    continue;
-                }
+            AttemptOutcome::HintRejected(status) => {
                 pool.clear_leader();
                 last_err = Some(ClientError::Rpc(status));
+                attempt_index = attempt_index.saturating_add(1);
                 continue;
             }
-            Err(status) => {
-                last_err = Some(ClientError::Rpc(status));
+            AttemptOutcome::Err(err) => {
+                let should_sleep = should_backoff(&err);
+                last_err = Some(err);
+                attempt_index = attempt_index.saturating_add(1);
+                if should_sleep {
+                    let backoff = jittered_backoff(policy.base_backoff, attempt_index - 1);
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let sleep_for = backoff.min(remaining);
+                    if sleep_for > Duration::ZERO {
+                        tokio::time::sleep(sleep_for).await;
+                    }
+                }
                 continue;
             }
         }
     }
     Err(last_err.unwrap_or(ClientError::NoReachableEndpoints))
+}
+
+/// Per-attempt outcome. Surfaces FAILED_PRECONDITION redirects as
+/// their own variant so the caller can preserve the existing "no
+/// backoff on hint" behaviour while still applying backoff to other
+/// retriable failures.
+enum AttemptOutcome {
+    Ok(Vec<Timestamp>),
+    LeaderHint(String),
+    HintRejected(tonic::Status),
+    Err(ClientError),
+}
+
+async fn attempt(
+    pool: &ChannelPool,
+    endpoint: &str,
+    count: u32,
+    budget: Duration,
+) -> AttemptOutcome {
+    let mut client = match tokio::time::timeout(budget, pool.client(endpoint)).await {
+        Ok(Ok(client)) => client,
+        Ok(Err(err)) => return AttemptOutcome::Err(err),
+        Err(_) => {
+            return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
+                format!("connect exceeded per_attempt_deadline of {budget:?}"),
+            )));
+        }
+    };
+    let rpc = client.get_ts(tsoracle_proto::v1::GetTsRequest { count });
+    let response = match tokio::time::timeout(budget, rpc).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(status)) if status.code() == tonic::Code::FailedPrecondition => {
+            let usable_hint = decode_leader_hint(&status)
+                .and_then(|hint| hint.leader_endpoint)
+                .filter(|hinted| !rejects_plaintext_hint(pool, hinted));
+            return match usable_hint {
+                Some(hinted) => AttemptOutcome::LeaderHint(hinted),
+                None => AttemptOutcome::HintRejected(status),
+            };
+        }
+        Ok(Err(status)) => return AttemptOutcome::Err(ClientError::Rpc(status)),
+        Err(_) => {
+            return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
+                format!("rpc exceeded per_attempt_deadline of {budget:?}"),
+            )));
+        }
+    };
+    match decode_get_ts_response(response.into_inner(), count) {
+        Ok(timestamps) => AttemptOutcome::Ok(timestamps),
+        Err(err) => AttemptOutcome::Err(err),
+    }
 }
 
 /// Refuse a wire-supplied leader hint that would downgrade the transport.
@@ -111,6 +191,20 @@ fn rejects_plaintext_hint(pool: &ChannelPool, hint: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RetryPolicy;
+
+    /// Aggressive policy used by the unit tests to keep them fast.
+    /// `per_attempt_deadline` is the dominant cost — the integration
+    /// tests cover wall-clock behaviour against real (unreachable)
+    /// sockets, but the unit tests just want the loop to terminate.
+    fn short_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_millis(100),
+            overall_deadline: Duration::from_millis(300),
+            base_backoff: Duration::from_millis(1),
+        }
+    }
 
     /// A pool seeded with duplicate endpoints must visit each once; the
     /// second visit hits the `!visited.insert` short-circuit and continues
@@ -123,6 +217,7 @@ mod tests {
             vec!["http://127.0.0.1:1".into(), "http://127.0.0.1:1".into()],
             None,
             false,
+            short_policy(),
         );
         let result = issue_rpc(&pool, 1).await;
         assert!(result.is_err(), "no live endpoint must surface as Err");
@@ -134,7 +229,12 @@ mod tests {
     /// continue path that's not reached by the happy-path integration tests.
     #[tokio::test]
     async fn unreachable_endpoints_surface_last_error() {
-        let pool = ChannelPool::new(vec!["http://127.0.0.1:1".into()], None, false);
+        let pool = ChannelPool::new(
+            vec!["http://127.0.0.1:1".into()],
+            None,
+            false,
+            short_policy(),
+        );
         let result = issue_rpc(&pool, 1).await;
         assert!(result.is_err(), "expected Err from unreachable pool");
     }
@@ -146,8 +246,8 @@ mod tests {
     /// the policy.
     #[test]
     fn plaintext_hint_policy_matches_scheme_and_tls_state() {
-        let tls = ChannelPool::new(vec!["a:1".into()], None, true);
-        let plain = ChannelPool::new(vec!["a:1".into()], None, false);
+        let tls = ChannelPool::new(vec!["a:1".into()], None, true, RetryPolicy::default());
+        let plain = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
 
         assert!(
             rejects_plaintext_hint(&tls, "http://attacker:1"),
@@ -164,6 +264,83 @@ mod tests {
         assert!(
             !rejects_plaintext_hint(&plain, "http://peer:1"),
             "http:// hint must be allowed when tls is not required"
+        );
+    }
+
+    /// A pool full of unreachable endpoints must surface its failure within
+    /// the `overall_deadline`, not the OS-default TCP timeout (`~75 s` on
+    /// Linux). The per-attempt deadline ensures each closed-port dial
+    /// returns quickly; the overall deadline ensures the loop terminates
+    /// even if a large pool would otherwise blow past it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overall_deadline_caps_total_wall_clock() {
+        // 5 endpoints, each closed. With max_attempts=5 and per_attempt
+        // budget=100ms, naive iteration could spend up to ~500ms; the
+        // overall_deadline=200ms must cut the loop short. Choose
+        // base_backoff=0 so backoff sleeps are not a factor here — this
+        // test pins the overall_deadline branch, not the backoff.
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            per_attempt_deadline: Duration::from_millis(100),
+            overall_deadline: Duration::from_millis(200),
+            base_backoff: Duration::ZERO,
+        };
+        let pool = ChannelPool::new(
+            vec![
+                "http://127.0.0.1:1".into(),
+                "http://127.0.0.1:2".into(),
+                "http://127.0.0.1:3".into(),
+                "http://127.0.0.1:4".into(),
+                "http://127.0.0.1:5".into(),
+            ],
+            None,
+            false,
+            policy,
+        );
+        let start = std::time::Instant::now();
+        let result = issue_rpc(&pool, 1).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "expected Err from all-unreachable pool");
+        // Grace allowance covers tokio runtime jitter on slow CI runners.
+        // The point is "≪ OS TCP timeout", not a microbenchmark.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "must return within ~overall_deadline; took {elapsed:?}"
+        );
+    }
+
+    /// `max_attempts` must cap the attempt count below the worklist size.
+    /// Configuring 4 unreachable endpoints with `max_attempts=2` and a
+    /// generous per-attempt budget proves the loop exits after two
+    /// attempts rather than burning through the whole worklist.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn max_attempts_caps_iteration() {
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_millis(50),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+        };
+        let pool = ChannelPool::new(
+            vec![
+                "http://127.0.0.1:1".into(),
+                "http://127.0.0.1:2".into(),
+                "http://127.0.0.1:3".into(),
+                "http://127.0.0.1:4".into(),
+            ],
+            None,
+            false,
+            policy,
+        );
+        let start = std::time::Instant::now();
+        let result = issue_rpc(&pool, 1).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err());
+        // Two attempts at ~50ms each + scheduler slack. Capping at 1s is
+        // enough to detect "loop kept iterating past max_attempts".
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "max_attempts=2 must cap iteration; took {elapsed:?}"
         );
     }
 }
