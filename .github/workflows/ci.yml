@@ -9,6 +9,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # The workspace's debug+test binaries for the openraft + rocksdb crates
+      # have grown past the ubuntu-latest runner's free disk budget — the
+      # final link step in `cargo test --workspace --all-features` hits
+      # ENOSPC inside `ld`. Stripping the pre-installed Android SDK / .NET /
+      # Haskell toolchains frees ~30 GB before any cargo work begins; the
+      # Rust toolchain installed below lives in ~/.cargo and is not touched
+      # by `tool-cache: false`.
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
