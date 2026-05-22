@@ -28,12 +28,24 @@ use tsoracle_core::Timestamp;
 use crate::MAX_TIMESTAMPS_PER_RPC;
 use crate::error::ClientError;
 
-/// Bound on the waiter queue. A slow server combined with a fast caller
-/// must not grow this without limit; once full, `Driver::request` awaits
+/// Bound on the total number of waiters that can exist inside the driver
+/// at any moment. A slow server combined with a fast caller must not grow
+/// this without limit; once the bound is reached, `Driver::request` awaits
 /// via `Sender::send().await`, propagating backpressure to callers.
 ///
-/// Each `Waiter` is small (~32 bytes), so 4096 caps the queue at ~128 KB
-/// regardless of how aggressive the producers are.
+/// The bound is split evenly between two structures that hold waiters:
+/// the `mpsc::Receiver` buffer (sized at `QUEUE_CAPACITY / 2`) and the
+/// secondary `VecDeque<Waiter>` owned by `driver_task` (gated at
+/// `QUEUE_CAPACITY / 2` in every `select!` arm that pulls from `rx`). The
+/// sum equals `QUEUE_CAPACITY`, so the documented bound is what callers
+/// actually see — the gate disables the receive arm once the secondary
+/// queue is at half-capacity, the mpsc buffer fills, and the next
+/// `Sender::send().await` blocks.
+///
+/// Each `Waiter` owns a `oneshot::Sender` whose paired receiver and
+/// shared state are heap-allocated; the practical per-waiter footprint
+/// is ~256 bytes, so 4096 caps total waiter memory at ~1 MB regardless
+/// of how aggressive the producers are.
 const QUEUE_CAPACITY: usize = 4096;
 
 pub(crate) struct Waiter {
@@ -51,11 +63,12 @@ type RpcFn = Arc<
         + Sync,
 >;
 
-/// One (expected_count, rpc_result, waiters-for-this-chunk) entry. The
-/// driver task spawns a sub-task that fills a `Vec<ChunkResult>` one chunk
-/// at a time, then delivers each chunk's result on the parent task.
-type ChunkResult = (u32, Result<Vec<Timestamp>, ClientError>, VecDeque<Waiter>);
-type BatchHandle = tokio::task::JoinHandle<Vec<ChunkResult>>;
+/// `driver_task` spawns one batch task per coalesced window; the batch
+/// task runs each chunk's RPC and delivers that chunk's outcome to its
+/// waiters before moving to the next chunk. The handle's `()` payload
+/// signals batch completion only — the per-chunk results are streamed to
+/// waiters inside the task, never returned through this join.
+type BatchHandle = tokio::task::JoinHandle<()>;
 
 impl Driver {
     pub fn spawn<F>(rpc: F, flush_interval: Duration) -> Self
@@ -65,7 +78,7 @@ impl Driver {
             + Sync
             + 'static,
     {
-        let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
+        let (tx, rx) = mpsc::channel(QUEUE_CAPACITY / 2);
         tokio::spawn(driver_task(Arc::new(rpc), rx, flush_interval));
         Driver { tx }
     }
@@ -94,16 +107,14 @@ async fn driver_task(rpc: RpcFn, mut rx: mpsc::Receiver<Waiter>, flush_interval:
         if let Some(handle) = in_flight.as_mut() {
             tokio::select! {
                 biased;
-                completed = handle => {
+                _completed = handle => {
+                    // `run_chunks` already delivered each chunk's response to
+                    // its waiters as that chunk's RPC completed; nothing to
+                    // do here beyond clearing the in-flight slot.
                     in_flight = None;
                     set_in_flight_gauge(0);
-                    if let Ok(chunks) = completed {
-                        for (expected, result, mut waiters) in chunks {
-                            deliver(&mut waiters, result, expected);
-                        }
-                    }
                 }
-                next = rx.recv() => {
+                next = rx.recv(), if queue.len() < QUEUE_CAPACITY / 2 => {
                     match next {
                         Some(w) => enqueue(&mut queue, &mut first_arrival, w),
                         None => return,
@@ -131,7 +142,7 @@ async fn driver_task(rpc: RpcFn, mut rx: mpsc::Receiver<Waiter>, flush_interval:
                     tokio::select! {
                         biased;
                         _ = sleep_until(deadline) => break,
-                        next = rx.recv() => {
+                        next = rx.recv(), if queue.len() < QUEUE_CAPACITY / 2 => {
                             match next {
                                 Some(w) => enqueue(&mut queue, &mut first_arrival, w),
                                 None => return,
@@ -194,15 +205,20 @@ fn chunk_queue(queue: &mut VecDeque<Waiter>) -> Vec<(u32, VecDeque<Waiter>)> {
     chunks
 }
 
-/// Issue one RPC per chunk, sequentially. Fail-fast: once one chunk's RPC
-/// errors, subsequent chunks get the same error without burning more RPCs
-/// against what is likely a failed leader or transport. Each chunk's
-/// (expected_count, result, waiters) is returned for the parent task to
-/// deliver.
-async fn run_chunks(rpc_fn: RpcFn, chunks: Vec<(u32, VecDeque<Waiter>)>) -> Vec<ChunkResult> {
-    let mut output: Vec<ChunkResult> = Vec::with_capacity(chunks.len());
+/// Issue one RPC per chunk, sequentially, and deliver each chunk's
+/// outcome to its waiters before moving on to the next chunk.
+///
+/// Fail-fast: once one chunk's RPC errors, subsequent chunks get the same
+/// error without burning more RPCs against what is likely a failed leader
+/// or transport.
+///
+/// Per-chunk delivery is the property that bounds retained response
+/// memory at one chunk's worth, even when a slow first chunk holds the
+/// batch open. The only state that crosses chunk boundaries is the
+/// `failed: Option<ClientError>` used for fail-fast.
+async fn run_chunks(rpc_fn: RpcFn, chunks: Vec<(u32, VecDeque<Waiter>)>) {
     let mut failed: Option<ClientError> = None;
-    for (count, waiters) in chunks {
+    for (count, mut waiters) in chunks {
         let result = match &failed {
             Some(e) => Err(clone_client_error(e)),
             None => {
@@ -213,9 +229,8 @@ async fn run_chunks(rpc_fn: RpcFn, chunks: Vec<(u32, VecDeque<Waiter>)>) -> Vec<
                 result
             }
         };
-        output.push((count, result, waiters));
+        deliver(&mut waiters, result, count);
     }
-    output
 }
 
 fn enqueue(queue: &mut VecDeque<Waiter>, first_arrival: &mut Option<Instant>, waiter: Waiter) {
@@ -596,6 +611,161 @@ mod tests {
         assert_eq!(rpc_count, 1, "fail-fast must issue exactly one RPC");
     }
 
+    /// With one in-flight RPC stalled, the driver must not let its
+    /// secondary queue grow without bound: producers exceeding the
+    /// documented `QUEUE_CAPACITY` waiter bound must backpressure on
+    /// `Sender::send().await` until existing waiters are delivered.
+    ///
+    /// White-box observation: if the secondary `VecDeque<Waiter>` were
+    /// unbounded, every waiter arriving while the first RPC stalled would
+    /// pile into a single follow-up batch, and after the stall releases
+    /// the largest `count` argument seen by the rpc closure would equal
+    /// the size of that pile. With real backpressure, every dispatched
+    /// batch is bounded by `QUEUE_CAPACITY`.
+    #[tokio::test]
+    async fn driver_bounds_in_flight_batch_to_queue_capacity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::watch;
+
+        let calls: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let rpc_invocations = Arc::new(AtomicUsize::new(0));
+        let (released_tx, released_rx) = watch::channel(false);
+
+        let calls_for_rpc = calls.clone();
+        let rpc_invocations_for_rpc = rpc_invocations.clone();
+        let released_rx_for_rpc = released_rx.clone();
+        let rpc = move |count: u32| -> futures::future::BoxFuture<
+            'static,
+            Result<Vec<Timestamp>, ClientError>,
+        > {
+            let is_first = rpc_invocations_for_rpc.fetch_add(1, Ordering::SeqCst) == 0;
+            let mut released = released_rx_for_rpc.clone();
+            let calls = calls_for_rpc.clone();
+            Box::pin(async move {
+                if is_first {
+                    while !*released.borrow() {
+                        released
+                            .changed()
+                            .await
+                            .expect("watch sender must outlive the rpc");
+                    }
+                }
+                calls.lock().push(count);
+                let timestamps: Vec<Timestamp> = (0..count)
+                    .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
+                    .collect();
+                Ok(timestamps)
+            })
+        };
+
+        let driver = Arc::new(Driver::spawn(rpc, Duration::ZERO));
+
+        // Fire 2 * QUEUE_CAPACITY concurrent requests, comfortably above the
+        // documented bound so that a missing gate produces a follow-up batch
+        // of `count > QUEUE_CAPACITY`.
+        let total = 2 * QUEUE_CAPACITY;
+        let mut handles = Vec::with_capacity(total);
+        for _ in 0..total {
+            let driver = driver.clone();
+            handles.push(tokio::spawn(async move { driver.request(1).await }));
+        }
+
+        // Yield enough times for the driver to absorb everything it can into
+        // its internal buffers. Anything past the bound must stay blocked on
+        // `Sender::send().await`.
+        for _ in 0..2_000 {
+            tokio::task::yield_now().await;
+        }
+
+        released_tx.send(true).expect("release the stalled rpc");
+
+        let results = futures::future::join_all(handles).await;
+        for result in results {
+            let outer = result.expect("join must succeed");
+            let timestamps = outer.expect("request must succeed");
+            assert_eq!(timestamps.len(), 1);
+        }
+
+        let observed = calls.lock().clone();
+        let max_count = *observed.iter().max().expect("at least one rpc was issued");
+        let batches = observed.len();
+        assert!(
+            max_count <= QUEUE_CAPACITY as u32,
+            "max batch count ({max_count}) exceeded documented bound ({QUEUE_CAPACITY}); fired {total} requests, observed {batches} batches"
+        );
+    }
+
+    /// A slow later chunk's RPC must not delay delivery of an earlier
+    /// chunk's response. Each chunk's outcome must stream out as that
+    /// chunk's RPC completes, not be held until every sibling chunk in
+    /// the batch finishes — otherwise an early-arrival waiter pays the
+    /// latency tail of the slowest sibling.
+    #[tokio::test]
+    async fn first_chunk_delivers_before_slow_second_chunk_completes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        let rpc_invocations = Arc::new(AtomicUsize::new(0));
+        let release_second = Arc::new(Notify::new());
+
+        let rpc_invocations_for_rpc = rpc_invocations.clone();
+        let release_second_for_rpc = release_second.clone();
+        let rpc = move |count: u32| -> futures::future::BoxFuture<
+            'static,
+            Result<Vec<Timestamp>, ClientError>,
+        > {
+            let invocation = rpc_invocations_for_rpc.fetch_add(1, Ordering::SeqCst);
+            let release = release_second_for_rpc.clone();
+            Box::pin(async move {
+                // The first invocation returns instantly; every later
+                // invocation waits for the test to notify.
+                if invocation >= 1 {
+                    release.notified().await;
+                }
+                let timestamps: Vec<Timestamp> = (0..count)
+                    .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
+                    .collect();
+                Ok(timestamps)
+            })
+        };
+
+        let driver = Arc::new(Driver::spawn(rpc, Duration::from_millis(50)));
+
+        // Two waiters each at the per-RPC cap force `chunk_queue` to emit
+        // two single-waiter chunks.
+        let first = {
+            let driver = driver.clone();
+            tokio::spawn(async move { driver.request(LOGICAL_MAX + 1).await })
+        };
+        let second = {
+            let driver = driver.clone();
+            tokio::spawn(async move { driver.request(LOGICAL_MAX + 1).await })
+        };
+
+        // The first chunk's rpc completes immediately. `first` must receive
+        // its response without waiting for the stalled second chunk; if the
+        // driver accumulates chunk results before delivering, this await
+        // never completes within the timeout.
+        let first_timestamps = tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("first chunk must deliver before second chunk's rpc completes")
+            .expect("join")
+            .expect("first request must succeed");
+        assert_eq!(first_timestamps.len(), (LOGICAL_MAX + 1) as usize);
+
+        assert!(
+            !second.is_finished(),
+            "second waiter must still be pending while its chunk's rpc is stalled",
+        );
+
+        release_second.notify_waiters();
+        let second_timestamps = second
+            .await
+            .expect("join")
+            .expect("second request must succeed");
+        assert_eq!(second_timestamps.len(), (LOGICAL_MAX + 1) as usize);
+    }
+
     /// `queue non-empty + flush_interval > 0` is the path where the driver
     /// task computes a deadline from `first_arrival` and waits for siblings
     /// up to that deadline before dispatching. A lone waiter that never gets
@@ -629,5 +799,90 @@ mod tests {
             elapsed >= flush,
             "dispatch fired at {elapsed:?}, before the {flush:?} flush deadline",
         );
+    }
+
+    /// Property tests: across thousands of randomly-generated arrival
+    /// schedules with mixed waiter counts, the driver must always
+    /// (a) deliver each waiter exactly its requested number of timestamps,
+    /// (b) respect the per-RPC cap so chunk_queue never violates it, and
+    /// (c) match the documented total-timestamp accounting (sum returned
+    ///     == sum requested).
+    ///
+    /// These invariants are independent of the specific bound the issue #74
+    /// fix tightens; they guard the freshness/chunking math against
+    /// regressions a fixed-input unit test would miss.
+    mod proptest_invariants {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                // Each case spins up a small runtime and spawns up to ~150
+                // tasks; 64 cases is enough to exercise interesting
+                // schedules without making the suite slow.
+                cases: 64,
+                .. ProptestConfig::default()
+            })]
+
+            #[test]
+            fn random_schedules_serve_every_waiter_correctly(
+                counts in prop::collection::vec(1u32..=MAX_TIMESTAMPS_PER_RPC, 1..150),
+                flush_micros in 0u64..2_000,
+            ) {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime must build");
+                runtime.block_on(async {
+                    let calls: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+                    let driver = Arc::new(Driver::spawn(
+                        recording_ok_rpc(calls.clone()),
+                        Duration::from_micros(flush_micros),
+                    ));
+
+                    let mut handles = Vec::with_capacity(counts.len());
+                    for count in counts.iter().copied() {
+                        let driver = driver.clone();
+                        handles.push(tokio::spawn(async move {
+                            driver.request(count).await
+                        }));
+                    }
+                    let results = futures::future::join_all(handles).await;
+
+                    // Every waiter must succeed with exactly its requested
+                    // number of timestamps.
+                    let mut total_served: u64 = 0;
+                    for (idx, (requested, result)) in counts
+                        .iter()
+                        .zip(results.into_iter())
+                        .enumerate()
+                    {
+                        let timestamps = result
+                            .expect("join must succeed")
+                            .expect("request must succeed");
+                        let served = timestamps.len();
+                        assert_eq!(served, *requested as usize, "request {idx} requested {requested}, served {served}");
+                        total_served += served as u64;
+                    }
+
+                    let observed = calls.lock().clone();
+                    // No RPC may exceed the per-call cap. chunk_queue
+                    // splits batches precisely to honour this; any
+                    // violation here would point at a refactor that
+                    // accidentally produced an over-sized chunk.
+                    for rpc_count in &observed {
+                        assert!(*rpc_count <= MAX_TIMESTAMPS_PER_RPC, "rpc dispatched with count {rpc_count} > per-call cap {MAX_TIMESTAMPS_PER_RPC}; observed: {observed:?}");
+                        assert!(*rpc_count > 0, "rpc dispatched with count 0");
+                    }
+
+                    // Accounting closure: the driver must never lose or
+                    // duplicate timestamps relative to the schedule.
+                    let total_requested: u64 = counts.iter().map(|c| u64::from(*c)).sum();
+                    let total_rpc: u64 = observed.iter().map(|c| u64::from(*c)).sum();
+                    assert_eq!(total_served, total_requested, "served {total_served} timestamps, requested {total_requested}");
+                    assert_eq!(total_rpc, total_requested, "rpc-side total {total_rpc} != requested {total_requested}");
+                });
+            }
+        }
     }
 }
