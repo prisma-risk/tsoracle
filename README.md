@@ -1,7 +1,7 @@
 <div align="center">
     <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/tsoracle-dark.svg">
-        <img alt="tsoracle" src="assets/tsoracle-light.svg" width="360">
+        <source media="(prefers-color-scheme: dark)" srcset="site/static/tsoracle-dark.svg">
+        <img alt="tsoracle" src="site/static/tsoracle-light.svg" width="360">
     </picture>
     <h4>
         Strictly monotonic timestamps in 🦀 Rust. Please ⭐ on <a href="https://github.com/prisma-risk/tsoracle">GitHub</a>!
@@ -10,7 +10,6 @@
 
 [![Crates.io](https://img.shields.io/crates/v/tsoracle-server.svg)](https://crates.io/crates/tsoracle-server)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-tsoracle-blue.svg)](https://deepwiki.com/prisma-risk/tsoracle)
-[![guide](https://img.shields.io/badge/guide-%E2%86%97-brightgreen)](https://docs.rs/tsoracle-server/latest/tsoracle_server/docs/index.html)
 <br/>
 [![CI](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml/badge.svg)](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/prisma-risk/tsoracle/badge.svg?branch=main)](https://coveralls.io/github/prisma-risk/tsoracle?branch=main)
@@ -78,7 +77,7 @@ A complete, runnable version lives in [`examples/embedded-server`](examples/embe
 
 A *timestamp oracle* is a service that hands out strictly increasing integer IDs which order events across a distributed system. You reach for one when:
 
-- You're building a database with snapshot isolation or MVCC (Spanner, TiDB, CockroachDB, FoundationDB all use a TSO internally).
+- You're building a database with snapshot isolation or MVCC (Spanner, CockroachDB, FoundationDB all use a TSO internally).
 - You need to merge change-data from many shards into one globally ordered stream.
 - You want audit logs with a real "happens-before" relation across machines.
 - Per-host clocks aren't monotonic or accurate enough, and database sequences don't scale to your workload.

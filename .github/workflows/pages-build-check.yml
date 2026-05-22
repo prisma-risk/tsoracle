@@ -1,0 +1,31 @@
+name: Pages build check
+
+on:
+  pull_request:
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages-build-check.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zola
+        run: |
+          ZOLA_VERSION="0.22.1"
+          curl -fsSL -o zola.tar.gz \
+            "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/zola-v${ZOLA_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          tar -xzf zola.tar.gz
+          sudo mv zola /usr/local/bin/zola
+          zola --version
+
+      - name: Build site
+        working-directory: site
+        run: zola build
+
+      - name: Check links
+        working-directory: site
+        run: zola check --skip-external-links
