@@ -7,6 +7,42 @@
 {% block twitter_title %}tsoracle — strictly monotonic timestamps in Rust{% endblock %}
 {% block twitter_description %}tsoracle is a distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering.{% endblock %}
 
+{% block extra_head %}
+<script type="application/ld+json">
+[
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "tsoracle",
+        "description": "A distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering.",
+        "url": {{ config.base_url | json_encode | safe }},
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Linux, macOS, Windows",
+        "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+        },
+        "author": {
+            "@type": "Organization",
+            "name": "Prisma Risk",
+            "url": "https://github.com/prisma-risk"
+        }
+    },
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "tsoracle",
+        "description": "A distributed timestamp oracle for Rust.",
+        "codeRepository": "https://github.com/prisma-risk/tsoracle",
+        "programmingLanguage": "Rust",
+        "license": "https://www.apache.org/licenses/LICENSE-2.0",
+        "url": {{ config.base_url | json_encode | safe }}
+    }
+]
+</script>
+{% endblock %}
+
 {% block content %}
 
 <h1 class="visually-hidden">tsoracle — strictly monotonic timestamps in Rust</h1>

@@ -16,13 +16,27 @@
 {% endblock %}
 
 {% block extra_head %}
+{% set og_url = config.base_url ~ "/og/" ~ page.slug ~ ".png" %}
 <script type="application/ld+json">
 {
     "@context": "https://schema.org",
     "@type": "Article",
     "headline": {{ page.title | json_encode | safe }},
     "description": {{ page.description | json_encode | safe }},
-    "url": "{{ page.permalink | safe }}"{% if page.date %},
+    "url": {{ page.permalink | json_encode | safe }},
+    "image": {{ og_url | json_encode | safe }},
+    "mainEntityOfPage": {{ page.permalink | json_encode | safe }},
+    "inLanguage": "en",
+    "author": {
+        "@type": "Organization",
+        "name": "Prisma Risk",
+        "url": "https://github.com/prisma-risk"
+    },
+    "publisher": {
+        "@type": "Organization",
+        "name": "Prisma Risk",
+        "url": "https://github.com/prisma-risk"
+    }{% if page.date %},
     "datePublished": "{{ page.date | date(format='%Y-%m-%d') }}"{% endif %}
 }
 </script>
