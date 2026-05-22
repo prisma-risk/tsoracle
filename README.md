@@ -1,5 +1,8 @@
 <div align="center">
-    <h1>tsoracle</h1>
+    <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/tsoracle-dark.svg">
+        <img alt="tsoracle" src="assets/tsoracle-light.svg" width="360">
+    </picture>
     <h4>
         Strictly monotonic, gap-free timestamps in 🦀 Rust. Please ⭐ on <a href="https://github.com/prisma-risk/tsoracle">GitHub</a>!
     </h4>
