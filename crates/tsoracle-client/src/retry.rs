@@ -93,10 +93,10 @@ mod tests {
     /// `visited` set being effective is the property under test here.
     #[tokio::test]
     async fn duplicate_endpoints_are_visited_once() {
-        let pool = ChannelPool::new(vec![
-            "http://127.0.0.1:1".into(),
-            "http://127.0.0.1:1".into(),
-        ]);
+        let pool = ChannelPool::new(
+            vec!["http://127.0.0.1:1".into(), "http://127.0.0.1:1".into()],
+            None,
+        );
         let result = issue_rpc(&pool, 1).await;
         assert!(result.is_err(), "no live endpoint must surface as Err");
     }
@@ -107,7 +107,7 @@ mod tests {
     /// continue path that's not reached by the happy-path integration tests.
     #[tokio::test]
     async fn unreachable_endpoints_surface_last_error() {
-        let pool = ChannelPool::new(vec!["http://127.0.0.1:1".into()]);
+        let pool = ChannelPool::new(vec!["http://127.0.0.1:1".into()], None);
         let result = issue_rpc(&pool, 1).await;
         assert!(result.is_err(), "expected Err from unreachable pool");
     }

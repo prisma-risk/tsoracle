@@ -288,6 +288,7 @@ fn clone_client_error(error: &ClientError) -> ClientError {
         ClientError::NoReachableEndpoints => ClientError::NoReachableEndpoints,
         ClientError::InvalidEndpoint(endpoint) => ClientError::InvalidEndpoint(endpoint.clone()),
         ClientError::InvalidCount(count) => ClientError::InvalidCount(*count),
+        ClientError::Connector(source) => ClientError::Connector(source.to_string().into()),
     }
 }
 

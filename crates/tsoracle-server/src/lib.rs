@@ -33,6 +33,10 @@
 //! `tsoracle` CLI from `tsoracle-bin` for a standalone process. The
 //! [`docs`] module contains the docs.rs-rendered operations chapter; the
 //! repo's `docs/key-subsystems.md` covers the same internals in depth.
+//!
+//! TLS termination is configured via
+//! `ServerBuilder::tls_config(ServerTlsConfig)`; see
+//! `docs/operations.md` for deployment guidance.
 
 #[macro_use]
 mod failpoint;

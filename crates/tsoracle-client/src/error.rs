@@ -22,4 +22,31 @@ pub enum ClientError {
     InvalidEndpoint(String),
     #[error("invalid count: {0}")]
     InvalidCount(u32),
+    #[error("custom channel connector failed: {0}")]
+    Connector(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connector_variant_renders_source_in_display() {
+        let inner: Box<dyn std::error::Error + Send + Sync + 'static> = "boom".into();
+        let err = ClientError::Connector(inner);
+        assert_eq!(
+            err.to_string(),
+            "custom channel connector failed: boom",
+            "Display should embed the boxed source's message"
+        );
+    }
+
+    #[test]
+    fn connector_variant_exposes_source() {
+        use std::error::Error;
+        let inner: Box<dyn std::error::Error + Send + Sync + 'static> =
+            std::io::Error::other("io-err").into();
+        let err = ClientError::Connector(inner);
+        assert!(err.source().is_some(), "Connector must propagate source()");
+    }
 }

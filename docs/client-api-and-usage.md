@@ -47,6 +47,7 @@ The trailer's wire format is described in [The leader-hint trailer](key-subsyste
 - `Rpc(Status)` — the last attempt returned a tonic `Status` we couldn't recover from.
 - `InvalidEndpoint(String)` — an endpoint string failed to parse as a URI.
 - `InvalidCount(u32)` — `count == 0` or `count > LOGICAL_MAX + 1` was passed to `get_ts_batch`.
+- `Connector(_)` — a user-supplied `channel_connector` closure returned an error. Built-in TLS failures continue to surface as `Transport(_)`.
 
 ## Configuration
 
@@ -67,3 +68,62 @@ ClientBuilder::endpoints(vec![
 **`batch_flush_interval`** is the *cold-start* coalescing window — the time the background driver waits, after the first buffered call arrives into an idle driver, before issuing the outgoing `GetTs` (default: 1 ms). It does *not* set the steady-state batch size: once any RPC is in flight, every waiter arriving during its round-trip is automatically coalesced into the next batch regardless of this knob, so steady-state batch size is set by `arrival_rate × rpc_round_trip` instead. Lowering `batch_flush_interval` (down to `Duration::ZERO`) reduces the per-call latency floor for cold-start callers but loses the first-burst coalescing window; raising it widens that window at the cost of a fixed latency tax on every first-after-idle request. For workloads that already batch explicitly, or that sustain enough concurrency to keep at least one RPC in flight at all times, the value is largely irrelevant. The full discussion — including why steady-state low batch size is a caller-concurrency problem and not a flushing problem — is in [The Client Driver](the-client-driver.md).
 
 There is no per-call timeout knob — wrap your call in `tokio::time::timeout` if you need one. The background coalescing task uses a bounded waiter queue (4096 entries); once full, callers await queue capacity, which applies backpressure before memory can grow without bound.
+
+## Custom transport (TLS, mTLS, connectors)
+
+The default `Client` dials each endpoint over plaintext HTTP/2. Two builder methods change that. `.tls_config(ClientTlsConfig)` (feature `tls-rustls` or `tls-native`; the former is on by default) attaches a `tonic::transport::ClientTlsConfig` to every endpoint the client opens, including leader-hint redirects to endpoints that were not in the configured list. `.channel_connector(|endpoint| async { ... })` is the generic escape hatch: the caller's closure builds and returns a `tonic::transport::Channel` for any endpoint string the client needs to dial. Use `tls_config` when a `ClientTlsConfig` is enough; reach for `channel_connector` when you also need to configure keepalive, custom connectors, service-mesh interposers, or proxies.
+
+Setting both `.tls_config(...)` and `.channel_connector(...)` is allowed; the last call wins (standard builder semantics).
+
+### Scheme rule
+
+| Configured state | Bare `host:port` becomes | `http://...` | `https://...` |
+| --- | --- | --- | --- |
+| No transport config (default) | `http://host:port` | plaintext | TLS (requires a `tls-*` feature to actually connect) |
+| `.tls_config(cfg)` set | `https://host:port` | plaintext (explicit beats configured) | TLS using `cfg` |
+| `.channel_connector(closure)` set | passed verbatim to the closure | passed verbatim | passed verbatim |
+
+"Explicit beats configured" is universal — including for leader-hint trailers. If the server emits a bare-host hint like `node-b:50551`, the client's rewrite rule applies (bare → https when `tls_config` is set; bare → http otherwise). If the server emits a fully-qualified scheme, that scheme is honored.
+
+### Minimal TLS example
+
+```rust
+use tonic::transport::{Certificate, ClientTlsConfig};
+
+let tls = ClientTlsConfig::new()
+    .ca_certificate(Certificate::from_pem(&ca_pem))
+    .domain_name("oracle.internal");
+
+let client = tsoracle_client::ClientBuilder::endpoints(vec![
+    "oracle-1.internal:50551".into(),
+    "oracle-2.internal:50551".into(),
+])
+    .tls_config(tls)
+    .build()
+    .await?;
+```
+
+### Minimal `channel_connector` example
+
+```rust
+let tls = ClientTlsConfig::new()
+    .ca_certificate(Certificate::from_pem(&ca_pem))
+    .identity(Identity::from_pem(&client_cert_pem, &client_key_pem))
+    .domain_name("oracle.internal");
+
+let client = tsoracle_client::ClientBuilder::endpoints(endpoints)
+    .channel_connector(move |endpoint: &str| {
+        let tls = tls.clone();
+        let uri = format!("https://{endpoint}");
+        async move {
+            let ep = tonic::transport::Endpoint::from_shared(uri)?
+                .tls_config(tls)?
+                .keep_alive_while_idle(true);
+            Ok(ep.connect().await?)
+        }
+    })
+    .build()
+    .await?;
+```
+
+See [`examples/tls-mtls`](../examples/tls-mtls/) for a runnable demo covering plain TLS, mTLS, the connector escape hatch, and a misconfigured mTLS negative path.
