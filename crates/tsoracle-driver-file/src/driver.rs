@@ -205,15 +205,22 @@ fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
 
     crate::failpoint!("file_driver::after_rename_before_dir_fsync");
 
-    // Fsync the directory so the rename is durable.
+    // Force the rename's metadata to durable media. The tmpfile `sync_all`
+    // above keeps the *data* durable on both platforms; this block adds the
+    // *metadata* barrier that makes the new directory entry survive a crash.
     //
-    // Unix-only: opening a directory fd and calling fsync on it forces the
-    // rename's metadata to disk. Windows has no portable equivalent --
-    // `FlushFileBuffers` on a directory handle is undefined for most
-    // filesystems, and NTFS already journals metadata transactions
-    // (including rename) such that the rename is recoverable across crash
-    // even without an explicit metadata flush. Best-effort on Windows;
-    // the tmpfile `sync_all` above still guarantees the data is durable.
+    // Unix: open the parent directory and `fsync` its descriptor. This is
+    // the canonical POSIX barrier for a rename — it flushes the directory
+    // entry that names the new inode.
+    //
+    // Windows: there is no portable directory-level flush. `FlushFileBuffers`
+    // on a directory handle is undefined for most filesystems. NTFS journals
+    // `MoveFileEx` as a metadata transaction, but the `$LogFile` record is
+    // itself only durable after a checkpoint or an explicit
+    // `FlushFileBuffers` on a file on the same volume. Re-opening the
+    // renamed file with write access (required by `FlushFileBuffers`) and
+    // calling `sync_all` flushes the journal entry covering this rename.
+    // This is the pattern SQLite and RocksDB use on Windows.
     #[cfg(unix)]
     {
         let dir_file = fs::File::open(dir)?;
@@ -223,6 +230,14 @@ fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
         if rc != 0 {
             return Err(FileDriverError::Io(std::io::Error::last_os_error()));
         }
+    }
+    #[cfg(not(unix))]
+    {
+        // `write(true)` is required: `FlushFileBuffers` rejects handles
+        // without `GENERIC_WRITE`. Default `truncate: false` leaves the
+        // file contents (the record we just renamed into place) intact.
+        let final_file = fs::OpenOptions::new().write(true).open(&final_path)?;
+        final_file.sync_all()?;
     }
     Ok(())
 }
