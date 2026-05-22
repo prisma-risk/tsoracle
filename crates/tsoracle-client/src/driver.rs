@@ -96,6 +96,7 @@ async fn driver_task(rpc: RpcFn, mut rx: mpsc::Receiver<Waiter>, flush_interval:
                 biased;
                 completed = handle => {
                     in_flight = None;
+                    set_in_flight_gauge(0);
                     if let Ok(chunks) = completed {
                         for (expected, result, mut waiters) in chunks {
                             deliver(&mut waiters, result, expected);
@@ -142,6 +143,7 @@ async fn driver_task(rpc: RpcFn, mut rx: mpsc::Receiver<Waiter>, flush_interval:
             first_arrival = None;
 
             let chunks = chunk_queue(&mut queue);
+            set_queue_depth_gauge(queue.len());
             if chunks.is_empty() {
                 // Every waiter was rejected inline (oversize/zero counts).
                 continue;
@@ -150,6 +152,7 @@ async fn driver_task(rpc: RpcFn, mut rx: mpsc::Receiver<Waiter>, flush_interval:
             in_flight = Some(tokio::spawn(
                 async move { run_chunks(rpc_fn, chunks).await },
             ));
+            set_in_flight_gauge(1);
         }
     }
 }
@@ -220,6 +223,29 @@ fn enqueue(queue: &mut VecDeque<Waiter>, first_arrival: &mut Option<Instant>, wa
         *first_arrival = Some(Instant::now());
     }
     queue.push_back(waiter);
+    set_queue_depth_gauge(queue.len());
+}
+
+/// Refresh the driver's waiter-queue gauge to the current size. Compiled away
+/// to a no-op without the `metrics` feature so the hot path stays free of
+/// branches when no recorder is installed.
+#[inline]
+fn set_queue_depth_gauge(depth: usize) {
+    #[cfg(feature = "metrics")]
+    metrics::gauge!("tsoracle.client.driver.queue_depth").set(depth as f64);
+    #[cfg(not(feature = "metrics"))]
+    let _ = depth;
+}
+
+/// 0 or 1: whether the driver currently has an outgoing batch in flight.
+/// A scalar gauge keeps the wire shape predictable and aligns with the
+/// "one batch at a time" invariant of the driver.
+#[inline]
+fn set_in_flight_gauge(state: u8) {
+    #[cfg(feature = "metrics")]
+    metrics::gauge!("tsoracle.client.driver.in_flight").set(f64::from(state));
+    #[cfg(not(feature = "metrics"))]
+    let _ = state;
 }
 
 /// Deliver one chunk's RPC outcome to its waiters.

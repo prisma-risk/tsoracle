@@ -27,11 +27,32 @@ use crate::transport::apply_endpoint_config;
 
 const LEADER_HINT_KEY: &str = "tsoracle-leader-hint-bin";
 
-pub fn decode_leader_hint(status: &Status) -> Option<LeaderHint> {
-    let key = MetadataKey::from_bytes(LEADER_HINT_KEY.as_bytes()).ok()?;
-    let value = status.metadata().get_bin(key)?;
-    let bytes = value.to_bytes().ok()?;
-    LeaderHint::decode(bytes.as_ref()).ok()
+/// Outcome of inspecting a `Status`'s trailers for the leader-hint payload.
+///
+/// The retry loop treats the three cases differently: `Absent` is the normal
+/// "this peer doesn't know who the leader is" signal and stays silent;
+/// `Malformed` is a wire-protocol bug worth a warning + counter; `Decoded`
+/// is the followable redirect.
+pub enum LeaderHintLookup {
+    Absent,
+    Decoded(LeaderHint),
+    Malformed,
+}
+
+pub fn decode_leader_hint(status: &Status) -> LeaderHintLookup {
+    let Ok(key) = MetadataKey::from_bytes(LEADER_HINT_KEY.as_bytes()) else {
+        return LeaderHintLookup::Absent;
+    };
+    let Some(value) = status.metadata().get_bin(key) else {
+        return LeaderHintLookup::Absent;
+    };
+    let Ok(bytes) = value.to_bytes() else {
+        return LeaderHintLookup::Malformed;
+    };
+    match LeaderHint::decode(bytes.as_ref()) {
+        Ok(hint) => LeaderHintLookup::Decoded(hint),
+        Err(_) => LeaderHintLookup::Malformed,
+    }
 }
 
 pub struct ChannelPool {
@@ -97,22 +118,41 @@ impl ChannelPool {
         if let Some(channel) = self.channels.lock().get(endpoint).cloned() {
             return Ok(TsoServiceClient::new(channel));
         }
+        // Cache miss: we are about to actually dial. Time the dial so the
+        // `connect.duration` histogram only captures real connect work, not
+        // the cache-hit fast path.
+        #[cfg(feature = "metrics")]
+        let connect_started = std::time::Instant::now();
         let channel = match &self.connector {
-            Some(connector) => connector(endpoint).await?,
-            None => {
-                let uri = crate::transport::normalize_uri(endpoint, false);
-                let transport_endpoint: Endpoint = uri
-                    .parse()
-                    .map_err(|_| ClientError::InvalidEndpoint(endpoint.into()))?;
-                let transport_endpoint =
-                    apply_endpoint_config(transport_endpoint, &self.retry_policy);
-                transport_endpoint.connect().await?
-            }
+            Some(connector) => connector(endpoint).await,
+            None => match crate::transport::normalize_uri(endpoint, false).parse::<Endpoint>() {
+                Ok(transport_endpoint) => {
+                    let transport_endpoint =
+                        apply_endpoint_config(transport_endpoint, &self.retry_policy);
+                    transport_endpoint
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                }
+                Err(_) => Err(ClientError::InvalidEndpoint(endpoint.into())),
+            },
         };
-        self.channels
-            .lock()
-            .insert(endpoint.to_string(), channel.clone());
-        Ok(TsoServiceClient::new(channel))
+        match channel {
+            Ok(channel) => {
+                #[cfg(feature = "metrics")]
+                metrics::histogram!("tsoracle.client.connect.duration")
+                    .record(connect_started.elapsed().as_secs_f64());
+                self.channels
+                    .lock()
+                    .insert(endpoint.to_string(), channel.clone());
+                Ok(TsoServiceClient::new(channel))
+            }
+            Err(error) => {
+                #[cfg(feature = "metrics")]
+                metrics::counter!("tsoracle.client.connect.failures.total").increment(1);
+                Err(error)
+            }
+        }
     }
 
     pub fn iter_round_robin(&self) -> Vec<String> {

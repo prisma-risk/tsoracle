@@ -14,7 +14,9 @@ Default is 1 second. On leadership gain, the new leader first computes `serving_
 
 ## Monitoring hooks
 
-The server emits the following signals through the [`metrics`](https://docs.rs/metrics) crate facade. Emission is gated behind the `metrics` Cargo feature on `tsoracle-server` (off by default so the dependency stays opt-in for embedders who do not want it):
+Both `tsoracle-server` and `tsoracle-client` emit signals through the [`metrics`](https://docs.rs/metrics) crate facade. Emission is gated behind the `metrics` Cargo feature on each crate (off by default so the dependency stays opt-in for embedders who do not want it). The client additionally emits structured events through the [`tracing`](https://docs.rs/tracing) crate; `tracing` is on by default for `tsoracle-client` (matching `tsoracle-server`).
+
+**Server signals**
 
 - `tsoracle.get_ts.total` — total GetTs RPCs handled (counter)
 - `tsoracle.get_ts.timestamps_issued` — sum of `count` across all GetTs responses (counter)
@@ -24,11 +26,23 @@ The server emits the following signals through the [`metrics`](https://docs.rs/m
 - `tsoracle.leader_transition.fence_latency` — duration of the failover fence (histogram, seconds)
 - `tsoracle.not_leader.total` — RPCs rejected with `NOT_LEADER` (counter)
 
-The library is exporter-agnostic: embedders install whichever recorder they want (`metrics-exporter-prometheus`, `metrics-exporter-influx`, a custom sink) before constructing the [`Server`]. The example below wires Prometheus over an HTTP listener:
+**Client signals**
+
+- `tsoracle.client.not_leader.total` — `FAILED_PRECONDITION` responses observed by the client (counter)
+- `tsoracle.client.leader_pivots.total` — times the retry loop accepted a leader-hint redirect and immediately retried the hinted endpoint (counter)
+- `tsoracle.client.retries.total{reason}` — endpoints the retry loop advanced past without success (counter). `reason` is one of `connect_failure`, `not_leader`, `transport`, `decode_error`, `deadline_exceeded`.
+- `tsoracle.client.leader_hint.decode_failures.total` — `FAILED_PRECONDITION` responses whose `tsoracle-leader-hint-bin` trailer was present but failed to decode as `LeaderHint` (counter). A non-zero rate indicates a misbehaving peer; absent trailers do not increment this.
+- `tsoracle.client.connect.duration` — wall-clock duration of a fresh `Channel` dial on cache miss (histogram, seconds). Cache hits are not sampled.
+- `tsoracle.client.connect.failures.total` — connect attempts that returned an error (counter)
+- `tsoracle.client.driver.queue_depth` — waiter-queue size inside the coalescing driver task (gauge). Updated after every enqueue and after each dispatch drain.
+- `tsoracle.client.driver.in_flight` — 0 or 1 indicating whether the driver currently has an outgoing batch in flight (gauge)
+
+Both libraries are exporter-agnostic: embedders install whichever recorder they want (`metrics-exporter-prometheus`, `metrics-exporter-influx`, a custom sink) before constructing the [`Server`] or [`Client`]. The example below wires Prometheus over an HTTP listener for a process that hosts either side:
 
 ```toml
 [dependencies]
 tsoracle-server             = { version = "0.1", features = ["metrics"] }
+tsoracle-client             = { version = "0.1", features = ["metrics"] }
 metrics-exporter-prometheus = "0.16"
 ```
 

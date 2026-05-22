@@ -3127,6 +3127,8 @@ version = "0.1.2"
 dependencies = [
  "async-trait",
  "futures",
+ "metrics",
+ "metrics-util 0.19.1",
  "parking_lot",
  "proptest",
  "prost",
@@ -3262,8 +3264,11 @@ version = "0.1.2"
 dependencies = [
  "fail",
  "futures",
+ "metrics",
+ "metrics-util 0.19.1",
  "rcgen",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tsoracle-client",
  "tsoracle-core",
