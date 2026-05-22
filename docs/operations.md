@@ -61,3 +61,13 @@ The consensus driver owns the mapping from consensus leader identity to tsoracle
 ## Client retry behavior
 
 The client gives `FAILED_PRECONDITION` special handling: it parses the `tsoracle-leader-hint-bin` trailer (see [The leader-hint trailer](key-subsystems.md#the-leader-hint-trailer)) and moves the hinted leader to the front of the current retry worklist. Other gRPC errors, including `UNAVAILABLE` and `INTERNAL`, are recorded and the client continues through the configured endpoints once for that call. Configure `endpoints` with all known servers so cold-start works even when the cached leader is unreachable.
+
+## TLS termination
+
+`tsoracle-server` terminates TLS via `ServerBuilder::tls_config(tonic::transport::ServerTlsConfig)`. The configuration is applied inside `Server::serve`, `Server::serve_with_shutdown`, and `Server::serve_with_listener` — all three paths pass through tonic's server builder, and the TLS config is attached before `.add_routes(routes)`. The default feature `tls-rustls` (using `tonic/tls-aws-lc`) is on by default; opt into `tls-native` instead if you prefer the platform root store.
+
+`Server::into_router` does **not** take a TLS config. It returns a `Routes` value for embedders mounting tsoracle alongside their own services on a shared tonic server; in that case the embedder configures TLS on their own `TonicServer::builder()` and we stay out of the way.
+
+Cert and key shapes follow tonic: `ServerTlsConfig::new().identity(Identity::from_pem(cert, key))` for plain TLS; add `.client_ca_root(Certificate::from_pem(ca))` for mTLS.
+
+The stock `tsoracle` CLI does not currently expose TLS flags. If you need TLS today, embed the library — see [`examples/tls-mtls`](../examples/tls-mtls/) for a runnable starting point.
