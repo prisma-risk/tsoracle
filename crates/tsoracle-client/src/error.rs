@@ -32,13 +32,11 @@ mod tests {
 
     #[test]
     fn connector_variant_renders_source_in_display() {
+        // Display must embed the boxed source's message so operators reading
+        // logs see the underlying cause, not just the wrapper.
         let inner: Box<dyn std::error::Error + Send + Sync + 'static> = "boom".into();
         let err = ClientError::Connector(inner);
-        assert_eq!(
-            err.to_string(),
-            "custom channel connector failed: boom",
-            "Display should embed the boxed source's message"
-        );
+        assert_eq!(err.to_string(), "custom channel connector failed: boom");
     }
 
     #[test]

@@ -352,6 +352,62 @@ async fn mtls_handshake_succeeds_with_client_identity() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_with_shutdown_applies_tls_config() {
+    // `boot_server` exercises `serve_with_listener`; this scenario covers the
+    // sibling `serve_with_shutdown` path so the TLS-config application inside
+    // it is reached end-to-end. Bind-then-drop probes a free port for the
+    // server to re-bind itself, since serve_with_shutdown takes a SocketAddr.
+    let bundle = mint_certs();
+    let driver = Arc::new(InMemoryDriver::new());
+    driver.become_leader(Epoch(1));
+
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind probe");
+    let addr = probe.local_addr().expect("probe addr");
+    drop(probe);
+
+    let server = Server::builder()
+        .consensus_driver(driver.clone())
+        .tls_config(server_tls_config(&bundle))
+        .build()
+        .expect("server build");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_handle = tokio::spawn(async move {
+        server
+            .serve_with_shutdown(addr, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    wait_for_grpc_handshake_tls(
+        addr,
+        client_tls_config_with_ca(&bundle),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("tls ready");
+
+    let client =
+        tsoracle_client::ClientBuilder::endpoints(vec![format!("127.0.0.1:{}", addr.port())])
+            .tls_config(client_tls_config_with_ca(&bundle))
+            .build()
+            .await
+            .expect("client connect");
+    let ts = client.get_ts().await.expect("get_ts");
+    assert!(ts.physical_ms() > 1_700_000_000_000);
+
+    drop(client);
+    let _ = shutdown_tx.send(());
+    server_handle
+        .await
+        .expect("server task panicked")
+        .expect("server exit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mtls_handshake_fails_without_client_identity() {
     let bundle = mint_certs();
     let driver = Arc::new(InMemoryDriver::new());

@@ -487,6 +487,9 @@ mod tests {
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     #[test]
     fn builder_stores_tls_config() {
+        // The serve_* paths read `tls_config` from `Server` (not the builder)
+        // after `into_router` consumes self — so the field must survive the
+        // builder → Server hand-off, not just the builder method.
         use crate::test_fakes::InMemoryDriver;
 
         let driver = Arc::new(InMemoryDriver::new());
@@ -496,10 +499,7 @@ mod tests {
             .tls_config(cfg)
             .build()
             .expect("build with tls_config must succeed");
-        assert!(
-            server.tls_config.is_some(),
-            "tls_config must be stored on Server"
-        );
+        assert!(server.tls_config.is_some());
     }
 
     #[tokio::test]
