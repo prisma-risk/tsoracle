@@ -1,6 +1,6 @@
 +++
 title = "Why distributed systems need a timestamp oracle"
-description = "Cross-machine event ordering is one of the foundational problems in distributed systems. Wall clocks don't solve it, database sequences don't scale, and consensus algorithms only get you partway. Here's what a timestamp oracle is, why Spanner / CockroachDB / FoundationDB all use one internally, and when you should reach for one yourself."
+description = "A timestamp oracle hands out strictly increasing IDs that order events across a distributed system. Why cross-machine ordering is hard, and what a TSO solves."
 weight = 1
 [taxonomies]
 tags = ["distributed-systems", "tso", "ordering"]
@@ -74,4 +74,4 @@ cargo install tsoracle
 tsoracle serve
 ```
 
-If you are at the point of reading this post, you probably already know whether you need a TSO. If you do, `tsoracle` is a small Rust one worth a few minutes of evaluation. Two follow-ups that readers usually want next: [tso-vs-uuidv7](/posts/tso-vs-uuidv7/) for the comparison with the most common alternative, and [When you need a TSO](/posts/when-you-need-a-tso/) for the decision framework — when the weaker tools are enough and when they are not.
+If you are at the point of reading this post, you probably already know whether you need a TSO. If you do, `tsoracle` is a small Rust one worth a few minutes of evaluation. If you want the five-minute version of what's inside `tsoracle` itself — the window allocator, the consensus driver, the crash-safety contract — the [how-it-works summary](/how-it-works/) is the right starting point. Two follow-ups that readers usually want next: [tso-vs-uuidv7](/posts/tso-vs-uuidv7/) for the comparison with the most common alternative, and [When you need a TSO](/posts/when-you-need-a-tso/) for the decision framework — when the weaker tools are enough and when they are not.
