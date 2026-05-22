@@ -1,0 +1,12 @@
+{
+    "windows": [
+        {"label": "W0", "start": 0, "end": 7},
+        {"label": "W1", "start": 8, "end": 15},
+        {"label": "W2", "start": 16, "end": 23}
+    ],
+    "frames": [
+        {"active": 0, "hwm": 8, "description": "W0 active. hwm fsync'd to 8 before any ID from W0 is issued."},
+        {"active": 1, "hwm": 16, "description": "W0 exhausted. Window flip: hwm fsync'd to 16, W1 active."},
+        {"active": 2, "hwm": 24, "description": "W1 exhausted. Window flip: hwm fsync'd to 24, W2 active."}
+    ]
+}

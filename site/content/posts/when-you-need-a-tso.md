@@ -1,7 +1,7 @@
 +++
 title = "When you need a TSO (and when you don't)"
-description = "A decision framework for picking a distributed ID strategy. Most systems do not need a timestamp oracle. The ones that do can't substitute anything weaker. This post walks through the cases on both sides and shows where TSOs, HLCs, database sequences, UUIDv7, and Snowflake-style IDs each belong on the cost/correctness frontier."
-date = 2026-05-23
+description = "A timestamp oracle solves a narrow problem: total order across machines. When you actually need one, and when something weaker is the right call."
+weight = 3
 [taxonomies]
 tags = ["distributed-systems", "tso", "ids", "decisions"]
 +++
@@ -73,5 +73,7 @@ The decision is the failure mode you are protecting against, not the abstract el
 ## Closing
 
 Most systems do not need a TSO. The ones that do cannot substitute anything weaker without taking on a silent correctness gap. That is the whole framework. Picking honestly is more important than picking sophisticatedly: reaching for a TSO when UUIDv7 is enough is a cost paid forever, and reaching for UUIDv7 when only a TSO will do is a debt paid all at once when the bug surfaces. Write down the failure mode, find the cheapest tool that closes it, stop.
+
+If you've decided you need one, the [how-it-works summary](/how-it-works/) is the five-minute architecture orientation for `tsoracle` specifically.
 
 Two posts that go deeper: [Why distributed systems need a TSO](/posts/why-distributed-systems-need-a-tso/) — the foundational post on why cross-machine ordering is hard — and [TSO vs UUIDv7](/posts/tso-vs-uuidv7/) — the head-to-head comparison with the most common alternative.

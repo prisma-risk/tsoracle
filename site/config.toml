@@ -19,6 +19,12 @@ external_links_no_follow = false
 smart_punctuation = true
 render_emoji = false
 bottom_footnotes = true
+insert_anchor_links = "right"
+
+[markdown.highlighting]
+style = "class"
+dark_theme = "github-dark-default"
+light_theme = "github-light-default"
 
 [extra]
 github_url = "https://github.com/prisma-risk/tsoracle"

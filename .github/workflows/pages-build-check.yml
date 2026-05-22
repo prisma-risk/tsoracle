@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'site/**'
+      - 'scripts/og-image/**'
       - '.github/workflows/pages-build-check.yml'
   workflow_dispatch:
 
@@ -12,6 +13,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and og-image build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            scripts/og-image/target
+          key: og-image-${{ runner.os }}-${{ hashFiles('scripts/og-image/Cargo.toml', 'scripts/og-image/src/main.rs') }}
+
+      - name: Generate og:image PNGs
+        run: cargo run --release --manifest-path scripts/og-image/Cargo.toml
 
       - name: Install Zola
         run: |

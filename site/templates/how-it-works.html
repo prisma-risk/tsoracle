@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}How tsoracle works — distributed timestamp oracle architecture{% endblock %}
+{% block description %}A five-minute orientation to tsoracle's architecture: window allocation, consensus replication, and the crash-safety contract.{% endblock %}
+{% block og_title %}How tsoracle works — distributed timestamp oracle architecture{% endblock %}
+{% block og_description %}A five-minute orientation to tsoracle's architecture: window allocation, consensus replication, and the crash-safety contract.{% endblock %}
+{% block twitter_title %}How tsoracle works — distributed timestamp oracle architecture{% endblock %}
+{% block twitter_description %}A five-minute orientation to tsoracle's architecture: window allocation, consensus replication, and the crash-safety contract.{% endblock %}
+{% block og_type %}article{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": "How tsoracle works",
+    "description": "A five-minute orientation to tsoracle's architecture: window allocation, consensus replication, and the crash-safety contract.",
+    "url": {{ page.permalink | json_encode | safe }},
+    "author": { "@type": "Organization", "name": "Prisma Risk", "url": "https://github.com/prisma-risk" },
+    "publisher": { "@type": "Organization", "name": "Prisma Risk", "url": "https://github.com/prisma-risk" },
+    "inLanguage": "en"
+}
+</script>
+{% endblock %}
+
+{% block content %}
+<article class="container">
+    <header class="post-header">
+        <h1 class="post-header__title">How tsoracle works</h1>
+        <div class="post-header__meta">Architecture summary · ~5 min read</div>
+    </header>
+
+    <div class="post-body">
+        {{ page.content | safe }}
+    </div>
+</article>
+{% endblock %}

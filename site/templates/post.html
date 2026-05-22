@@ -7,40 +7,110 @@
 {% block twitter_title %}{{ page.title }} — tsoracle{% endblock %}
 {% block twitter_description %}{{ page.description }}{% endblock %}
 {% block og_type %}article{% endblock %}
+{% block og_image %}{{ config.base_url ~ "/og/" ~ page.slug ~ ".png" }}{% endblock %}
+{% block twitter_image %}{{ config.base_url ~ "/og/" ~ page.slug ~ ".png" }}{% endblock %}
+
+{% block link_rel %}
+    {% if page.lower %}<link rel="prev" href="{{ page.lower.permalink | safe }}">{% endif %}
+    {% if page.higher %}<link rel="next" href="{{ page.higher.permalink | safe }}">{% endif %}
+{% endblock %}
 
 {% block extra_head %}
+{% set og_url = config.base_url ~ "/og/" ~ page.slug ~ ".png" %}
 <script type="application/ld+json">
 {
     "@context": "https://schema.org",
     "@type": "Article",
     "headline": {{ page.title | json_encode | safe }},
-    "datePublished": "{{ page.date | date(format='%Y-%m-%d') }}",
     "description": {{ page.description | json_encode | safe }},
-    "url": "{{ page.permalink | safe }}"
+    "url": {{ page.permalink | json_encode | safe }},
+    "image": {{ og_url | json_encode | safe }},
+    "mainEntityOfPage": {{ page.permalink | json_encode | safe }},
+    "inLanguage": "en",
+    "author": {
+        "@type": "Organization",
+        "name": "Prisma Risk",
+        "url": "https://github.com/prisma-risk"
+    },
+    "publisher": {
+        "@type": "Organization",
+        "name": "Prisma Risk",
+        "url": "https://github.com/prisma-risk"
+    }{% if page.date %},
+    "datePublished": "{{ page.date | date(format='%Y-%m-%d') }}"{% endif %}
 }
 </script>
 {% endblock %}
 
 {% block content %}
-<article class="container">
-    <header class="post-header">
-        <h1 class="post-header__title">{{ page.title }}</h1>
-        <div class="post-header__meta">
-            {{ page.date | date(format="%Y-%m-%d") }} · {{ page.reading_time }} min read
-        </div>
-    </header>
+<article class="post-layout">
+    <div class="post-main">
+        <header class="post-header">
+            <h1 class="post-header__title">{{ page.title }}</h1>
+            <div class="post-header__meta">
+                {% if page.date %}{{ page.date | date(format="%Y-%m-%d") }} · {% endif %}{{ page.reading_time }} min read
+            </div>
+            {% if page.taxonomies.tags %}
+            <ul class="tag-list" aria-label="Tags">
+                {% for tag in page.taxonomies.tags %}
+                <li><a class="tag-pill" href="/tags/{{ tag | slugify }}/">{{ tag }}</a></li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </header>
 
-    <div class="post-body">
-        {{ page.content | safe }}
+        {% if page.toc %}
+        <details class="post-toc post-toc--mobile">
+            <summary>On this page</summary>
+            <ul>
+                {% for h1 in page.toc %}
+                <li>
+                    <a href="#{{ h1.id }}">{{ h1.title }}</a>
+                    {% if h1.children %}
+                    <ul>
+                        {% for h2 in h1.children %}
+                        <li><a href="#{{ h2.id }}">{{ h2.title }}</a></li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+
+        <div class="post-body">
+            {{ page.content | safe }}
+        </div>
+
+        <nav class="post-nav">
+            {% if page.lower %}
+            <a href="{{ page.lower.permalink }}">← {{ page.lower.title }}</a>
+            {% else %}<span></span>{% endif %}
+            {% if page.higher %}
+            <a href="{{ page.higher.permalink }}">{{ page.higher.title }} →</a>
+            {% else %}<span></span>{% endif %}
+        </nav>
     </div>
 
-    <nav class="post-nav">
-        {% if page.earlier %}
-        <a href="{{ page.earlier.permalink }}">← {{ page.earlier.title }}</a>
-        {% else %}<span></span>{% endif %}
-        {% if page.later %}
-        <a href="{{ page.later.permalink }}">{{ page.later.title }} →</a>
-        {% else %}<span></span>{% endif %}
-    </nav>
+    {% if page.toc %}
+    <aside class="post-toc post-toc--sidebar" aria-label="On this page">
+        <p class="post-toc__heading">on this page</p>
+        <ul>
+            {% for h1 in page.toc %}
+            <li>
+                <a href="#{{ h1.id }}">{{ h1.title }}</a>
+                {% if h1.children %}
+                <ul>
+                    {% for h2 in h1.children %}
+                    <li><a href="#{{ h2.id }}">{{ h2.title }}</a></li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </aside>
+    {% endif %}
 </article>
 {% endblock %}

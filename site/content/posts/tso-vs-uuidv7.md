@@ -1,7 +1,7 @@
 +++
 title = "TSO vs UUIDv7"
-description = "UUIDv7 and a timestamp oracle solve overlapping problems with very different tradeoffs. UUIDv7 is locally generated and k-sortable. A TSO is globally strictly monotonic. This post is an honest comparison — when each is correct, where UUIDv7 silently fails to meet a requirement, and a decision tree for picking."
-date = 2026-05-22
+description = "A timestamp oracle gives strict global monotonicity; UUIDv7 gives k-sortable IDs locally. When each is correct, and where UUIDv7 silently fails."
+weight = 2
 [taxonomies]
 tags = ["distributed-systems", "tso", "uuidv7", "ids"]
 +++
@@ -74,5 +74,7 @@ The most common "I tried to bridge" failure is wrapping UUIDv7 in a coordinator 
 ## A pragmatic note
 
 Most teams that *think* they need a TSO actually need UUIDv7 or something even simpler. The instinct that "we need global ordering" is often a vague restatement of "we want sorted IDs," and sorted-by-time is exactly what UUIDv7 gives you for free. Reaching for a TSO where UUIDv7 would do adds a network round-trip, a service to operate, and a new failure mode for no gain. Most teams that *think* UUIDv7 is enough have a correctness gap they have not hit yet — an MVCC interaction, a snapshot read, an audit requirement — that will surface as a quiet bug six months from now. The point of this post is not to push tsoracle; it is to make the distinction sharp enough that you pick correctly. K-sortable is enough until it isn't, and the cost of finding out which side of the line you are on after the fact is much higher than the cost of figuring it out now.
+
+If you've concluded you actually need a TSO, the [how-it-works summary](/how-it-works/) is the architecture orientation for `tsoracle` specifically.
 
 Two follow-ups that go deeper: [Why distributed systems need a TSO](/posts/why-distributed-systems-need-a-tso/) — the foundational post on why cross-machine ordering is hard — and [When you need a TSO](/posts/when-you-need-a-tso/) — the decision framework for picking the right ordering primitive for a given workload.

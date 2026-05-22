@@ -1,7 +1,6 @@
 +++
-title = "Posts"
+title = "Writing on distributed timestamps"
 template = "section.html"
 page_template = "post.html"
-sort_by = "date"
-paginate_by = 10
+sort_by = "weight"
 +++

@@ -1,0 +1,37 @@
+{
+    "nodes": ["N1", "N2", "N3"],
+    "duration": 7500,
+    "events": [
+        {"t": 0,    "type": "term",       "term": 2},
+        {"t": 0,    "type": "state",      "node": "N1", "state": "leader"},
+        {"t": 0,    "type": "state",      "node": "N2", "state": "follower"},
+        {"t": 0,    "type": "state",      "node": "N3", "state": "follower"},
+        {"t": 0,    "type": "node_value", "node": "N1", "value": "hwm=8"},
+        {"t": 0,    "type": "node_value", "node": "N2", "value": "hwm=8"},
+        {"t": 0,    "type": "node_value", "node": "N3", "value": "hwm=8"},
+
+        {"t": 800,  "type": "message",    "from": "N1", "to": "N2", "label": "AppendEntries(hwm=16)"},
+        {"t": 800,  "type": "message",    "from": "N1", "to": "N3", "label": "AppendEntries(hwm=16)"},
+
+        {"t": 2200, "type": "message",    "from": "N2", "to": "N1", "label": "Ack", "kind": "reply"},
+
+        {"t": 2900, "type": "node_value", "node": "N1", "value": "hwm=16"},
+
+        {"t": 3700, "type": "message",    "from": "N3", "to": "N1", "label": "Ack", "kind": "reply"},
+
+        {"t": 4900, "type": "message",    "from": "N1", "to": "N2", "label": "Commit(hwm=16)"},
+        {"t": 4900, "type": "message",    "from": "N1", "to": "N3", "label": "Commit(hwm=16)"},
+
+        {"t": 5600, "type": "node_value", "node": "N2", "value": "hwm=16"},
+        {"t": 5600, "type": "node_value", "node": "N3", "value": "hwm=16"}
+    ],
+    "annotations": [
+        {"t": 0,    "text": "Term 2. All nodes agree hwm=8. Leader N1 wants to advance to 16. Appends to its log, fsyncs."},
+        {"t": 800,  "text": "Sends AppendEntries(hwm=16) to N2 and N3. The entry is now in their logs once it arrives."},
+        {"t": 2200, "text": "N2 acks first. Its ack travels back to the leader."},
+        {"t": 2900, "text": "Ack arrives at N1. Quorum reached (N1 + N2 of 3). hwm advances to 16 on the leader."},
+        {"t": 3700, "text": "N3 also acks, ack travels back. The entry is now on all replicas."},
+        {"t": 4900, "text": "Leader sends Commit(hwm=16) — telling followers \"you can apply this entry now\"."},
+        {"t": 5600, "text": "Commit arrives. N2 and N3 apply hwm=16. Durable across the cluster."}
+    ]
+}

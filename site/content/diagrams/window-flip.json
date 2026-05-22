@@ -1,0 +1,12 @@
+{
+    "windows": [
+        {"label": "W0", "start": 0, "end": 7},
+        {"label": "W1", "start": 8, "end": 15}
+    ],
+    "frames": [
+        {"active": 0, "hwm": 0, "description": "Start. window_end = 0, next = 0, hwm = 0. No ID issued yet."},
+        {"active": 0, "hwm": 8, "description": "Step 1+2: Compute new_end = 8. fsync hwm to 8. Now durable."},
+        {"active": 0, "hwm": 8, "description": "Step 4: window_end advances to 8 in memory. IDs 0-7 now issuable."},
+        {"active": 1, "hwm": 16, "description": "Window flip: W0 exhausted. fsync hwm to 16. window_end advances. W1 active."}
+    ]
+}

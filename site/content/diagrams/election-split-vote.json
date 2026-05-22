@@ -1,0 +1,52 @@
+{
+    "nodes": ["N1", "N2", "N3"],
+    "duration": 9000,
+    "events": [
+        {"t": 0,    "type": "term",    "term": 1},
+        {"t": 0,    "type": "state",   "node": "N1", "state": "down"},
+        {"t": 0,    "type": "state",   "node": "N2", "state": "follower"},
+        {"t": 0,    "type": "state",   "node": "N3", "state": "follower"},
+
+        {"t": 300,  "type": "timeout", "node": "N2", "duration": 900},
+        {"t": 300,  "type": "timeout", "node": "N3", "duration": 900},
+
+        {"t": 1200, "type": "term",    "term": 2},
+        {"t": 1200, "type": "state",   "node": "N2", "state": "candidate"},
+        {"t": 1200, "type": "state",   "node": "N3", "state": "candidate"},
+        {"t": 1200, "type": "vote",    "voter": "N2", "candidate": "N2"},
+        {"t": 1200, "type": "vote",    "voter": "N3", "candidate": "N3"},
+
+        {"t": 1400, "type": "message", "from": "N2", "to": "N3", "label": "RequestVote(2)"},
+        {"t": 1400, "type": "message", "from": "N3", "to": "N2", "label": "RequestVote(2)"},
+
+        {"t": 2400, "type": "message", "from": "N2", "to": "N3", "label": "VoteRejected", "kind": "reply"},
+        {"t": 2400, "type": "message", "from": "N3", "to": "N2", "label": "VoteRejected", "kind": "reply"},
+
+        {"t": 3400, "type": "state",   "node": "N2", "state": "follower"},
+        {"t": 3400, "type": "state",   "node": "N3", "state": "follower"},
+
+        {"t": 3600, "type": "timeout", "node": "N2", "duration": 1200},
+        {"t": 3600, "type": "timeout", "node": "N3", "duration": 1900},
+
+        {"t": 4800, "type": "term",    "term": 3},
+        {"t": 4800, "type": "state",   "node": "N2", "state": "candidate"},
+        {"t": 4800, "type": "vote",    "voter": "N2", "candidate": "N2"},
+        {"t": 5000, "type": "message", "from": "N2", "to": "N3", "label": "RequestVote(3)"},
+
+        {"t": 5900, "type": "vote",    "voter": "N3", "candidate": "N2"},
+        {"t": 5900, "type": "message", "from": "N3", "to": "N2", "label": "VoteGranted", "kind": "reply"},
+
+        {"t": 6800, "type": "state",   "node": "N2", "state": "leader"},
+        {"t": 7100, "type": "message", "from": "N2", "to": "N3", "label": "heartbeat"}
+    ],
+    "annotations": [
+        {"t": 0,    "text": "N1 is down. N2 and N3 start election timeouts in term 1."},
+        {"t": 1200, "text": "Bad luck: both timeouts fire together. New term 2 — both become candidates, both vote for themselves."},
+        {"t": 1400, "text": "Each asks the other for a vote — but each already voted for itself in term 2."},
+        {"t": 2400, "text": "Both reject the other's request. Neither reaches quorum."},
+        {"t": 3400, "text": "Both step back to follower and pick fresh randomized timeouts."},
+        {"t": 4800, "text": "N2's new timeout fires first. New term 3 starts fresh."},
+        {"t": 5900, "text": "N3 grants the vote in term 3 — it hasn't voted in this term."},
+        {"t": 6800, "text": "N2 wins. Randomized timeouts make split votes self-correcting."}
+    ]
+}

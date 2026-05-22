@@ -1,4 +1,5 @@
 /target
+/scripts/og-image/target/
 /.worktrees/
 /.claude/
 **/*.rs.bk
@@ -28,3 +29,9 @@ docs/*
 
 # Zola site build output
 site/public/
+site/static/giallo-*.css
+/site/static/og/
+/site/static/og-default.png
+/.playwright-mcp/
+/audit-*.png
+/verify-*.png
