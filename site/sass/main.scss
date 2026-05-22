@@ -466,3 +466,28 @@ th {
     h1 { font-size: 1.5rem; }
     h2 { font-size: 1.25rem; }
 }
+
+// Syntax highlighting retint -------------------------------------------------
+//
+// Giallo (Zola's highlighter) emits z-* token classes. The github-dark/light
+// themes set defaults; override them so highlighted code stays in the site's
+// amber+monochrome vocabulary rather than introducing a separate colour space.
+
+.z-code { color: var(--fg) !important; background: transparent !important; }
+
+.z-keyword,
+.z-storage { color: var(--accent) !important; font-weight: 700; }
+
+.z-entity { color: var(--fg) !important; font-weight: 700; }
+
+.z-string { color: var(--fg) !important; font-style: italic; }
+
+.z-constant { color: var(--fg) !important; }
+
+.z-comment { color: var(--fg-dim) !important; font-style: italic; }
+
+.z-variable,
+.z-support,
+.z-source { color: var(--fg) !important; }
+
+.giallo-ln { color: var(--fg-dim) !important; }

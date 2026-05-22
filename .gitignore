@@ -28,3 +28,7 @@ docs/*
 
 # Zola site build output
 site/public/
+site/static/giallo-*.css
+/.playwright-mcp/
+/audit-*.png
+/verify-*.png
