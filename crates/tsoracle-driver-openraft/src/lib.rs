@@ -10,7 +10,6 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-// #[PerformanceCriticalPath]
 //! openraft-backed `ConsensusDriver` for tsoracle.
 //!
 //! This crate replicates the TSO high-water mark across an openraft cluster

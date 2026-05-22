@@ -10,6 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
+// #[PerformanceCriticalPath]
 //! Log entries replicated by the openraft cluster.
 //!
 //! The driver replicates a single command: advance the high-water mark to at

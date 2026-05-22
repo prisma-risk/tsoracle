@@ -10,6 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
+// #[PerformanceCriticalPath]
 //! `RaftStateMachine` for the high-water counter with pluggable snapshot
 //! persistence.
 //!

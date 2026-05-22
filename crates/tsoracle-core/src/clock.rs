@@ -10,6 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
+// #[PerformanceCriticalPath]
 //! Source of physical-time milliseconds for the TSO algorithm.
 //!
 //! The Allocator's monotonicity is independent of clock correctness — a clock

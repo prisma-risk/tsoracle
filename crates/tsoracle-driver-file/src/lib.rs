@@ -10,7 +10,6 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-// #[PerformanceCriticalPath]
 //! Single-node, fsync-durable [`ConsensusDriver`] implementation for tsoracle.
 //!
 //! Persists the committed high-water as a 17-byte CRC-checked record

@@ -10,6 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
+// #[PerformanceCriticalPath]
 //! `ConsensusDriver` impl on top of any [`OpenraftHighWaterHost`].
 //!
 //! [`OpenraftDriver`] is a thin bridge: it owns the trait-surface boilerplate
