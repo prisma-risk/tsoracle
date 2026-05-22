@@ -8,6 +8,10 @@ Cargo.lock.bak
 /examples/openraft-cluster/.data/
 /examples/embedded-server/tsoracle-embedded-data/
 /examples/metrics-prometheus/tsoracle-prometheus-data/
+# Default `tsoracle serve --state-dir` target, written when the binary is run
+# from the workspace root. The LOCK sentinel acquired by FileDriver::open_or_init
+# lives here too.
+/tsoracle-data/
 /lcov.info
 
 # bench-minimal flamegraph artifacts (written to CWD by the bench binary

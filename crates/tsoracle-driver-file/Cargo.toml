@@ -25,6 +25,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 async-trait        = { workspace = true }
 fail               = { workspace = true, optional = true }
 crc32c             = { workspace = true }
+fs2                = "0.4"
 futures            = { workspace = true }
 libc               = "0.2"
 parking_lot        = { workspace = true }
