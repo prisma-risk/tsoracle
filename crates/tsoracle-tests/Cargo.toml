@@ -17,6 +17,7 @@ failpoints = ["tsoracle-server/failpoints", "dep:fail"]
 [dependencies]
 fail            = { workspace = true, optional = true }
 futures         = { workspace = true }
+rcgen           = { workspace = true }
 tokio           = { workspace = true, features = ["test-util"] }
 tonic           = { workspace = true }
 tsoracle-client = { path = "../tsoracle-client" }
