@@ -78,7 +78,7 @@ A complete, runnable version lives in [`examples/embedded-server`](examples/embe
 
 A *timestamp oracle* is a service that hands out strictly increasing integer IDs which order events across a distributed system. You reach for one when:
 
-- You're building a database with snapshot isolation or MVCC (Spanner, TiDB, CockroachDB, FoundationDB all use a TSO internally).
+- You're building a database with snapshot isolation or MVCC (Spanner, CockroachDB, FoundationDB all use a TSO internally).
 - You need to merge change-data from many shards into one globally ordered stream.
 - You want audit logs with a real "happens-before" relation across machines.
 - Per-host clocks aren't monotonic or accurate enough, and database sequences don't scale to your workload.
