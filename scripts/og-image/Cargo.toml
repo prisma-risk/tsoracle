@@ -11,6 +11,10 @@ description = "Generates social-card og:image PNGs for tsoracle.rs."
 name = "tsoracle-og-image"
 path = "src/main.rs"
 
+[[bin]]
+name = "tsoracle-favicon"
+path = "src/bin/favicon.rs"
+
 [dependencies]
 resvg     = "0.45"
 tiny-skia = "0.11"
