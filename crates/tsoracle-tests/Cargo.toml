@@ -37,6 +37,9 @@ tsoracle-server = { path = "../tsoracle-server", features = ["test-support"] }
 name = "client_e2e"
 
 [[test]]
+name = "client_backpressure"
+
+[[test]]
 name = "client_freshness"
 
 [[test]]

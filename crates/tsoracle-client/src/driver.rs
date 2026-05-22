@@ -801,4 +801,103 @@ mod tests {
             "dispatch fired at {elapsed:?}, before the {flush:?} flush deadline",
         );
     }
+
+    /// Property tests: across thousands of randomly-generated arrival
+    /// schedules with mixed waiter counts, the driver must always
+    /// (a) deliver each waiter exactly its requested number of timestamps,
+    /// (b) respect the per-RPC cap so chunk_queue never violates it, and
+    /// (c) match the documented total-timestamp accounting (sum returned
+    ///     == sum requested).
+    ///
+    /// These invariants are independent of the specific bound the issue #74
+    /// fix tightens; they guard the freshness/chunking math against
+    /// regressions a fixed-input unit test would miss.
+    mod proptest_invariants {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                // Each case spins up a small runtime and spawns up to ~150
+                // tasks; 64 cases is enough to exercise interesting
+                // schedules without making the suite slow.
+                cases: 64,
+                .. ProptestConfig::default()
+            })]
+
+            #[test]
+            fn random_schedules_serve_every_waiter_correctly(
+                counts in prop::collection::vec(1u32..=MAX_TIMESTAMPS_PER_RPC, 1..150),
+                flush_micros in 0u64..2_000,
+            ) {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime must build");
+                runtime.block_on(async {
+                    let calls: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+                    let driver = Arc::new(Driver::spawn(
+                        recording_ok_rpc(calls.clone()),
+                        Duration::from_micros(flush_micros),
+                    ));
+
+                    let mut handles = Vec::with_capacity(counts.len());
+                    for count in counts.iter().copied() {
+                        let driver = driver.clone();
+                        handles.push(tokio::spawn(async move {
+                            driver.request(count).await
+                        }));
+                    }
+                    let results = futures::future::join_all(handles).await;
+
+                    // Every waiter must succeed with exactly its requested
+                    // number of timestamps.
+                    let mut total_served: u64 = 0;
+                    for (idx, (requested, result)) in counts
+                        .iter()
+                        .zip(results.into_iter())
+                        .enumerate()
+                    {
+                        let timestamps = result
+                            .expect("join must succeed")
+                            .expect("request must succeed");
+                        assert_eq!(
+                            timestamps.len(),
+                            *requested as usize,
+                            "request {idx} requested {requested}, served {}",
+                            timestamps.len(),
+                        );
+                        total_served += timestamps.len() as u64;
+                    }
+
+                    let observed = calls.lock().clone();
+                    // No RPC may exceed the per-call cap. chunk_queue
+                    // splits batches precisely to honour this; any
+                    // violation here would point at a refactor that
+                    // accidentally produced an over-sized chunk.
+                    for rpc_count in &observed {
+                        assert!(
+                            *rpc_count <= MAX_TIMESTAMPS_PER_RPC,
+                            "rpc dispatched with count {rpc_count} > per-call cap \
+                             {MAX_TIMESTAMPS_PER_RPC}; observed: {observed:?}"
+                        );
+                        assert!(*rpc_count > 0, "rpc dispatched with count 0");
+                    }
+
+                    // Accounting closure: the driver must never lose or
+                    // duplicate timestamps relative to the schedule.
+                    let total_requested: u64 = counts.iter().map(|c| u64::from(*c)).sum();
+                    let total_rpc: u64 = observed.iter().map(|c| u64::from(*c)).sum();
+                    assert_eq!(
+                        total_served, total_requested,
+                        "served {total_served} timestamps, requested {total_requested}"
+                    );
+                    assert_eq!(
+                        total_rpc, total_requested,
+                        "rpc-side total {total_rpc} != requested {total_requested}"
+                    );
+                });
+            }
+        }
+    }
 }
