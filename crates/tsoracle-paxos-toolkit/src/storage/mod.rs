@@ -326,15 +326,40 @@ where
 
     fn set_stopsign(
         &mut self,
-        _s: Option<omnipaxos::storage::StopSign>,
+        s: Option<omnipaxos::storage::StopSign>,
     ) -> omnipaxos::storage::StorageResult<()> {
-        unimplemented!("set_stopsign: implemented in a later commit")
+        use crate::storage::key_space::meta_stopsign_key;
+        use crate::storage::meta::encode_postcard;
+        match s {
+            Some(stopsign) => {
+                let bytes = encode_postcard(&stopsign).map_err(box_err)?;
+                self.batch_with(|cf, batch| {
+                    batch.put_cf(&cf, meta_stopsign_key(), bytes);
+                    Ok(())
+                })
+                .map_err(box_err)?;
+            }
+            None => {
+                self.batch_with(|cf, batch| {
+                    batch.delete_cf(&cf, meta_stopsign_key());
+                    Ok(())
+                })
+                .map_err(box_err)?;
+            }
+        }
+        Ok(())
     }
 
     fn get_stopsign(
         &self,
     ) -> omnipaxos::storage::StorageResult<Option<omnipaxos::storage::StopSign>> {
-        unimplemented!("get_stopsign: implemented in a later commit")
+        use crate::storage::key_space::meta_stopsign_key;
+        use crate::storage::meta::decode_postcard;
+        let cf = self.cf().map_err(box_err)?;
+        match self.db.get_cf(&cf, meta_stopsign_key()).map_err(box_err)? {
+            Some(bytes) => Ok(Some(decode_postcard(&bytes).map_err(box_err)?)),
+            None => Ok(None),
+        }
     }
 
     fn trim(&mut self, idx: u64) -> omnipaxos::storage::StorageResult<()> {
@@ -377,13 +402,38 @@ where
 
     fn set_snapshot(
         &mut self,
-        _snapshot: Option<T::Snapshot>,
+        snapshot: Option<T::Snapshot>,
     ) -> omnipaxos::storage::StorageResult<()> {
-        unimplemented!("set_snapshot: implemented in a later commit")
+        use crate::storage::key_space::meta_snapshot_key;
+        use crate::storage::meta::encode_postcard;
+        match snapshot {
+            Some(snap) => {
+                let bytes = encode_postcard(&snap).map_err(box_err)?;
+                self.batch_with(|cf, batch| {
+                    batch.put_cf(&cf, meta_snapshot_key(), bytes);
+                    Ok(())
+                })
+                .map_err(box_err)?;
+            }
+            None => {
+                self.batch_with(|cf, batch| {
+                    batch.delete_cf(&cf, meta_snapshot_key());
+                    Ok(())
+                })
+                .map_err(box_err)?;
+            }
+        }
+        Ok(())
     }
 
     fn get_snapshot(&self) -> omnipaxos::storage::StorageResult<Option<T::Snapshot>> {
-        unimplemented!("get_snapshot: implemented in a later commit")
+        use crate::storage::key_space::meta_snapshot_key;
+        use crate::storage::meta::decode_postcard;
+        let cf = self.cf().map_err(box_err)?;
+        match self.db.get_cf(&cf, meta_snapshot_key()).map_err(box_err)? {
+            Some(bytes) => Ok(Some(decode_postcard(&bytes).map_err(box_err)?)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -672,5 +722,80 @@ mod decided_compacted_tests {
         assert_eq!(suffix[0].value, 3);
         // Physical remaining = next_abs (4) - compacted (2) = 2.
         assert_eq!(storage.get_log_len().unwrap(), 2);
+    }
+}
+
+#[cfg(all(test, feature = "rocksdb-storage"))]
+mod snapshot_stopsign_tests {
+    use super::log_tests::fresh_storage;
+    use super::open_in_tests::TestSnapshot;
+    use omnipaxos::ClusterConfig;
+    use omnipaxos::storage::{StopSign, Storage};
+    use tempfile::TempDir;
+
+    fn stopsign() -> StopSign {
+        StopSign::with(
+            ClusterConfig {
+                configuration_id: 2,
+                nodes: vec![1, 2, 3],
+                flexible_quorum: None,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn snapshot_is_none_initially() {
+        let dir = TempDir::new().unwrap();
+        let storage = fresh_storage(&dir);
+        assert!(storage.get_snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_snapshot_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage
+            .set_snapshot(Some(TestSnapshot { value: 99 }))
+            .unwrap();
+        let got = storage.get_snapshot().unwrap().expect("present");
+        assert_eq!(got.value, 99);
+    }
+
+    #[test]
+    fn set_snapshot_none_clears() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage
+            .set_snapshot(Some(TestSnapshot { value: 5 }))
+            .unwrap();
+        storage.set_snapshot(None).unwrap();
+        assert!(storage.get_snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn stopsign_is_none_initially() {
+        let dir = TempDir::new().unwrap();
+        let storage = fresh_storage(&dir);
+        assert!(storage.get_stopsign().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_stopsign_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage.set_stopsign(Some(stopsign())).unwrap();
+        let got = storage.get_stopsign().unwrap().expect("present");
+        assert_eq!(got.next_config.configuration_id, 2);
+        assert_eq!(got.next_config.nodes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn set_stopsign_none_clears() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage.set_stopsign(Some(stopsign())).unwrap();
+        storage.set_stopsign(None).unwrap();
+        assert!(storage.get_stopsign().unwrap().is_none());
     }
 }
