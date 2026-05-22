@@ -4,6 +4,23 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.1.1...tsoracle-client-v0.1.2) - 2026-05-22
+
+### Added
+
+- *(client,server)* TLS and mTLS transport configuration ([#81](https://github.com/prisma-risk/tsoracle/pull/81))
+
+### Other
+
+- *(contract)* clarify monotonicity guarantee, drop "gap-free" overclaim ([#73](https://github.com/prisma-risk/tsoracle/pull/73))
+- *(brand)* update description ([#71](https://github.com/prisma-risk/tsoracle/pull/71))
+- *(headers)* enforce canonical copyright header on .rs files ([#70](https://github.com/prisma-risk/tsoracle/pull/70))
+- *(readme)* replace title heading with light/dark logo ([#69](https://github.com/prisma-risk/tsoracle/pull/69))
+- *(readme)* expand examples list with HA and metrics bullets ([#68](https://github.com/prisma-risk/tsoracle/pull/68))
+- *(client)* drop expect() from flush-deadline path in driver_task ([#64](https://github.com/prisma-risk/tsoracle/pull/64))
+- *(tests)* move cross-crate e2e tests to tsoracle-tests crate ([#60](https://github.com/prisma-risk/tsoracle/pull/60))
+- raise workspace coverage ([#57](https://github.com/prisma-risk/tsoracle/pull/57))
+
 ## [0.1.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.1.0...tsoracle-client-v0.1.1) - 2026-05-21
 
 ### Added
