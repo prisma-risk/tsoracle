@@ -23,8 +23,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
-use tsoracle_core::{LOGICAL_MAX, Timestamp};
+use tsoracle_core::Timestamp;
 
+use crate::MAX_TIMESTAMPS_PER_RPC;
 use crate::error::ClientError;
 
 /// Bound on the waiter queue. A slow server combined with a fast caller
@@ -34,11 +35,6 @@ use crate::error::ClientError;
 /// Each `Waiter` is small (~32 bytes), so 4096 caps the queue at ~128 KB
 /// regardless of how aggressive the producers are.
 const QUEUE_CAPACITY: usize = 4096;
-
-/// The server's per-call cap, fixed by the 18-bit logical width. Any single
-/// outgoing `GetTs` RPC must respect this; coalesced batches that exceed it
-/// are split into multiple chunks of this size or less.
-const MAX_TIMESTAMPS_PER_RPC: u32 = LOGICAL_MAX + 1;
 
 pub(crate) struct Waiter {
     pub count: u32,
