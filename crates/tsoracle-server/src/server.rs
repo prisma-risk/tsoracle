@@ -52,6 +52,15 @@ pub enum ServerError {
     /// "task panicked" (programming bug).
     #[error("leader-watch task panicked: {payload}{bt}")]
     WatchPanic { payload: String, bt: Bt },
+    /// The consensus driver's `leadership_events()` stream ended cleanly while
+    /// the leader-watch task was running. The stream is contracted to live for
+    /// the life of the server, so its end is anomalous (driver shutdown, lost
+    /// session, etc.) — distinct from a `Consensus` error returned mid-fence.
+    /// The watch task publishes `ServingState::NotServing` before returning
+    /// this variant so embedders who never observe the `JoinHandle` still get
+    /// the documented fail-safe behavior.
+    #[error("consensus driver leadership stream closed")]
+    WatchStreamClosed,
 }
 
 #[derive(Clone, Debug)]
@@ -196,10 +205,13 @@ impl Server {
     /// on a shared tonic listener instead of binding a dedicated port.
     ///
     /// The `JoinHandle` payload is `Result<(), ServerError>` so embedders
-    /// can observe leader-watch termination. Before returning an error, the
-    /// task publishes `ServingState::NotServing { leader_endpoint: None }`
-    /// so all subsequent RPCs fail fast with `FAILED_PRECONDITION` — even
-    /// embedders who never inspect the handle get fail-safe behavior.
+    /// can observe leader-watch termination. The task never returns
+    /// `Ok(())`: every termination — driver error, panic, or clean EOF on
+    /// the leadership stream (surfaced as `ServerError::WatchStreamClosed`)
+    /// — publishes `ServingState::NotServing { leader_endpoint: None }`
+    /// before returning, so all subsequent RPCs fail fast with
+    /// `FAILED_PRECONDITION`. Embedders who never inspect the handle still
+    /// get fail-safe behavior.
     ///
     /// The `Server::serve()` method is a thin wrapper over this — it calls
     /// `into_router`, builds a tonic `Server`, and binds a listener.
@@ -406,9 +418,12 @@ impl Server {
 
 /// Convert a `JoinHandle` result into a `ServerError`-typed result.
 ///
-/// - `Ok(Ok(()))` — task ended cleanly (driver stream closed). Caller decides
-///   whether this is normal (shutdown) or anomalous.
-/// - `Ok(Err(e))` — task returned an error. Forward verbatim.
+/// - `Ok(Ok(()))` — unreachable in production: `run_leader_watch` only
+///   returns from its loop via the `WatchStreamClosed` branch. Forwarded
+///   verbatim so the conversion remains total for test helpers that spawn
+///   no-op join futures.
+/// - `Ok(Err(e))` — task returned an error (including `WatchStreamClosed`
+///   from a clean EOF). Forward verbatim.
 /// - `Err(JoinError)` — task was cancelled or panicked. Cancellation maps to
 ///   Ok (we asked for it); panic maps to `WatchPanic` with payload.
 fn join_to_server_result(
