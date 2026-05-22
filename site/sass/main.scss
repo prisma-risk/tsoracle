@@ -838,3 +838,30 @@ th {
     font-size: 11px;
     text-anchor: middle;
 }
+
+.diagram-controls {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+    margin-top: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.diagram-controls button {
+    background: transparent;
+    border: 1px solid var(--rule);
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    padding: 0.35rem 0.8rem;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.diagram-controls button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.diagram-controls button[hidden] { display: none; }

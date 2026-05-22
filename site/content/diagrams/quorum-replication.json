@@ -1,0 +1,27 @@
+{
+    "nodes": ["N1", "N2", "N3"],
+    "duration": 7500,
+    "events": [
+        {"t": 0,    "type": "term",    "term": 2},
+        {"t": 0,    "type": "state",   "node": "N1", "state": "leader"},
+        {"t": 0,    "type": "state",   "node": "N2", "state": "follower"},
+        {"t": 0,    "type": "state",   "node": "N3", "state": "follower"},
+
+        {"t": 800,  "type": "message", "from": "N1", "to": "N2", "label": "AppendEntries(hwm=16)"},
+        {"t": 800,  "type": "message", "from": "N1", "to": "N3", "label": "AppendEntries(hwm=16)"},
+
+        {"t": 1900, "type": "message", "from": "N2", "to": "N1", "label": "Ack", "kind": "reply"},
+
+        {"t": 3200, "type": "message", "from": "N3", "to": "N1", "label": "Ack", "kind": "reply"},
+
+        {"t": 4500, "type": "message", "from": "N1", "to": "N2", "label": "Commit(hwm=16)"},
+        {"t": 4500, "type": "message", "from": "N1", "to": "N3", "label": "Commit(hwm=16)"}
+    ],
+    "annotations": [
+        {"t": 0,    "text": "Term 2. Leader N1 wants to advance hwm to 16. Appends to its log, fsyncs."},
+        {"t": 800,  "text": "Sends AppendEntries(hwm=16) to N2 and N3."},
+        {"t": 1900, "text": "N2 writes to its log, acks. Leader has quorum (self + N2 of 3 = 2/3)."},
+        {"t": 3200, "text": "N3 also acks. All replicas now have the entry."},
+        {"t": 4500, "text": "Commit notice propagates. hwm = 16 is durable across the cluster."}
+    ]
+}

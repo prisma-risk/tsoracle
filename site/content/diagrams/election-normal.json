@@ -1,0 +1,42 @@
+{
+    "nodes": ["N1", "N2", "N3"],
+    "duration": 9000,
+    "events": [
+        {"t": 0,    "type": "term",    "term": 1},
+        {"t": 0,    "type": "state",   "node": "N1", "state": "leader"},
+        {"t": 0,    "type": "state",   "node": "N2", "state": "follower"},
+        {"t": 0,    "type": "state",   "node": "N3", "state": "follower"},
+
+        {"t": 300,  "type": "message", "from": "N1", "to": "N2", "label": "heartbeat"},
+        {"t": 300,  "type": "message", "from": "N1", "to": "N3", "label": "heartbeat"},
+        {"t": 1100, "type": "message", "from": "N1", "to": "N2", "label": "heartbeat"},
+        {"t": 1100, "type": "message", "from": "N1", "to": "N3", "label": "heartbeat"},
+        {"t": 1900, "type": "message", "from": "N1", "to": "N2", "label": "heartbeat"},
+        {"t": 1900, "type": "message", "from": "N1", "to": "N3", "label": "heartbeat"},
+
+        {"t": 2700, "type": "state",   "node": "N1", "state": "down"},
+
+        {"t": 3000, "type": "timeout", "node": "N2", "duration": 1500},
+        {"t": 3000, "type": "timeout", "node": "N3", "duration": 2100},
+
+        {"t": 4500, "type": "term",    "term": 2},
+        {"t": 4500, "type": "state",   "node": "N2", "state": "candidate"},
+        {"t": 4500, "type": "vote",    "voter": "N2", "candidate": "N2"},
+        {"t": 4700, "type": "message", "from": "N2", "to": "N3", "label": "RequestVote(2)"},
+
+        {"t": 5700, "type": "vote",    "voter": "N3", "candidate": "N2"},
+        {"t": 5700, "type": "message", "from": "N3", "to": "N2", "label": "VoteGranted", "kind": "reply"},
+
+        {"t": 6700, "type": "state",   "node": "N2", "state": "leader"},
+        {"t": 7000, "type": "message", "from": "N2", "to": "N3", "label": "heartbeat"},
+        {"t": 7900, "type": "message", "from": "N2", "to": "N3", "label": "heartbeat"}
+    ],
+    "annotations": [
+        {"t": 0,    "text": "Steady state in term 1. N1 is leader, sending heartbeats every ~800ms."},
+        {"t": 2700, "text": "N1 fails. Its heartbeats stop arriving."},
+        {"t": 3000, "text": "N2 and N3 each start a randomized election timeout. Whoever's fires first will try to lead."},
+        {"t": 4500, "text": "N2's timeout fires. New term 2 begins. N2 votes for itself and asks N3."},
+        {"t": 5700, "text": "N3 grants the vote — it hasn't voted in term 2 yet."},
+        {"t": 6700, "text": "Quorum (N2 + N3 of 3). N2 is the new leader and starts heartbeating."}
+    ]
+}
