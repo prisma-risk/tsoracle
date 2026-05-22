@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}{{ taxonomy.name | capitalize }} — tsoracle{% endblock %}
+{% block description %}Browse posts by {{ taxonomy.name }}.{% endblock %}
+{% block og_title %}{{ taxonomy.name | capitalize }} — tsoracle{% endblock %}
+{% block og_description %}Browse posts by {{ taxonomy.name }}.{% endblock %}
+{% block twitter_title %}{{ taxonomy.name | capitalize }} — tsoracle{% endblock %}
+{% block twitter_description %}Browse posts by {{ taxonomy.name }}.{% endblock %}
+
+{% block content %}
+<section class="container">
+    <header class="post-header">
+        <h1 class="post-header__title">{{ taxonomy.name | capitalize }}</h1>
+    </header>
+
+    <ul class="posts-list">
+        {% for term in terms %}
+        <li>
+            <a class="post-title" href="{{ term.permalink }}">{{ term.name }}</a>
+            <span class="post-date">{{ term.pages | length }} post{% if term.pages | length != 1 %}s{% endif %}</span>
+        </li>
+        {% else %}
+        <li><p class="post-excerpt">No {{ taxonomy.name }} yet.</p></li>
+        {% endfor %}
+    </ul>
+</section>
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}{{ term.name }} — tsoracle{% endblock %}
+{% block description %}Posts tagged "{{ term.name }}" on tsoracle.{% endblock %}
+{% block og_title %}{{ term.name }} — tsoracle{% endblock %}
+{% block og_description %}Posts tagged "{{ term.name }}" on tsoracle.{% endblock %}
+{% block twitter_title %}{{ term.name }} — tsoracle{% endblock %}
+{% block twitter_description %}Posts tagged "{{ term.name }}" on tsoracle.{% endblock %}
+
+{% block content %}
+<section class="container">
+    <header class="post-header">
+        <h1 class="post-header__title">{{ term.name }}</h1>
+    </header>
+
+    <ul class="posts-list">
+        {% for page in term.pages %}
+        <li>
+            <a class="post-title" href="{{ page.permalink }}">{{ page.title }}</a>
+            <span class="post-date">{{ page.date | date(format="%Y-%m-%d") }}</span>
+            {% if page.description %}
+            <p class="post-excerpt">{{ page.description }}</p>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endblock %}
