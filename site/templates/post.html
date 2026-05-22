@@ -7,6 +7,13 @@
 {% block twitter_title %}{{ page.title }} — tsoracle{% endblock %}
 {% block twitter_description %}{{ page.description }}{% endblock %}
 {% block og_type %}article{% endblock %}
+{% block og_image %}{{ config.base_url ~ "/og/" ~ page.slug ~ ".png" }}{% endblock %}
+{% block twitter_image %}{{ config.base_url ~ "/og/" ~ page.slug ~ ".png" }}{% endblock %}
+
+{% block link_rel %}
+    {% if page.higher %}<link rel="prev" href="{{ page.higher.permalink | safe }}">{% endif %}
+    {% if page.lower %}<link rel="next" href="{{ page.lower.permalink | safe }}">{% endif %}
+{% endblock %}
 
 {% block extra_head %}
 <script type="application/ld+json">
@@ -67,11 +74,11 @@
         </p>
 
         <nav class="post-nav">
-            {% if page.earlier %}
-            <a href="{{ page.earlier.permalink }}">← {{ page.earlier.title }}</a>
+            {% if page.higher %}
+            <a href="{{ page.higher.permalink }}">← {{ page.higher.title }}</a>
             {% else %}<span></span>{% endif %}
-            {% if page.later %}
-            <a href="{{ page.later.permalink }}">{{ page.later.title }} →</a>
+            {% if page.lower %}
+            <a href="{{ page.lower.permalink }}">{{ page.lower.title }} →</a>
             {% else %}<span></span>{% endif %}
         </nav>
     </div>

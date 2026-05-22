@@ -25,18 +25,25 @@
     <link rel="alternate icon" type="image/png" sizes="32x32" href="/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 
+    <meta name="theme-color" content="#0E0E10" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#FAFAF7" media="(prefers-color-scheme: light)">
+    <meta name="author" content="Prisma Risk">
+
     {% block canonical %}<link rel="canonical" href="{{ current_url | default(value=config.base_url) | safe }}">{% endblock %}
+    {% block link_rel %}{% endblock %}
 
     {# Open Graph #}
     <meta property="og:title" content="{% block og_title %}{{ config.title }}{% endblock %}">
     <meta property="og:description" content="{% block og_description %}{{ config.description }}{% endblock %}">
     <meta property="og:type" content="{% block og_type %}website{% endblock %}">
     <meta property="og:url" content="{{ current_url | default(value=config.base_url) | safe }}">
+    <meta property="og:image" content="{% block og_image %}{{ config.base_url ~ '/og-default.png' }}{% endblock %}">
 
     {# Twitter card — child templates that override og_title/og_description naturally drive these via og:* picked up by most consumers; we also emit explicit twitter:* via blocks. #}
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="{% block twitter_title %}{{ config.title }}{% endblock %}">
     <meta name="twitter:description" content="{% block twitter_description %}{{ config.description }}{% endblock %}">
+    <meta name="twitter:image" content="{% block twitter_image %}{{ config.base_url ~ '/og-default.png' }}{% endblock %}">
 
     {# Font preload to reduce render-blocking #}
     <link rel="preload" href="/fonts/JetBrainsMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
@@ -56,8 +63,10 @@
         <a class="site-header__brand" href="/">tsoracle</a>
         <nav class="site-nav">
             <a href="/posts/">Posts</a>
+            <a href="/how-it-works/">How it works</a>
             <a href="{{ config.extra.github_url }}">GitHub →</a>
             <a href="{{ config.extra.crates_url }}">Crates.io →</a>
+            <a href="/rss.xml" aria-label="RSS feed">RSS</a>
             <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme" type="button">
                 <span class="theme-toggle__moon" aria-hidden="true">☾</span>
                 <span class="theme-toggle__sun" aria-hidden="true">☀</span>
