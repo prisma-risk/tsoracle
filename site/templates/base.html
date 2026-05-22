@@ -97,5 +97,38 @@
     })();
 </script>
 
+<script>
+    (function() {
+        var pres = document.querySelectorAll(".post-body pre, .code-cols pre");
+        pres.forEach(function(pre) {
+            var wrap = document.createElement("div");
+            wrap.className = "code-block";
+            pre.parentNode.insertBefore(wrap, pre);
+            wrap.appendChild(pre);
+
+            var button = document.createElement("button");
+            button.type = "button";
+            button.className = "copy-button";
+            button.setAttribute("aria-label", "Copy code to clipboard");
+            button.textContent = "[copy]";
+            wrap.appendChild(button);
+
+            button.addEventListener("click", function() {
+                var text = pre.textContent;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(function() {
+                        button.textContent = "[copied]";
+                        button.setAttribute("data-copied", "true");
+                        setTimeout(function() {
+                            button.textContent = "[copy]";
+                            button.removeAttribute("data-copied");
+                        }, 1500);
+                    });
+                }
+            });
+        });
+    })();
+</script>
+
 </body>
 </html>

@@ -22,25 +22,78 @@
 {% endblock %}
 
 {% block content %}
-<article class="container">
-    <header class="post-header">
-        <h1 class="post-header__title">{{ page.title }}</h1>
-        <div class="post-header__meta">
-            {{ page.date | date(format="%Y-%m-%d") }} · {{ page.reading_time }} min read
-        </div>
-    </header>
+<article class="post-layout">
+    <div class="post-main">
+        <header class="post-header">
+            <h1 class="post-header__title">{{ page.title }}</h1>
+            <div class="post-header__meta">
+                {{ page.date | date(format="%Y-%m-%d") }} · {{ page.reading_time }} min read
+            </div>
+            {% if page.taxonomies.tags %}
+            <ul class="tag-list" aria-label="Tags">
+                {% for tag in page.taxonomies.tags %}
+                <li><a class="tag-pill" href="/tags/{{ tag | slugify }}/">{{ tag }}</a></li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </header>
 
-    <div class="post-body">
-        {{ page.content | safe }}
+        {% if page.toc %}
+        <details class="post-toc post-toc--mobile">
+            <summary>On this page</summary>
+            <ul>
+                {% for h1 in page.toc %}
+                <li>
+                    <a href="#{{ h1.id }}">{{ h1.title }}</a>
+                    {% if h1.children %}
+                    <ul>
+                        {% for h2 in h1.children %}
+                        <li><a href="#{{ h2.id }}">{{ h2.title }}</a></li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+
+        <div class="post-body">
+            {{ page.content | safe }}
+        </div>
+
+        <p class="edit-on-github">
+            <a href="{{ config.extra.github_url }}/edit/main/site/content/posts/{{ page.relative_path | split(pat='/') | last }}">Edit this page on GitHub →</a>
+        </p>
+
+        <nav class="post-nav">
+            {% if page.earlier %}
+            <a href="{{ page.earlier.permalink }}">← {{ page.earlier.title }}</a>
+            {% else %}<span></span>{% endif %}
+            {% if page.later %}
+            <a href="{{ page.later.permalink }}">{{ page.later.title }} →</a>
+            {% else %}<span></span>{% endif %}
+        </nav>
     </div>
 
-    <nav class="post-nav">
-        {% if page.earlier %}
-        <a href="{{ page.earlier.permalink }}">← {{ page.earlier.title }}</a>
-        {% else %}<span></span>{% endif %}
-        {% if page.later %}
-        <a href="{{ page.later.permalink }}">{{ page.later.title }} →</a>
-        {% else %}<span></span>{% endif %}
-    </nav>
+    {% if page.toc %}
+    <aside class="post-toc post-toc--sidebar" aria-label="On this page">
+        <p class="post-toc__heading">on this page</p>
+        <ul>
+            {% for h1 in page.toc %}
+            <li>
+                <a href="#{{ h1.id }}">{{ h1.title }}</a>
+                {% if h1.children %}
+                <ul>
+                    {% for h2 in h1.children %}
+                    <li><a href="#{{ h2.id }}">{{ h2.title }}</a></li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </aside>
+    {% endif %}
 </article>
 {% endblock %}
