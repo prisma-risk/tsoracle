@@ -134,7 +134,7 @@ async fn serve_with_shutdown_translates_watch_panic_to_server_error() {
     let _ = shutdown_tx; // unused; the watch arm exits first
 
     match outcome {
-        Err(ServerError::WatchPanic { payload }) => {
+        Err(ServerError::WatchPanic { payload, .. }) => {
             assert!(payload.contains("watch boom"), "got {payload}");
         }
         other => panic!("expected WatchPanic, got {other:?}"),

@@ -15,6 +15,10 @@ path = "src/main.rs"
 [features]
 default    = []
 reflection = ["tsoracle-server/reflection"]
+# Capture backtraces in instrumented error variants. Fans out to every
+# direct dependency that exposes a `bt` feature. Runtime capture is still
+# gated by `RUST_BACKTRACE`/`RUST_LIB_BACKTRACE`.
+bt         = ["tsoracle-core/bt", "tsoracle-server/bt", "tsoracle-driver-file/bt"]
 
 [dependencies]
 anyhow                = "1"

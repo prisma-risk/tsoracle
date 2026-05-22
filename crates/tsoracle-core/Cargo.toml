@@ -17,6 +17,10 @@ default    = ["std"]
 std        = []
 serde      = ["dep:serde"]
 test-clock = []
+# Capture a `std::backtrace::Backtrace` in instrumented error variants. With
+# this off, `Bt` is a ZST and `Bt::capture()` is a no-op. With it on, capture
+# is still gated at runtime by `RUST_BACKTRACE`/`RUST_LIB_BACKTRACE`.
+bt = ["std"]
 
 [package.metadata.docs.rs]
 features       = ["std", "serde"]
