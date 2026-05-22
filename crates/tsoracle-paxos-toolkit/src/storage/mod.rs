@@ -198,12 +198,30 @@ where
         Ok(())
     }
 
-    fn set_decided_idx(&mut self, _ld: u64) -> omnipaxos::storage::StorageResult<()> {
-        unimplemented!("set_decided_idx: implemented in a later commit")
+    fn set_decided_idx(&mut self, ld: u64) -> omnipaxos::storage::StorageResult<()> {
+        use crate::storage::key_space::meta_decided_idx_key;
+        use crate::storage::meta::encode_u64;
+        let bytes = encode_u64(ld);
+        self.batch_with(|cf, batch| {
+            batch.put_cf(&cf, meta_decided_idx_key(), bytes);
+            Ok(())
+        })
+        .map_err(box_err)?;
+        Ok(())
     }
 
     fn get_decided_idx(&self) -> omnipaxos::storage::StorageResult<u64> {
-        unimplemented!("get_decided_idx: implemented in a later commit")
+        use crate::storage::key_space::meta_decided_idx_key;
+        use crate::storage::meta::decode_u64;
+        let cf = self.cf().map_err(box_err)?;
+        match self
+            .db
+            .get_cf(&cf, meta_decided_idx_key())
+            .map_err(box_err)?
+        {
+            Some(bytes) => Ok(decode_u64(&bytes).map_err(box_err)?),
+            None => Ok(0),
+        }
     }
 
     fn set_accepted_round(
@@ -319,18 +337,42 @@ where
         unimplemented!("get_stopsign: implemented in a later commit")
     }
 
-    fn trim(&mut self, _idx: u64) -> omnipaxos::storage::StorageResult<()> {
-        unimplemented!("trim: implemented in a later commit")
+    fn trim(&mut self, idx: u64) -> omnipaxos::storage::StorageResult<()> {
+        use crate::storage::key_space::log_key;
+        self.batch_with(|cf, batch| {
+            let lower = log_key(0);
+            let upper = log_key(idx);
+            batch.delete_range_cf(&cf, &lower, &upper);
+            Ok(())
+        })
+        .map_err(box_err)?;
+        Ok(())
     }
 
-    fn set_compacted_idx(&mut self, _idx: u64) -> omnipaxos::storage::StorageResult<()> {
-        unimplemented!("set_compacted_idx: implemented in a later commit")
+    fn set_compacted_idx(&mut self, idx: u64) -> omnipaxos::storage::StorageResult<()> {
+        use crate::storage::key_space::meta_compacted_idx_key;
+        use crate::storage::meta::encode_u64;
+        let bytes = encode_u64(idx);
+        self.batch_with(|cf, batch| {
+            batch.put_cf(&cf, meta_compacted_idx_key(), bytes);
+            Ok(())
+        })
+        .map_err(box_err)?;
+        Ok(())
     }
 
     fn get_compacted_idx(&self) -> omnipaxos::storage::StorageResult<u64> {
-        // Temporary impl: needed by append_*/get_log_len in this commit; replaced
-        // with the full meta-backed read in a later commit.
-        Ok(0)
+        use crate::storage::key_space::meta_compacted_idx_key;
+        use crate::storage::meta::decode_u64;
+        let cf = self.cf().map_err(box_err)?;
+        match self
+            .db
+            .get_cf(&cf, meta_compacted_idx_key())
+            .map_err(box_err)?
+        {
+            Some(bytes) => Ok(decode_u64(&bytes).map_err(box_err)?),
+            None => Ok(0),
+        }
     }
 
     fn set_snapshot(
@@ -568,5 +610,67 @@ mod ballot_tests {
         storage.set_accepted_round(b).unwrap();
         let got = storage.get_accepted_round().unwrap().expect("present");
         assert_eq!(got.n, b.n);
+    }
+}
+
+#[cfg(all(test, feature = "rocksdb-storage"))]
+mod decided_compacted_tests {
+    use super::log_tests::fresh_storage;
+    use super::open_in_tests::TestEntry;
+    use omnipaxos::storage::Storage;
+    use tempfile::TempDir;
+
+    #[test]
+    fn decided_idx_defaults_to_zero() {
+        let dir = TempDir::new().unwrap();
+        let storage = fresh_storage(&dir);
+        assert_eq!(storage.get_decided_idx().unwrap(), 0);
+    }
+
+    #[test]
+    fn set_decided_idx_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage.set_decided_idx(42).unwrap();
+        assert_eq!(storage.get_decided_idx().unwrap(), 42);
+    }
+
+    #[test]
+    fn compacted_idx_defaults_to_zero() {
+        let dir = TempDir::new().unwrap();
+        let storage = fresh_storage(&dir);
+        assert_eq!(storage.get_compacted_idx().unwrap(), 0);
+    }
+
+    #[test]
+    fn set_compacted_idx_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage.set_compacted_idx(17).unwrap();
+        assert_eq!(storage.get_compacted_idx().unwrap(), 17);
+    }
+
+    #[test]
+    fn trim_then_compacted_yields_physical_remaining_length() {
+        // trim takes an absolute index and deletes [0, idx). set_compacted_idx
+        // is the paired call that advances the offset. After both, get_log_len
+        // returns `next_abs - compacted = physical remaining`.
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage
+            .append_entries(vec![
+                TestEntry { value: 1 },
+                TestEntry { value: 2 },
+                TestEntry { value: 3 },
+                TestEntry { value: 4 },
+            ])
+            .unwrap();
+        storage.trim(2).unwrap();
+        storage.set_compacted_idx(2).unwrap();
+        let suffix = storage.get_suffix(2).unwrap();
+        assert_eq!(suffix.len(), 2);
+        assert_eq!(suffix[0].value, 3);
+        // Physical remaining = next_abs (4) - compacted (2) = 2.
+        assert_eq!(storage.get_log_len().unwrap(), 2);
     }
 }
