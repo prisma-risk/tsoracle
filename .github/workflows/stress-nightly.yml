@@ -48,7 +48,7 @@ jobs:
           - random-2
           - random-3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Skip non-matching filters (manual dispatch)
         if: |
@@ -123,7 +123,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stress-${{ matrix.topology }}-${{ matrix.scenario }}-${{ github.run_id }}
           path: |
