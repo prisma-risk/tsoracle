@@ -99,11 +99,20 @@ jobs:
           ARGS: ${{ steps.args.outputs.args }}
         run: |
           set +e
-          # ARGS is intentionally word-split here.
+          # `tsoracle serve` is single-node; the process topology spawns one
+          # binary and exercises SIGKILL/respawn against the file driver's
+          # persisted high water. The shared --nodes default of 3 fits raft
+          # but would manufacture incoherent clock baselines under process.
+          case "$TOPOLOGY" in
+            process) NODES_ARG="--nodes 1" ;;
+            *)       NODES_ARG="" ;;
+          esac
+          # ARGS and NODES_ARG are intentionally word-split here.
           # shellcheck disable=SC2086
           cargo run --release -p stress --features stress-failpoints -- \
             run --topology "$TOPOLOGY" \
             $ARGS \
+            $NODES_ARG \
             --clients 32 --batch-size 4 \
             --json --schedule-out stress-schedule.json \
             > stress-report.json

@@ -26,6 +26,22 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Ensure labels exist
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        gh label create area:stress \
+          --repo "$REPO" \
+          --color BFD4F2 \
+          --description "Stress + chaos harness regressions" 2>/dev/null || true
+        gh label create priority:investigate \
+          --repo "$REPO" \
+          --color FBCA04 \
+          --description "Needs root-cause investigation" 2>/dev/null || true
+
     - name: Compute dedupe signature
       id: sig
       shell: bash

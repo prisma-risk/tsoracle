@@ -78,6 +78,18 @@ impl StressConfig {
         if matches!(self.topology, TopologyKind::Raft | TopologyKind::Process) && self.nodes < 1 {
             return Err("--nodes must be >= 1 for raft/process topology".into());
         }
+        // `tsoracle serve` is single-node (FileDriver, no cluster protocol).
+        // Spawning multiple of them under process topology gives independent
+        // oracles with independent physical-clock baselines; client failover
+        // between them under chaos would surface as per-client monotonicity
+        // regressions that are an artifact of the harness, not a real bug.
+        if matches!(self.topology, TopologyKind::Process) && self.nodes != 1 {
+            return Err(
+                "--nodes must be 1 for process topology (tsoracle serve is single-node; \
+                 multi-node coordination requires raft topology)"
+                    .into(),
+            );
+        }
         Ok(())
     }
 
@@ -177,5 +189,28 @@ mod tests {
         cfg.topology = TopologyKind::Raft;
         cfg.nodes = 0;
         assert!(cfg.validate().unwrap_err().contains("--nodes"));
+    }
+
+    #[test]
+    fn process_topology_rejects_multi_node() {
+        // Process topology spawns independent single-node oracles; >1 produces
+        // unrelated physical-clock baselines and surfaces as fake per-client
+        // monotonicity regressions under client failover.
+        let mut cfg = ok_config();
+        cfg.topology = TopologyKind::Process;
+        cfg.nodes = 3;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("--nodes must be 1 for process topology"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn process_topology_accepts_single_node() {
+        let mut cfg = ok_config();
+        cfg.topology = TopologyKind::Process;
+        cfg.nodes = 1;
+        cfg.validate().unwrap();
     }
 }

@@ -368,7 +368,7 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
         transient_retries: transient_retries.load(Ordering::Relaxed),
         out_of_range_samples: 0,
         violations: supervisor_outcome.violations,
-        chaos_events: Vec::new(),
+        chaos_events: supervisor_outcome.chaos_events,
         schedule,
         outcome,
     };
