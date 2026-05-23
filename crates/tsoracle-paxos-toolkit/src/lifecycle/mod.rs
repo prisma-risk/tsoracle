@@ -25,11 +25,21 @@ use omnipaxos::OmniPaxos;
 use omnipaxos::messages::Message;
 use omnipaxos::storage::{Entry, Storage};
 use parking_lot::Mutex;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tracing::{debug, error, warn};
 use tsoracle_core::Epoch;
+
+/// Bound on the outbound message queue feeding the dedicated sender task.
+///
+/// Outbound delivery is fire-and-forget by OmniPaxos's design — every tick
+/// regenerates the messages a node still needs to send, so a message dropped
+/// here is retransmitted on the next tick. The queue exists only to decouple
+/// tick-loop progress from per-send latency; when it fills (a slow or
+/// blackholed peer), the tick loop drops rather than blocks. The capacity is
+/// therefore a memory/throughput knob, not a correctness one.
+const OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 
 /// Outbound message dispatch contract supplied by the caller.
 ///
@@ -62,6 +72,7 @@ where
     leader_stream: Option<LeaderEventStream>,
     apply_notify: Arc<Notify>,
     handle: Option<JoinHandle<()>>,
+    sender_handle: Option<JoinHandle<()>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
@@ -91,6 +102,7 @@ where
             leader_stream: Some(leader_stream),
             apply_notify: Arc::new(Notify::new()),
             handle: None,
+            sender_handle: None,
             shutdown_tx: None,
         }
     }
@@ -153,6 +165,20 @@ where
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         self.shutdown_tx = Some(shutdown_tx);
 
+        // Dedicated outbound sender: owns the sink and drains the queue
+        // serially. Isolating per-send latency here is what keeps the tick
+        // loop's cadence — and thus leadership observation, leader-event
+        // emission, apply notification, and shutdown — independent of how
+        // long any individual send takes. A send that never resolves wedges
+        // only this task; `stop` aborts it as the backstop.
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Message<T>>(OUTBOUND_QUEUE_CAPACITY);
+        let sender_handle = tokio::spawn(async move {
+            while let Some(message) = outbound_rx.recv().await {
+                sink.send(message).await;
+            }
+        });
+        self.sender_handle = Some(sender_handle);
+
         let handle = tokio::spawn(async move {
             let mut ticker = interval(tick_interval);
             // Locally-tracked leader observation + monotonic counter for the
@@ -171,9 +197,25 @@ where
                             op.outgoing_messages()
                         };
 
-                        // 2. Send outbound messages with the lock released.
+                        // 2. Hand outbound messages to the sender task without
+                        //    awaiting delivery. `try_send` never blocks, so a
+                        //    slow or wedged sink cannot stall this loop. A full
+                        //    queue means the sink is behind; we drop the message
+                        //    because OmniPaxos regenerates it next tick.
                         for message in outgoing {
-                            sink.send(message).await;
+                            match outbound_tx.try_send(message) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    debug!(
+                                        "paxos outbound queue full; dropping message \
+                                         (resent next tick)"
+                                    );
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    warn!("paxos outbound sender task gone; stopping tick loop");
+                                    break;
+                                }
+                            }
                         }
 
                         // 3. Observe leadership.
@@ -234,6 +276,15 @@ where
                 error!(error = ?err, "paxos runner task terminated abnormally");
             }
         }
+        // The tick task drops `outbound_tx` as it exits, closing the queue so
+        // the sender task finishes once it has drained — unless it is wedged
+        // on a send that never resolves. A hung send has no cancellation point
+        // of its own, so awaiting the sender unconditionally would reintroduce
+        // the very deadlock this design removes; abort is the backstop.
+        if let Some(sender) = self.sender_handle.take() {
+            sender.abort();
+            let _ = sender.await;
+        }
     }
 }
 
@@ -251,6 +302,12 @@ where
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
+        }
+        // Cannot await in Drop, so abort the sender task outright rather than
+        // wait for the closed queue to unwind it — guards against leaking a
+        // task wedged on a never-resolving send.
+        if let Some(sender) = self.sender_handle.take() {
+            sender.abort();
         }
     }
 }
@@ -376,6 +433,36 @@ mod tests {
         async fn send(&self, _message: Message<TestEntry>) {}
     }
 
+    /// A sink whose `send` future never resolves, modelling a blackholed
+    /// peer (firewall rule, dropped keepalives) reached over a transport
+    /// with no per-request timeout. `entered` records how many sends were
+    /// started so tests can confirm the hang path was actually exercised.
+    #[derive(Default)]
+    struct BlockingSink {
+        entered: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl MessageSink<TestEntry> for BlockingSink {
+        async fn send(&self, _message: Message<TestEntry>) {
+            self.entered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Poll `cond` until it returns true or the deadline elapses.
+    async fn wait_until(deadline: Duration, cond: impl Fn() -> bool) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < deadline {
+            if cond() {
+                return true;
+            }
+            sleep(Duration::from_millis(2)).await;
+        }
+        cond()
+    }
+
     fn build_omnipaxos(node_id: u64) -> Arc<Mutex<OmniPaxos<TestEntry, StubStorage>>> {
         // OmniPaxos 0.2 rejects single-node ClusterConfigs, so build a 3-node
         // configuration even when only one runner will exist.
@@ -478,5 +565,62 @@ mod tests {
         );
 
         runner.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hung_sink_does_not_starve_apply_notify() {
+        // A sink that never resolves must not prevent the tick loop from
+        // making progress: ticks, leadership observation, and apply_notify
+        // are all downstream of the outbound drain, so coupling them to
+        // per-send completion starves the apply task on a blackholed peer.
+        let mut runner = build_runner(1);
+        let sink = Arc::new(BlockingSink::default());
+        let entered = sink.entered.clone();
+        let notify = runner.apply_notify();
+        runner.start(sink);
+
+        // Confirm the hang path is actually exercised (BLE emits heartbeats
+        // to peers 2 and 3 every tick, so a send is attempted promptly).
+        assert!(
+            wait_until(Duration::from_millis(200), || entered
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 1)
+            .await,
+            "expected at least one send to be attempted",
+        );
+
+        let woke = tokio::time::timeout(Duration::from_millis(200), notify.notified()).await;
+        assert!(
+            woke.is_ok(),
+            "apply_notify must fire even while every send is wedged",
+        );
+
+        runner.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hung_sink_does_not_deadlock_stop() {
+        // SIGTERM -> host.stop().await must return even when an outbound
+        // send is wedged forever. The original serial-await-in-select shape
+        // could not observe the shutdown branch while suspended mid-send, so
+        // stop() blocked on the JoinHandle indefinitely.
+        let mut runner = build_runner(1);
+        let sink = Arc::new(BlockingSink::default());
+        let entered = sink.entered.clone();
+        runner.start(sink);
+
+        assert!(
+            wait_until(Duration::from_millis(200), || entered
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 1)
+            .await,
+            "expected at least one send to be attempted before stop",
+        );
+
+        let stopped = tokio::time::timeout(Duration::from_secs(1), runner.stop()).await;
+        assert!(
+            stopped.is_ok(),
+            "stop() must complete even when a send is wedged",
+        );
     }
 }
