@@ -14,17 +14,21 @@ gRPC client driver for the [tsoracle](https://github.com/prisma-risk/tsoracle) t
 ## Usage shape
 
 ```rust,no_run
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
 use tsoracle_client::ClientBuilder;
 
-let client = ClientBuilder::new()
-    .endpoint("http://127.0.0.1:50051")
-    .endpoint("http://127.0.0.1:50052")
-    .endpoint("http://127.0.0.1:50053")
-    .build().await?;
+let client = ClientBuilder::endpoints(vec![
+    "http://127.0.0.1:50051".into(),
+    "http://127.0.0.1:50052".into(),
+    "http://127.0.0.1:50053".into(),
+])
+.build()
+.await?;
 
 let ts = client.get_ts().await?;
 println!("got timestamp: {ts:?}");
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok(())
+# }
 ```
 
 Pass every cluster endpoint you can — the client cycles through them on transport failure and follows `LeaderHint` redirects on `FAILED_PRECONDITION` responses to land on whichever node is currently leader.

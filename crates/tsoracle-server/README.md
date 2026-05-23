@@ -13,17 +13,19 @@ Wires four pieces together: the sync window allocator from [`tsoracle-core`](htt
 
 ## Usage shape
 
-```rust,no_run
+```rust,ignore
 use tsoracle_server::Server;
 use tsoracle_driver_file::FileDriver;
 
-let driver = FileDriver::open_or_init("./tsoracle-data")?;
-let server = Server::builder()
-    .consensus_driver(driver)
-    .build()?;
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let driver = FileDriver::open_or_init("./tsoracle-data")?;
+    let server = Server::builder()
+        .consensus_driver(driver)
+        .build()?;
 
-server.serve("127.0.0.1:50051".parse()?).await?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+    server.serve("127.0.0.1:50051".parse()?).await?;
+    Ok(())
+}
 ```
 
 See [`examples/embedded-server`](https://github.com/prisma-risk/tsoracle/tree/main/examples/embedded-server) for graceful Ctrl-C shutdown, and the HA examples (`openraft-standalone`, `openraft-piggyback`, `paxos-standalone`, `paxos-piggyback`, `paxos-embedded`) for swapping the file driver out for a replicated one.
