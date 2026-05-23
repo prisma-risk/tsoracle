@@ -47,6 +47,7 @@ use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, SnapshotPolicy, Stand
 use tsoracle_paxos_toolkit::lifecycle::{MessageSink, Peer};
 use tsoracle_paxos_toolkit::storage::RocksdbStorage;
 use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
+use tsoracle_paxos_toolkit::test_fakes::partition::PartitionController;
 use tsoracle_server::Server;
 
 use crate::chaos::ChaosEvent;
@@ -343,6 +344,24 @@ async fn wait_for_leader(nodes: &[PaxosNode], timeout: Duration) -> anyhow::Resu
             }
         }
         sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// RAII guard that restores reachability for a single node on drop. Used to
+/// make `kill_leader` / `pause_leader` cancel-safe: if the harness's outer
+/// `select!` (e.g. the `--duration` timer) drops the chaos future while it
+/// is parked at the mid-window `sleep`, the guard's `Drop` still fires and
+/// restores reachability — without this, the cluster would remain
+/// partitioned for the rest of the run.
+#[allow(dead_code)]
+struct HealOnDrop {
+    partition: Arc<PartitionController>,
+    node: u64,
+}
+
+impl Drop for HealOnDrop {
+    fn drop(&mut self) {
+        self.partition.restore(self.node);
     }
 }
 
