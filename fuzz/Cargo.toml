@@ -30,6 +30,14 @@ prost                    = "0.14"
 tsoracle-openraft-toolkit         = { path = "../crates/tsoracle-openraft-toolkit", default-features = false }
 tsoracle-driver-file     = { path = "../crates/tsoracle-driver-file" }
 tsoracle-driver-openraft = { path = "../crates/tsoracle-driver-openraft", default-features = false }
+# `default-features = false` drops the `rocksdb-storage` feature on both paxos
+# crates, keeping `librocksdb-sys` → `bindgen` → `clang-sys` out of the fuzz
+# build (the runner has no clang). The harnesses only touch pure postcard
+# decoders: `HighWaterCommand`/`HighWaterSnapshot` (driver) and the
+# `storage::meta` ballot decoder (toolkit), all of which live outside the
+# feature-gated rocksdb `Storage` impl.
+tsoracle-driver-paxos    = { path = "../crates/tsoracle-driver-paxos", default-features = false }
+tsoracle-paxos-toolkit   = { path = "../crates/tsoracle-paxos-toolkit", default-features = false }
 tsoracle-proto           = { path = "../crates/tsoracle-proto" }
 
 [[bin]]
@@ -91,6 +99,30 @@ doctest           = false
 [[bin]]
 name              = "toolkit_codec_decode"
 path              = "fuzz_targets/toolkit_codec_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
+name              = "paxos_log_entry_decode"
+path              = "fuzz_targets/paxos_log_entry_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
+name              = "paxos_snapshot_decode"
+path              = "fuzz_targets/paxos_snapshot_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
+name              = "paxos_meta_ballot_decode"
+path              = "fuzz_targets/paxos_meta_ballot_decode.rs"
 test              = false
 doc               = false
 bench             = false

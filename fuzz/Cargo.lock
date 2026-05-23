@@ -544,6 +544,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1002,6 +1012,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnipaxos"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8b6871f667e9a1045996d5a42d8fec5c8b9aaac66ba22ccb9664707a86524bf"
+dependencies = [
+ "omnipaxos_macros",
+ "serde",
+]
+
+[[package]]
+name = "omnipaxos_macros"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a89202e33e5b69cf15a16070842905fbdbf48e05e5cba9fd2fda2abffdf3013"
+dependencies = [
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1111,6 +1141,12 @@ checksum = "1f2a05b18d44e2957b88f96ba460715e295bc1d7510468a2f3d3b44535d26c24"
 dependencies = [
  "regex",
 ]
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "peel-off"
@@ -1976,7 +2012,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tsoracle-consensus"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -1986,17 +2022,18 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-core"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "tsoracle-driver-file"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "crc32c",
+ "fs2",
  "futures",
  "libc",
  "parking_lot",
@@ -2009,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-openraft"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -2027,6 +2064,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsoracle-driver-paxos"
+version = "0.1.4"
+dependencies = [
+ "async-trait",
+ "futures",
+ "omnipaxos",
+ "parking_lot",
+ "postcard",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tsoracle-consensus",
+ "tsoracle-core",
+ "tsoracle-paxos-toolkit",
+ "tsoracle-yieldpoint",
+]
+
+[[package]]
 name = "tsoracle-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -2035,13 +2092,15 @@ dependencies = [
  "prost",
  "tsoracle-driver-file",
  "tsoracle-driver-openraft",
+ "tsoracle-driver-paxos",
  "tsoracle-openraft-toolkit",
+ "tsoracle-paxos-toolkit",
  "tsoracle-proto",
 ]
 
 [[package]]
 name = "tsoracle-openraft-toolkit"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -2055,13 +2114,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsoracle-paxos-toolkit"
+version = "0.1.4"
+dependencies = [
+ "async-trait",
+ "futures",
+ "omnipaxos",
+ "parking_lot",
+ "pastey",
+ "postcard",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tsoracle-consensus",
+ "tsoracle-core",
+]
+
+[[package]]
 name = "tsoracle-proto"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "prost",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "tsoracle-yieldpoint"
+version = "0.1.4"
+dependencies = [
+ "parking_lot",
+ "tokio",
 ]
 
 [[package]]
@@ -2236,6 +2322,28 @@ dependencies = [
  "indexmap",
  "semver",
 ]
+
+[[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows-core"
