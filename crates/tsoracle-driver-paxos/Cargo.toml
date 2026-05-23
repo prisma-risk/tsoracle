@@ -1,7 +1,7 @@
 [package]
 name         = "tsoracle-driver-paxos"
 description  = "OmniPaxos-backed ConsensusDriver for tsoracle"
-version.workspace      = true
+version      = "0.1.4"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
