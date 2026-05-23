@@ -18,8 +18,11 @@ message GetTsResponse {
   uint32 logical_start = 2;
   // Number of consecutive timestamps allocated.
   uint32 count = 3;
-  // Leader epoch that issued this grant.
-  uint64 epoch = 4;
+  // Leader epoch that issued this grant, as a 128-bit value split into two
+  // 64-bit halves (epoch_hi is the more significant half). Lexicographic
+  // (epoch_hi, epoch_lo) order equals numeric order.
+  uint64 epoch_hi = 4;
+  uint64 epoch_lo = 5;
 }
 
 // Carried in the `tsoracle-leader-hint-bin` binary metadata trailer when the
@@ -27,5 +30,8 @@ message GetTsResponse {
 // the leader.
 message LeaderHint {
   optional string leader_endpoint = 1;
-  optional uint64 leader_epoch = 2;
+  // Leader epoch as two 64-bit halves (see GetTsResponse). Both are present
+  // or both absent.
+  optional uint64 leader_epoch_hi = 2;
+  optional uint64 leader_epoch_lo = 3;
 }

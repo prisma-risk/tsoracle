@@ -53,7 +53,8 @@ async fn embedded_router_serves_via_caller_owned_listener() {
         .unwrap()
         .into_inner();
     assert_eq!(resp.count, 1);
-    assert_eq!(resp.epoch, 1);
+    // Epoch(1).to_wire() == (hi: 0, lo: 1).
+    assert_eq!((resp.epoch_hi, resp.epoch_lo), (0, 1));
 
     booted.shutdown().await.unwrap();
 }

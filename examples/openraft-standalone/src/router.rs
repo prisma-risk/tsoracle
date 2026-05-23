@@ -62,7 +62,9 @@ impl ConsensusDriver for StandaloneRouter {
         let addrs = Arc::clone(&self.tso_addrs);
         Box::pin(
             stream_from_receiver::<TypeConfig>(receiver).map(move |state| match state {
-                LeadershipState::Leader { term } => LeaderState::Leader { epoch: Epoch(term) },
+                LeadershipState::Leader { term } => LeaderState::Leader {
+                    epoch: Epoch(u128::from(term)),
+                },
                 LeadershipState::Follower {
                     leader: Some((id, _peer)),
                     ..

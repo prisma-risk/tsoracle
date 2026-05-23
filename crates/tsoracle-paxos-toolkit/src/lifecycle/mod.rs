@@ -241,7 +241,7 @@ where
                                 leader_change_counter = leader_change_counter.wrapping_add(1);
                             }
                         }
-                        let epoch = leader_pid.map(|_| Epoch(leader_change_counter));
+                        let epoch = leader_pid.map(|_| Epoch(u128::from(leader_change_counter)));
                         let state = LeadershipState::from_omnipaxos(
                             my_node_id, leader_pid, epoch, &peers,
                         );

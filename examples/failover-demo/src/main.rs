@@ -90,7 +90,9 @@ async fn main() -> anyhow::Result<()> {
         let ts = Timestamp::pack(resp.physical_ms, resp.logical_start);
         println!(
             "  ts = {}.{} (epoch={})",
-            resp.physical_ms, resp.logical_start, resp.epoch
+            resp.physical_ms,
+            resp.logical_start,
+            Epoch::from_wire(resp.epoch_hi, resp.epoch_lo).0
         );
         if let Some(prev) = last {
             assert!(ts > prev, "monotonicity violated within epoch 1");
@@ -118,7 +120,9 @@ async fn main() -> anyhow::Result<()> {
         let ts = Timestamp::pack(resp.physical_ms, resp.logical_start);
         println!(
             "  ts = {}.{} (epoch={})",
-            resp.physical_ms, resp.logical_start, resp.epoch
+            resp.physical_ms,
+            resp.logical_start,
+            Epoch::from_wire(resp.epoch_hi, resp.epoch_lo).0
         );
         let prev = last.expect("phase 1 issued at least one timestamp");
         assert!(ts > prev, "fence failed: ts <= last pre-fence ts");

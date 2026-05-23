@@ -83,12 +83,14 @@ mod tests {
     fn roundtrip() {
         let hint = LeaderHint {
             leader_endpoint: Some("10.0.0.7:50551".into()),
-            leader_epoch: Some(42),
+            leader_epoch_hi: Some(0),
+            leader_epoch_lo: Some(42),
         };
         let status = not_leader_status(hint.clone());
         let decoded = decode_leader_hint(&status).expect("present");
         assert_eq!(decoded.leader_endpoint, hint.leader_endpoint);
-        assert_eq!(decoded.leader_epoch, hint.leader_epoch);
+        assert_eq!(decoded.leader_epoch_hi, hint.leader_epoch_hi);
+        assert_eq!(decoded.leader_epoch_lo, hint.leader_epoch_lo);
     }
 
     #[test]
@@ -100,7 +102,8 @@ mod tests {
     fn invalid_key_omits_trailer_but_preserves_status() {
         let hint = LeaderHint {
             leader_endpoint: Some("10.0.0.7:50551".into()),
-            leader_epoch: Some(42),
+            leader_epoch_hi: Some(0),
+            leader_epoch_lo: Some(42),
         };
         // Spaces and uppercase make this key invalid for HTTP header
         // construction; it also lacks the required `-bin` suffix.

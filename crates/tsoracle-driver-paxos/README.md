@@ -27,7 +27,7 @@ The driver's read path consults a `Barrier` synchronized with the local OmniPaxo
 
 ### Epoch ↔ Ballot encoding
 
-tsoracle's `Epoch` (the fence-watermark identifier persisted with each `HighWaterCommand`) is encoded as a 48-bit value combining OmniPaxos's `Ballot.n` (the round counter) and `Ballot.pid` (the proposer id) via `encode_epoch` / `decode_epoch`. This gives the driver a stable per-leader epoch that the failover fence uses to reject stale writes after a leader change — every advance carries the proposer's ballot, and a write that races a re-election will fence against the new leader's epoch.
+tsoracle's `Epoch` (the fence-watermark identifier persisted with each `HighWaterCommand`) is a 128-bit value that packs the round-changing fields of an OmniPaxos `Ballot` — `config_id` (bits 96..128), `n`, the round counter (bits 64..96), and `pid`, the proposer id (bits 0..64) — via `encode_epoch` / `decode_epoch`. The full ballot identity fits exactly, so the encoding is lossless and total: distinct ballots never collide and a later ballot always encodes to a strictly greater epoch. This gives the driver a stable, monotonic per-leader epoch that the failover fence uses to reject stale writes after a leader change — every advance carries the proposer's ballot, and a write that races a re-election will fence against the new leader's epoch. `priority` is not encoded: it is a static per-node tiebreaker fully determined by `pid`.
 
 ## Documentation
 
