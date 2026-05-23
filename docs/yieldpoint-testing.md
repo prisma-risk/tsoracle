@@ -41,11 +41,13 @@ The string is matched verbatim against the registry — typos at the call site o
 
 ## Current sites
 
-### `tsoracle-driver-paxos` — 1 site in `crates/tsoracle-driver-paxos/src/standalone.rs`
+### `tsoracle-driver-paxos` — 3 sites in `crates/tsoracle-driver-paxos/src/standalone.rs`
 
 | Site name | Position | Test |
 |---|---|---|
 | `standalone_host::apply_task::between_iterations` | End of the `apply_notify` branch in the apply task's `tokio::select!`, after `drain_decided_into` + `maybe_snapshot` and before the loop returns to the next `select!`. | `stop_delivers_shutdown_when_apply_task_is_mid_iteration` |
+| `standalone_host::current_high_water::after_append_before_await` | In `PaxosHighWaterHost::current_high_water`, after the `Barrier` append and before the first `Notified::enable()` registers as an `apply_notifier` waiter. | `current_high_water_returns_when_apply_drained_before_register` |
+| `standalone_host::submit_advance::after_append_before_await` | In `PaxosHighWaterHost::submit_advance`, after the `Advance` append and before the first `Notified::enable()` registers as an `apply_notifier` waiter. | `submit_advance_returns_when_apply_drained_before_register` |
 
 ## Writing a yield-point test
 
