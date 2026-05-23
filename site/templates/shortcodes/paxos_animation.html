@@ -1,0 +1,17 @@
+{% set data = load_data(path="content/diagrams/" ~ name ~ ".json") %}
+{% set caption = title | default(value='') %}
+<figure class="diagram diagram--paxos" data-d3-init="paxos-animation">
+    <svg viewBox="0 0 800 540" role="img" aria-label="{{ caption | default(value='Paxos animation: ' ~ name) }}" preserveAspectRatio="xMidYMid meet">
+        <text x="400" y="270" text-anchor="middle" fill="#8A8A86" font-family="JetBrainsMono, ui-monospace, monospace" font-size="14">
+            cluster: {% for n in data.nodes %}{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+        </text>
+    </svg>
+    <div class="diagram-controls">
+        <button type="button" data-action="restart" aria-label="Restart animation">↻ restart</button>
+        <button type="button" data-action="step" aria-label="Step to next beat">▶| step</button>
+        <button type="button" data-action="play" aria-label="Play animation">▶ play through</button>
+        <button type="button" data-action="pause" aria-label="Pause animation" hidden>⏸ pause</button>
+    </div>
+    <script type="application/json">{{ data | json_encode | safe }}</script>
+    {% if caption %}<figcaption>{{ caption }}</figcaption>{% endif %}
+</figure>

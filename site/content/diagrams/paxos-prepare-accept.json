@@ -1,0 +1,47 @@
+{
+    "nodes": ["P1", "A1", "A2", "A3"],
+    "duration": 7000,
+    "events": [
+        {"t": 0,    "type": "state",   "node": "P1", "state": "proposer"},
+        {"t": 0,    "type": "state",   "node": "A1", "state": "acceptor"},
+        {"t": 0,    "type": "state",   "node": "A2", "state": "acceptor"},
+        {"t": 0,    "type": "state",   "node": "A3", "state": "acceptor"},
+        {"t": 300,  "type": "ballot",  "ballot": 1},
+
+        {"t": 400,  "type": "message", "from": "P1", "to": "A1", "label": "prepare(b=1)"},
+        {"t": 400,  "type": "message", "from": "P1", "to": "A2", "label": "prepare(b=1)"},
+        {"t": 400,  "type": "message", "from": "P1", "to": "A3", "label": "prepare(b=1)"},
+
+        {"t": 1200, "type": "promise", "acceptor": "A1", "proposer": "P1"},
+        {"t": 1200, "type": "promise", "acceptor": "A2", "proposer": "P1"},
+        {"t": 1200, "type": "promise", "acceptor": "A3", "proposer": "P1"},
+        {"t": 1200, "type": "message", "from": "A1", "to": "P1", "label": "promise(b=1, last=∅)", "kind": "reply"},
+        {"t": 1200, "type": "message", "from": "A2", "to": "P1", "label": "promise(b=1, last=∅)", "kind": "reply"},
+        {"t": 1200, "type": "message", "from": "A3", "to": "P1", "label": "promise(b=1, last=∅)", "kind": "reply"},
+
+        {"t": 2050, "type": "node_value", "node": "A1", "value": "promised b=1"},
+        {"t": 2050, "type": "node_value", "node": "A2", "value": "promised b=1"},
+        {"t": 2050, "type": "node_value", "node": "A3", "value": "promised b=1"},
+
+        {"t": 3000, "type": "message", "from": "P1", "to": "A1", "label": "accept(b=1, v=hwm=14)"},
+        {"t": 3000, "type": "message", "from": "P1", "to": "A2", "label": "accept(b=1, v=hwm=14)"},
+        {"t": 3000, "type": "message", "from": "P1", "to": "A3", "label": "accept(b=1, v=hwm=14)"},
+
+        {"t": 3800, "type": "message", "from": "A1", "to": "P1", "label": "accepted(b=1)", "kind": "reply"},
+        {"t": 3800, "type": "message", "from": "A2", "to": "P1", "label": "accepted(b=1)", "kind": "reply"},
+        {"t": 3800, "type": "message", "from": "A3", "to": "P1", "label": "accepted(b=1)", "kind": "reply"},
+
+        {"t": 4600, "type": "node_value", "node": "A1", "value": "accepted (b=1, hwm=14)"},
+        {"t": 4600, "type": "node_value", "node": "A2", "value": "accepted (b=1, hwm=14)"},
+        {"t": 4600, "type": "node_value", "node": "A3", "value": "accepted (b=1, hwm=14)"},
+
+        {"t": 5400, "type": "node_value", "node": "P1", "value": "decided hwm=14"}
+    ],
+    "annotations": [
+        {"t": 0,    "text": "P1 is a proposer with three acceptors. It wants the cluster to agree on hwm=14."},
+        {"t": 400,  "text": "Phase 1 — prepare(b=1). P1 picks ballot b=1 and asks each acceptor to promise not to accept anything lower."},
+        {"t": 2050, "text": "All three acceptors promise b=1, reporting they have nothing previously accepted (last=∅). P1 has quorum and may propose freely."},
+        {"t": 3000, "text": "Phase 2 — accept(b=1, v=hwm=14). The value travels to the acceptors at the promised ballot."},
+        {"t": 4600, "text": "Quorum responds accepted. hwm=14 is durably decided. Any future round must learn this value before proposing anything new."}
+    ]
+}

@@ -1,0 +1,54 @@
+{
+    "nodes": ["P1", "A1", "A2", "A3", "P2"],
+    "duration": 9000,
+    "events": [
+        {"t": 0,    "type": "state",   "node": "P1", "state": "proposer"},
+        {"t": 0,    "type": "state",   "node": "P2", "state": "proposer"},
+        {"t": 0,    "type": "state",   "node": "A1", "state": "acceptor"},
+        {"t": 0,    "type": "state",   "node": "A2", "state": "acceptor"},
+        {"t": 0,    "type": "state",   "node": "A3", "state": "acceptor"},
+        {"t": 300,  "type": "ballot",  "ballot": 1},
+
+        {"t": 400,  "type": "message", "from": "P1", "to": "A1", "label": "prepare(b=1)"},
+        {"t": 400,  "type": "message", "from": "P1", "to": "A2", "label": "prepare(b=1)"},
+        {"t": 400,  "type": "message", "from": "P1", "to": "A3", "label": "prepare(b=1)"},
+
+        {"t": 1200, "type": "message", "from": "A1", "to": "P1", "label": "promise(b=1, last=∅)", "kind": "reply"},
+        {"t": 1200, "type": "message", "from": "A2", "to": "P1", "label": "promise(b=1, last=∅)", "kind": "reply"},
+        {"t": 1200, "type": "message", "from": "A3", "to": "P1", "label": "promise(b=1, last=∅)", "kind": "reply"},
+
+        {"t": 2000, "type": "node_value", "node": "A1", "value": "promised b=1"},
+        {"t": 2000, "type": "node_value", "node": "A2", "value": "promised b=1"},
+        {"t": 2000, "type": "node_value", "node": "A3", "value": "promised b=1"},
+
+        {"t": 2600, "type": "ballot",  "ballot": 2},
+
+        {"t": 2700, "type": "message", "from": "P2", "to": "A1", "label": "prepare(b=2)"},
+        {"t": 2700, "type": "message", "from": "P2", "to": "A2", "label": "prepare(b=2)"},
+        {"t": 2700, "type": "message", "from": "P2", "to": "A3", "label": "prepare(b=2)"},
+
+        {"t": 3500, "type": "message", "from": "A1", "to": "P2", "label": "promise(b=2, last=∅)", "kind": "reply"},
+        {"t": 3500, "type": "message", "from": "A2", "to": "P2", "label": "promise(b=2, last=∅)", "kind": "reply"},
+        {"t": 3500, "type": "message", "from": "A3", "to": "P2", "label": "promise(b=2, last=∅)", "kind": "reply"},
+
+        {"t": 4300, "type": "node_value", "node": "A1", "value": "promised b=2"},
+        {"t": 4300, "type": "node_value", "node": "A2", "value": "promised b=2"},
+        {"t": 4300, "type": "node_value", "node": "A3", "value": "promised b=2"},
+
+        {"t": 5000, "type": "message", "from": "P1", "to": "A1", "label": "accept(b=1, v=A)"},
+        {"t": 5000, "type": "message", "from": "P1", "to": "A2", "label": "accept(b=1, v=A)"},
+        {"t": 5000, "type": "message", "from": "P1", "to": "A3", "label": "accept(b=1, v=A)"},
+
+        {"t": 5800, "type": "message", "from": "A1", "to": "P1", "label": "reject (promised b=2)", "kind": "reply"},
+        {"t": 5800, "type": "message", "from": "A2", "to": "P1", "label": "reject (promised b=2)", "kind": "reply"},
+        {"t": 5800, "type": "message", "from": "A3", "to": "P1", "label": "reject (promised b=2)", "kind": "reply"}
+    ],
+    "annotations": [
+        {"t": 0,    "text": "Two proposers, P1 and P2, both want to propose into the same Paxos instance."},
+        {"t": 400,  "text": "P1 goes first with prepare(b=1) and collects promises from a quorum of acceptors."},
+        {"t": 2700, "text": "Before P1 can send its accept, P2 starts a competing round with a higher ballot: prepare(b=2)."},
+        {"t": 4300, "text": "Acceptors promise b=2, supplanting their earlier promise. No value has been accepted yet at b=1, so there is no prior value to report."},
+        {"t": 5000, "text": "P1 finally sends accept(b=1, v=A) — too late."},
+        {"t": 5800, "text": "All three acceptors reject: they have promised b=2 and will not honour b=1. Without a stable leader, P1 retries with a higher ballot, P2 retries with a higher one again, and the cycle repeats. This is Paxos livelock — and it is exactly what Multi-Paxos solves with a distinguished leader."}
+    ]
+}
