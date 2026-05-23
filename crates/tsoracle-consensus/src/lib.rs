@@ -10,11 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! The `ConsensusDriver` trait — the single injection point for HA and persistence.
-//!
-//! Consumers implement this trait against their preferred mechanism (openraft,
-//! etcd, a single-node file, etc.). The library itself does not run consensus.
-
+#![doc = include_str!("../README.md")]
 // Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
 // for the lib's own unit tests; integration tests are separate compilation units.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]

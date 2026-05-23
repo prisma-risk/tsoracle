@@ -10,51 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! Async yield points — the structural analogue of [`fail-rs`] failpoints,
-//! but driven by a `tokio::sync::Notify` so the production code yields its
-//! tokio worker while parked instead of blocking the thread.
-//!
-//! A fail-crate `pause` action uses `std::thread::park` / a condvar, which
-//! blocks the OS thread the failpoint fires on. Inside a tokio task that
-//! starves the runtime's timer driver — `tokio::time::sleep` stops
-//! returning for every task on that worker, and any race the test is
-//! trying to observe gets masked. Yield points exist for exactly the case
-//! where the call site is in an async path that must keep yielding to
-//! the runtime while parked.
-//!
-//! # Quick reference
-//!
-//! Opt in by declaring a feature on the consumer crate that flips
-//! `tsoracle-yieldpoint/yieldpoints`:
-//!
-//! ```toml
-//! # consumer Cargo.toml
-//! [features]
-//! yieldpoints = ["tsoracle-yieldpoint/yieldpoints"]
-//!
-//! [dependencies]
-//! tsoracle-yieldpoint = { workspace = true }
-//! ```
-//!
-//! Insert the macro at the call site:
-//!
-//! ```ignore
-//! tsoracle_yieldpoint::yieldpoint!("module::site::after_X_before_Y");
-//! ```
-//!
-//! Arm and release from a test:
-//!
-//! ```ignore
-//! let handle = tsoracle_yieldpoint::cfg("module::site::after_X_before_Y");
-//! // ... drive code into the yield point ...
-//! handle.notify_one(); // release
-//! tsoracle_yieldpoint::remove("module::site::after_X_before_Y");
-//! ```
-//!
-//! The registry is process-global (same pattern as `fail-rs`). Tests that
-//! arm the same name must serialize.
-//!
-//! [`fail-rs`]: https://docs.rs/fail
+#![doc = include_str!("../README.md")]
 
 #[cfg(feature = "yieldpoints")]
 mod registry {
