@@ -108,10 +108,29 @@ where
     pub leader_stream: Option<LeaderEventStream>,
     /// Shared OmniPaxos handle for direct inspection (`get_decided_idx`,
     /// `get_current_leader`, `append`, etc.).
-    pub omnipaxos: Arc<Mutex<OmniPaxos<HighWaterCommand, S>>>,
+    ///
+    /// Wrapped in `Option` so [`Cluster::stop_node`] can release the
+    /// final harness-held reference, which lets RocksDB drop the
+    /// directory lock before [`Cluster::rebuild_rocksdb_node`] reopens
+    /// it. Use [`NodeHandle::omnipaxos`] to get a cloned handle.
+    omnipaxos: Option<Arc<Mutex<OmniPaxos<HighWaterCommand, S>>>>,
     /// Stop signal for the inbox pump task.
     pump_stop: Option<oneshot::Sender<()>>,
     pump_handle: Option<JoinHandle<()>>,
+}
+
+impl<S> NodeHandle<S>
+where
+    S: Storage<HighWaterCommand> + Send + 'static,
+{
+    /// Cloned `Arc` to this node's OmniPaxos handle. Panics if the node
+    /// has been stopped via [`Cluster::stop_node`] and not yet rebuilt.
+    pub fn omnipaxos(&self) -> Arc<Mutex<OmniPaxos<HighWaterCommand, S>>> {
+        self.omnipaxos
+            .as_ref()
+            .expect("node is running (call rebuild + start_node after stop_node)")
+            .clone()
+    }
 }
 
 /// Cluster of paxos nodes wired through a shared [`MemNetwork`].
@@ -121,6 +140,9 @@ where
 {
     pub nodes: Vec<NodeHandle<S>>,
     pub network: Arc<MemNetwork<HighWaterCommand>>,
+    /// Captured at construction so restart helpers can rebuild a node's
+    /// OmniPaxos with the same topology hint.
+    pub cluster_config: ClusterConfig,
     /// Held to keep RocksDB directories alive across the cluster's
     /// lifetime. Unused for `MemStorage` clusters.
     #[allow(dead_code)]
@@ -151,7 +173,7 @@ where
                 .inbox
                 .take()
                 .expect("inbox must be present before start_all");
-            let omnipaxos = node.omnipaxos.clone();
+            let omnipaxos = node.omnipaxos();
             let (stop_tx, stop_rx) = oneshot::channel();
             node.pump_stop = Some(stop_tx);
             node.pump_handle = Some(tokio::spawn(pump_inbox(omnipaxos, inbox, stop_rx)));
@@ -173,8 +195,12 @@ where
         }
     }
 
-    /// Stop a single node (runner + inbox pump + host). Used by tests
-    /// that need to bring one replica down without disturbing the rest.
+    /// Stop a single node (runner + inbox pump + host) and drop the
+    /// final harness-held `Arc` to its OmniPaxos handle.
+    ///
+    /// Releasing the last `Arc` reference is what lets RocksDB-backed
+    /// storage drop its directory lock, so that
+    /// [`Cluster::rebuild_rocksdb_node`] can reopen the same path.
     pub async fn stop_node(&mut self, node_id: u64) {
         let node = self
             .nodes
@@ -190,6 +216,10 @@ where
         if let Some(mut host) = node.host.take() {
             host.stop().await;
         }
+        // Drop the harness-held Arc last; the host has already released
+        // its own clone via `host.stop().await + drop`. Once this take()
+        // runs, the underlying OmniPaxos + Storage are deallocated.
+        node.omnipaxos.take();
     }
 
     /// Block until `predicate(self)` returns true.
@@ -217,7 +247,8 @@ where
     pub fn leader(&self) -> u64 {
         self.nodes
             .iter()
-            .find_map(|node| node.omnipaxos.lock().get_current_leader())
+            .filter_map(|node| node.omnipaxos.as_ref())
+            .find_map(|handle| handle.lock().get_current_leader())
             .expect("no leader elected")
     }
 
@@ -226,7 +257,8 @@ where
     pub fn leader_opt(&self) -> Option<u64> {
         self.nodes
             .iter()
-            .find_map(|node| node.omnipaxos.lock().get_current_leader())
+            .filter_map(|node| node.omnipaxos.as_ref())
+            .find_map(|handle| handle.lock().get_current_leader())
     }
 
     /// In-memory high-water visible on the specified node.
@@ -241,12 +273,7 @@ where
 
     /// Decided index on the specified node.
     pub fn decided_idx_on(&self, node_id: u64) -> u64 {
-        let node = self
-            .nodes
-            .iter()
-            .find(|node| node.node_id == node_id)
-            .expect("node id present");
-        node.omnipaxos.lock().get_decided_idx()
+        self.node(node_id).omnipaxos().lock().get_decided_idx()
     }
 
     /// Borrow a node by id. Panics if absent.
@@ -349,7 +376,7 @@ pub fn build_mem_cluster_with_policy(node_count: usize, policy: SnapshotPolicy) 
             host: Some(host),
             inbox: Some(inbox),
             leader_stream,
-            omnipaxos: shared_omnipaxos,
+            omnipaxos: Some(shared_omnipaxos),
             pump_stop: None,
             pump_handle: None,
         });
@@ -358,6 +385,7 @@ pub fn build_mem_cluster_with_policy(node_count: usize, policy: SnapshotPolicy) 
     Cluster {
         nodes,
         network,
+        cluster_config,
         tempdirs: HashMap::new(),
     }
 }
@@ -428,7 +456,7 @@ pub fn build_rocksdb_cluster_with_policy(
             host: Some(host),
             inbox: Some(inbox),
             leader_stream,
-            omnipaxos: shared_omnipaxos,
+            omnipaxos: Some(shared_omnipaxos),
             pump_stop: None,
             pump_handle: None,
         });
@@ -437,7 +465,79 @@ pub fn build_rocksdb_cluster_with_policy(
     Cluster {
         nodes,
         network,
+        cluster_config,
         tempdirs,
+    }
+}
+
+#[cfg(feature = "rocksdb-storage")]
+impl Cluster<RocksdbStorage<HighWaterCommand>> {
+    /// Re-open the storage at this node's `TempDir` and rebuild its
+    /// host. Used after [`Cluster::stop_node`] to simulate a clean
+    /// restart with the same on-disk state.
+    ///
+    /// The runner + pump are NOT started by this call; the caller drives
+    /// `start_after_restart` separately so they can inspect the recovered
+    /// state first.
+    pub fn rebuild_rocksdb_node(&mut self, node_id: u64) {
+        let path = self
+            .tempdirs
+            .get(&node_id)
+            .map(|dir| dir.path().to_path_buf())
+            .expect("node has a tempdir backing");
+        let storage = reopen_rocksdb_storage(&path);
+        let server_config = ServerConfig {
+            pid: node_id,
+            election_tick_timeout: 5,
+            resend_message_tick_timeout: 5,
+            ..Default::default()
+        };
+        let omnipaxos_config = OmniPaxosConfig {
+            cluster_config: self.cluster_config.clone(),
+            server_config,
+        };
+        let omnipaxos = omnipaxos_config
+            .build(storage)
+            .expect("rebuild omnipaxos from recovered storage");
+        let shared_omnipaxos = Arc::new(Mutex::new(omnipaxos));
+        let inbox = self.network.register(node_id);
+        let host = StandaloneHost::builder()
+            .omnipaxos(shared_omnipaxos.clone())
+            .my_node_id(node_id)
+            .peers(Vec::new())
+            .tick_interval(DEFAULT_TICK_INTERVAL)
+            .snapshot_policy(SnapshotPolicy::disabled())
+            .build()
+            .expect("build standalone host after restart");
+        let leader_stream = host.take_leader_stream();
+
+        let slot = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == node_id)
+            .expect("node id present");
+        slot.host = Some(host);
+        slot.inbox = Some(inbox);
+        slot.leader_stream = leader_stream;
+        slot.omnipaxos = Some(shared_omnipaxos);
+    }
+
+    /// Start the runner + pump for a single node. Used as the second
+    /// half of a [`Self::rebuild_rocksdb_node`] / start cycle.
+    pub fn start_node(&mut self, node_id: u64) {
+        let sink = Arc::new(MeshSink::new(self.network.clone()));
+        let omnipaxos = self.node(node_id).omnipaxos();
+        let slot = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == node_id)
+            .expect("node id present");
+        let host = slot.host.as_mut().expect("host present after rebuild");
+        host.start(sink);
+        let inbox = slot.inbox.take().expect("inbox present after rebuild");
+        let (stop_tx, stop_rx) = oneshot::channel();
+        slot.pump_stop = Some(stop_tx);
+        slot.pump_handle = Some(tokio::spawn(pump_inbox(omnipaxos, inbox, stop_rx)));
     }
 }
 
@@ -472,7 +572,10 @@ where
         .map(|dir| dir.path().to_path_buf())
 }
 
-/// Convenience predicate: every node's `decided_idx` is at least `target`.
+/// Convenience predicate: every running node's `decided_idx` is at least
+/// `target`. Stopped nodes (those whose OmniPaxos handle has been
+/// released by [`Cluster::stop_node`]) are skipped, since they have no
+/// observable state.
 pub fn all_decided_at_least<S>(target: u64) -> impl FnMut(&Cluster<S>) -> bool
 where
     S: Storage<HighWaterCommand> + Send + 'static,
@@ -481,7 +584,8 @@ where
         cluster
             .nodes
             .iter()
-            .all(|node| node.omnipaxos.lock().get_decided_idx() >= target)
+            .filter_map(|node| node.omnipaxos.as_ref())
+            .all(|handle| handle.lock().get_decided_idx() >= target)
     }
 }
 
@@ -494,6 +598,7 @@ where
         cluster
             .nodes
             .iter()
-            .any(|node| node.omnipaxos.lock().get_current_leader().is_some())
+            .filter_map(|node| node.omnipaxos.as_ref())
+            .any(|handle| handle.lock().get_current_leader().is_some())
     }
 }

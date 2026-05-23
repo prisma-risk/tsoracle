@@ -41,13 +41,13 @@ async fn three_node_quorum_advances_converge_across_replicas() {
 
     cluster
         .node(leader_id)
-        .omnipaxos
+        .omnipaxos()
         .lock()
         .append(HighWaterCommand::Advance { at_least: 10 })
         .expect("first append succeeds on leader");
     cluster
         .node(leader_id)
-        .omnipaxos
+        .omnipaxos()
         .lock()
         .append(HighWaterCommand::Advance { at_least: 50 })
         .expect("second append succeeds on leader");
@@ -104,7 +104,7 @@ async fn fence_check_rejects_stale_epoch_and_accepts_current() {
     // the leader's prepare sees the same Ballot, so encoding either the
     // leader's or the follower's promise here yields the same Epoch.
     let current_epoch = {
-        let handle = cluster.node(follower_id).omnipaxos.clone();
+        let handle = cluster.node(follower_id).omnipaxos();
         let promise = handle.lock().get_promise();
         encode_epoch(promise)
     };
@@ -115,7 +115,7 @@ async fn fence_check_rejects_stale_epoch_and_accepts_current() {
     // handle in a thin `PaxosHighWaterHost` proxy that delegates
     // omnipaxos() to the same Arc — fence checks read `get_promise()` off
     // that handle, which is the contract under test.
-    let follower_handle = cluster.node(follower_id).omnipaxos.clone();
+    let follower_handle = cluster.node(follower_id).omnipaxos();
     let follower_apply = FollowerProxyHost::new(follower_handle.clone());
 
     // The PaxosDriver doesn't actually use leader_stream for

@@ -72,7 +72,7 @@ async fn three_runners_advance_then_converge() {
     // apply task picks it up via `apply_notify` after the runner ticks.
     cluster
         .node(leader_id)
-        .omnipaxos
+        .omnipaxos()
         .lock()
         .append(HighWaterCommand::Advance { at_least: 25 })
         .expect("append succeeds on leader");

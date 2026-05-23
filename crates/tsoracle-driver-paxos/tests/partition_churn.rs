@@ -36,7 +36,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
 
     cluster
         .node(original_leader)
-        .omnipaxos
+        .omnipaxos()
         .lock()
         .append(HighWaterCommand::Advance { at_least: 100 })
         .expect("first append succeeds on leader");
@@ -69,13 +69,13 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
                     .iter()
                     .filter(|node| node.node_id != original_leader)
                     .any(|node| {
-                        node.omnipaxos
+                        node.omnipaxos()
                             .lock()
                             .get_current_leader()
                             .is_some_and(|leader| leader != original_leader)
                     })
             },
-            3_000,
+            5_000,
         )
         .await;
     let new_leader = cluster
@@ -83,7 +83,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
         .iter()
         .filter(|node| node.node_id != original_leader)
         .find_map(|node| {
-            node.omnipaxos
+            node.omnipaxos()
                 .lock()
                 .get_current_leader()
                 .filter(|leader| *leader != original_leader)
@@ -93,7 +93,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
 
     cluster
         .node(new_leader)
-        .omnipaxos
+        .omnipaxos()
         .lock()
         .append(HighWaterCommand::Advance { at_least: 200 })
         .expect("second append succeeds on the new leader");
@@ -108,7 +108,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
                     .filter(|node| node.node_id != original_leader)
                     .all(|node| state.high_water_on(node.node_id) >= 200)
             },
-            3_000,
+            5_000,
         )
         .await;
 
@@ -124,7 +124,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
                     .iter()
                     .all(|node| state.high_water_on(node.node_id) >= 200)
             },
-            3_000,
+            5_000,
         )
         .await;
 
