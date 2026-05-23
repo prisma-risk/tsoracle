@@ -72,6 +72,24 @@ Per-driver recipes:
 - **etcd:** transactional update: read current value, compare-and-swap with `max(current, at_least)`. The lease + revision number gives you epoch fencing.
 - **Single-node:** read current value under a mutex, take max, write the record atomically (write-then-rename + dir fsync), return.
 
+## Choosing a driver
+
+Three driver crates ship in this repo, all on the same `ConsensusDriver` trait. They answer different operational questions.
+
+| Driver | HA | Persistence durability | Partial-connectivity behavior |
+| --- | --- | --- | --- |
+| [`tsoracle-driver-file`](https://github.com/prisma-risk/tsoracle/tree/main/crates/tsoracle-driver-file) | No — single process, single binary. | File-backed; an `fsync` is taken on every high-water advance. | N/A (single node). |
+| [`tsoracle-driver-openraft`](https://github.com/prisma-risk/tsoracle/tree/main/crates/tsoracle-driver-openraft) | Yes — raft quorum (majority of N must be reachable). | Replicated log + state machine; durability tracks the replication factor. | Standard raft: any cut that leaves the leader without majority forces a re-election. Asymmetric partial connectivity can churn leadership repeatedly. |
+| [`tsoracle-driver-paxos`](https://github.com/prisma-risk/tsoracle/tree/main/crates/tsoracle-driver-paxos) | Yes — paxos quorum (majority of N). | Same replicated-log shape as openraft. | OmniPaxos's BLE election is more tolerant of asymmetric reachability — a leader still able to talk to some peers may retain leadership where a raft leader would step down. |
+
+**Pick the file driver** for single-node demos, embedded use, or when an outage of the timestamp oracle is acceptable. It's the slowest of the three under load (fsync-per-advance) but has zero operational overhead — no cluster to deploy.
+
+**Pick the openraft driver** when you need HA and your failure model is full partitions or process death. It's the most thoroughly exercised path in the existing examples and benchmarks; the worked example below documents the trait wiring.
+
+**Pick the paxos driver** when you need HA and your operational environment is prone to asymmetric reachability (cross-AZ links that drop one direction, half-broken NICs, byzantine middleboxes). OmniPaxos's BLE pays a small steady-state cost for richer election logic but degrades more gracefully under conditions that would churn a raft leader.
+
+All three drivers are interchangeable from the server's perspective — `tsoracle-server` accepts any `ConsensusDriver` impl, so swapping is a one-line change in your binary.
+
 ## Worked example: openraft
 
 The canonical openraft integration ships in [`tsoracle-driver-openraft`](https://github.com/prisma-risk/tsoracle/tree/main/crates/tsoracle-driver-openraft). The crate provides `OpenraftDriver` (the generic `ConsensusDriver` bridge), `HighWaterStateMachine` (the state machine + postcard snapshot codec, with a pluggable `SnapshotStore` for persistence — an in-memory default plus an optional `RocksdbSnapshotStore` behind the `rocksdb-snapshot-store` feature), and the `OpenraftHighWaterHost` trait — the integration boundary.

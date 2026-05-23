@@ -10,13 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! Reusable OmniPaxos glue for tsoracle's paxos driver.
-//!
-//! This crate provides a RocksDB-backed [`omnipaxos::storage::Storage`] impl,
-//! lifecycle helpers, the `declare_omnipaxos_types_ext!` macro, and in-memory
-//! test fakes. The paxos driver crate consumes this crate; this crate itself
-//! does not depend on the driver.
-
+#![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 

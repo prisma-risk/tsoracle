@@ -10,15 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! OmniPaxos-backed `ConsensusDriver` for tsoracle.
-//!
-//! This crate replicates the TSO high-water mark across an OmniPaxos cluster
-//! and exposes the result via the [`tsoracle_consensus::ConsensusDriver`]
-//! trait. The caller supplies a pre-built host (typically [`StandaloneHost`]
-//! once it lands) that owns the OmniPaxos handle, the storage, and the
-//! tick task; this crate provides the log-entry type, the `Epoch ↔ Ballot`
-//! encoding, the `PaxosHighWaterHost` trait, and the trait bridge.
-
+#![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
