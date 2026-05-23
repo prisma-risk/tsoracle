@@ -208,7 +208,27 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
             }
         }
         TopologyKind::Paxos => {
-            anyhow::bail!("paxos topology not yet implemented");
+            let topo = server_rt.block_on(crate::topology::paxos::PaxosTopology::spawn(
+                cfg.nodes, grace,
+            ))?;
+            let endpoints = topo.controller.endpoints();
+            // `PaxosTopology` returns one server `JoinHandle<()>` per node;
+            // same adapter shape as `RaftTopology` above — see its comment.
+            let mut handles = topo.server_handles.into_iter();
+            let first = handles
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("paxos topology returned zero server handles"))?;
+            for extra in handles {
+                server_rt.spawn(async move {
+                    let _ = extra.await;
+                });
+            }
+            let server_handle: tokio::task::JoinHandle<Result<(), tsoracle_server::ServerError>> =
+                server_rt.spawn(async move {
+                    let _ = first.await;
+                    Ok(())
+                });
+            (Box::new(topo.controller), endpoints, server_handle)
         }
     };
 
