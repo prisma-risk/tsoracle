@@ -201,3 +201,327 @@ mod tests {
         assert_eq!(state.high_water(), 42);
     }
 }
+
+#[cfg(test)]
+mod drain_tests {
+    //! Coverage for `drain_decided_into` and `maybe_snapshot`.
+    //!
+    //! Boots a 3-node OmniPaxos cluster wired through the toolkit's
+    //! `MemNetwork` + `MemStorage`, drives ticks until consensus is
+    //! reached on a set of `HighWaterCommand` entries, then exercises
+    //! the apply pipeline against the leader's `OmniPaxos` handle.
+
+    use super::*;
+    use crate::log_entry::HighWaterCommand;
+    use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
+    use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
+
+    struct ClusterNode {
+        id: u64,
+        omnipaxos: Arc<Mutex<OmniPaxos<HighWaterCommand, MemStorage<HighWaterCommand>>>>,
+        inbox: mpsc::Receiver<omnipaxos::messages::Message<HighWaterCommand>>,
+    }
+
+    struct Cluster {
+        nodes: Vec<ClusterNode>,
+        network: Arc<MemNetwork<HighWaterCommand>>,
+    }
+
+    fn build_cluster(node_count: usize) -> Cluster {
+        let network: Arc<MemNetwork<HighWaterCommand>> = Arc::new(MemNetwork::new());
+        let node_ids: Vec<u64> = (1..=node_count as u64).collect();
+        let cluster_config = ClusterConfig {
+            configuration_id: 1,
+            nodes: node_ids.clone(),
+            flexible_quorum: None,
+        };
+
+        let mut nodes = Vec::with_capacity(node_count);
+        for &node_id in &node_ids {
+            let server_config = ServerConfig {
+                pid: node_id,
+                election_tick_timeout: 5,
+                resend_message_tick_timeout: 5,
+                ..Default::default()
+            };
+            let storage = MemStorage::<HighWaterCommand>::new();
+            let config = OmniPaxosConfig {
+                cluster_config: cluster_config.clone(),
+                server_config,
+            };
+            let omnipaxos = config.build(storage).expect("build omnipaxos");
+            let inbox = network.register(node_id);
+            nodes.push(ClusterNode {
+                id: node_id,
+                omnipaxos: Arc::new(Mutex::new(omnipaxos)),
+                inbox,
+            });
+        }
+        Cluster { nodes, network }
+    }
+
+    async fn drive_until<F>(cluster: &mut Cluster, mut predicate: F, max_ticks: usize)
+    where
+        F: FnMut(&Cluster) -> bool,
+    {
+        for _ in 0..max_ticks {
+            for node in &cluster.nodes {
+                let outgoing = {
+                    let mut handle = node.omnipaxos.lock();
+                    handle.tick();
+                    handle.outgoing_messages()
+                };
+                for message in outgoing {
+                    cluster.network.deliver(message).await;
+                }
+            }
+            for node in &mut cluster.nodes {
+                while let Ok(message) = node.inbox.try_recv() {
+                    node.omnipaxos.lock().handle_incoming(message);
+                }
+            }
+            if predicate(cluster) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("predicate did not become true within {max_ticks} ticks");
+    }
+
+    async fn drive_to_leader_election(cluster: &mut Cluster) {
+        drive_until(
+            cluster,
+            |state| {
+                state
+                    .nodes
+                    .iter()
+                    .any(|node| node.omnipaxos.lock().get_current_leader().is_some())
+            },
+            500,
+        )
+        .await;
+    }
+
+    fn leader_handle(
+        cluster: &Cluster,
+    ) -> Arc<Mutex<OmniPaxos<HighWaterCommand, MemStorage<HighWaterCommand>>>> {
+        let leader_id = cluster
+            .nodes
+            .iter()
+            .find_map(|node| node.omnipaxos.lock().get_current_leader())
+            .expect("leader has been elected");
+        cluster
+            .nodes
+            .iter()
+            .find(|node| node.id == leader_id)
+            .expect("leader present in topology")
+            .omnipaxos
+            .clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drain_advances_high_water_when_advance_decides() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+
+        leader_handle(&cluster)
+            .lock()
+            .append(HighWaterCommand::Advance { at_least: 42 })
+            .expect("append succeeds on leader");
+
+        drive_until(
+            &mut cluster,
+            |state| {
+                state
+                    .nodes
+                    .iter()
+                    .all(|node| node.omnipaxos.lock().get_decided_idx() >= 1)
+            },
+            500,
+        )
+        .await;
+
+        let state = ApplyState::new();
+        let mut cursor = 0u64;
+        let new_decided = drain_decided_into(&leader_handle(&cluster), &mut cursor, &state);
+
+        assert!(new_decided >= 1);
+        assert_eq!(state.high_water(), 42);
+        assert_eq!(cursor, new_decided);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drain_keeps_max_across_multiple_advances() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+
+        {
+            let leader = leader_handle(&cluster);
+            let mut handle = leader.lock();
+            handle
+                .append(HighWaterCommand::Advance { at_least: 10 })
+                .expect("append");
+            handle
+                .append(HighWaterCommand::Advance { at_least: 50 })
+                .expect("append");
+            handle
+                .append(HighWaterCommand::Advance { at_least: 30 })
+                .expect("append");
+        }
+
+        drive_until(
+            &mut cluster,
+            |state| {
+                state
+                    .nodes
+                    .iter()
+                    .all(|node| node.omnipaxos.lock().get_decided_idx() >= 3)
+            },
+            500,
+        )
+        .await;
+
+        let state = ApplyState::new();
+        let mut cursor = 0u64;
+        drain_decided_into(&leader_handle(&cluster), &mut cursor, &state);
+
+        assert_eq!(
+            state.high_water(),
+            50,
+            "max-across-advances is the contract"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drain_ignores_barrier_entries() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+
+        {
+            let leader = leader_handle(&cluster);
+            let mut handle = leader.lock();
+            handle
+                .append(HighWaterCommand::Advance { at_least: 17 })
+                .expect("append");
+            handle.append(HighWaterCommand::Barrier).expect("append");
+        }
+
+        drive_until(
+            &mut cluster,
+            |state| {
+                state
+                    .nodes
+                    .iter()
+                    .all(|node| node.omnipaxos.lock().get_decided_idx() >= 2)
+            },
+            500,
+        )
+        .await;
+
+        let state = ApplyState::new();
+        let mut cursor = 0u64;
+        drain_decided_into(&leader_handle(&cluster), &mut cursor, &state);
+
+        assert_eq!(state.high_water(), 17, "Barrier must not lower or zero out");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drain_with_no_new_decided_is_noop() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+
+        let state = ApplyState::new();
+        state.high_water.store(99, Ordering::SeqCst);
+        let mut cursor = 0u64;
+        let returned = drain_decided_into(&leader_handle(&cluster), &mut cursor, &state);
+
+        assert_eq!(returned, 0);
+        assert_eq!(cursor, 0);
+        assert_eq!(state.high_water(), 99, "unchanged when nothing decided");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drain_advances_cursor_so_repeat_calls_skip_already_applied() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+
+        leader_handle(&cluster)
+            .lock()
+            .append(HighWaterCommand::Advance { at_least: 7 })
+            .expect("append");
+
+        drive_until(
+            &mut cluster,
+            |state| {
+                state
+                    .nodes
+                    .iter()
+                    .all(|node| node.omnipaxos.lock().get_decided_idx() >= 1)
+            },
+            500,
+        )
+        .await;
+
+        let state = ApplyState::new();
+        let mut cursor = 0u64;
+        let first = drain_decided_into(&leader_handle(&cluster), &mut cursor, &state);
+        assert_eq!(state.high_water(), 7);
+
+        // Lower the atomic to a sentinel; if the second drain re-applied
+        // the same entry it would bump us back to 7.
+        state.high_water.store(3, Ordering::SeqCst);
+        let second = drain_decided_into(&leader_handle(&cluster), &mut cursor, &state);
+
+        assert_eq!(first, second, "no new decisions between calls");
+        assert_eq!(
+            state.high_water(),
+            3,
+            "the second drain must NOT re-apply already-cursored entries",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn maybe_snapshot_advances_policy_state() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+
+        leader_handle(&cluster)
+            .lock()
+            .append(HighWaterCommand::Advance { at_least: 1 })
+            .expect("append");
+
+        drive_until(
+            &mut cluster,
+            |state| {
+                state
+                    .nodes
+                    .iter()
+                    .all(|node| node.omnipaxos.lock().get_decided_idx() >= 1)
+            },
+            500,
+        )
+        .await;
+
+        let mut policy = SnapshotPolicy::every(1);
+        maybe_snapshot(&leader_handle(&cluster), &mut policy, 1);
+        assert!(
+            !policy.should_snapshot(1),
+            "policy's last_snapshot_at must have advanced past the trigger",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn maybe_snapshot_is_noop_when_policy_disabled() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+
+        // No appends; decided_idx stays 0. Disabled policy must skip the
+        // snapshot call path entirely.
+        let mut policy = SnapshotPolicy::disabled();
+        maybe_snapshot(&leader_handle(&cluster), &mut policy, 0);
+        assert!(!policy.should_snapshot(u64::MAX));
+    }
+}
