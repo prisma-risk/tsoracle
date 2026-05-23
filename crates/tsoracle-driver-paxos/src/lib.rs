@@ -30,6 +30,7 @@ pub mod standalone;
 pub mod state_machine;
 pub mod type_config;
 
+pub use driver::PaxosDriver;
 pub use log_entry::{HighWaterCommand, HighWaterSnapshot};
 pub use snapshot_policy::SnapshotPolicy;
 pub use standalone::{BuilderError, StandaloneHost, StandaloneHostBuilder};
