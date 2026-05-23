@@ -158,6 +158,11 @@ where
         use crate::storage::key_space::{LOG_PREFIX, log_key_range, parse_log_key};
         use rocksdb::IteratorMode;
 
+        // The next absolute write index must satisfy
+        // `next >= compacted_idx`; otherwise a snapshot that trims every
+        // surviving log key would let a fresh append land at L/0 and
+        // become unreachable via get_suffix(compacted_idx).
+        let compacted = self.compacted_idx_inner()?;
         let cf = self.cf()?;
         let (_, upper) = log_key_range();
         let iter = self
@@ -169,10 +174,20 @@ where
                 let idx = parse_log_key(&key).ok_or_else(|| {
                     StorageError::LogIntegrity(format!("malformed log key: {key:?}"))
                 })?;
-                return Ok(idx + 1);
+                return Ok((idx + 1).max(compacted));
             }
         }
-        Ok(0)
+        Ok(compacted)
+    }
+
+    fn compacted_idx_inner(&self) -> Result<u64, StorageError> {
+        use crate::storage::key_space::meta_compacted_idx_key;
+        use crate::storage::meta::decode_u64;
+        let cf = self.cf()?;
+        match self.db.get_cf(&cf, meta_compacted_idx_key())? {
+            Some(bytes) => Ok(decode_u64(&bytes)?),
+            None => Ok(0),
+        }
     }
 
     fn store_log_entry(
@@ -457,17 +472,7 @@ where
     }
 
     fn get_compacted_idx(&self) -> omnipaxos::storage::StorageResult<u64> {
-        use crate::storage::key_space::meta_compacted_idx_key;
-        use crate::storage::meta::decode_u64;
-        let cf = self.cf().map_err(box_err)?;
-        match self
-            .db
-            .get_cf(&cf, meta_compacted_idx_key())
-            .map_err(box_err)?
-        {
-            Some(bytes) => Ok(decode_u64(&bytes).map_err(box_err)?),
-            None => Ok(0),
-        }
+        self.compacted_idx_inner().map_err(box_err)
     }
 
     fn set_snapshot(
@@ -792,6 +797,95 @@ mod decided_compacted_tests {
         assert_eq!(suffix[0].value, 3);
         // Physical remaining = next_abs (4) - compacted (2) = 2.
         assert_eq!(storage.get_log_len().unwrap(), 2);
+    }
+
+    #[test]
+    fn append_after_full_trim_writes_at_compacted_idx() {
+        // After a snapshot trims every physical log key, the next append
+        // must continue at the absolute index `compacted_idx`, not reset
+        // to 0. Otherwise OmniPaxos's in-memory accepted_idx diverges
+        // from the on-disk key space and the entry becomes unreadable
+        // via get_suffix/get_entries.
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage
+            .append_entries(vec![
+                TestEntry { value: 1 },
+                TestEntry { value: 2 },
+                TestEntry { value: 3 },
+                TestEntry { value: 4 },
+            ])
+            .unwrap();
+        storage.trim(4).unwrap();
+        storage.set_compacted_idx(4).unwrap();
+
+        let new_len = storage.append_entry(TestEntry { value: 99 }).unwrap();
+        // physical remaining = (compacted + 1) - compacted = 1
+        assert_eq!(new_len, 1);
+        assert_eq!(storage.get_log_len().unwrap(), 1);
+
+        let suffix = storage.get_suffix(4).unwrap();
+        assert_eq!(suffix.len(), 1, "entry must be reachable at absolute idx 4");
+        assert_eq!(suffix[0].value, 99);
+
+        let range = storage.get_entries(4, 5).unwrap();
+        assert_eq!(range.len(), 1);
+        assert_eq!(range[0].value, 99);
+
+        // The phantom-write bug stored the entry at L/0 even though
+        // compacted_idx is 4, so a get_suffix(0) would surface it.
+        // The fix means the entry lives at L/4, so get_suffix(0)
+        // returns exactly the same single entry (no phantom at L/0).
+        let from_zero = storage.get_suffix(0).unwrap();
+        assert_eq!(from_zero.len(), 1);
+    }
+
+    #[test]
+    fn append_after_full_trim_survives_reopen() {
+        // Crash-recovery shape: after full compaction + append, drop the
+        // storage and reopen on the same path. The persisted entry must
+        // still live at the correct absolute index, and the next append
+        // must continue from there.
+        use super::open_in_tests::open_db;
+        use crate::storage::RocksdbStorage;
+
+        let dir = TempDir::new().unwrap();
+        {
+            let db = open_db(&dir, "tso_paxos");
+            let mut storage: RocksdbStorage<TestEntry> =
+                RocksdbStorage::open_in(db.clone(), "tso_paxos").unwrap();
+            storage
+                .append_entries(vec![
+                    TestEntry { value: 10 },
+                    TestEntry { value: 20 },
+                    TestEntry { value: 30 },
+                ])
+                .unwrap();
+            storage.trim(3).unwrap();
+            storage.set_compacted_idx(3).unwrap();
+            storage.append_entry(TestEntry { value: 77 }).unwrap();
+            drop(storage);
+            drop(db);
+        }
+
+        let db = open_db(&dir, "tso_paxos");
+        let mut storage: RocksdbStorage<TestEntry> =
+            RocksdbStorage::open_in(db, "tso_paxos").unwrap();
+        assert_eq!(storage.get_compacted_idx().unwrap(), 3);
+        let recovered = storage.get_suffix(3).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].value, 77);
+
+        let next_len = storage.append_entry(TestEntry { value: 88 }).unwrap();
+        assert_eq!(next_len, 2);
+        let recovered = storage.get_suffix(3).unwrap();
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(recovered[0].value, 77);
+        assert_eq!(recovered[1].value, 88);
+        // The new entry must land at absolute idx 4, not L/1.
+        let single = storage.get_entries(4, 5).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].value, 88);
     }
 }
 
