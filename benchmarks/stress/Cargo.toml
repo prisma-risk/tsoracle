@@ -14,7 +14,11 @@ publish = false
 default = []
 # Enables in-process failpoint chaos in mem/raft topologies. When off,
 # `arm_failpoint`/`disarm_failpoint` log a warning and return Skipped.
-stress-failpoints = ["dep:fail", "tsoracle-server/failpoints"]
+stress-failpoints = [
+    "dep:fail",
+    "tsoracle-server/failpoints",
+    "tsoracle-paxos-toolkit/failpoints",
+]
 
 [dependencies]
 anyhow             = { workspace = true }
@@ -23,8 +27,9 @@ clap               = { workspace = true, features = ["derive"] }
 hdrhistogram       = { workspace = true }
 humantime          = { workspace = true }
 humantime-serde    = { workspace = true }
+omnipaxos          = { workspace = true, features = ["serde"] }
 openraft           = { workspace = true }
-parking_lot       = { workspace = true }
+parking_lot        = { workspace = true }
 rand               = { workspace = true }
 rocksdb            = { workspace = true }
 serde              = { workspace = true, features = ["derive"] }
@@ -35,12 +40,14 @@ tonic              = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-tsoracle-openraft-toolkit         = { path = "../../crates/tsoracle-openraft-toolkit", version = "0.1.3", features = ["test-fakes"] }
-tsoracle-server    = { path = "../../crates/tsoracle-server", version = "0.1.3", features = ["test-fakes"] }
-tsoracle-client    = { path = "../../crates/tsoracle-client", version = "0.1.3" }
-tsoracle-core      = { path = "../../crates/tsoracle-core", version = "0.1.3" }
-tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.3" }
+tsoracle-client          = { path = "../../crates/tsoracle-client", version = "0.1.3" }
+tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.3" }
+tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.1.3" }
 tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.1.3" }
+tsoracle-driver-paxos    = { path = "../../crates/tsoracle-driver-paxos", version = "0.1.4" }
+tsoracle-openraft-toolkit = { path = "../../crates/tsoracle-openraft-toolkit", version = "0.1.3", features = ["test-fakes"] }
+tsoracle-paxos-toolkit   = { path = "../../crates/tsoracle-paxos-toolkit", version = "0.1.4", features = ["rocksdb-storage"] }
+tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.1.3", features = ["test-fakes"] }
 
 fail = { workspace = true, optional = true }
 
