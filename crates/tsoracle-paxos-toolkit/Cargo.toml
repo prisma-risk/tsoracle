@@ -50,3 +50,33 @@ tokio              = { workspace = true, features = ["macros", "rt-multi-thread"
 name              = "failpoints"
 path              = "tests/failpoints.rs"
 required-features = ["failpoints", "rocksdb-storage"]
+
+[[test]]
+name              = "_smoke"
+path              = "tests/_smoke.rs"
+required-features = ["test-fakes"]
+
+[[test]]
+name              = "lifecycle"
+path              = "tests/lifecycle.rs"
+required-features = ["test-fakes"]
+
+[[test]]
+name              = "macro_smoke"
+path              = "tests/macro_smoke.rs"
+required-features = ["test-fakes"]
+
+[[test]]
+name              = "mem_network_negative"
+path              = "tests/mem_network_negative.rs"
+required-features = ["test-fakes"]
+
+[[test]]
+name              = "mem_network_smoke"
+path              = "tests/mem_network_smoke.rs"
+required-features = ["test-fakes"]
+
+[[test]]
+name              = "storage_conformance"
+path              = "tests/storage_conformance.rs"
+required-features = ["test-fakes", "rocksdb-storage"]
