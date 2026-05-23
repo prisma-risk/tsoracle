@@ -50,7 +50,18 @@ where
     apply_state: ApplyState,
     leader_stream: Mutex<Option<LeaderEventStream>>,
     apply_handle: Mutex<Option<JoinHandle<()>>>,
-    apply_shutdown: Arc<Notify>,
+    /// Shutdown handle for the *currently running* apply task, installed by
+    /// `start` and taken by `stop`. `None` whenever no apply task is live.
+    ///
+    /// Each `start` mints a fresh `Notify` rather than reusing one across the
+    /// host's lifetime. `stop` signals shutdown with `notify_one`, which
+    /// stores a permit when no task is parked on `notified()`; a reused
+    /// `Notify` would carry such a stale permit into the next `start`, where
+    /// the newly spawned apply task would consume it and exit immediately. A
+    /// per-`start` `Notify` confines every permit to the task it was minted
+    /// for, and the `Option` lets `stop` skip signalling entirely when no
+    /// task is running (stop-before-start, double-stop, stop-after-exit).
+    apply_shutdown: Mutex<Option<Arc<Notify>>>,
     policy: Arc<Mutex<SnapshotPolicy>>,
 }
 
@@ -101,7 +112,7 @@ where
             apply_state,
             leader_stream: Mutex::new(leader_stream),
             apply_handle: Mutex::new(None),
-            apply_shutdown: Arc::new(Notify::new()),
+            apply_shutdown: Mutex::new(None),
             policy: Arc::new(Mutex::new(policy)),
         }
     }
@@ -138,7 +149,11 @@ where
         let apply_notify = self.runner.apply_notify();
         let apply_state = self.apply_state.clone();
         let policy = self.policy.clone();
-        let shutdown = self.apply_shutdown.clone();
+        // Mint a fresh shutdown Notify for this apply task and publish it for
+        // stop(). A per-start Notify cannot carry a stale permit from an
+        // earlier stop() into this task's select! loop.
+        let shutdown = Arc::new(Notify::new());
+        *self.apply_shutdown.lock() = Some(shutdown.clone());
 
         let handle = tokio::spawn(async move {
             let mut cursor: u64 = 0;
@@ -169,10 +184,16 @@ where
     /// apply task. Surfaces a `tracing::warn!` if the apply task
     /// terminated abnormally.
     pub async fn stop(&mut self) {
-        // notify_one stores a permit; notify_waiters would be lost if the
-        // apply task is mid-drain when stop() fires, livelocking against
-        // the runner's per-tick apply_notify.
-        self.apply_shutdown.notify_one();
+        // Signal only the apply task that start() installed. notify_one (not
+        // notify_waiters) is required because the apply task may be mid-drain
+        // rather than parked on notified() when stop() fires; the stored
+        // permit is consumed on its next select! turn instead of being lost
+        // and livelocking against the runner's per-tick apply_notify. Taking
+        // the Option means a stop() with no running task signals nothing, so
+        // no permit can survive to poison a later start().
+        if let Some(shutdown) = self.apply_shutdown.lock().take() {
+            shutdown.notify_one();
+        }
         let handle = self.apply_handle.lock().take();
         if let Some(handle) = handle {
             if let Err(err) = handle.await {
