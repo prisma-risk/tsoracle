@@ -75,7 +75,8 @@ async fn returns_not_leader_with_hint() {
         matches!(
             s,
             ServingState::NotServing {
-                leader_endpoint: Some(_)
+                leader_endpoint: Some(_),
+                ..
             }
         )
     })

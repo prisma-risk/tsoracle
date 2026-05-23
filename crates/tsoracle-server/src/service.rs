@@ -26,7 +26,9 @@ use crate::server::{Server, ServingState};
 /// service-layer code path; matches what the fast NOT_LEADER gate emits.
 fn leader_hint_from(server: &Server) -> LeaderHint {
     let endpoint = match server.state_rx.borrow().clone() {
-        ServingState::NotServing { leader_endpoint } => leader_endpoint,
+        ServingState::NotServing {
+            leader_endpoint, ..
+        } => leader_endpoint,
         ServingState::Serving => None,
     };
     LeaderHint {
@@ -69,7 +71,9 @@ impl TsoService for TsoServiceImpl {
         }
 
         // Fast NOT_LEADER gate.
-        if let ServingState::NotServing { leader_endpoint } = self.server.state_rx.borrow().clone()
+        if let ServingState::NotServing {
+            leader_endpoint, ..
+        } = self.server.state_rx.borrow().clone()
         {
             return Err(not_leader_status(LeaderHint {
                 leader_endpoint,
@@ -276,6 +280,7 @@ mod tests {
             .unwrap();
         let _ = server.state_tx.send(ServingState::NotServing {
             leader_endpoint: Some("http://other-node:9000".into()),
+            leader_epoch: None,
         });
         let hint = leader_hint_from(&server);
         assert_eq!(

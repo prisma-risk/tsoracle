@@ -57,6 +57,15 @@ impl InMemoryDriver {
         });
     }
 
+    /// Emit a `Follower` transition carrying both the leader endpoint hint and
+    /// the leader's epoch, so tests can exercise epoch propagation.
+    pub fn become_follower_with_epoch(&self, hint: Option<String>, epoch: Option<Epoch>) {
+        let _ = self.tx.send(LeaderState::Follower {
+            leader_endpoint: hint,
+            leader_epoch: epoch,
+        });
+    }
+
     pub fn current_high_water(&self) -> u64 {
         *self.state.lock()
     }
