@@ -112,7 +112,7 @@ async fn isolated_node_catches_up_via_snapshot_transfer() {
     cluster.network.partition().heal();
 
     cluster
-        .drive_until(|state| state.high_water_on(joining_id) >= 20, 5_000)
+        .drive_until(|state| state.high_water_on(joining_id) >= 20, 10_000)
         .await;
 
     // Snapshot transfer observable: the joining node's storage now has

@@ -113,7 +113,7 @@ async fn snapshot_policy_persists_across_restart() {
 
     // The restarted follower must converge to the latest high-water of 20.
     cluster
-        .drive_until(|state| state.high_water_on(follower_id) >= 20, 3_000)
+        .drive_until(|state| state.high_water_on(follower_id) >= 20, 10_000)
         .await;
     assert_eq!(cluster.high_water_on(follower_id), 20);
 

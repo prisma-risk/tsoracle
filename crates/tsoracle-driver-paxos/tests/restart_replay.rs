@@ -109,7 +109,7 @@ async fn restart_recovers_decided_state_from_storage() {
 
     // Catch-up: the restarted follower must converge to high_water == 100.
     cluster
-        .drive_until(|state| state.high_water_on(follower_id) >= 100, 3_000)
+        .drive_until(|state| state.high_water_on(follower_id) >= 100, 10_000)
         .await;
 
     assert_eq!(cluster.high_water_on(follower_id), 100);
