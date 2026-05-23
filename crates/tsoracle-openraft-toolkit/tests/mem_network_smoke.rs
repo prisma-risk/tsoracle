@@ -262,3 +262,130 @@ async fn three_node_mem_network_elects_and_replicates() {
     .await
     .expect("all nodes converged to value=42 within 5s");
 }
+
+/// Leader transfer must actually move leadership to the requested target.
+///
+/// `Raft::trigger().transfer_leader(to)` broadcasts a `TransferLeaderRequest`
+/// over the network's `transfer_leader` RPC; the receiver hands it to
+/// `Raft::handle_transfer_leader`, which disables the leader lease and makes the
+/// target campaign. Before this RPC was implemented on `MemNetwork`, the
+/// broadcast was dropped ("transfer_leader not implemented") and leadership only
+/// moved incidentally (if an automatic election timer happened to re-elect the
+/// target). This test pins that the RPC now delivers and the chosen target takes
+/// over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transfer_leader_moves_leadership_to_target() {
+    use rocksdb::{ColumnFamilyDescriptor, DB, Options};
+    use tempfile::TempDir;
+    use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
+
+    let net = MemNetwork::<SmokeConfig>::new();
+    let cfg = Arc::new(
+        Config {
+            heartbeat_interval: 50,
+            election_timeout_min: 150,
+            election_timeout_max: 300,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap(),
+    );
+
+    let mut nodes: Vec<(
+        u64,
+        Raft<SmokeConfig, SmokeStateMachine>,
+        SmokeStateMachine,
+        TempDir,
+    )> = Vec::new();
+
+    for id in [1u64, 2, 3] {
+        let dir = TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let cfs = vec![
+            ColumnFamilyDescriptor::new("raft_log", Options::default()),
+            ColumnFamilyDescriptor::new("raft_meta", Options::default()),
+        ];
+        let db = Arc::new(DB::open_cf_descriptors(&opts, dir.path(), cfs).unwrap());
+        let log: RocksdbLogStore<SmokeConfig, Flat> =
+            RocksdbLogStore::open(db, "raft_log", "raft_meta", Flat).unwrap();
+        let sm = SmokeStateMachine::new();
+        let raft = Raft::new(id, cfg.clone(), net.factory_for(id), log, sm.clone())
+            .await
+            .expect("Raft::new");
+        net.register(id, raft.clone());
+        nodes.push((id, raft, sm, dir));
+    }
+
+    let mut mem = BTreeMap::new();
+    for id in [1u64, 2, 3] {
+        mem.insert(id, SmokeNode);
+    }
+    nodes[0].1.initialize(mem).await.expect("initialize");
+
+    let current_leader = timeout(Duration::from_secs(10), async {
+        loop {
+            for (id, raft, _, _) in nodes.iter() {
+                if raft.current_leader().await == Some(*id) {
+                    return *id;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a leader elected within 10s");
+
+    // A committed write so followers' logs are caught up to the leader (a behind
+    // target would lose its forced election on log-freshness).
+    let leader_idx = nodes
+        .iter()
+        .position(|(id, _, _, _)| *id == current_leader)
+        .unwrap();
+    nodes[leader_idx]
+        .1
+        .client_write(SmokeCmd(7))
+        .await
+        .expect("client_write");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if nodes.iter().all(|(_, _, sm, _)| sm.value() == 7) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("write replicated within 5s");
+
+    // Transfer to a node that is not the current leader.
+    let target = nodes
+        .iter()
+        .map(|(id, _, _, _)| *id)
+        .find(|id| *id != current_leader)
+        .expect("a non-leader target exists");
+    nodes[leader_idx]
+        .1
+        .trigger()
+        .transfer_leader(target)
+        .await
+        .expect("trigger transfer_leader");
+
+    // The target must take over leadership. Without the network RPC this would
+    // time out (or pass only by lucky re-election).
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let (_, target_raft, _, _) = nodes
+                .iter()
+                .find(|(id, _, _, _)| *id == target)
+                .expect("target node present");
+            if target_raft.current_leader().await == Some(target) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("leadership did not transfer to target {target} within 10s"));
+}
