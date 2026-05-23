@@ -1,0 +1,41 @@
+[package]
+name                   = "example-paxos-standalone"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description            = "tsoracle example: HA via OmniPaxos, 3-node multi-process cluster (uses tsoracle-driver-paxos)"
+publish                = false
+
+[[bin]]
+name = "paxos-standalone"
+path = "src/main.rs"
+
+[features]
+default    = []
+reflection = ["tsoracle-server/reflection"]
+
+[dependencies]
+tsoracle-core          = { path = "../../crates/tsoracle-core", version = "0.1.3" }
+tsoracle-consensus     = { path = "../../crates/tsoracle-consensus", version = "0.1.3" }
+tsoracle-server        = { path = "../../crates/tsoracle-server", version = "0.1.3" }
+tsoracle-driver-paxos  = { path = "../../crates/tsoracle-driver-paxos", version = "0.1.4" }
+tsoracle-paxos-toolkit = { path = "../../crates/tsoracle-paxos-toolkit", version = "0.1.4", features = ["rocksdb-storage"] }
+
+omnipaxos          = { workspace = true, features = ["serde"] }
+rocksdb            = { workspace = true }
+tonic              = { workspace = true }
+tonic-prost        = { workspace = true }
+prost              = { workspace = true }
+tokio              = { workspace = true, features = ["signal"] }
+async-trait        = { workspace = true }
+clap               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+postcard           = { workspace = true }
+parking_lot        = { workspace = true }
+anyhow             = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }

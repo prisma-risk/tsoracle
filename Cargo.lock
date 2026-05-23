@@ -845,6 +845,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-paxos-standalone"
+version = "0.1.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "omnipaxos",
+ "parking_lot",
+ "postcard",
+ "prost",
+ "rocksdb",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "tracing-subscriber",
+ "tsoracle-consensus",
+ "tsoracle-core",
+ "tsoracle-driver-paxos",
+ "tsoracle-paxos-toolkit",
+ "tsoracle-server",
+]
+
+[[package]]
 name = "example-tls-mtls"
 version = "0.1.4"
 dependencies = [
