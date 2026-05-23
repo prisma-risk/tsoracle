@@ -1,0 +1,53 @@
+{
+    "nodes": ["L1", "A1", "A2", "A3", "L2"],
+    "duration": 10000,
+    "events": [
+        {"t": 0,    "type": "state",   "node": "L1", "state": "leader"},
+        {"t": 0,    "type": "state",   "node": "L2", "state": "acceptor"},
+        {"t": 0,    "type": "state",   "node": "A1", "state": "acceptor"},
+        {"t": 0,    "type": "state",   "node": "A2", "state": "acceptor"},
+        {"t": 0,    "type": "state",   "node": "A3", "state": "acceptor"},
+        {"t": 0,    "type": "ballot",  "ballot": 5},
+        {"t": 0,    "type": "node_value", "node": "A1", "value": "accepted (b=5, hwm=21)"},
+
+        {"t": 1000, "type": "state",   "node": "L1", "state": "down"},
+
+        {"t": 1600, "type": "state",   "node": "L2", "state": "proposer"},
+        {"t": 1700, "type": "ballot",  "ballot": 10},
+
+        {"t": 1800, "type": "message", "from": "L2", "to": "A1", "label": "prepare(b=10)"},
+        {"t": 1800, "type": "message", "from": "L2", "to": "A2", "label": "prepare(b=10)"},
+        {"t": 1800, "type": "message", "from": "L2", "to": "A3", "label": "prepare(b=10)"},
+
+        {"t": 2700, "type": "message", "from": "A1", "to": "L2", "label": "promise(b=10, last=(b=5, hwm=21))", "kind": "reply"},
+        {"t": 2700, "type": "message", "from": "A2", "to": "L2", "label": "promise(b=10, last=∅)", "kind": "reply"},
+        {"t": 2700, "type": "message", "from": "A3", "to": "L2", "label": "promise(b=10, last=∅)", "kind": "reply"},
+
+        {"t": 3600, "type": "node_value", "node": "A1", "value": "promised b=10"},
+        {"t": 3600, "type": "node_value", "node": "A2", "value": "promised b=10"},
+        {"t": 3600, "type": "node_value", "node": "A3", "value": "promised b=10"},
+
+        {"t": 5000, "type": "message", "from": "L2", "to": "A1", "label": "accept(b=10, v=hwm=21)"},
+        {"t": 5000, "type": "message", "from": "L2", "to": "A2", "label": "accept(b=10, v=hwm=21)"},
+        {"t": 5000, "type": "message", "from": "L2", "to": "A3", "label": "accept(b=10, v=hwm=21)"},
+
+        {"t": 5800, "type": "message", "from": "A1", "to": "L2", "label": "accepted(b=10)", "kind": "reply"},
+        {"t": 5800, "type": "message", "from": "A2", "to": "L2", "label": "accepted(b=10)", "kind": "reply"},
+        {"t": 5800, "type": "message", "from": "A3", "to": "L2", "label": "accepted(b=10)", "kind": "reply"},
+
+        {"t": 6600, "type": "node_value", "node": "A1", "value": "accepted (b=10, hwm=21)"},
+        {"t": 6600, "type": "node_value", "node": "A2", "value": "accepted (b=10, hwm=21)"},
+        {"t": 6600, "type": "node_value", "node": "A3", "value": "accepted (b=10, hwm=21)"},
+
+        {"t": 7600, "type": "state",   "node": "L2", "state": "leader"}
+    ],
+    "annotations": [
+        {"t": 0,    "text": "L1 is the Multi-Paxos leader at ballot b=5. It has proposed hwm=21, and so far only A1 has accepted. The value is not yet decided across a quorum."},
+        {"t": 1000, "text": "L1 fails. No more accepts are coming from it."},
+        {"t": 1700, "text": "L2 wakes up and runs prepare(b=10) — strictly higher than any ballot L1 ever used."},
+        {"t": 2700, "text": "Promises arrive. A1 reports its previously-accepted value (b=5, hwm=21). A2 and A3 have nothing to report."},
+        {"t": 5000, "text": "By Paxos's safety rule, L2 must propose hwm=21 — any value that might have been decided at an earlier ballot must be re-proposed at the new one. L2 sends accept(b=10, v=hwm=21)."},
+        {"t": 6600, "text": "Quorum acks. hwm=21 is now durably decided across the cluster. Whether L1 had committed it before failing or not, the cluster now agrees."},
+        {"t": 7600, "text": "L2 is the new distinguished leader. The high-water mark survived the handoff with no ambiguity — this is the safety property Paxos is famous for."}
+    ]
+}
