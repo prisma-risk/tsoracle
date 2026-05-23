@@ -301,11 +301,27 @@ impl PiggybackHost {
         state: HostState,
         my_node_id: u64,
     ) -> Self {
+        // Resume the barrier-nonce counter above any seq this node already
+        // used in a prior process lifetime. `barrier_seq` is process-local
+        // and resets to 0, but `applied_barriers` is durable (restored from
+        // decided-log replay + snapshot transfer). `current_high_water`
+        // waits for `applied_barrier_seq(self) >= minted_seq`; minting from 0
+        // would hand back a seq a recovered `(self, old_seq)` entry already
+        // satisfies, letting the read return before its own barrier is
+        // applied. Fold the recovered suffix to learn this node's highest
+        // durable seq and lift the counter above it. (This example's
+        // MemStorage discards state on restart, so the fold is a no-op here;
+        // it mirrors the StandaloneHost fix so the pattern stays correct if
+        // ported onto durable storage.) The apply pump re-drains from its
+        // own cursor; the fold is idempotent.
+        let mut recovery_cursor = 0u64;
+        drain_decided_into(&omnipaxos, &mut recovery_cursor, &state);
+        let recovered_seq = state.applied_barrier_seq(my_node_id);
         Self {
             omnipaxos,
             state,
             my_node_id,
-            barrier_seq: AtomicU64::new(0),
+            barrier_seq: AtomicU64::new(recovered_seq),
         }
     }
 }

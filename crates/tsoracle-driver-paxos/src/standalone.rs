@@ -73,12 +73,32 @@ where
     ) -> Self {
         let mut runner = PaxosRunner::new(omnipaxos.clone(), my_node_id, peers, tick_interval);
         let leader_stream = runner.take_leader_stream();
+
+        // Resume the barrier-nonce counter above any seq this node already
+        // used in a prior process lifetime. `barrier_seq` is process-local
+        // and resets to 0 on restart, but the `applied_barriers` ledger is
+        // durable — restored from decided-log replay and snapshot transfer.
+        // `current_high_water` waits for `applied_barrier_seq(self) >=
+        // minted_seq`; minting from 0 would hand back a seq a recovered
+        // `(self, old_seq)` entry already satisfies, letting the read return
+        // before its own barrier is applied and seeding the new leader's
+        // allocator below the prior ceiling. Folding the recovered decided
+        // suffix here learns this node's highest durable seq and lifts the
+        // counter above it, so a freshly minted seq can only be satisfied by
+        // this lifetime's own barrier. The apply task re-drains from its own
+        // cursor on start; the fold is idempotent (max over advances and
+        // per-node seqs), so seeding the shared state early is safe.
+        let apply_state = ApplyState::new();
+        let mut recovery_cursor = 0u64;
+        drain_decided_into(&omnipaxos, &mut recovery_cursor, &apply_state);
+        let recovered_seq = apply_state.applied_barrier_seq(my_node_id);
+
         Self {
             omnipaxos,
             my_node_id,
-            barrier_seq: AtomicU64::new(0),
+            barrier_seq: AtomicU64::new(recovered_seq),
             runner,
-            apply_state: ApplyState::new(),
+            apply_state,
             leader_stream: Mutex::new(leader_stream),
             apply_handle: Mutex::new(None),
             apply_shutdown: Arc::new(Notify::new()),
