@@ -32,10 +32,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use async_trait::async_trait;
 use omnipaxos::OmniPaxos;
 use parking_lot::Mutex;
+use rocksdb::{DB, Options};
 use tempfile::TempDir;
+use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_paxos_toolkit::storage::RocksdbStorage;
@@ -68,6 +71,65 @@ struct PaxosNode {
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     /// Keep the rocksdb tempdir alive for the node's lifetime.
     _storage_dir: TempDir,
+}
+
+#[allow(dead_code)]
+fn open_paxos_storage(dir: &std::path::Path) -> anyhow::Result<RocksdbStorage<HighWaterCommand>> {
+    let mut opts = Options::default();
+    opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
+    // RocksdbStorage uses a single column family; DB::open always registers
+    // the "default" CF, which is the one we target here.
+    let db = Arc::new(DB::open(&opts, dir).context("paxos topology: open rocksdb at storage dir")?);
+    RocksdbStorage::open_in(db, "default")
+        .map_err(|e| anyhow::anyhow!("paxos topology: open RocksdbStorage: {e:?}"))
+}
+
+/// Pluggable backend for the spawn-time I/O dependencies that production
+/// `PaxosTopology::spawn` cannot otherwise force into a failure mode.
+///
+/// Production code uses [`DefaultPaxosBackend`]; tests inject impls that
+/// fail at a chosen step to exercise the `?` propagation paths in
+/// `spawn_with`. The `id` parameter lets a test backend differentiate
+/// behavior per node (fail only on node 1, succeed on the rest, etc.).
+/// Production ignores it.
+#[async_trait]
+pub trait PaxosBackend: Send + Sync {
+    /// Allocate a fresh, writable directory for node `id`'s rocksdb storage
+    /// and open the store on it. The returned `TempDir` must be kept alive
+    /// for the node's lifetime; dropping it deletes the directory and
+    /// invalidates the storage.
+    async fn prepare_node_storage(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<(TempDir, RocksdbStorage<HighWaterCommand>)>;
+
+    /// Bind the loopback listener that node `id`'s tsoracle server will
+    /// serve from. Production uses `127.0.0.1:0`.
+    async fn bind_loopback(&self, id: u64) -> anyhow::Result<TcpListener>;
+}
+
+/// Production [`PaxosBackend`]: real `tempfile::TempDir`, real
+/// `RocksdbStorage`, real `TcpListener::bind("127.0.0.1:0")`.
+pub struct DefaultPaxosBackend;
+
+#[async_trait]
+impl PaxosBackend for DefaultPaxosBackend {
+    async fn prepare_node_storage(
+        &self,
+        _id: u64,
+    ) -> anyhow::Result<(TempDir, RocksdbStorage<HighWaterCommand>)> {
+        let dir = TempDir::new().context("paxos topology: create tempdir")?;
+        let storage = open_paxos_storage(dir.path())
+            .with_context(|| format!("paxos topology: open storage at {:?}", dir.path()))?;
+        Ok((dir, storage))
+    }
+
+    async fn bind_loopback(&self, _id: u64) -> anyhow::Result<TcpListener> {
+        TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("paxos topology: bind loopback")
+    }
 }
 
 // `ChaosController` impl. Method bodies are stubbed; subsequent commits
