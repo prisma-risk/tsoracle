@@ -27,7 +27,8 @@ use openraft::error::{
 };
 use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
+    VoteRequest, VoteResponse,
 };
 use openraft::storage::RaftStateMachine;
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
@@ -51,6 +52,8 @@ trait RaftAdapter<C: RaftTypeConfig>: Send + Sync + 'static {
         vote: VoteOf<C>,
         snapshot: SnapshotOf<C>,
     ) -> Result<SnapshotResponse<C>, Fatal<C>>;
+
+    async fn transfer_leader(&self, req: TransferLeaderRequest<C>) -> Result<(), Fatal<C>>;
 }
 
 struct RaftHandle<C: RaftTypeConfig, SM: RaftStateMachine<C>> {
@@ -80,6 +83,10 @@ where
         snapshot: SnapshotOf<C>,
     ) -> Result<SnapshotResponse<C>, Fatal<C>> {
         self.raft.install_full_snapshot(vote, snapshot).await
+    }
+
+    async fn transfer_leader(&self, req: TransferLeaderRequest<C>) -> Result<(), Fatal<C>> {
+        self.raft.handle_transfer_leader(req).await
     }
 }
 
@@ -242,5 +249,29 @@ where
                     "mem-network remote: {e}"
                 )))
             })
+    }
+
+    async fn transfer_leader(
+        &mut self,
+        req: TransferLeaderRequest<C>,
+        _option: RPCOption,
+    ) -> Result<(), RPCError<C>> {
+        if !self.net.partitions.is_reachable(self.from, self.to) {
+            return Err(RPCError::Network(NetworkError::from_string(format!(
+                "mem-network: partitioned {:?} -> {:?}",
+                self.from, self.to
+            ))));
+        }
+        let target = self.net.dispatch(&self.to).ok_or_else(|| {
+            RPCError::Network(NetworkError::from_string(format!(
+                "mem-network: unknown peer {:?}",
+                self.to
+            )))
+        })?;
+        target.transfer_leader(req).await.map_err(|e| {
+            RPCError::Network(NetworkError::from_string(format!(
+                "mem-network remote: {e}"
+            )))
+        })
     }
 }
