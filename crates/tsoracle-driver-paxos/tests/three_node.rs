@@ -101,8 +101,24 @@ async fn fence_check_rejects_stale_epoch_and_accepts_current() {
 
     // The fence epoch the driver compares against is derived from the
     // host's current promise ballot — every node that has acknowledged
-    // the leader's prepare sees the same Ballot, so encoding either the
-    // leader's or the follower's promise here yields the same Epoch.
+    // the leader's prepare sees the same Ballot. `some_leader_elected`
+    // only proves the elected node observes itself as leader; on slow
+    // runners the follower may not have processed the prepare yet, so
+    // its promise is still `Ballot::default()` (encodes to `Epoch(0)`).
+    // Wait for the follower's encoded promise to match the leader's
+    // before sampling so the assertion against the driver's fence-check
+    // observation is race-free.
+    cluster
+        .drive_until(
+            |c| {
+                let leader_epoch = encode_epoch(c.node(leader_id).omnipaxos().lock().get_promise());
+                let follower_epoch =
+                    encode_epoch(c.node(follower_id).omnipaxos().lock().get_promise());
+                leader_epoch != Epoch(0) && leader_epoch == follower_epoch
+            },
+            1_000,
+        )
+        .await;
     let current_epoch = {
         let handle = cluster.node(follower_id).omnipaxos();
         let promise = handle.lock().get_promise();
