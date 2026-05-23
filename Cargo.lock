@@ -845,6 +845,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-paxos-embedded"
+version = "0.1.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "omnipaxos",
+ "parking_lot",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tsoracle-consensus",
+ "tsoracle-core",
+ "tsoracle-driver-paxos",
+ "tsoracle-paxos-toolkit",
+ "tsoracle-server",
+]
+
+[[package]]
 name = "example-paxos-standalone"
 version = "0.1.4"
 dependencies = [

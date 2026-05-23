@@ -18,6 +18,7 @@ members  = [
     "examples/metrics-prometheus",
     "examples/openraft-piggyback",
     "examples/openraft-standalone",
+    "examples/paxos-embedded",
     "examples/paxos-standalone",
     "examples/tls-mtls",
     "benchmarks/minimal",
