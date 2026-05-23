@@ -12,14 +12,13 @@
 
 //! Multi-process 3-node tsoracle cluster backed by `tsoracle-driver-openraft`.
 //!
-//! The integration body is just three bindings (`StandaloneHost::new`,
-//! `OpenraftDriver::new`, `StandaloneRouter::new`); everything else is
-//! transport plumbing (`src/network.rs`) and config parsing.
+//! The integration body is just two bindings (`StandaloneHost::new`,
+//! `OpenraftDriver::with_peers`); everything else is transport plumbing
+//! (`src/network.rs`) and config parsing.
 //!
 //! `--bootstrap` flag goes on exactly one node at first cluster init.
 
 mod network;
-mod router;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -38,7 +37,6 @@ use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 use tsoracle_server::Server as TsoServer;
 
 use crate::network::{PeerFactory, server as peer_server};
-use crate::router::StandaloneRouter;
 
 const LOG_CF: &str = "raft_log";
 const META_CF: &str = "raft_meta";
@@ -112,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let raft_addrs = parse_peer_map(&cli.peers)?;
-    let tso_addrs = Arc::new(parse_peer_map(&cli.tso_peers)?);
+    let tso_addrs = parse_peer_map(&cli.tso_peers)?;
 
     // ---- Storage + state machine ----
     // One rocksdb instance covers the raft log (`raft_log` / `raft_meta` CFs)
@@ -180,10 +178,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ---- Driver: StandaloneHost -> OpenraftDriver -> StandaloneRouter ----
+    // ---- Driver: StandaloneHost -> OpenraftDriver (with endpoint resolution) ----
+    // `--tso-peers` is the NodeId -> tsoracle-service-addr map; the driver
+    // consults it to populate LeaderHint follower-redirects.
     let host = StandaloneHost::new(raft.clone(), state_machine_for_host);
-    let inner_driver = OpenraftDriver::new(host);
-    let driver = StandaloneRouter::new(inner_driver, raft.clone(), tso_addrs);
+    let driver = OpenraftDriver::with_peers(host, tso_addrs);
 
     // ---- Tsoracle gRPC server ----
     let tso = TsoServer::builder().consensus_driver(driver).build()?;
