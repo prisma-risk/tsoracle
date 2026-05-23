@@ -19,18 +19,20 @@ use tsoracle_server::test_fakes::InMemoryDriver;
 use tsoracle_server::test_support::{
     boot_router, wait_for_grpc_handshake, wait_until, wait_until_serving,
 };
-use tsoracle_server::{Server, ServerError, ServingState};
+use tsoracle_server::{Server, ServingState};
 
 static FAILPOINT_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// `server::fence::after_load_before_persist` fires inside `run_leader_watch`,
 /// between `consensus.load_high_water()` and `consensus.persist_high_water()`.
-/// A `return(transient)` action produces `Err(ServerError::Consensus(...))`,
-/// which causes the leader-watch task to terminate. The server calls
-/// `step_down_due_to_consensus_rejection` before the join handle resolves,
-/// so the test can observe the error via the JoinHandle.
+/// A single `return(transient)` injects one recoverable `ConsensusError`. The
+/// fence must RETRY rather than tear the server down: the second attempt sees
+/// the failpoint disabled, persists, and advances to `Serving`. The watch task
+/// stays alive throughout. Regression guard for the fence's transient-error
+/// recovery (unit-level coverage lives in
+/// `crates/tsoracle-server/tests/leader_watch.rs`).
 #[tokio::test]
-async fn fence_aborted_after_load_does_not_advance_to_serving() {
+async fn fence_recovers_after_transient_load_error() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
     let _scenario = fail::FailScenario::setup();
 
@@ -39,31 +41,36 @@ async fn fence_aborted_after_load_does_not_advance_to_serving() {
         .consensus_driver(driver.clone())
         .build()
         .unwrap();
+    let mut state_rx = server.state_rx.clone();
     let (_routes, watch_handle) = server.into_router();
 
+    // Fire the transient error exactly once; the retry sees the failpoint
+    // disabled and completes the fence.
     fail::cfg(
         "server::fence::after_load_before_persist",
-        "return(transient)",
+        "1*return(transient)",
     )
     .unwrap();
 
-    // Trigger a leadership transition; the fence will hit the failpoint.
+    // Trigger a leadership transition; the first fence attempt hits the
+    // failpoint, the retry succeeds.
     driver.become_leader(Epoch(1));
 
-    // The watch handle resolves with the ServerError.
-    let result = tokio::time::timeout(Duration::from_secs(2), watch_handle)
+    tokio::time::timeout(Duration::from_secs(5), wait_until_serving(&mut state_rx))
         .await
-        .expect("watch task did not terminate within 2s")
-        .expect("watch task panicked");
+        .expect("fence must recover from a single transient error and reach Serving");
 
+    // A transient error is not fatal: the watch task is still running.
     assert!(
-        matches!(result, Err(ServerError::Consensus(_))),
-        "expected ServerError::Consensus, got {result:?}"
+        !watch_handle.is_finished(),
+        "watch task terminated on a transient fence error; it must retry"
     );
 
-    // The driver's stored high-water must not have advanced: the failpoint
-    // fires before `persist_high_water` is called.
-    assert_eq!(driver.current_high_water(), 0);
+    // The successful retry persisted the fence, advancing the durable value.
+    assert!(
+        driver.current_high_water() > 0,
+        "the recovered fence must have persisted a high-water above zero"
+    );
 }
 
 /// `server::fence::after_persist_before_publish` fires after

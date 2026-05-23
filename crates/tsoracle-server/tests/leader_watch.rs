@@ -11,9 +11,13 @@
 //
 
 use std::{sync::Arc, time::Duration};
+use tokio::time::timeout;
 use tsoracle_consensus::ConsensusDriver;
 use tsoracle_core::{Epoch, testing::MockClock};
-use tsoracle_server::{Server, ServingState, test_fakes::InMemoryDriver};
+use tsoracle_server::{
+    Server, ServerError, ServingState,
+    test_fakes::{FaultKind, FaultyDriver, InMemoryDriver},
+};
 
 /// Drive a leader transition to completion and return when `state_rx` reports
 /// `Serving`. Shared by the regression tests below.
@@ -177,4 +181,131 @@ async fn first_grant_strictly_above_prior_high_water_when_prior_exceeds_now() {
     );
 
     watch_handle.abort();
+}
+
+/// A transient driver error during the fence is recoverable: the new leader
+/// must retry rather than tear the server down. Models a momentary quorum
+/// blip in the volatile post-election window. Without recovery the fence's
+/// `?` terminates the watch task and the server never reaches `Serving`.
+#[tokio::test]
+async fn fence_retries_transient_persist_error_then_serves() {
+    let driver = Arc::new(FaultyDriver::new());
+    let clock = Arc::new(MockClock::new(10_000));
+
+    let server = Arc::new(
+        Server::builder()
+            .consensus_driver(driver.clone())
+            .clock(clock.clone())
+            .failover_advance(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+    );
+
+    // The first persist of the fence fails transiently; the retry must succeed.
+    driver.fail_next_persists(1, FaultKind::Transient);
+
+    let watch_server = server.clone();
+    let watch_handle = tokio::spawn(async move { watch_server.run_leader_watch_for_tests().await });
+
+    driver.become_leader(Epoch(1));
+
+    let mut state_rx = server.state_rx.clone();
+    timeout(Duration::from_secs(5), wait_until_serving(&mut state_rx))
+        .await
+        .expect("fence must recover from a transient persist error and reach Serving");
+
+    // It really retried (more than one persist attempt) and fenced above the floor.
+    assert!(
+        driver.persist_call_count() >= 2,
+        "expected a retry (>=2 persist calls), saw {}",
+        driver.persist_call_count()
+    );
+    assert!(driver.current_high_water() >= 12_000);
+
+    watch_handle.abort();
+}
+
+/// A `NotLeader` error during the fence means leadership moved under us — a
+/// failover flap. The watch task must NOT terminate; it steps down to
+/// `NotServing` and fences cleanly on the next leadership event.
+#[tokio::test]
+async fn fence_steps_down_on_not_leader_then_serves_next_election() {
+    let driver = Arc::new(FaultyDriver::new());
+    let clock = Arc::new(MockClock::new(10_000));
+
+    let server = Arc::new(
+        Server::builder()
+            .consensus_driver(driver.clone())
+            .clock(clock.clone())
+            .failover_advance(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+    );
+
+    // The first leadership gain races with a flap: persist returns NotLeader.
+    driver.fail_next_persists(1, FaultKind::NotLeader);
+
+    let watch_server = server.clone();
+    let watch_handle = tokio::spawn(async move { watch_server.run_leader_watch_for_tests().await });
+
+    // First election: the fence hits NotLeader. Wait until that failing persist
+    // is observed so the next election is a distinct leadership event.
+    driver.become_leader(Epoch(1));
+    timeout(Duration::from_secs(5), async {
+        while driver.persist_call_count() < 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fence should have attempted (and failed) the first persist");
+
+    // A NotLeader fence error must not be fatal — the watch task stays alive.
+    assert!(
+        !watch_handle.is_finished(),
+        "watch task terminated on a NotLeader fence error; it must step down and await the next election"
+    );
+
+    // Re-won leadership: the fence must now complete and serve.
+    driver.become_leader(Epoch(2));
+    let mut state_rx = server.state_rx.clone();
+    timeout(Duration::from_secs(5), wait_until_serving(&mut state_rx))
+        .await
+        .expect("fence must serve after re-winning leadership");
+
+    watch_handle.abort();
+}
+
+/// A permanent driver error stays fatal: the watch task terminates with the
+/// error (and `into_router` poisons serving state). Guards the fail-safe for
+/// unrecoverable faults so the transient-recovery change does not silently
+/// swallow corruption-class errors.
+#[tokio::test]
+async fn fence_permanent_error_terminates_watch() {
+    let driver = Arc::new(FaultyDriver::new());
+    let clock = Arc::new(MockClock::new(10_000));
+
+    let server = Arc::new(
+        Server::builder()
+            .consensus_driver(driver.clone())
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+
+    driver.fail_next_persists(1, FaultKind::Permanent);
+
+    let watch_server = server.clone();
+    let watch_handle = tokio::spawn(async move { watch_server.run_leader_watch_for_tests().await });
+
+    driver.become_leader(Epoch(1));
+
+    let result = timeout(Duration::from_secs(5), watch_handle)
+        .await
+        .expect("watch task must terminate on a permanent error")
+        .expect("watch task panicked");
+
+    assert!(
+        matches!(result, Err(ServerError::Consensus(_))),
+        "expected fatal ServerError::Consensus, got {result:?}"
+    );
 }

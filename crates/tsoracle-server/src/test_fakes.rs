@@ -15,6 +15,7 @@
 use core::pin::Pin;
 use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Notify, watch};
@@ -192,6 +193,112 @@ impl ConsensusDriver for StallableDriver {
         self.inner
             .persist_high_water(effective_at_least, epoch)
             .await
+    }
+}
+
+/// Kinds of [`ConsensusError`] a [`FaultyDriver`] injects, each mapped to the
+/// variant the real openraft/paxos drivers produce for the matching failure.
+#[derive(Clone, Copy, Debug)]
+pub enum FaultKind {
+    /// `ConsensusError::NotLeader` — what drivers return when a
+    /// `ForwardToLeader` is observed (leadership moved during the fence).
+    NotLeader,
+    /// `ConsensusError::TransientDriver` — the explicitly retryable class
+    /// (momentary quorum loss or transport flap during a failover).
+    Transient,
+    /// `ConsensusError::PermanentDriver` — the must-not-retry class
+    /// (corruption, gone storage); the fence treats it as fatal.
+    Permanent,
+}
+
+impl FaultKind {
+    fn into_error(self) -> ConsensusError {
+        match self {
+            FaultKind::NotLeader => ConsensusError::NotLeader { observed: None },
+            FaultKind::Transient => ConsensusError::TransientDriver(Box::new(
+                std::io::Error::other("injected transient fault"),
+            )),
+            FaultKind::Permanent => ConsensusError::PermanentDriver(Box::new(
+                std::io::Error::other("injected permanent fault"),
+            )),
+        }
+    }
+}
+
+/// Wraps an [`InMemoryDriver`] with a queue of faults applied to upcoming
+/// `persist_high_water` calls, for tests that exercise the fence's
+/// transient-vs-permanent error handling.
+///
+/// Each `persist_high_water` call pops one fault off the front of the queue
+/// and returns it; once the queue is empty, calls fall through to the inner
+/// driver and succeed. Leadership events and the stored high-water are
+/// delegated to the inner [`InMemoryDriver`].
+#[derive(Clone)]
+pub struct FaultyDriver {
+    inner: InMemoryDriver,
+    persist_faults: Arc<Mutex<VecDeque<FaultKind>>>,
+    persist_calls: Arc<AtomicU64>,
+}
+
+impl Default for FaultyDriver {
+    fn default() -> Self {
+        FaultyDriver {
+            inner: InMemoryDriver::new(),
+            persist_faults: Arc::new(Mutex::new(VecDeque::new())),
+            persist_calls: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+impl FaultyDriver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn become_leader(&self, epoch: Epoch) {
+        self.inner.become_leader(epoch);
+    }
+
+    pub fn become_follower(&self, hint: Option<String>) {
+        self.inner.become_follower(hint);
+    }
+
+    pub fn current_high_water(&self) -> u64 {
+        self.inner.current_high_water()
+    }
+
+    /// Number of `persist_high_water` calls that have started so far,
+    /// including any that returned an injected fault.
+    pub fn persist_call_count(&self) -> u64 {
+        self.persist_calls.load(Ordering::SeqCst)
+    }
+
+    /// Enqueue `count` faults of `kind`. The next `count` `persist_high_water`
+    /// calls return that error in order; later calls succeed.
+    pub fn fail_next_persists(&self, count: usize, kind: FaultKind) {
+        let mut queue = self.persist_faults.lock();
+        for _ in 0..count {
+            queue.push_back(kind);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ConsensusDriver for FaultyDriver {
+    fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
+        self.inner.leadership_events()
+    }
+
+    async fn load_high_water(&self) -> Result<u64, ConsensusError> {
+        self.inner.load_high_water().await
+    }
+
+    async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
+        self.persist_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(kind) = self.persist_faults.lock().pop_front() {
+            return Err(kind.into_error());
+        }
+        self.inner.persist_high_water(at_least, epoch).await
     }
 }
 
