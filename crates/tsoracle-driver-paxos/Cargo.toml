@@ -31,6 +31,7 @@ tsoracle-paxos-toolkit = { path = "../tsoracle-paxos-toolkit", version = "0.1.3"
 [dev-dependencies]
 anyhow           = { workspace = true }
 proptest         = { workspace = true }
+rocksdb          = { workspace = true }
 tempfile         = { workspace = true }
 tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tsoracle-paxos-toolkit = { path = "../tsoracle-paxos-toolkit", version = "0.1.3", features = ["rocksdb-storage", "test-fakes"] }
