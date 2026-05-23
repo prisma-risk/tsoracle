@@ -1,7 +1,7 @@
 [package]
 name         = "tsoracle-driver-openraft"
 description  = "openraft-backed ConsensusDriver for tsoracle"
-version      = "0.1.4"
+version      = "0.2.0"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -33,7 +33,7 @@ postcard           = { workspace = true }
 # members that need `RocksdbLogStore` (examples, this crate's dev-deps) opt in
 # explicitly with `features = ["rocksdb-log-store"]` and cargo feature
 # unification re-enables it for their builds.
-tsoracle-openraft-toolkit   = { path = "../tsoracle-openraft-toolkit", version = "0.1.3", default-features = false }
+tsoracle-openraft-toolkit   = { path = "../tsoracle-openraft-toolkit", version = "0.1.5", default-features = false }
 parking_lot        = { workspace = true }
 rocksdb            = { workspace = true, optional = true, features = ["multi-threaded-cf"] }
 serde              = { workspace = true }
@@ -41,12 +41,12 @@ thiserror          = { workspace = true }
 tokio              = { workspace = true }
 tokio-stream       = { workspace = true }
 tracing            = { workspace = true }
-tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.3" }
-tsoracle-core      = { path = "../tsoracle-core", version = "0.1.3" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.5" }
+tsoracle-core      = { path = "../tsoracle-core", version = "0.2.0" }
 
 [dev-dependencies]
 anyhow           = { workspace = true }
-tsoracle-openraft-toolkit = { path = "../tsoracle-openraft-toolkit", version = "0.1.3", features = ["rocksdb-log-store", "test-fakes"] }
+tsoracle-openraft-toolkit = { path = "../tsoracle-openraft-toolkit", version = "0.1.5", features = ["rocksdb-log-store", "test-fakes"] }
 proptest         = { workspace = true }
 rocksdb          = { workspace = true }
 tempfile         = { workspace = true }

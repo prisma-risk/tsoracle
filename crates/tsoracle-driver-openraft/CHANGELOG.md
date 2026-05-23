@@ -4,6 +4,17 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.1.4...tsoracle-driver-openraft-v0.2.0) - 2026-05-23
+
+### Fixed
+
+- *(core)* [**breaking**] widen Epoch to u128 for lossless leader-epoch encoding ([#221](https://github.com/prisma-risk/tsoracle/pull/221))
+
+### Other
+
+- *(release)* version crates independently to fix release-plz resolution ([#223](https://github.com/prisma-risk/tsoracle/pull/223))
+- add READMEs for the remaining published crates ([#213](https://github.com/prisma-risk/tsoracle/pull/213))
+
 ## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.1.2...tsoracle-driver-openraft-v0.1.3) - 2026-05-22
 
 ### Fixed
