@@ -17,11 +17,11 @@ default    = []
 reflection = ["tsoracle-server/reflection"]
 
 [dependencies]
-tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.1.3" }
-tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.3" }
-tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.1.3" }
-tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.1.3" }
-tsoracle-openraft-toolkit         = { path = "../../crates/tsoracle-openraft-toolkit", version = "0.1.3", features = ["rocksdb-log-store"] }
+tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.2.0" }
+tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.5" }
+tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.2.0" }
+tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.2.0" }
+tsoracle-openraft-toolkit         = { path = "../../crates/tsoracle-openraft-toolkit", version = "0.1.5", features = ["rocksdb-log-store"] }
 
 openraft           = { workspace = true }
 rocksdb            = { workspace = true }

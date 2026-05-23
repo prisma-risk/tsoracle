@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.1.4...tsoracle-paxos-toolkit-v0.2.0) - 2026-05-23
+
+### Fixed
+
+- *(core)* [**breaking**] widen Epoch to u128 for lossless leader-epoch encoding ([#221](https://github.com/prisma-risk/tsoracle/pull/221))
+- *(paxos-toolkit)* decouple PaxosRunner tick loop from outbound send completion ([#218](https://github.com/prisma-risk/tsoracle/pull/218))
+- *(paxos-toolkit)* preserve absolute log index after full RocksDB compaction ([#188](https://github.com/prisma-risk/tsoracle/pull/188))
+
+### Other
+
+- *(paxos)* add fuzz targets and seed corpora for the paxos decoders ([#225](https://github.com/prisma-risk/tsoracle/pull/225))
+- *(release)* version crates independently to fix release-plz resolution ([#223](https://github.com/prisma-risk/tsoracle/pull/223))
+- *(paxos)* per-crate READMEs + driver-choice comparison ([#208](https://github.com/prisma-risk/tsoracle/pull/208))
+
 ## [0.1.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.1.3...tsoracle-paxos-toolkit-v0.1.4) - 2026-05-23
 
 ### Added

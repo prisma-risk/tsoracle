@@ -4,6 +4,17 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.4...tsoracle-openraft-toolkit-v0.1.5) - 2026-05-23
+
+### Added
+
+- *(test-fakes)* implement transfer_leader RPC on MemNetwork ([#226](https://github.com/prisma-risk/tsoracle/pull/226))
+
+### Other
+
+- *(release)* version crates independently to fix release-plz resolution ([#223](https://github.com/prisma-risk/tsoracle/pull/223))
+- *(paxos)* per-crate READMEs + driver-choice comparison ([#208](https://github.com/prisma-risk/tsoracle/pull/208))
+
 ## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.2...tsoracle-openraft-toolkit-v0.1.3) - 2026-05-22
 
 ### Added
