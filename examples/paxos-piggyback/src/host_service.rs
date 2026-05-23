@@ -150,6 +150,49 @@ impl HostState {
 
 // ---------- Apply pump ----------
 
+/// Apply a single decided [`MyAppCommand`] to `state`.
+///
+/// Pure with respect to consensus — does not lock any OmniPaxos handle, does
+/// not signal the apply notifier. Callers that drain a decided suffix should
+/// invoke this per entry and then call [`HostState::apply_notify`].
+///
+/// Half-isolation: `Kv` variants touch only the KV map; `HighWater` variants
+/// touch only the high-water cell. `Advance` is monotonic — high_water moves
+/// only forward, never backward.
+pub fn apply_decided_into(cmd: &MyAppCommand, state: &HostState) {
+    match cmd {
+        MyAppCommand::Kv(KvOp::Put { key, value }) => {
+            state.kv.lock().insert(key.clone(), value.clone());
+        }
+        MyAppCommand::Kv(KvOp::Delete { key }) => {
+            state.kv.lock().remove(key);
+        }
+        MyAppCommand::HighWater(HighWaterCommand::Advance { at_least }) => {
+            let prev = state.high_water.load(Ordering::SeqCst);
+            if *at_least > prev {
+                state.high_water.store(*at_least, Ordering::SeqCst);
+                trace!(prev, new = at_least, "piggyback high-water advanced");
+            }
+        }
+        MyAppCommand::HighWater(HighWaterCommand::Barrier) => {}
+    }
+}
+
+/// Apply a [`MyAppSnap`] (e.g., delivered as a `LogEntry::Snapshotted`) to
+/// `state`. Merges the snapshot's KV map into the host KV and lifts
+/// `high_water` to `max(prev, snap.high_water)`.
+pub fn apply_snapshot_into(snap: &MyAppSnap, state: &HostState) {
+    let mut kv = state.kv.lock();
+    for (k, v) in &snap.kv {
+        kv.insert(k.clone(), v.clone());
+    }
+    drop(kv);
+    let prev = state.high_water.load(Ordering::SeqCst);
+    if snap.high_water > prev {
+        state.high_water.store(snap.high_water, Ordering::SeqCst);
+    }
+}
+
 /// Drain decided `MyAppCommand` entries from `omnipaxos` starting at
 /// `*cursor`, fold them into `state`, advance `*cursor`, and wake any
 /// pollers parked on `state.apply_notifier()`.
@@ -171,39 +214,22 @@ pub fn drain_decided_into(
         (decided_idx, entries)
     };
 
-    if let Some(entries) = entries {
-        for entry in &entries {
-            match entry {
-                LogEntry::Decided(MyAppCommand::Kv(KvOp::Put { key, value })) => {
-                    state.kv.lock().insert(key.clone(), value.clone());
-                }
-                LogEntry::Decided(MyAppCommand::Kv(KvOp::Delete { key })) => {
-                    state.kv.lock().remove(key);
-                }
-                LogEntry::Decided(MyAppCommand::HighWater(HighWaterCommand::Advance {
-                    at_least,
-                })) => {
-                    let prev = state.high_water.load(Ordering::SeqCst);
-                    if *at_least > prev {
-                        state.high_water.store(*at_least, Ordering::SeqCst);
-                        trace!(prev, new = at_least, "piggyback high-water advanced");
-                    }
-                }
-                LogEntry::Decided(MyAppCommand::HighWater(HighWaterCommand::Barrier)) => {}
-                LogEntry::Snapshotted(snapshotted) => {
-                    let snap = &snapshotted.snapshot;
-                    let mut kv = state.kv.lock();
-                    for (k, v) in &snap.kv {
-                        kv.insert(k.clone(), v.clone());
-                    }
-                    drop(kv);
-                    let prev = state.high_water.load(Ordering::SeqCst);
-                    if snap.high_water > prev {
-                        state.high_water.store(snap.high_water, Ordering::SeqCst);
-                    }
-                }
-                LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) | LogEntry::Undecided(_) => {}
-            }
+    // `read_decided_suffix` returns None when decided_idx has advanced past
+    // our cursor but the local log hasn't yet received the entries (the
+    // Decide message can arrive before the AcceptDecide payload on a lagging
+    // follower). Leave cursor in place and retry on the next notify — if we
+    // advanced cursor here, the entry would be silently dropped when it
+    // eventually arrives. See `read_decided_suffix` → `read` → `get_entry_type`
+    // in omnipaxos 0.2.2: get_entry_type returns None for idx >= virtual_log_len.
+    let Some(entries) = entries else {
+        return *cursor;
+    };
+
+    for entry in &entries {
+        match entry {
+            LogEntry::Decided(cmd) => apply_decided_into(cmd, state),
+            LogEntry::Snapshotted(snapshotted) => apply_snapshot_into(&snapshotted.snapshot, state),
+            LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) | LogEntry::Undecided(_) => {}
         }
     }
 
@@ -250,11 +276,20 @@ impl PaxosHighWaterHost for PiggybackHost {
             })?;
         let notify = self.state.apply_notifier();
         loop {
-            notify.notified().await;
+            // Register as a waiter before re-reading decided_idx; otherwise a
+            // notify_waiters that fires between the previous iteration's check
+            // and the next notified().await is lost. apply_notifier uses
+            // notify_waiters, which does not store permits — Notified::enable
+            // is the supported way to close the window. Mirrors the driver-paxos
+            // reader fix in #196.
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let new_decided = self.omnipaxos.lock().get_decided_idx();
             if new_decided > snapshot_decided {
                 return Ok(self.state.high_water());
             }
+            notified.await;
         }
     }
 
@@ -270,11 +305,14 @@ impl PaxosHighWaterHost for PiggybackHost {
             })?;
         let notify = self.state.apply_notifier();
         loop {
-            notify.notified().await;
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let new_decided = self.omnipaxos.lock().get_decided_idx();
             if new_decided > snapshot_decided && self.state.high_water() >= at_least {
                 return Ok(self.state.high_water());
             }
+            notified.await;
         }
     }
 }
@@ -288,20 +326,48 @@ mod tests {
     use super::*;
     use omnipaxos::storage::Snapshot;
 
+    fn put(key: &str, value: &[u8]) -> MyAppCommand {
+        MyAppCommand::Kv(KvOp::Put {
+            key: key.into(),
+            value: value.to_vec(),
+        })
+    }
+
+    fn delete(key: &str) -> MyAppCommand {
+        MyAppCommand::Kv(KvOp::Delete { key: key.into() })
+    }
+
+    fn advance(at_least: u64) -> MyAppCommand {
+        MyAppCommand::HighWater(HighWaterCommand::Advance { at_least })
+    }
+
+    fn barrier() -> MyAppCommand {
+        MyAppCommand::HighWater(HighWaterCommand::Barrier)
+    }
+
+    // ---------- Envelope ----------
+
+    #[test]
+    fn from_highwatercommand_wraps_into_envelope() {
+        let wrapped: MyAppCommand = HighWaterCommand::Advance { at_least: 5 }.into();
+        match wrapped {
+            MyAppCommand::HighWater(HighWaterCommand::Advance { at_least }) => {
+                assert_eq!(at_least, 5);
+            }
+            other => panic!("expected envelope wrap, got {other:?}"),
+        }
+    }
+
+    // ---------- Snapshot::create fold ----------
+
     #[test]
     fn snapshot_create_folds_kv_and_high_water() {
         let entries = vec![
-            MyAppCommand::Kv(KvOp::Put {
-                key: "a".into(),
-                value: b"1".to_vec(),
-            }),
-            MyAppCommand::HighWater(HighWaterCommand::Advance { at_least: 10 }),
-            MyAppCommand::Kv(KvOp::Put {
-                key: "b".into(),
-                value: b"2".to_vec(),
-            }),
-            MyAppCommand::HighWater(HighWaterCommand::Advance { at_least: 30 }),
-            MyAppCommand::HighWater(HighWaterCommand::Barrier),
+            put("a", b"1"),
+            advance(10),
+            put("b", b"2"),
+            advance(30),
+            barrier(),
         ];
         let snap = MyAppSnap::create(&entries);
         assert_eq!(snap.high_water, 30);
@@ -317,13 +383,252 @@ mod tests {
     }
 
     #[test]
-    fn from_highwatercommand_wraps_into_envelope() {
-        let wrapped: MyAppCommand = HighWaterCommand::Advance { at_least: 5 }.into();
-        match wrapped {
-            MyAppCommand::HighWater(HighWaterCommand::Advance { at_least }) => {
-                assert_eq!(at_least, 5);
-            }
-            other => panic!("expected envelope wrap, got {other:?}"),
-        }
+    fn snapshot_create_take_highest_of_repeated_advances() {
+        let snap = MyAppSnap::create(&[advance(5), advance(20), advance(12), advance(7)]);
+        assert_eq!(snap.high_water, 20);
+        assert!(snap.kv.is_empty());
+    }
+
+    #[test]
+    fn snapshot_create_delete_removes_prior_put() {
+        let snap = MyAppSnap::create(&[put("a", b"1"), put("b", b"2"), delete("a")]);
+        assert!(!snap.kv.contains_key("a"));
+        assert_eq!(
+            snap.kv.get("b").map(|v| v.as_slice()),
+            Some(b"2".as_slice())
+        );
+    }
+
+    #[test]
+    fn snapshot_create_kv_only_leaves_high_water_zero() {
+        let snap = MyAppSnap::create(&[put("a", b"1"), put("b", b"2")]);
+        assert_eq!(snap.high_water, 0, "KV writes must not touch the TSO field");
+    }
+
+    #[test]
+    fn snapshot_create_high_water_only_leaves_kv_empty() {
+        let snap = MyAppSnap::create(&[advance(10), advance(20), barrier()]);
+        assert!(snap.kv.is_empty(), "TSO commands must not touch the KV map");
+        assert_eq!(snap.high_water, 20);
+    }
+
+    #[test]
+    fn snapshot_create_barrier_is_no_op() {
+        let snap = MyAppSnap::create(&[barrier(), barrier()]);
+        assert!(snap.kv.is_empty());
+        assert_eq!(snap.high_water, 0);
+    }
+
+    // ---------- Snapshot::merge ----------
+
+    #[test]
+    fn snapshot_merge_takes_max_high_water() {
+        let mut left = MyAppSnap {
+            kv: BTreeMap::new(),
+            high_water: 100,
+        };
+        let right = MyAppSnap {
+            kv: BTreeMap::new(),
+            high_water: 50,
+        };
+        left.merge(right);
+        assert_eq!(
+            left.high_water, 100,
+            "merge must not move high_water backward"
+        );
+
+        let mut left = MyAppSnap {
+            kv: BTreeMap::new(),
+            high_water: 50,
+        };
+        let right = MyAppSnap {
+            kv: BTreeMap::new(),
+            high_water: 100,
+        };
+        left.merge(right);
+        assert_eq!(left.high_water, 100, "merge takes the higher of the two");
+    }
+
+    #[test]
+    fn snapshot_merge_overwrites_kv_on_conflict() {
+        let mut left = MyAppSnap {
+            kv: BTreeMap::from([("a".into(), b"left".to_vec())]),
+            high_water: 0,
+        };
+        let right = MyAppSnap {
+            kv: BTreeMap::from([
+                ("a".into(), b"right".to_vec()),
+                ("b".into(), b"only-right".to_vec()),
+            ]),
+            high_water: 0,
+        };
+        left.merge(right);
+        assert_eq!(
+            left.kv.get("a").map(|v| v.as_slice()),
+            Some(b"right".as_slice())
+        );
+        assert_eq!(
+            left.kv.get("b").map(|v| v.as_slice()),
+            Some(b"only-right".as_slice())
+        );
+    }
+
+    // ---------- apply_decided_into ----------
+
+    #[test]
+    fn apply_decided_kv_put_inserts_into_state() {
+        let state = HostState::new();
+        apply_decided_into(&put("alpha", b"v1"), &state);
+        assert_eq!(
+            state.kv_dump().get("alpha").map(|v| v.as_slice()),
+            Some(b"v1".as_slice())
+        );
+    }
+
+    #[test]
+    fn apply_decided_kv_put_overwrites_existing_value() {
+        let state = HostState::new();
+        apply_decided_into(&put("k", b"first"), &state);
+        apply_decided_into(&put("k", b"second"), &state);
+        assert_eq!(
+            state.kv_dump().get("k").map(|v| v.as_slice()),
+            Some(b"second".as_slice())
+        );
+    }
+
+    #[test]
+    fn apply_decided_kv_delete_removes_existing_key() {
+        let state = HostState::new();
+        apply_decided_into(&put("k", b"v"), &state);
+        apply_decided_into(&delete("k"), &state);
+        assert!(!state.kv_dump().contains_key("k"));
+    }
+
+    #[test]
+    fn apply_decided_kv_delete_on_missing_key_is_no_op() {
+        let state = HostState::new();
+        apply_decided_into(&delete("missing"), &state);
+        assert!(state.kv_dump().is_empty());
+    }
+
+    #[test]
+    fn apply_decided_advance_advances_high_water() {
+        let state = HostState::new();
+        apply_decided_into(&advance(42), &state);
+        assert_eq!(state.high_water(), 42);
+    }
+
+    #[test]
+    fn apply_decided_advance_is_monotonic() {
+        let state = HostState::new();
+        apply_decided_into(&advance(100), &state);
+        apply_decided_into(&advance(50), &state);
+        assert_eq!(
+            state.high_water(),
+            100,
+            "advance must not move high_water backward"
+        );
+        apply_decided_into(&advance(150), &state);
+        assert_eq!(
+            state.high_water(),
+            150,
+            "advance must move high_water forward"
+        );
+    }
+
+    #[test]
+    fn apply_decided_barrier_does_not_change_state() {
+        let state = HostState::new();
+        apply_decided_into(&put("k", b"v"), &state);
+        apply_decided_into(&advance(99), &state);
+        let kv_before = state.kv_dump();
+        let hw_before = state.high_water();
+        apply_decided_into(&barrier(), &state);
+        assert_eq!(state.kv_dump(), kv_before);
+        assert_eq!(state.high_water(), hw_before);
+    }
+
+    // ---------- Half-isolation (the piggyback invariant) ----------
+
+    #[test]
+    fn kv_writes_leave_high_water_untouched() {
+        let state = HostState::new();
+        apply_decided_into(&advance(500), &state);
+        let hw_before = state.high_water();
+        apply_decided_into(&put("a", b"1"), &state);
+        apply_decided_into(&put("b", b"2"), &state);
+        apply_decided_into(&delete("a"), &state);
+        assert_eq!(
+            state.high_water(),
+            hw_before,
+            "Kv ops must not touch high_water"
+        );
+    }
+
+    #[test]
+    fn high_water_writes_leave_kv_untouched() {
+        let state = HostState::new();
+        apply_decided_into(&put("a", b"original"), &state);
+        let kv_before = state.kv_dump();
+        apply_decided_into(&advance(10), &state);
+        apply_decided_into(&advance(20), &state);
+        apply_decided_into(&barrier(), &state);
+        assert_eq!(
+            state.kv_dump(),
+            kv_before,
+            "HighWater ops must not touch kv"
+        );
+    }
+
+    // ---------- apply_snapshot_into ----------
+
+    #[test]
+    fn apply_snapshot_hydrates_empty_state() {
+        let state = HostState::new();
+        let snap = MyAppSnap {
+            kv: BTreeMap::from([("a".into(), b"1".to_vec()), ("b".into(), b"2".to_vec())]),
+            high_water: 99,
+        };
+        apply_snapshot_into(&snap, &state);
+        assert_eq!(state.high_water(), 99);
+        let kv = state.kv_dump();
+        assert_eq!(kv.len(), 2);
+        assert_eq!(kv.get("a").map(|v| v.as_slice()), Some(b"1".as_slice()));
+    }
+
+    #[test]
+    fn apply_snapshot_merges_into_populated_state() {
+        let state = HostState::new();
+        apply_decided_into(&put("only-state", b"s"), &state);
+        apply_decided_into(&advance(50), &state);
+
+        let snap = MyAppSnap {
+            kv: BTreeMap::from([("only-snap".into(), b"x".to_vec())]),
+            high_water: 30, // lower than existing 50
+        };
+        apply_snapshot_into(&snap, &state);
+
+        let kv = state.kv_dump();
+        assert!(kv.contains_key("only-state"), "existing keys preserved");
+        assert!(kv.contains_key("only-snap"), "snapshot keys merged in");
+        assert_eq!(
+            state.high_water(),
+            50,
+            "snapshot must not move high_water backward"
+        );
+    }
+
+    #[test]
+    fn apply_snapshot_advances_high_water_when_higher() {
+        let state = HostState::new();
+        apply_decided_into(&advance(10), &state);
+        apply_snapshot_into(
+            &MyAppSnap {
+                kv: BTreeMap::new(),
+                high_water: 100,
+            },
+            &state,
+        );
+        assert_eq!(state.high_water(), 100);
     }
 }
