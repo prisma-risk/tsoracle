@@ -29,10 +29,11 @@
 //! process-wide `fail` registry (which affects every in-process node at
 //! once); disabled, they return `Skipped`.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use omnipaxos::messages::Message;
 use omnipaxos::{ClusterConfig, OmniPaxos, OmniPaxosConfig, ServerConfig};
@@ -41,10 +42,12 @@ use rocksdb::{DB, Options};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
-use tsoracle_driver_paxos::HighWaterCommand;
-use tsoracle_paxos_toolkit::lifecycle::MessageSink;
+use tokio::time::{Instant, sleep};
+use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, SnapshotPolicy, StandaloneHost};
+use tsoracle_paxos_toolkit::lifecycle::{MessageSink, Peer};
 use tsoracle_paxos_toolkit::storage::RocksdbStorage;
 use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
+use tsoracle_server::Server;
 
 use crate::chaos::ChaosEvent;
 use crate::topology::{ChaosController, NodeId};
@@ -181,6 +184,165 @@ async fn run_inbox_pump(
 ) {
     while let Some(message) = inbox.recv().await {
         omnipaxos.lock().handle_incoming(message);
+    }
+}
+
+impl PaxosTopology {
+    /// Boot an N-node in-process cluster, each node running its own
+    /// `tsoracle::Server` bound to a fresh loopback port. Returns once
+    /// a leader has been observed.
+    ///
+    /// Uses [`DefaultPaxosBackend`] for the spawn-time I/O steps. Tests
+    /// that need to exercise the failure paths call [`Self::spawn_with`]
+    /// with a fake backend.
+    pub async fn spawn(node_count: usize, grace: Duration) -> anyhow::Result<Self> {
+        Self::spawn_with(&DefaultPaxosBackend, node_count, grace).await
+    }
+
+    /// Like [`Self::spawn`] but with a caller-supplied [`PaxosBackend`]
+    /// for the spawn-time I/O. Useful for tests that want to inject
+    /// failures at the storage-preparation or listener-binding steps.
+    pub async fn spawn_with(
+        backend: &dyn PaxosBackend,
+        node_count: usize,
+        grace: Duration,
+    ) -> anyhow::Result<Self> {
+        if node_count == 0 {
+            bail!("paxos topology requires at least one node");
+        }
+
+        let network: Arc<MemNetwork<HighWaterCommand>> = Arc::new(MemNetwork::new());
+        let node_ids: Vec<u64> = (1..=node_count as u64).collect();
+        let cluster = ClusterConfig {
+            configuration_id: 1,
+            nodes: node_ids.clone(),
+            flexible_quorum: None,
+        };
+
+        // Allocate every node's loopback listener first so we know every
+        // node's address before constructing per-node `StandaloneHost`s
+        // (each `StandaloneHost` needs its peers' addresses for the
+        // `LeaderHint` follower-redirect trailer).
+        let mut listeners: Vec<(u64, TcpListener, SocketAddr)> = Vec::with_capacity(node_count);
+        for &id in &node_ids {
+            let listener = backend.bind_loopback(id).await?;
+            let addr = listener.local_addr()?;
+            listeners.push((id, listener, addr));
+        }
+
+        let tso_endpoints: Vec<(u64, SocketAddr)> =
+            listeners.iter().map(|(id, _, addr)| (*id, *addr)).collect();
+
+        let mut nodes: Vec<PaxosNode> = Vec::with_capacity(node_count);
+        let mut server_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(node_count);
+
+        for (id, listener, addr) in listeners {
+            // ---- Storage ----
+            let (storage_dir, storage) = backend.prepare_node_storage(id).await?;
+
+            // ---- OmniPaxos handle ----
+            let omnipaxos_config = paxos_config(id, &cluster);
+            let omnipaxos = Arc::new(Mutex::new(omnipaxos_config.build(storage).with_context(
+                || format!("paxos topology: build OmniPaxos handle for node {id}"),
+            )?));
+
+            // ---- Inbox pump ----
+            let inbox: mpsc::Receiver<Message<HighWaterCommand>> = network.register(id);
+            let inbox_omnipaxos = omnipaxos.clone();
+            tokio::spawn(async move {
+                run_inbox_pump(inbox_omnipaxos, inbox).await;
+            });
+
+            // ---- StandaloneHost ----
+            let toolkit_peers: Vec<Peer> = tso_endpoints
+                .iter()
+                .filter(|(peer_id, _)| *peer_id != id)
+                .map(|(peer_id, peer_addr)| Peer {
+                    node_id: *peer_id,
+                    endpoint: format!("http://{peer_addr}"),
+                })
+                .collect();
+            let mut host = StandaloneHost::builder()
+                .omnipaxos(omnipaxos.clone())
+                .my_node_id(id)
+                .peers(toolkit_peers)
+                .tick_interval(TICK_INTERVAL)
+                .snapshot_policy(SnapshotPolicy::disabled())
+                .build()
+                .with_context(|| format!("paxos topology: build StandaloneHost for node {id}"))?;
+            let leader_stream = host.take_leader_stream().ok_or_else(|| {
+                anyhow::anyhow!("paxos topology: leader stream for node {id} already taken")
+            })?;
+
+            let sink = Arc::new(MeshSink {
+                network: network.clone(),
+            });
+            host.start(sink);
+
+            // ---- Driver + tsoracle server ----
+            let driver = Arc::new(PaxosDriver::new(host, leader_stream));
+            let server = Server::builder()
+                .consensus_driver(driver)
+                .build()
+                .map_err(|e| anyhow::anyhow!("paxos topology: server build: {e:?}"))?;
+
+            let endpoint = format!("http://{addr}");
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let endpoint_for_log = endpoint.clone();
+            let handle = tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = shutdown_rx.await;
+                };
+                if let Err(e) = server.serve_with_listener(listener, shutdown).await {
+                    tracing::error!(error = ?e, endpoint = %endpoint_for_log, "tsoracle server died");
+                }
+            });
+
+            nodes.push(PaxosNode {
+                node_id: NodeId(id as u32),
+                endpoint,
+                omnipaxos,
+                shutdown_tx: Mutex::new(Some(shutdown_tx)),
+                _storage_dir: storage_dir,
+            });
+            server_handles.push(handle);
+        }
+
+        wait_for_leader(&nodes, Duration::from_secs(5)).await?;
+
+        Ok(PaxosTopology {
+            controller: PaxosController {
+                nodes,
+                network,
+                grace,
+            },
+            server_handles,
+        })
+    }
+}
+
+async fn wait_for_leader(nodes: &[PaxosNode], timeout: Duration) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if Instant::now() >= deadline {
+            let snapshots: Vec<String> = nodes
+                .iter()
+                .map(|n| {
+                    let leader = n.omnipaxos.lock().get_current_leader();
+                    format!("node {} sees leader={:?}", n.node_id.0, leader)
+                })
+                .collect();
+            bail!(
+                "paxos topology: no leader within {timeout:?}; snapshots:\n  {}",
+                snapshots.join("\n  ")
+            );
+        }
+        for node in nodes {
+            if node.omnipaxos.lock().get_current_leader().is_some() {
+                return Ok(());
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
     }
 }
 
