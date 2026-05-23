@@ -36,7 +36,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - name: system deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -130,7 +134,11 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - name: system deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
       - name: coverage
         run: make coverage
       - uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e  # v2
@@ -150,7 +158,11 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - name: system deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
       - name: build
         run: cargo build --release --bin tsoracle && cargo build --release -p stress
       - name: smoke (mem)

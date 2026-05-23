@@ -38,7 +38,11 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - name: system deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
       - uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db  # v0.5
         with:
           command: release
@@ -73,7 +77,11 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - name: system deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
       - uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db  # v0.5
         with:
           command: release-pr

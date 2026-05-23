@@ -37,7 +37,11 @@ jobs:
           components: rust-src, llvm-tools-preview
 
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler
+          version: 1
 
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@v2
