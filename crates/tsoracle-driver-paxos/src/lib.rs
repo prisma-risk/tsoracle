@@ -30,5 +30,5 @@ pub mod standalone;
 pub mod state_machine;
 pub mod type_config;
 
-pub use log_entry::HighWaterCommand;
+pub use log_entry::{HighWaterCommand, HighWaterSnapshot};
 pub use type_config::{PaxosPeer, decode_epoch, encode_epoch};
