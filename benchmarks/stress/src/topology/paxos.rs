@@ -50,8 +50,8 @@ use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
 use tsoracle_paxos_toolkit::test_fakes::partition::PartitionController;
 use tsoracle_server::Server;
 
-use crate::chaos::ChaosEvent;
-use crate::topology::{ChaosController, NodeId};
+use crate::chaos::{ChaosEvent, ChaosKind, ChaosOutcome};
+use crate::topology::{ChaosController, NodeId, timed_event};
 
 #[allow(dead_code)]
 const TICK_INTERVAL: Duration = Duration::from_millis(20);
@@ -378,12 +378,55 @@ impl ChaosController for PaxosController {
         unimplemented!()
     }
 
-    async fn arm_failpoint(&self, _name: &str, _action: &str) -> ChaosEvent {
-        unimplemented!()
+    async fn arm_failpoint(&self, name: &str, action: &str) -> ChaosEvent {
+        let kind = ChaosKind::FailpointArm { name: name.into() };
+        #[cfg(feature = "stress-failpoints")]
+        {
+            let name = name.to_string();
+            let action = action.to_string();
+            return timed_event(kind, self.grace, move || async move {
+                match fail::cfg(name.as_str(), action.as_str()) {
+                    Ok(()) => ChaosOutcome::Applied,
+                    Err(e) => ChaosOutcome::Failed {
+                        reason: format!("fail::cfg: {e}"),
+                    },
+                }
+            })
+            .await;
+        }
+        #[cfg(not(feature = "stress-failpoints"))]
+        {
+            let _ = (name, action);
+            timed_event(kind, self.grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "stress-failpoints feature off; failpoints not linked".into(),
+                }
+            })
+            .await
+        }
     }
 
-    async fn disarm_failpoint(&self, _name: &str) -> ChaosEvent {
-        unimplemented!()
+    async fn disarm_failpoint(&self, name: &str) -> ChaosEvent {
+        let kind = ChaosKind::FailpointDisarm { name: name.into() };
+        #[cfg(feature = "stress-failpoints")]
+        {
+            let name = name.to_string();
+            return timed_event(kind, self.grace, move || async move {
+                fail::remove(name.as_str());
+                ChaosOutcome::Applied
+            })
+            .await;
+        }
+        #[cfg(not(feature = "stress-failpoints"))]
+        {
+            let _ = name;
+            timed_event(kind, self.grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "stress-failpoints feature off".into(),
+                }
+            })
+            .await
+        }
     }
 
     fn endpoints(&self) -> Vec<String> {
