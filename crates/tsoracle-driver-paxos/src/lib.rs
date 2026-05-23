@@ -31,4 +31,6 @@ pub mod state_machine;
 pub mod type_config;
 
 pub use log_entry::{HighWaterCommand, HighWaterSnapshot};
+pub use snapshot_policy::SnapshotPolicy;
+pub use state_machine::{ApplyState, drain_decided_into, maybe_snapshot};
 pub use type_config::{PaxosPeer, decode_epoch, encode_epoch};
