@@ -13,6 +13,7 @@ members  = [
     "crates/tsoracle-openraft-toolkit",
     "crates/tsoracle-paxos-toolkit",
     "crates/tsoracle-tests",
+    "crates/tsoracle-yieldpoint",
     "examples/embedded-server",
     "examples/failover-demo",
     "examples/metrics-prometheus",
@@ -39,6 +40,7 @@ default-members = [
     "crates/tsoracle-bin",
     "crates/tsoracle-openraft-toolkit",
     "crates/tsoracle-paxos-toolkit",
+    "crates/tsoracle-yieldpoint",
 ]
 
 [workspace.package]
@@ -82,6 +84,7 @@ tempfile           = "3"
 thiserror          = "2"
 tokio              = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "fs"] }
 tokio-stream       = { version = "0.1", features = ["sync"] }
+tsoracle-yieldpoint = { path = "crates/tsoracle-yieldpoint", version = "0.1.4" }
 tonic              = "0.14"
 tonic-prost        = "0.14"
 tonic-prost-build  = "0.14"

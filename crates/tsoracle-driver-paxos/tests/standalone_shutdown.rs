@@ -37,10 +37,10 @@ use async_trait::async_trait;
 use omnipaxos::messages::Message;
 use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
 use parking_lot::Mutex;
-use tsoracle_driver_paxos::yieldpoint;
 use tsoracle_driver_paxos::{HighWaterCommand, StandaloneHost};
 use tsoracle_paxos_toolkit::lifecycle::MessageSink;
 use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
+use tsoracle_yieldpoint as yieldpoint;
 
 const APPLY_TASK_YIELD: &str = "standalone_host::apply_task::between_iterations";
 

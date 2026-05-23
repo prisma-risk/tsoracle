@@ -12,28 +12,47 @@
 
 //! Async yield points — the structural analogue of [`fail-rs`] failpoints,
 //! but driven by a `tokio::sync::Notify` so the production code yields its
-//! tokio worker while parked instead of blocking the thread. A
-//! fail-crate `pause` action wedges the tokio timer driver, which is
-//! the symptom that motivated this module.
+//! tokio worker while parked instead of blocking the thread.
 //!
-//! Each call site is named:
+//! A fail-crate `pause` action uses `std::thread::park` / a condvar, which
+//! blocks the OS thread the failpoint fires on. Inside a tokio task that
+//! starves the runtime's timer driver — `tokio::time::sleep` stops
+//! returning for every task on that worker, and any race the test is
+//! trying to observe gets masked. Yield points exist for exactly the case
+//! where the call site is in an async path that must keep yielding to
+//! the runtime while parked.
 //!
-//! ```ignore
-//! tsoracle_driver_paxos::yieldpoint!("standalone_host::apply_task::between_iterations");
+//! # Quick reference
+//!
+//! Opt in by declaring a feature on the consumer crate that flips
+//! `tsoracle-yieldpoint/yieldpoints`:
+//!
+//! ```toml
+//! # consumer Cargo.toml
+//! [features]
+//! yieldpoints = ["tsoracle-yieldpoint/yieldpoints"]
+//!
+//! [dependencies]
+//! tsoracle-yieldpoint = { workspace = true }
 //! ```
 //!
-//! When the `yieldpoints` feature is off the macro expands to nothing.
-//! When on, the macro consults the registry; if the named yield point
-//! is armed, the production code awaits the registered `Notify`.
-//!
-//! From a test:
+//! Insert the macro at the call site:
 //!
 //! ```ignore
-//! let handle = yieldpoint::cfg("name");
+//! tsoracle_yieldpoint::yieldpoint!("module::site::after_X_before_Y");
+//! ```
+//!
+//! Arm and release from a test:
+//!
+//! ```ignore
+//! let handle = tsoracle_yieldpoint::cfg("module::site::after_X_before_Y");
 //! // ... drive code into the yield point ...
 //! handle.notify_one(); // release
-//! yieldpoint::remove("name");
+//! tsoracle_yieldpoint::remove("module::site::after_X_before_Y");
 //! ```
+//!
+//! The registry is process-global (same pattern as `fail-rs`). Tests that
+//! arm the same name must serialize.
 //!
 //! [`fail-rs`]: https://docs.rs/fail
 
@@ -78,16 +97,17 @@ pub use registry::{cfg, get, remove};
 
 /// Await the registered `Notify` at this site if armed; no-op otherwise.
 ///
-/// Expands to `{}` when the `yieldpoints` cargo feature is off, so
-/// production builds carry zero overhead. When on, an armed entry parks
-/// the calling task on `Notify::notified().await` — yielding the tokio
-/// worker so timers and other tasks continue to run. Release with
-/// `notify_one()` on the handle returned by [`cfg`].
+/// Expands to `{}` when the `yieldpoints` cargo feature is off (on
+/// `yield-rs` itself), so production builds of consuming crates carry
+/// zero overhead. When on, an armed entry parks the calling task on
+/// `Notify::notified().await` — yielding the tokio worker so timers and
+/// other tasks continue to run. Release with `notify_one()` on the
+/// handle returned by [`cfg`].
 #[cfg(feature = "yieldpoints")]
 #[macro_export]
 macro_rules! yieldpoint {
     ($name:expr) => {{
-        if let Some(yp) = $crate::yieldpoint::get($name) {
+        if let Some(yp) = $crate::get($name) {
             yp.notified().await;
         }
     }};

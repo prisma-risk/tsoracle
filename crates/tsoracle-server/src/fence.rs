@@ -76,6 +76,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                         )))
                     }
                 );
+                tsoracle_yieldpoint::yieldpoint!("server::fence::after_load_before_persist");
 
                 // Compute the serving floor and the requested ceiling.
                 // serving_floor is the first physical_ms the new leader may

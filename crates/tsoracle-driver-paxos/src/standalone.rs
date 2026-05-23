@@ -125,7 +125,9 @@ where
                             let mut policy = policy.lock();
                             maybe_snapshot(&omnipaxos, &mut policy, decided_idx);
                         }
-                        crate::yieldpoint!("standalone_host::apply_task::between_iterations");
+                        tsoracle_yieldpoint::yieldpoint!(
+                            "standalone_host::apply_task::between_iterations"
+                        );
                     }
                     _ = shutdown.notified() => {
                         break;
