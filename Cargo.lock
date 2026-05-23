@@ -863,6 +863,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-paxos-piggyback"
+version = "0.1.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "omnipaxos",
+ "parking_lot",
+ "postcard",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tsoracle-client",
+ "tsoracle-consensus",
+ "tsoracle-core",
+ "tsoracle-driver-paxos",
+ "tsoracle-paxos-toolkit",
+ "tsoracle-server",
+]
+
+[[package]]
 name = "example-paxos-standalone"
 version = "0.1.4"
 dependencies = [

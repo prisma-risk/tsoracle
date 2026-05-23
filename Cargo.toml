@@ -20,6 +20,7 @@ members  = [
     "examples/openraft-piggyback",
     "examples/openraft-standalone",
     "examples/paxos-embedded",
+    "examples/paxos-piggyback",
     "examples/paxos-standalone",
     "examples/tls-mtls",
     "benchmarks/minimal",
