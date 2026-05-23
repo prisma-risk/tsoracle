@@ -17,6 +17,10 @@
 //! and rasterizes the result to `site/static/og/<slug>.png` (per-post) and
 //! `site/static/og-default.png` (site-wide fallback). Outputs are gitignored
 //! and regenerated unconditionally on every run.
+//!
+//! JetBrainsMono TTFs are bundled under `../fonts/` and loaded explicitly,
+//! so the generator does not depend on the host environment having the font
+//! installed (CI's Ubuntu runners do not).
 
 use anyhow::{anyhow, Context, Result};
 use resvg::tiny_skia;
@@ -26,6 +30,8 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 const TEMPLATE: &str = include_str!("../template.svg");
+const FONT_REGULAR: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
+const FONT_BOLD: &[u8] = include_bytes!("../fonts/JetBrainsMono-Bold.ttf");
 const POSTS_DIR: &str = "site/content/posts";
 const OUT_PER_POST: &str = "site/static/og";
 const OUT_DEFAULT: &str = "site/static/og-default.png";
@@ -135,7 +141,11 @@ fn render_to_png(title: &str, date: &str, out_path: &Path) -> Result<()> {
         .replace("__DATELINE__", &escape_xml(&dateline));
 
     let mut options = usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
+    {
+        let fontdb = options.fontdb_mut();
+        fontdb.load_font_data(FONT_REGULAR.to_vec());
+        fontdb.load_font_data(FONT_BOLD.to_vec());
+    }
 
     let tree = usvg::Tree::from_str(&svg, &options)
         .map_err(|e| anyhow!("parsing SVG: {e}"))?;
