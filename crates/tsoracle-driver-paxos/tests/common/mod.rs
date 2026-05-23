@@ -161,23 +161,41 @@ where
     /// [`MeshSink`] pointing at the shared network. The pump task drains
     /// inbox messages and calls `handle_incoming` on the OmniPaxos handle.
     pub fn start_all(&mut self) {
-        for node in &mut self.nodes {
-            let host = node
-                .host
-                .as_mut()
-                .expect("host must be present before start_all");
-            let sink = Arc::new(MeshSink::new(self.network.clone()));
-            host.start(sink);
-
-            let inbox = node
-                .inbox
-                .take()
-                .expect("inbox must be present before start_all");
-            let omnipaxos = node.omnipaxos();
-            let (stop_tx, stop_rx) = oneshot::channel();
-            node.pump_stop = Some(stop_tx);
-            node.pump_handle = Some(tokio::spawn(pump_inbox(omnipaxos, inbox, stop_rx)));
+        let node_ids: Vec<u64> = self.nodes.iter().map(|node| node.node_id).collect();
+        for node_id in node_ids {
+            self.start_node(node_id);
         }
+    }
+
+    /// Start a subset of nodes: every node whose id is in `subset`.
+    /// Used by the joining-node test to leave one node intentionally
+    /// idle (no runner, no pump → no OmniPaxos progress).
+    pub fn start_only(&mut self, subset: &[u64]) {
+        for node_id in subset {
+            self.start_node(*node_id);
+        }
+    }
+
+    /// Start the runner + pump for a single node. Idempotent guard:
+    /// panics if the node is already running.
+    pub fn start_node(&mut self, node_id: u64) {
+        let sink = Arc::new(MeshSink::new(self.network.clone()));
+        let omnipaxos = self.node(node_id).omnipaxos();
+        let slot = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == node_id)
+            .expect("node id present");
+        assert!(
+            slot.pump_handle.is_none(),
+            "node {node_id} is already running",
+        );
+        let host = slot.host.as_mut().expect("host present");
+        host.start(sink);
+        let inbox = slot.inbox.take().expect("inbox present");
+        let (stop_tx, stop_rx) = oneshot::channel();
+        slot.pump_stop = Some(stop_tx);
+        slot.pump_handle = Some(tokio::spawn(pump_inbox(omnipaxos, inbox, stop_rx)));
     }
 
     /// Stop every node's runner + inbox pump.
@@ -520,24 +538,6 @@ impl Cluster<RocksdbStorage<HighWaterCommand>> {
         slot.inbox = Some(inbox);
         slot.leader_stream = leader_stream;
         slot.omnipaxos = Some(shared_omnipaxos);
-    }
-
-    /// Start the runner + pump for a single node. Used as the second
-    /// half of a [`Self::rebuild_rocksdb_node`] / start cycle.
-    pub fn start_node(&mut self, node_id: u64) {
-        let sink = Arc::new(MeshSink::new(self.network.clone()));
-        let omnipaxos = self.node(node_id).omnipaxos();
-        let slot = self
-            .nodes
-            .iter_mut()
-            .find(|node| node.node_id == node_id)
-            .expect("node id present");
-        let host = slot.host.as_mut().expect("host present after rebuild");
-        host.start(sink);
-        let inbox = slot.inbox.take().expect("inbox present after rebuild");
-        let (stop_tx, stop_rx) = oneshot::channel();
-        slot.pump_stop = Some(stop_tx);
-        slot.pump_handle = Some(tokio::spawn(pump_inbox(omnipaxos, inbox, stop_rx)));
     }
 }
 
