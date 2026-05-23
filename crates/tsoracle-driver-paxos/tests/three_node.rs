@@ -111,9 +111,11 @@ async fn fence_check_rejects_stale_epoch_and_accepts_current() {
     cluster
         .drive_until(
             |c| {
-                let leader_epoch = encode_epoch(c.node(leader_id).omnipaxos().lock().get_promise());
+                let leader_epoch = encode_epoch(c.node(leader_id).omnipaxos().lock().get_promise())
+                    .expect("cluster node id is in-bounds");
                 let follower_epoch =
-                    encode_epoch(c.node(follower_id).omnipaxos().lock().get_promise());
+                    encode_epoch(c.node(follower_id).omnipaxos().lock().get_promise())
+                        .expect("cluster node id is in-bounds");
                 leader_epoch != Epoch(0) && leader_epoch == follower_epoch
             },
             1_000,
@@ -122,7 +124,7 @@ async fn fence_check_rejects_stale_epoch_and_accepts_current() {
     let current_epoch = {
         let handle = cluster.node(follower_id).omnipaxos();
         let promise = handle.lock().get_promise();
-        encode_epoch(promise)
+        encode_epoch(promise).expect("cluster node id is in-bounds")
     };
 
     // We cannot move the cluster's StandaloneHost into a PaxosDriver

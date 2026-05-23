@@ -26,6 +26,8 @@ use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
 use tsoracle_paxos_toolkit::lifecycle::LeaderEventStream;
 
+use tracing::error;
+
 use crate::host::PaxosHighWaterHost;
 use crate::type_config::encode_epoch;
 
@@ -85,8 +87,16 @@ where
                         // Re-derive epoch from the host's view of the
                         // current ballot. This is what fence checks see.
                         let ballot = omnipaxos.lock().get_promise();
-                        LeaderState::Leader {
-                            epoch: encode_epoch(ballot),
+                        match encode_epoch(ballot) {
+                            Ok(epoch) => LeaderState::Leader { epoch },
+                            // A ballot we cannot fence-encode (node id or
+                            // reconfiguration count out of range) must not be
+                            // reported as a leader at a fabricated epoch.
+                            // Surface it loudly and report no leader observed.
+                            Err(err) => {
+                                error!(%err, "paxos leader ballot is not fence-encodable");
+                                LeaderState::Unknown
+                            }
                         }
                     }
                     other => other,
@@ -108,11 +118,16 @@ where
         // whose ballot has been superseded will see its append rejected
         // downstream anyway; this is a cheap pre-flight to avoid wasting
         // a log slot.
+        // An out-of-range ballot here means the local node id or the
+        // reconfiguration count exceeds what the fence can encode — an
+        // invariant violation that will not clear on retry, so fail with a
+        // permanent error rather than silently fencing on a colliding epoch.
         let current_epoch = {
             let handle = self.host.omnipaxos();
             let guard = handle.lock();
             encode_epoch(guard.get_promise())
-        };
+        }
+        .map_err(|err| ConsensusError::PermanentDriver(Box::new(err)))?;
         if epoch != current_epoch {
             return Err(ConsensusError::Fenced {
                 expected: epoch,
@@ -205,7 +220,7 @@ mod tests {
     async fn persist_with_matching_epoch_calls_submit_advance() {
         let host = StubHost::new();
         let current_ballot = host.omnipaxos().lock().get_promise();
-        let current_epoch = encode_epoch(current_ballot);
+        let current_epoch = encode_epoch(current_ballot).expect("default ballot is in-bounds");
 
         let (_sender, stream) = leader_event_channel();
         let driver = PaxosDriver::new(host, stream);
@@ -234,5 +249,48 @@ mod tests {
         let (_sender, stream) = leader_event_channel();
         let driver = PaxosDriver::new(host, stream);
         assert_eq!(driver.load_high_water().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn paxos_driver_persist_surfaces_encoding_error() {
+        use omnipaxos::ballot_leader_election::Ballot;
+        use omnipaxos::storage::Storage;
+        use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
+
+        // Seed the node's persisted promise with a pid that overflows the
+        // 16-bit fence encoding. On recovery the OmniPaxos handle reports this
+        // ballot via get_promise(), so the driver's fence cannot encode it and
+        // must surface a permanent error rather than silently fence on a
+        // truncated, collision-prone epoch.
+        let mut storage = MemStorage::<HighWaterCommand>::new();
+        storage
+            .set_promise(Ballot {
+                config_id: 1,
+                n: 0,
+                priority: 0,
+                pid: 0x1_0000,
+            })
+            .expect("seed promise");
+        let config = OmniPaxosConfig {
+            cluster_config: ClusterConfig {
+                configuration_id: 1,
+                nodes: vec![1, 2, 3],
+                flexible_quorum: None,
+            },
+            server_config: ServerConfig {
+                pid: 1,
+                ..Default::default()
+            },
+        };
+        let omnipaxos = Arc::new(Mutex::new(config.build(storage).expect("build")));
+        let host = StubHost { omnipaxos };
+
+        let (_sender, stream) = leader_event_channel();
+        let driver = PaxosDriver::new(host, stream);
+
+        match driver.persist_high_water(42, Epoch(0)).await {
+            Err(ConsensusError::PermanentDriver(_)) => {}
+            other => panic!("expected PermanentDriver encoding error, got {other:?}"),
+        }
     }
 }
