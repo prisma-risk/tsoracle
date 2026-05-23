@@ -145,7 +145,7 @@ where
 /// apply task after each successful drain.
 pub fn maybe_snapshot<S>(
     omnipaxos: &Arc<Mutex<OmniPaxos<HighWaterCommand, S>>>,
-    policy: &SnapshotPolicy,
+    policy: &mut SnapshotPolicy,
     decided_idx: u64,
 ) where
     S: Storage<HighWaterCommand> + Send + 'static,
