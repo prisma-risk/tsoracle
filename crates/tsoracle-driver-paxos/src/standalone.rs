@@ -20,6 +20,7 @@
 //! `PaxosHighWaterHost` directly against their existing cluster instead.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -43,6 +44,8 @@ where
     S: Storage<HighWaterCommand> + Send + 'static,
 {
     omnipaxos: Arc<Mutex<OmniPaxos<HighWaterCommand, S>>>,
+    my_node_id: u64,
+    barrier_seq: AtomicU64,
     runner: PaxosRunner<HighWaterCommand, S>,
     apply_state: ApplyState,
     leader_stream: Mutex<Option<LeaderEventStream>>,
@@ -72,6 +75,8 @@ where
         let leader_stream = runner.take_leader_stream();
         Self {
             omnipaxos,
+            my_node_id,
+            barrier_seq: AtomicU64::new(0),
             runner,
             apply_state: ApplyState::new(),
             leader_stream: Mutex::new(leader_stream),
@@ -267,10 +272,17 @@ where
     }
 
     async fn current_high_water(&self) -> Result<u64, ConsensusError> {
-        let snapshot_decided = self.omnipaxos.lock().get_decided_idx();
+        // Mint a (my_node_id, seq) nonce, append a Barrier carrying it,
+        // and wait until the apply path folds *this specific* barrier
+        // into the ledger. Tracking by appending-node lets two nodes'
+        // independent counters coexist without trampling each other.
+        let seq = self.barrier_seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.omnipaxos
             .lock()
-            .append(HighWaterCommand::Barrier)
+            .append(HighWaterCommand::Barrier {
+                node: self.my_node_id,
+                seq,
+            })
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
             })?;
@@ -279,16 +291,13 @@ where
             "standalone_host::current_high_water::after_append_before_await"
         );
         loop {
-            // Register as waiter before checking state; otherwise a notify_waiters
-            // that fires between the previous iteration's check and the next
-            // notified().await is lost. apply_notifier uses notify_waiters which
-            // does not store permits — Notified::enable() is the supported way
-            // to close that window.
+            // Register as waiter before checking state; otherwise a
+            // notify_waiters that fires between the previous iteration's
+            // check and the next notified().await is lost.
             let notified = notifier.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let new_decided = self.omnipaxos.lock().get_decided_idx();
-            if new_decided > snapshot_decided {
+            if self.apply_state.applied_barrier_seq(self.my_node_id) >= seq {
                 return Ok(self.apply_state.high_water());
             }
             notified.await;

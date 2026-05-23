@@ -12,19 +12,22 @@
 
 //! Apply-task state machine.
 //!
-//! Owns the in-memory high-water mark (an `AtomicU64`) and the apply
-//! notifier the host's blocking-read methods loop on. The apply task is
-//! spawned by the host (`StandaloneHost` in a follow-up sub-issue),
-//! awaits the toolkit runner's `apply_notify`, then drains the
-//! OmniPaxos log's decided suffix into the AtomicU64 — exactly once per
-//! decided entry.
+//! Owns the in-memory high-water mark (an `AtomicU64`), the per-node
+//! barrier-nonce ledger that linearizes `current_high_water`, and the
+//! apply notifier the host's blocking-read methods loop on. The apply
+//! task is spawned by the host (`StandaloneHost`), awaits the toolkit
+//! runner's `apply_notify`, then drains the OmniPaxos log's decided
+//! suffix into the apply state — exactly once per decided entry.
 //!
-//! No per-proposal tracking. Blocking-read methods (`submit_advance`,
-//! `current_high_water`) snapshot `decided_idx` and the AtomicU64
-//! before they append, then loop on the `apply_notifier` until their
-//! waitcondition is satisfied. This is the consequence of
-//! `OmniPaxos::append` not returning a log index for the proposing node.
+//! Why per-node barrier nonces. `OmniPaxos::append` does not return a
+//! log index, and the apply path only sees decided entries in order. To
+//! make `current_high_water` a linearized read, the reader mints a
+//! `(my_node, seq)` nonce, appends `Barrier { node, seq }`, and waits
+//! until the ledger reports `applied_barrier_seq(my_node) >= seq`. The
+//! ledger is keyed by appending-node so two nodes' independent nonce
+//! counters don't trample each other; size is bounded by cluster size.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -47,6 +50,7 @@ use crate::snapshot_policy::SnapshotPolicy;
 pub struct ApplyState {
     high_water: Arc<AtomicU64>,
     apply_notifier: Arc<Notify>,
+    applied_barriers: Arc<Mutex<HashMap<u64, u64>>>,
 }
 
 impl Default for ApplyState {
@@ -61,6 +65,7 @@ impl ApplyState {
         Self {
             high_water: Arc::new(AtomicU64::new(0)),
             apply_notifier: Arc::new(Notify::new()),
+            applied_barriers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -68,6 +73,17 @@ impl ApplyState {
     #[must_use]
     pub fn high_water(&self) -> u64 {
         self.high_water.load(Ordering::SeqCst)
+    }
+
+    /// Latest applied barrier sequence for `node`. Returns 0 if the
+    /// apply path has never folded a `Barrier { node, .. }` entry.
+    #[must_use]
+    pub fn applied_barrier_seq(&self, node: u64) -> u64 {
+        self.applied_barriers
+            .lock()
+            .get(&node)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Notifier the host's blocking-read methods loop on.
@@ -116,17 +132,33 @@ where
                         trace!(prev, new = at_least, "high-water advanced");
                     }
                 }
-                LogEntry::Decided(HighWaterCommand::Barrier) => {
-                    // No-op marker; the AtomicU64 is unchanged.
+                LogEntry::Decided(HighWaterCommand::Barrier { node, seq }) => {
+                    let mut ledger = state.applied_barriers.lock();
+                    let slot = ledger.entry(*node).or_insert(0);
+                    if *seq > *slot {
+                        *slot = *seq;
+                    }
                 }
                 LogEntry::Snapshotted(snapshotted) => {
                     // OmniPaxos may surface a Snapshotted entry on log
-                    // catch-up; reflect its value if it's higher.
+                    // catch-up; reflect its value if it's higher and
+                    // merge the snapshot's per-node barrier ledger.
+                    // Without merging the ledger, a node that catches
+                    // up via snapshot transfer would never see its own
+                    // barriers as applied and current_high_water would
+                    // hang.
                     let prev = state.high_water.load(Ordering::SeqCst);
                     if snapshotted.snapshot.value > prev {
                         state
                             .high_water
                             .store(snapshotted.snapshot.value, Ordering::SeqCst);
+                    }
+                    let mut ledger = state.applied_barriers.lock();
+                    for (node, seq) in &snapshotted.snapshot.applied_barriers {
+                        let slot = ledger.entry(*node).or_insert(0);
+                        if *seq > *slot {
+                            *slot = *seq;
+                        }
                     }
                 }
                 LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) | LogEntry::Undecided(_) => {
@@ -406,7 +438,9 @@ mod drain_tests {
             handle
                 .append(HighWaterCommand::Advance { at_least: 17 })
                 .expect("append");
-            handle.append(HighWaterCommand::Barrier).expect("append");
+            handle
+                .append(HighWaterCommand::Barrier { node: 1, seq: 1 })
+                .expect("append");
         }
 
         drive_until(
@@ -426,6 +460,54 @@ mod drain_tests {
         drain_decided_into(&leader_handle(&cluster), &mut cursor, &state);
 
         assert_eq!(state.high_water(), 17, "Barrier must not lower or zero out");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drain_records_latest_barrier_seq_per_node() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+
+        {
+            let leader = leader_handle(&cluster);
+            let mut handle = leader.lock();
+            handle
+                .append(HighWaterCommand::Barrier { node: 1, seq: 5 })
+                .expect("append");
+            handle
+                .append(HighWaterCommand::Barrier { node: 1, seq: 7 })
+                .expect("append");
+            handle
+                .append(HighWaterCommand::Barrier { node: 2, seq: 3 })
+                .expect("append");
+        }
+
+        drive_until(
+            &mut cluster,
+            |state| {
+                state
+                    .nodes
+                    .iter()
+                    .all(|node| node.omnipaxos.lock().get_decided_idx() >= 3)
+            },
+            500,
+        )
+        .await;
+
+        let state = ApplyState::new();
+        let mut cursor = 0u64;
+        drain_decided_into(&leader_handle(&cluster), &mut cursor, &state);
+
+        assert_eq!(state.applied_barrier_seq(1), 7);
+        assert_eq!(state.applied_barrier_seq(2), 3);
+        assert_eq!(state.applied_barrier_seq(99), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drain_does_not_regress_barrier_seq_on_lower_value() {
+        let state = ApplyState::new();
+        state.applied_barriers.lock().insert(1, 42);
+        // No drain — just verify the helper observes the seeded ledger.
+        assert_eq!(state.applied_barrier_seq(1), 42);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

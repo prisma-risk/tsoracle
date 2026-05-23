@@ -18,7 +18,7 @@
 //! host's apply pump, sitting next to the KV map. The snapshot type carries
 //! both halves.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,11 +56,16 @@ impl From<HighWaterCommand> for MyAppCommand {
     }
 }
 
-/// Snapshot payload — carries BOTH halves (KV map and high-water).
+/// Snapshot payload — carries BOTH halves (KV map and high-water) plus
+/// the per-appending-node barrier ledger. The ledger is required so a
+/// node that catches up via snapshot transfer still sees its own
+/// barriers as "applied" — otherwise `current_high_water` would hang
+/// after recovery waiting on a seq it can never observe.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MyAppSnap {
     pub kv: BTreeMap<String, Vec<u8>>,
     pub high_water: u64,
+    pub applied_barriers: HashMap<u64, u64>,
 }
 
 impl omnipaxos::storage::Entry for MyAppCommand {
@@ -81,6 +86,12 @@ impl omnipaxos::storage::Snapshot<MyAppCommand> for MyAppSnap {
             self.kv.insert(key, value);
         }
         self.high_water = self.high_water.max(other.high_water);
+        for (node, seq) in other.applied_barriers {
+            let slot = self.applied_barriers.entry(node).or_insert(0);
+            if seq > *slot {
+                *slot = seq;
+            }
+        }
     }
 
     fn use_snapshots() -> bool {
@@ -101,7 +112,12 @@ fn apply_into_snapshot(entry: &MyAppCommand, snap: &mut MyAppSnap) {
                 snap.high_water = *at_least;
             }
         }
-        MyAppCommand::HighWater(HighWaterCommand::Barrier) => {}
+        MyAppCommand::HighWater(HighWaterCommand::Barrier { node, seq }) => {
+            let slot = snap.applied_barriers.entry(*node).or_insert(0);
+            if *seq > *slot {
+                *slot = *seq;
+            }
+        }
     }
 }
 
@@ -116,6 +132,7 @@ pub struct HostState {
     kv: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     high_water: Arc<AtomicU64>,
     apply_notify: Arc<Notify>,
+    applied_barriers: Arc<Mutex<HashMap<u64, u64>>>,
 }
 
 impl Default for HostState {
@@ -130,6 +147,7 @@ impl HostState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
             high_water: Arc::new(AtomicU64::new(0)),
             apply_notify: Arc::new(Notify::new()),
+            applied_barriers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -146,6 +164,16 @@ impl HostState {
     pub fn apply_notifier(&self) -> Arc<Notify> {
         self.apply_notify.clone()
     }
+
+    /// Latest applied barrier sequence for `node`. Returns 0 if the
+    /// pump has never folded a `Barrier { node, .. }` entry.
+    pub fn applied_barrier_seq(&self, node: u64) -> u64 {
+        self.applied_barriers
+            .lock()
+            .get(&node)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 // ---------- Apply pump ----------
@@ -157,8 +185,11 @@ impl HostState {
 /// invoke this per entry and then call [`HostState::apply_notify`].
 ///
 /// Half-isolation: `Kv` variants touch only the KV map; `HighWater` variants
-/// touch only the high-water cell. `Advance` is monotonic — high_water moves
-/// only forward, never backward.
+/// touch only the high-water cell (or the barrier ledger). `Advance` is
+/// monotonic — high_water moves only forward, never backward. `Barrier`
+/// records `(node, seq)` so `current_high_water` can wait for its own
+/// barrier to be applied instead of trusting `decided_idx` advancement
+/// alone.
 pub fn apply_decided_into(cmd: &MyAppCommand, state: &HostState) {
     match cmd {
         MyAppCommand::Kv(KvOp::Put { key, value }) => {
@@ -174,13 +205,20 @@ pub fn apply_decided_into(cmd: &MyAppCommand, state: &HostState) {
                 trace!(prev, new = at_least, "piggyback high-water advanced");
             }
         }
-        MyAppCommand::HighWater(HighWaterCommand::Barrier) => {}
+        MyAppCommand::HighWater(HighWaterCommand::Barrier { node, seq }) => {
+            let mut ledger = state.applied_barriers.lock();
+            let slot = ledger.entry(*node).or_insert(0);
+            if *seq > *slot {
+                *slot = *seq;
+            }
+        }
     }
 }
 
 /// Apply a [`MyAppSnap`] (e.g., delivered as a `LogEntry::Snapshotted`) to
-/// `state`. Merges the snapshot's KV map into the host KV and lifts
-/// `high_water` to `max(prev, snap.high_water)`.
+/// `state`. Merges the snapshot's KV map into the host KV, lifts
+/// `high_water` to `max(prev, snap.high_water)`, and merges the
+/// per-node barrier ledger (taking the max per node).
 pub fn apply_snapshot_into(snap: &MyAppSnap, state: &HostState) {
     let mut kv = state.kv.lock();
     for (k, v) in &snap.kv {
@@ -190,6 +228,13 @@ pub fn apply_snapshot_into(snap: &MyAppSnap, state: &HostState) {
     let prev = state.high_water.load(Ordering::SeqCst);
     if snap.high_water > prev {
         state.high_water.store(snap.high_water, Ordering::SeqCst);
+    }
+    let mut ledger = state.applied_barriers.lock();
+    for (node, seq) in &snap.applied_barriers {
+        let slot = ledger.entry(*node).or_insert(0);
+        if *seq > *slot {
+            *slot = *seq;
+        }
     }
 }
 
@@ -246,14 +291,22 @@ pub fn drain_decided_into(
 pub struct PiggybackHost {
     omnipaxos: Arc<Mutex<OmniPaxos<MyAppCommand, MemStorage<MyAppCommand>>>>,
     state: HostState,
+    my_node_id: u64,
+    barrier_seq: AtomicU64,
 }
 
 impl PiggybackHost {
     pub fn new(
         omnipaxos: Arc<Mutex<OmniPaxos<MyAppCommand, MemStorage<MyAppCommand>>>>,
         state: HostState,
+        my_node_id: u64,
     ) -> Self {
-        Self { omnipaxos, state }
+        Self {
+            omnipaxos,
+            state,
+            my_node_id,
+            barrier_seq: AtomicU64::new(0),
+        }
     }
 }
 
@@ -267,26 +320,31 @@ impl PaxosHighWaterHost for PiggybackHost {
     }
 
     async fn current_high_water(&self) -> Result<u64, ConsensusError> {
-        let snapshot_decided = self.omnipaxos.lock().get_decided_idx();
+        // Mint a (my_node_id, seq) nonce and wait for *this specific
+        // barrier* to be folded into the state — not merely for
+        // `decided_idx` to advance past a pre-append snapshot, which
+        // would fire on any unrelated earlier entry and let the read
+        // return a stale `high_water` while the barrier is still
+        // undecided. This mirrors the StandaloneHost fix.
+        let seq = self.barrier_seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.omnipaxos
             .lock()
-            .append(MyAppCommand::HighWater(HighWaterCommand::Barrier))
+            .append(MyAppCommand::HighWater(HighWaterCommand::Barrier {
+                node: self.my_node_id,
+                seq,
+            }))
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(PiggybackAppendError(format!("{err:?}"))))
             })?;
         let notify = self.state.apply_notifier();
         loop {
-            // Register as a waiter before re-reading decided_idx; otherwise a
-            // notify_waiters that fires between the previous iteration's check
-            // and the next notified().await is lost. apply_notifier uses
-            // notify_waiters, which does not store permits — Notified::enable
-            // is the supported way to close the window. Mirrors the driver-paxos
-            // reader fix in #196.
+            // Register as a waiter before checking state; apply_notifier
+            // uses notify_waiters which does not store permits, so an
+            // unregistered check would race against the wake.
             let notified = notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let new_decided = self.omnipaxos.lock().get_decided_idx();
-            if new_decided > snapshot_decided {
+            if self.state.applied_barrier_seq(self.my_node_id) >= seq {
                 return Ok(self.state.high_water());
             }
             notified.await;
@@ -341,8 +399,8 @@ mod tests {
         MyAppCommand::HighWater(HighWaterCommand::Advance { at_least })
     }
 
-    fn barrier() -> MyAppCommand {
-        MyAppCommand::HighWater(HighWaterCommand::Barrier)
+    fn barrier(node: u64, seq: u64) -> MyAppCommand {
+        MyAppCommand::HighWater(HighWaterCommand::Barrier { node, seq })
     }
 
     // ---------- Envelope ----------
@@ -367,7 +425,7 @@ mod tests {
             advance(10),
             put("b", b"2"),
             advance(30),
-            barrier(),
+            barrier(1, 1),
         ];
         let snap = MyAppSnap::create(&entries);
         assert_eq!(snap.high_water, 30);
@@ -407,14 +465,14 @@ mod tests {
 
     #[test]
     fn snapshot_create_high_water_only_leaves_kv_empty() {
-        let snap = MyAppSnap::create(&[advance(10), advance(20), barrier()]);
+        let snap = MyAppSnap::create(&[advance(10), advance(20), barrier(1, 1)]);
         assert!(snap.kv.is_empty(), "TSO commands must not touch the KV map");
         assert_eq!(snap.high_water, 20);
     }
 
     #[test]
     fn snapshot_create_barrier_is_no_op() {
-        let snap = MyAppSnap::create(&[barrier(), barrier()]);
+        let snap = MyAppSnap::create(&[barrier(1, 1), barrier(1, 1)]);
         assert!(snap.kv.is_empty());
         assert_eq!(snap.high_water, 0);
     }
@@ -424,12 +482,12 @@ mod tests {
     #[test]
     fn snapshot_merge_takes_max_high_water() {
         let mut left = MyAppSnap {
-            kv: BTreeMap::new(),
             high_water: 100,
+            ..Default::default()
         };
         let right = MyAppSnap {
-            kv: BTreeMap::new(),
             high_water: 50,
+            ..Default::default()
         };
         left.merge(right);
         assert_eq!(
@@ -438,12 +496,12 @@ mod tests {
         );
 
         let mut left = MyAppSnap {
-            kv: BTreeMap::new(),
             high_water: 50,
+            ..Default::default()
         };
         let right = MyAppSnap {
-            kv: BTreeMap::new(),
             high_water: 100,
+            ..Default::default()
         };
         left.merge(right);
         assert_eq!(left.high_water, 100, "merge takes the higher of the two");
@@ -453,14 +511,14 @@ mod tests {
     fn snapshot_merge_overwrites_kv_on_conflict() {
         let mut left = MyAppSnap {
             kv: BTreeMap::from([("a".into(), b"left".to_vec())]),
-            high_water: 0,
+            ..Default::default()
         };
         let right = MyAppSnap {
             kv: BTreeMap::from([
                 ("a".into(), b"right".to_vec()),
                 ("b".into(), b"only-right".to_vec()),
             ]),
-            high_water: 0,
+            ..Default::default()
         };
         left.merge(right);
         assert_eq!(
@@ -537,15 +595,38 @@ mod tests {
     }
 
     #[test]
-    fn apply_decided_barrier_does_not_change_state() {
+    fn apply_decided_barrier_leaves_kv_and_high_water_unchanged() {
         let state = HostState::new();
         apply_decided_into(&put("k", b"v"), &state);
         apply_decided_into(&advance(99), &state);
         let kv_before = state.kv_dump();
         let hw_before = state.high_water();
-        apply_decided_into(&barrier(), &state);
+        apply_decided_into(&barrier(1, 1), &state);
         assert_eq!(state.kv_dump(), kv_before);
         assert_eq!(state.high_water(), hw_before);
+    }
+
+    #[test]
+    fn apply_decided_barrier_records_latest_seq_per_node() {
+        let state = HostState::new();
+        apply_decided_into(&barrier(1, 5), &state);
+        apply_decided_into(&barrier(1, 7), &state);
+        apply_decided_into(&barrier(2, 3), &state);
+        assert_eq!(state.applied_barrier_seq(1), 7);
+        assert_eq!(state.applied_barrier_seq(2), 3);
+        assert_eq!(state.applied_barrier_seq(99), 0);
+    }
+
+    #[test]
+    fn apply_decided_barrier_seq_is_monotonic_per_node() {
+        let state = HostState::new();
+        apply_decided_into(&barrier(1, 10), &state);
+        apply_decided_into(&barrier(1, 5), &state);
+        assert_eq!(
+            state.applied_barrier_seq(1),
+            10,
+            "an out-of-order replay must not regress the per-node seq",
+        );
     }
 
     // ---------- Half-isolation (the piggyback invariant) ----------
@@ -572,7 +653,7 @@ mod tests {
         let kv_before = state.kv_dump();
         apply_decided_into(&advance(10), &state);
         apply_decided_into(&advance(20), &state);
-        apply_decided_into(&barrier(), &state);
+        apply_decided_into(&barrier(1, 1), &state);
         assert_eq!(
             state.kv_dump(),
             kv_before,
@@ -588,6 +669,7 @@ mod tests {
         let snap = MyAppSnap {
             kv: BTreeMap::from([("a".into(), b"1".to_vec()), ("b".into(), b"2".to_vec())]),
             high_water: 99,
+            ..Default::default()
         };
         apply_snapshot_into(&snap, &state);
         assert_eq!(state.high_water(), 99);
@@ -605,6 +687,7 @@ mod tests {
         let snap = MyAppSnap {
             kv: BTreeMap::from([("only-snap".into(), b"x".to_vec())]),
             high_water: 30, // lower than existing 50
+            ..Default::default()
         };
         apply_snapshot_into(&snap, &state);
 
@@ -624,11 +707,44 @@ mod tests {
         apply_decided_into(&advance(10), &state);
         apply_snapshot_into(
             &MyAppSnap {
-                kv: BTreeMap::new(),
                 high_water: 100,
+                ..Default::default()
             },
             &state,
         );
         assert_eq!(state.high_water(), 100);
+    }
+
+    #[test]
+    fn apply_snapshot_merges_barrier_ledger() {
+        let state = HostState::new();
+        apply_decided_into(&barrier(1, 3), &state);
+        apply_snapshot_into(
+            &MyAppSnap {
+                applied_barriers: HashMap::from([(1, 5), (2, 7)]),
+                ..Default::default()
+            },
+            &state,
+        );
+        assert_eq!(state.applied_barrier_seq(1), 5, "snapshot lifts seq");
+        assert_eq!(state.applied_barrier_seq(2), 7, "snapshot introduces nodes");
+    }
+
+    #[test]
+    fn apply_snapshot_does_not_regress_barrier_ledger() {
+        let state = HostState::new();
+        apply_decided_into(&barrier(1, 10), &state);
+        apply_snapshot_into(
+            &MyAppSnap {
+                applied_barriers: HashMap::from([(1, 5)]),
+                ..Default::default()
+            },
+            &state,
+        );
+        assert_eq!(
+            state.applied_barrier_seq(1),
+            10,
+            "merge must not move seq backward",
+        );
     }
 }
