@@ -387,14 +387,25 @@ impl ChaosController for PaxosController {
     }
 
     fn endpoints(&self) -> Vec<String> {
-        unimplemented!()
+        self.nodes.iter().map(|n| n.endpoint.clone()).collect()
     }
 
     fn current_leader(&self) -> Option<NodeId> {
-        unimplemented!()
+        for node in &self.nodes {
+            if let Some(leader_pid) = node.omnipaxos.lock().get_current_leader() {
+                // OmniPaxos pids are assigned 1..=node_count by spawn_with;
+                // the cast is safe for any sane cluster size.
+                return Some(NodeId(leader_pid as u32));
+            }
+        }
+        None
     }
 
     async fn shutdown(self: Box<Self>) {
-        unimplemented!()
+        for node in &self.nodes {
+            if let Some(tx) = node.shutdown_tx.lock().take() {
+                let _ = tx.send(());
+            }
+        }
     }
 }
