@@ -32,6 +32,7 @@ fn base_cfg(scenario: &str, duration_s: u64) -> StressConfig {
         liveness_deadline: Duration::from_secs(5),
         grace_mem: Duration::from_millis(100),
         grace_raft: Duration::from_millis(750),
+        grace_paxos: Duration::from_millis(1000),
         grace_process: Duration::from_secs(2),
         nodes: 1,
         bind: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),

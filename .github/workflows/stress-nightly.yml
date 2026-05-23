@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       topology:
-        description: "Topology (mem | raft | process | all)"
+        description: "Topology (mem | raft | paxos | process | all)"
         required: false
         default: all
         type: string
@@ -36,6 +36,7 @@ jobs:
         topology:
           - mem
           - raft
+          - paxos
           - process
         scenario:
           - steady

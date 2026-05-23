@@ -2774,6 +2774,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "nix",
+ "omnipaxos",
  "openraft",
  "parking_lot",
  "rand 0.9.4",
@@ -2789,7 +2790,9 @@ dependencies = [
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-driver-openraft",
+ "tsoracle-driver-paxos",
  "tsoracle-openraft-toolkit",
+ "tsoracle-paxos-toolkit",
  "tsoracle-server",
 ]
 

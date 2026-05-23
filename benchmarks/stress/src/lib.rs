@@ -207,6 +207,29 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
                 (controller, endpoints, server_handle)
             }
         }
+        TopologyKind::Paxos => {
+            let topo = server_rt.block_on(crate::topology::paxos::PaxosTopology::spawn(
+                cfg.nodes, grace,
+            ))?;
+            let endpoints = topo.controller.endpoints();
+            // `PaxosTopology` returns one server `JoinHandle<()>` per node;
+            // same adapter shape as `RaftTopology` above — see its comment.
+            let mut handles = topo.server_handles.into_iter();
+            let first = handles
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("paxos topology returned zero server handles"))?;
+            for extra in handles {
+                server_rt.spawn(async move {
+                    let _ = extra.await;
+                });
+            }
+            let server_handle: tokio::task::JoinHandle<Result<(), tsoracle_server::ServerError>> =
+                server_rt.spawn(async move {
+                    let _ = first.await;
+                    Ok(())
+                });
+            (Box::new(topo.controller), endpoints, server_handle)
+        }
     };
 
     // --- Supervisor task on control runtime. ---
@@ -526,6 +549,7 @@ mod resolve_schedule_tests {
             liveness_deadline: Duration::from_secs(5),
             grace_mem: Duration::from_millis(100),
             grace_raft: Duration::from_millis(750),
+            grace_paxos: Duration::from_millis(1000),
             grace_process: Duration::from_secs(2),
             nodes: 1,
             bind: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),

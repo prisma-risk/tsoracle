@@ -157,6 +157,8 @@ jobs:
         run: cargo run --release -p stress -- run --topology mem --ci-smoke
       - name: smoke (raft)
         run: cargo run --release -p stress -- run --topology raft --ci-smoke --nodes 3
+      - name: smoke (paxos)
+        run: cargo run --release -p stress -- run --topology paxos --ci-smoke --nodes 3
       - name: smoke (process)
         run: cargo run --release -p stress -- run --topology process --ci-smoke --nodes 1
       - name: positive control (inject-violation)

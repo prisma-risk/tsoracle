@@ -116,6 +116,7 @@ impl Report {
         let topo = match self.topology {
             TopologyKind::Mem => "Mem",
             TopologyKind::Raft => "Raft",
+            TopologyKind::Paxos => "Paxos",
             TopologyKind::Process => "Process",
         };
         format!(
@@ -164,6 +165,7 @@ impl Report {
         let topology = match self.topology {
             TopologyKind::Mem => "Mem",
             TopologyKind::Raft => "Raft",
+            TopologyKind::Paxos => "Paxos",
             TopologyKind::Process => "Process",
         };
         let value = serde_json::json!({
@@ -309,6 +311,7 @@ mod tests {
                 liveness_deadline: Duration::from_secs(5),
                 grace_mem: Duration::from_millis(100),
                 grace_raft: Duration::from_millis(750),
+                grace_paxos: Duration::from_millis(1000),
                 grace_process: Duration::from_secs(2),
                 nodes: 1,
                 bind: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
@@ -444,13 +447,18 @@ mod tests {
 
     #[test]
     fn renders_non_mem_topologies() {
-        for topo in [TopologyKind::Raft, TopologyKind::Process] {
+        for topo in [
+            TopologyKind::Raft,
+            TopologyKind::Paxos,
+            TopologyKind::Process,
+        ] {
             let mut r = sample_report();
             r.topology = topo;
             let text = r.render_text();
             let expect = match topo {
                 TopologyKind::Mem => "Mem",
                 TopologyKind::Raft => "Raft",
+                TopologyKind::Paxos => "Paxos",
                 TopologyKind::Process => "Process",
             };
             assert!(text.contains(&format!("topology={expect}")), "{text}");
