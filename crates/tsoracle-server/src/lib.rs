@@ -10,33 +10,10 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! gRPC server for tsoracle.
-//!
-//! Wires four pieces together:
-//! - [`tsoracle_core::Allocator`] — the sync window allocator.
-//! - A user-supplied [`tsoracle_consensus::ConsensusDriver`] — leadership
-//!   state plus durable high-water persistence.
-//! - The tonic-generated `TsoServiceServer` from `tsoracle-proto`,
-//!   mounted on `GetTs` and `GetTsBatch`.
-//! - The internal leader-watch pipeline and failover fence, which keep
-//!   timestamps strictly monotonic across leader transitions.
-
+#![doc = include_str!("../README.md")]
 // Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
 // for the lib's own unit tests; integration tests are separate compilation units.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
-//!
-//! Followers respond to RPCs with `FAILED_PRECONDITION` and a
-//! `tsoracle-leader-hint-bin` binary trailer; `tsoracle-client` consumes
-//! the hint to redirect without an extra round-trip.
-//!
-//! Use [`Server::builder`] to embed in another binary, or use the
-//! `tsoracle` CLI from `tsoracle-bin` for a standalone process. The
-//! [`docs`] module contains the docs.rs-rendered operations chapter; the
-//! repo's `docs/key-subsystems.md` covers the same internals in depth.
-//!
-//! TLS termination is configured via
-//! `ServerBuilder::tls_config(ServerTlsConfig)`; see
-//! `docs/operations.md` for deployment guidance.
 
 #[macro_use]
 mod failpoint;

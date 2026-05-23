@@ -10,16 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! gRPC client for tsoracle.
-//!
-//! **The client never retains pre-fetched timestamps.** Every timestamp returned
-//! to a caller was allocated by the server after that caller's request entered
-//! the client driver. RPC efficiency comes from request coalescing (multiple
-//! concurrent waiters batch into one outgoing GetTs), not pre-fetching.
-//!
-//! TLS is configured via `ClientBuilder::tls_config(ClientTlsConfig)`;
-//! see `docs/client-api-and-usage.md` for the scheme rule and examples.
-
+#![doc = include_str!("../README.md")]
 // Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
 // for the lib's own unit tests; integration tests are separate compilation units.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]

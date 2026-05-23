@@ -10,5 +10,4 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! Private cross-crate integration tests. No public API; all real test code
-//! lives under `tests/`. See `Cargo.toml` for the rationale.
+#![doc = include_str!("../README.md")]

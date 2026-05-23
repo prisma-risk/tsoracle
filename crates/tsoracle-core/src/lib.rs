@@ -10,10 +10,7 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! Core algorithm for tsoracle.
-//!
-//! No I/O, no async, no tokio. Runtime-neutral. Property-testable in microseconds.
-
+#![doc = include_str!("../README.md")]
 // Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
 // for the lib's own unit tests; integration tests are separate compilation units.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
