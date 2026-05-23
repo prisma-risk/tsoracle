@@ -371,11 +371,66 @@ impl Drop for HealOnDrop {
 #[async_trait]
 impl ChaosController for PaxosController {
     async fn kill_leader(&self) -> ChaosEvent {
-        unimplemented!()
+        // Find the OmniPaxos pid (u64) of the current leader by polling each
+        // node's handle. The pid is what `PartitionController` uses to gate
+        // edges, so we keep it in its native u64 width rather than going
+        // through `current_leader()`'s narrowed `NodeId(u32)`.
+        let leader_pid: Option<u64> = self
+            .nodes
+            .iter()
+            .find_map(|n| n.omnipaxos.lock().get_current_leader());
+        let Some(leader_pid) = leader_pid else {
+            return timed_event(ChaosKind::LeaderKill, self.grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "no current leader".into(),
+                }
+            })
+            .await;
+        };
+        let partition = self.network.partition();
+        timed_event(ChaosKind::LeaderKill, self.grace, move || async move {
+            partition.isolate(leader_pid);
+            // Heal-on-drop guarantees reachability is restored even if the
+            // outer future is cancelled at the `sleep` below.
+            let _guard = HealOnDrop {
+                partition,
+                node: leader_pid,
+            };
+            // OmniPaxos BLE runs on a 20 ms tick with `election_tick_timeout = 5`
+            // (~100 ms for followers to escalate after losing the leader).
+            // 1500 ms keeps the chaos window short while reliably producing a
+            // re-election; matches raft.rs's window.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            ChaosOutcome::Applied
+        })
+        .await
     }
 
-    async fn pause_leader(&self, _dur: Duration) -> ChaosEvent {
-        unimplemented!()
+    async fn pause_leader(&self, dur: Duration) -> ChaosEvent {
+        // Same leader-discovery shape as `kill_leader` — see its comment.
+        let leader_pid: Option<u64> = self
+            .nodes
+            .iter()
+            .find_map(|n| n.omnipaxos.lock().get_current_leader());
+        let Some(leader_pid) = leader_pid else {
+            return timed_event(ChaosKind::LeaderPause, self.grace, || async {
+                ChaosOutcome::Skipped {
+                    reason: "no current leader".into(),
+                }
+            })
+            .await;
+        };
+        let partition = self.network.partition();
+        timed_event(ChaosKind::LeaderPause, self.grace, move || async move {
+            partition.isolate(leader_pid);
+            let _guard = HealOnDrop {
+                partition,
+                node: leader_pid,
+            };
+            tokio::time::sleep(dur).await;
+            ChaosOutcome::Applied
+        })
+        .await
     }
 
     async fn arm_failpoint(&self, name: &str, action: &str) -> ChaosEvent {
