@@ -34,18 +34,25 @@ use std::time::Duration;
 
 use anyhow::Context;
 use async_trait::async_trait;
-use omnipaxos::OmniPaxos;
+use omnipaxos::messages::Message;
+use omnipaxos::{ClusterConfig, OmniPaxos, OmniPaxosConfig, ServerConfig};
 use parking_lot::Mutex;
 use rocksdb::{DB, Options};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tsoracle_driver_paxos::HighWaterCommand;
+use tsoracle_paxos_toolkit::lifecycle::MessageSink;
 use tsoracle_paxos_toolkit::storage::RocksdbStorage;
 use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
 
 use crate::chaos::ChaosEvent;
 use crate::topology::{ChaosController, NodeId};
+
+#[allow(dead_code)]
+const TICK_INTERVAL: Duration = Duration::from_millis(20);
+const ELECTION_TICK_TIMEOUT: u64 = 5;
+const RESEND_MESSAGE_TICK_TIMEOUT: u64 = 5;
 
 /// In-process OmniPaxos cluster with one `tsoracle::Server` per node.
 #[allow(dead_code)]
@@ -129,6 +136,51 @@ impl PaxosBackend for DefaultPaxosBackend {
         TcpListener::bind("127.0.0.1:0")
             .await
             .context("paxos topology: bind loopback")
+    }
+}
+
+/// Build an `OmniPaxosConfig` for node `node_id` in the given `cluster`.
+/// Election timing matches `examples/paxos-embedded` — tick interval 20 ms,
+/// election timeout 5 ticks (~100 ms). This is shorter than the raft
+/// topology's 300–600 ms election timeout, but well inside `grace_paxos`'s
+/// 1000 ms default so the fence-freshness gate still has headroom.
+#[allow(dead_code)]
+fn paxos_config(node_id: u64, cluster: &ClusterConfig) -> OmniPaxosConfig {
+    OmniPaxosConfig {
+        cluster_config: cluster.clone(),
+        server_config: ServerConfig {
+            pid: node_id,
+            election_tick_timeout: ELECTION_TICK_TIMEOUT,
+            resend_message_tick_timeout: RESEND_MESSAGE_TICK_TIMEOUT,
+            ..Default::default()
+        },
+    }
+}
+
+/// `MessageSink` that routes outbound paxos messages back through the
+/// shared `MemNetwork`. Lifted from `examples/paxos-embedded`.
+#[allow(dead_code)]
+struct MeshSink {
+    network: Arc<MemNetwork<HighWaterCommand>>,
+}
+
+#[async_trait]
+impl MessageSink<HighWaterCommand> for MeshSink {
+    async fn send(&self, message: Message<HighWaterCommand>) {
+        self.network.deliver(message).await;
+    }
+}
+
+/// Drains the per-node `MemNetwork` inbox into the node's OmniPaxos handle.
+/// Lifted from `examples/paxos-embedded`. One pump task per node; lives for
+/// the lifetime of the topology.
+#[allow(dead_code)]
+async fn run_inbox_pump(
+    omnipaxos: Arc<Mutex<OmniPaxos<HighWaterCommand, RocksdbStorage<HighWaterCommand>>>>,
+    mut inbox: mpsc::Receiver<Message<HighWaterCommand>>,
+) {
+    while let Some(message) = inbox.recv().await {
+        omnipaxos.lock().handle_incoming(message);
     }
 }
 
