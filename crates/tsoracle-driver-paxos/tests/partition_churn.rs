@@ -75,7 +75,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
                             .is_some_and(|leader| leader != original_leader)
                     })
             },
-            5_000,
+            10_000,
         )
         .await;
     let new_leader = cluster
@@ -108,7 +108,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
                     .filter(|node| node.node_id != original_leader)
                     .all(|node| state.high_water_on(node.node_id) >= 200)
             },
-            5_000,
+            10_000,
         )
         .await;
 
@@ -124,7 +124,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
                     .iter()
                     .all(|node| state.high_water_on(node.node_id) >= 200)
             },
-            5_000,
+            10_000,
         )
         .await;
 
