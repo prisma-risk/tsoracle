@@ -6,6 +6,8 @@ If your service already runs OmniPaxos for other state and you want TSO to share
 
 > **Do not copy this example to production unchanged.** It is *correct enough* to teach the integration boundary, but several layers are deliberately simplified. See [Production caveats](#production-caveats).
 
+> **⚠️ Warning — no authentication or encryption.** Every RPC here (the paxos peer transport *and* the tsoracle client API) is **unauthenticated plaintext**. The peer server feeds any deserialize-valid message straight into `OmniPaxos::handle_incoming` with no peer-identity or membership check, so a reachable peer port lets anyone disrupt elections, advance ballots, or get values decided. The `--listen`/`--tso-listen` defaults bind to **loopback only** (`127.0.0.1:0`); exposing the ports off-loopback requires an explicit override, and you must add TLS with client-cert auth first. See [Authentication & TLS](#production-caveats).
+
 ## Prerequisites
 
 - Rust 1.88+ (workspace toolchain).

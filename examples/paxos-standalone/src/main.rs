@@ -57,11 +57,18 @@ struct Cli {
     node_id: u64,
 
     /// Address on which to listen for paxos peer RPCs (e.g. 127.0.0.1:53001).
-    #[arg(long)]
+    ///
+    /// Defaults to `127.0.0.1:0` (loopback, OS-assigned port). The peer
+    /// transport is unauthenticated plaintext, so binding off-loopback must be
+    /// an explicit, deliberate override — never the default.
+    #[arg(long, default_value = "127.0.0.1:0")]
     listen: SocketAddr,
 
     /// Address on which to serve the tsoracle gRPC API (e.g. 127.0.0.1:50581).
-    #[arg(long)]
+    ///
+    /// Defaults to `127.0.0.1:0` (loopback, OS-assigned port) for the same
+    /// reason as `--listen`: the client API is also unauthenticated plaintext.
+    #[arg(long, default_value = "127.0.0.1:0")]
     tso_listen: SocketAddr,
 
     /// Comma-separated `id=host:port` pairs for paxos peer addresses.
