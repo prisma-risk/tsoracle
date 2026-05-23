@@ -4,6 +4,17 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v0.1.3...tsoracle-driver-file-v0.1.4) - 2026-05-23
+
+### Fixed
+
+- *(driver-file)* durably flush rename metadata on Windows ([#154](https://github.com/prisma-risk/tsoracle/pull/154))
+
+### Other
+
+- update README.md badges ([#164](https://github.com/prisma-risk/tsoracle/pull/164))
+- update README.md and add downloads badge ([#143](https://github.com/prisma-risk/tsoracle/pull/143))
+
 ## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v0.1.2...tsoracle-driver-file-v0.1.3) - 2026-05-22
 
 ### Added
