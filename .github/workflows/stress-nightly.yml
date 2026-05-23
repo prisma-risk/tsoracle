@@ -26,8 +26,6 @@ jobs:
   stress:
     name: ${{ matrix.topology }}/${{ matrix.scenario }}
     runs-on: ubuntu-latest
-    # Hard ceiling above the 15-minute --duration budget, leaving margin for
-    # build, smoke, and artifact upload.
     timeout-minutes: 30
     permissions:
       issues: write
@@ -48,34 +46,44 @@ jobs:
           - random-2
           - random-3
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Skip non-matching filters (manual dispatch)
-        if: |
-          github.event_name == 'workflow_dispatch' &&
-          ((github.event.inputs.topology != 'all' && github.event.inputs.topology != matrix.topology) ||
-           (github.event.inputs.scenario != 'all' && github.event.inputs.scenario != matrix.scenario))
+      - id: filter
+        name: Determine whether this matrix cell should run
         env:
+          EVENT_NAME: ${{ github.event_name }}
           MATRIX_TOPOLOGY: ${{ matrix.topology }}
           MATRIX_SCENARIO: ${{ matrix.scenario }}
           REQUESTED_TOPOLOGY: ${{ github.event.inputs.topology }}
           REQUESTED_SCENARIO: ${{ github.event.inputs.scenario }}
         run: |
-          echo "Skipping ${MATRIX_TOPOLOGY}/${MATRIX_SCENARIO} (dispatch requested ${REQUESTED_TOPOLOGY}/${REQUESTED_SCENARIO})"
-          exit 0
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]] \
+            && { [[ "$REQUESTED_TOPOLOGY" != "all" && "$REQUESTED_TOPOLOGY" != "$MATRIX_TOPOLOGY" ]] \
+              || [[ "$REQUESTED_SCENARIO" != "all" && "$REQUESTED_SCENARIO" != "$MATRIX_SCENARIO" ]]; }; then
+            echo "Skipping ${MATRIX_TOPOLOGY}/${MATRIX_SCENARIO} (dispatch requested ${REQUESTED_TOPOLOGY}/${REQUESTED_SCENARIO})"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.filter.outputs.skip != 'true'
 
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.filter.outputs.skip != 'true'
 
       - uses: Swatinem/rust-cache@v2
+        if: steps.filter.outputs.skip != 'true'
 
       - name: system deps
+        if: steps.filter.outputs.skip != 'true'
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang libclang-dev
 
       - name: build
+        if: steps.filter.outputs.skip != 'true'
         run: cargo build --release --bin tsoracle && cargo build --release -p stress --features stress-failpoints
 
       - name: Determine scenario args
         id: args
+        if: steps.filter.outputs.skip != 'true'
         env:
           SCENARIO: ${{ matrix.scenario }}
           REQUESTED_DURATION: ${{ github.event.inputs.duration }}
@@ -94,6 +102,7 @@ jobs:
 
       - name: Run stress
         id: stress
+        if: steps.filter.outputs.skip != 'true'
         env:
           TOPOLOGY: ${{ matrix.topology }}
           ARGS: ${{ steps.args.outputs.args }}
@@ -122,7 +131,7 @@ jobs:
           exit "$code"
 
       - name: Upload artifacts
-        if: always()
+        if: always() && steps.filter.outputs.skip != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: stress-${{ matrix.topology }}-${{ matrix.scenario }}-${{ github.run_id }}
@@ -133,7 +142,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Auto-file deduplicated issue on failure
-        if: failure() && steps.stress.outputs.exit_code != '0'
+        if: failure() && steps.stress.outputs.exit_code != '0' && steps.filter.outputs.skip != 'true'
         uses: ./.github/actions/stress-auto-issue
         with:
           topology: ${{ matrix.topology }}
