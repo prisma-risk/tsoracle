@@ -66,13 +66,15 @@ impl ConsensusDriver for StandaloneRouter {
                     epoch: Epoch(u128::from(term)),
                 },
                 LeadershipState::Follower {
+                    term,
                     leader: Some((id, _peer)),
-                    ..
                 } => LeaderState::Follower {
                     leader_endpoint: addrs.get(&id).cloned(),
+                    leader_epoch: Some(Epoch(u128::from(term))),
                 },
-                LeadershipState::Follower { leader: None, .. } => LeaderState::Follower {
+                LeadershipState::Follower { term, leader: None } => LeaderState::Follower {
                     leader_endpoint: None,
+                    leader_epoch: Some(Epoch(u128::from(term))),
                 },
                 LeadershipState::Candidate { .. }
                 | LeadershipState::Learner

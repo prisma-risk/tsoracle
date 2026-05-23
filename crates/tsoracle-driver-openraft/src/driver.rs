@@ -139,17 +139,19 @@ impl<H: OpenraftHighWaterHost> Stream for KeepAlive<H> {
 /// Project a toolkit [`LeadershipState`] into a tsoracle-consensus
 /// [`LeaderState`].
 ///
-/// Always returns `leader_endpoint: None` on the follower branch: the generic
-/// mapper has no way to extract an endpoint from `C::Node` (different hosts
-/// pick different `Node` types). Hosts that need endpoint resolution wrap the
-/// driver themselves and provide their own `ConsensusDriver` impl.
+/// On the follower branch, `leader_epoch` is the follower's term (which equals
+/// the accepted leader's term). `leader_endpoint` is always `None` here: the
+/// generic mapper has no way to extract an endpoint from `C::Node` (different
+/// hosts pick different `Node` types). Hosts that need endpoint resolution wrap
+/// the driver themselves and provide their own `ConsensusDriver` impl.
 fn map_leader_state<C: RaftTypeConfig>(s: LeadershipState<C>) -> LeaderState {
     match s {
         LeadershipState::Leader { term } => LeaderState::Leader {
             epoch: Epoch(u128::from(term)),
         },
-        LeadershipState::Follower { .. } => LeaderState::Follower {
+        LeadershipState::Follower { term, .. } => LeaderState::Follower {
             leader_endpoint: None,
+            leader_epoch: Some(Epoch(u128::from(term))),
         },
         LeadershipState::Candidate { .. }
         | LeadershipState::Learner
@@ -172,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn follower_with_no_leader_maps_to_follower() {
+    fn follower_with_no_leader_maps_to_follower_with_epoch() {
         let s = map_leader_state::<TypeConfig>(LeadershipState::Follower {
             term: 3,
             leader: None,
@@ -180,13 +182,14 @@ mod tests {
         assert_eq!(
             s,
             LeaderState::Follower {
-                leader_endpoint: None
+                leader_endpoint: None,
+                leader_epoch: Some(Epoch(3)),
             }
         );
     }
 
     #[test]
-    fn follower_with_known_leader_still_maps_without_endpoint() {
+    fn follower_with_known_leader_maps_epoch_but_not_endpoint_yet() {
         let s = map_leader_state::<TypeConfig>(LeadershipState::Follower {
             term: 4,
             leader: Some((
@@ -196,12 +199,13 @@ mod tests {
                 },
             )),
         });
-        // The generic mapper intentionally drops endpoint info; hosts that
-        // want endpoint resolution wrap the driver themselves.
+        // Endpoint resolution arrives with the peer map; the epoch is the
+        // follower's term and is available immediately.
         assert_eq!(
             s,
             LeaderState::Follower {
-                leader_endpoint: None
+                leader_endpoint: None,
+                leader_epoch: Some(Epoch(4)),
             }
         );
     }

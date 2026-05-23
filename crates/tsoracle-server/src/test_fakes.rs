@@ -53,6 +53,7 @@ impl InMemoryDriver {
     pub fn become_follower(&self, hint: Option<String>) {
         let _ = self.tx.send(LeaderState::Follower {
             leader_endpoint: hint,
+            leader_epoch: None,
         });
     }
 

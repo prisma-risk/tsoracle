@@ -202,7 +202,9 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                     }
                 }
             }
-            LeaderState::Follower { leader_endpoint } => {
+            LeaderState::Follower {
+                leader_endpoint, ..
+            } => {
                 server.allocator.lock().on_leadership_lost();
                 let _ = server
                     .state_tx
