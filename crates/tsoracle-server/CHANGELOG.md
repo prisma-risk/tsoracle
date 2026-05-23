@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.0...tsoracle-server-v0.2.1) - 2026-05-23
+
+### Fixed
+
+- *(server)* recover from transient consensus errors during the fence ([#227](https://github.com/prisma-risk/tsoracle/pull/227))
+
 ## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.1.4...tsoracle-server-v0.2.0) - 2026-05-23
 
 ### Added
