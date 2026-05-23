@@ -72,7 +72,8 @@ async fn client_follows_leader_hint_on_first_call() {
         matches!(
             s,
             ServingState::NotServing {
-                leader_endpoint: Some(_)
+                leader_endpoint: Some(_),
+                ..
             }
         )
     })
@@ -119,7 +120,8 @@ async fn client_surfaces_error_when_only_endpoint_is_a_hintless_follower() {
         matches!(
             s,
             ServingState::NotServing {
-                leader_endpoint: None
+                leader_endpoint: None,
+                ..
             }
         )
     })

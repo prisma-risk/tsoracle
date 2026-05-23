@@ -23,10 +23,10 @@
 //! A LeaderHint that carries a leader epoch is honored only when the
 //! cache permits it: a strictly lower-epoch hint is dropped silently
 //! (counted, traced) so a delayed NOT_LEADER from an old epoch cannot
-//! flap the cache backward. Hints with no epoch (the current server's
-//! wire output) and hints arriving when the cache has no epoch yet
-//! are accepted unconditionally so a transition-state deployment is
-//! not left without leader discovery.
+//! flap the cache backward. Hints with no epoch (a paxos backend, or an
+//! older openraft server from before the epoch was populated) and hints
+//! arriving when the cache has no epoch yet are accepted unconditionally
+//! so a transition-state deployment is not left without leader discovery.
 //!
 //! Three deadlines bound the loop, governed by [`crate::RetryPolicy`]:
 //!
@@ -172,9 +172,9 @@ enum AttemptOutcome {
     LeaderHint {
         endpoint: String,
         /// `None` only when the server omitted the leader epoch from the
-        /// `LeaderHint` payload (current server behaviour; tracked as
-        /// a follow-up). Once populated, the cache uses it as the
-        /// upper bound future hints must meet to be honored.
+        /// `LeaderHint` payload (a paxos backend, or an older openraft
+        /// server). Once populated, the cache uses it as the upper bound
+        /// future hints must meet to be honored.
         epoch: Option<u128>,
     },
     StaleLeaderHint,
@@ -624,6 +624,54 @@ mod tests {
         }
     }
 
+    /// Two peers redirect us at different epochs. Whatever order the hints
+    /// arrive in, the client must end up following the higher-epoch leader and
+    /// never flap its cache back to the lower-epoch one. This is the end-to-end
+    /// safety property the populated server epoch unlocks.
+    #[test]
+    fn higher_epoch_hint_wins_regardless_of_arrival_order() {
+        for stale_first in [true, false] {
+            let pool = ChannelPool::new(
+                vec!["a:1".into(), "b:1".into(), "c:1".into()],
+                None,
+                false,
+                RetryPolicy::default(),
+            );
+            // Bootstrap the cache at a low epoch so the first hint is accepted.
+            pool.record_success("a:1", 1);
+
+            let fresh = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                leader_endpoint: Some("c:1".into()),
+                leader_epoch_hi: Some(0),
+                leader_epoch_lo: Some(9),
+            });
+            let stale = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                leader_endpoint: Some("b:1".into()),
+                leader_epoch_hi: Some(0),
+                leader_epoch_lo: Some(4),
+            });
+            let ordered = if stale_first {
+                vec![stale, fresh]
+            } else {
+                vec![fresh, stale]
+            };
+
+            for status in ordered {
+                if let AttemptOutcome::LeaderHint { endpoint, epoch } =
+                    classify_not_leader_hint(&pool, "a:1", status)
+                {
+                    pool.set_leader_with(endpoint, epoch);
+                }
+            }
+
+            assert_eq!(
+                pool.cached_leader().as_deref(),
+                Some("c:1"),
+                "must follow the epoch-9 leader (stale_first={stale_first})",
+            );
+        }
+    }
+
     /// A well-formed hint whose `leader_epoch` is strictly less than
     /// the cached leader's epoch must be dropped — that is the whole
     /// point of the epoch-monotone gate. The retry loop's
@@ -651,9 +699,9 @@ mod tests {
         assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
     }
 
-    /// A hint that carries no `leader_epoch` (the current server's
-    /// behaviour, until #125 lands) is accepted unconditionally so
-    /// the client remains useful during a mixed-version deployment.
+    /// A hint that carries no `leader_epoch` (a paxos backend, or an older
+    /// openraft server) is accepted unconditionally so the client remains
+    /// useful during a mixed-version deployment.
     #[test]
     fn classify_no_epoch_hint_returns_leader_hint() {
         let pool = ChannelPool::new(

@@ -195,7 +195,8 @@ async fn emits_documented_client_signals_end_to_end() {
         matches!(
             s,
             ServingState::NotServing {
-                leader_endpoint: Some(_)
+                leader_endpoint: Some(_),
+                ..
             }
         )
     })

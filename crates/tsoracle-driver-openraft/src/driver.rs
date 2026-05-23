@@ -29,6 +29,7 @@
 //! absorbed by the apply-time `max`. Both outcomes preserve correctness
 //! without a term-based pre-check.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -49,23 +50,46 @@ use crate::host::OpenraftHighWaterHost;
 /// actual high-water storage to the host.
 pub struct OpenraftDriver<H: OpenraftHighWaterHost> {
     host: Arc<H>,
+    /// Maps a peer's raft `NodeId` to its advertised tsoracle service address.
+    /// Used to populate `LeaderState::Follower::leader_endpoint` so clients can
+    /// redirect. Empty means "no endpoint resolution" (the bare-driver case).
+    peers: Arc<HashMap<<H::Config as RaftTypeConfig>::NodeId, String>>,
 }
 
 impl<H: OpenraftHighWaterHost> OpenraftDriver<H> {
-    /// Build a driver from a host value. The driver wraps the host in an
-    /// `Arc` so the leadership stream can keep it alive independently of the
-    /// outer driver handle.
+    /// Build a driver from a host value with no endpoint resolution. Follower
+    /// hints carry `leader_endpoint: None`; use [`Self::with_peers`] to resolve.
     pub fn new(host: H) -> Arc<Self> {
+        Self::with_peers(host, HashMap::new())
+    }
+
+    /// Build a driver from a host value and a `NodeId -> tsoracle-service-addr`
+    /// map. The map is consulted on the follower branch to resolve the elected
+    /// leader's advertised endpoint for `LeaderHint` redirects.
+    pub fn with_peers(
+        host: H,
+        peers: HashMap<<H::Config as RaftTypeConfig>::NodeId, String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             host: Arc::new(host),
+            peers: Arc::new(peers),
         })
     }
 
-    /// Build a driver from a pre-shared `Arc<H>`. Useful when the host is
-    /// already shared with other subsystems (e.g. a placement driver that
-    /// hands the same backend to multiple gRPC services).
+    /// Build a driver from a pre-shared `Arc<H>` with no endpoint resolution.
     pub fn from_arc(host: Arc<H>) -> Arc<Self> {
-        Arc::new(Self { host })
+        Self::from_arc_with_peers(host, HashMap::new())
+    }
+
+    /// Build a driver from a pre-shared `Arc<H>` and a peer map.
+    pub fn from_arc_with_peers(
+        host: Arc<H>,
+        peers: HashMap<<H::Config as RaftTypeConfig>::NodeId, String>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            host,
+            peers: Arc::new(peers),
+        })
     }
 }
 
@@ -81,7 +105,8 @@ impl<H: OpenraftHighWaterHost> ConsensusDriver for OpenraftDriver<H> {
     /// outer driver doesn't shut the raft down.
     fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
         let host = Arc::clone(&self.host);
-        Box::pin(owned_leadership_stream::<H>(host))
+        let peers = Arc::clone(&self.peers);
+        Box::pin(owned_leadership_stream::<H>(host, peers))
     }
 
     /// Read the durably-persisted high-water mark via the host.
@@ -109,10 +134,13 @@ impl<H: OpenraftHighWaterHost> ConsensusDriver for OpenraftDriver<H> {
 /// raft it owns) outlives the stream's polling.
 fn owned_leadership_stream<H: OpenraftHighWaterHost>(
     host: Arc<H>,
+    peers: Arc<HashMap<<H::Config as RaftTypeConfig>::NodeId, String>>,
 ) -> impl Stream<Item = LeaderState> + Send + 'static {
     let rx = host.raft().metrics();
-    let inner: Pin<Box<dyn Stream<Item = LeaderState> + Send>> =
-        Box::pin(stream_from_receiver::<H::Config>(rx).map(map_leader_state::<H::Config>));
+    let inner: Pin<Box<dyn Stream<Item = LeaderState> + Send>> = Box::pin(
+        stream_from_receiver::<H::Config>(rx)
+            .map(move |state| map_leader_state::<H::Config>(state, peers.as_ref())),
+    );
     KeepAlive { _host: host, inner }
 }
 
@@ -139,17 +167,21 @@ impl<H: OpenraftHighWaterHost> Stream for KeepAlive<H> {
 /// Project a toolkit [`LeadershipState`] into a tsoracle-consensus
 /// [`LeaderState`].
 ///
-/// Always returns `leader_endpoint: None` on the follower branch: the generic
-/// mapper has no way to extract an endpoint from `C::Node` (different hosts
-/// pick different `Node` types). Hosts that need endpoint resolution wrap the
-/// driver themselves and provide their own `ConsensusDriver` impl.
-fn map_leader_state<C: RaftTypeConfig>(s: LeadershipState<C>) -> LeaderState {
+/// On the follower branch, `leader_epoch` is the follower's term (equal to the
+/// leader's term once a leader is accepted) and `leader_endpoint` is resolved
+/// from `peers` (the `NodeId -> tsoracle-service-addr` map); an empty map or an
+/// unlisted leader yields `None`.
+fn map_leader_state<C: RaftTypeConfig>(
+    s: LeadershipState<C>,
+    peers: &HashMap<C::NodeId, String>,
+) -> LeaderState {
     match s {
         LeadershipState::Leader { term } => LeaderState::Leader {
             epoch: Epoch(u128::from(term)),
         },
-        LeadershipState::Follower { .. } => LeaderState::Follower {
-            leader_endpoint: None,
+        LeadershipState::Follower { term, leader } => LeaderState::Follower {
+            leader_endpoint: leader.and_then(|(id, _node)| peers.get(&id).cloned()),
+            leader_epoch: Some(Epoch(u128::from(term))),
         },
         LeadershipState::Candidate { .. }
         | LeadershipState::Learner
@@ -161,66 +193,133 @@ fn map_leader_state<C: RaftTypeConfig>(s: LeadershipState<C>) -> LeaderState {
 mod tests {
     use super::map_leader_state;
     use crate::type_config::TypeConfig;
+    use std::collections::HashMap;
     use tsoracle_consensus::LeaderState;
     use tsoracle_core::Epoch;
     use tsoracle_openraft_toolkit::LeadershipState;
 
     #[test]
     fn leader_maps_to_leader_with_epoch() {
-        let s = map_leader_state::<TypeConfig>(LeadershipState::Leader { term: 7 });
+        let peers = HashMap::new();
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Leader { term: 7 }, &peers);
         assert_eq!(s, LeaderState::Leader { epoch: Epoch(7) });
     }
 
     #[test]
-    fn follower_with_no_leader_maps_to_follower() {
-        let s = map_leader_state::<TypeConfig>(LeadershipState::Follower {
-            term: 3,
-            leader: None,
-        });
+    fn follower_with_no_leader_maps_to_follower_with_epoch() {
+        let peers = HashMap::new();
+        let s = map_leader_state::<TypeConfig>(
+            LeadershipState::Follower {
+                term: 3,
+                leader: None,
+            },
+            &peers,
+        );
         assert_eq!(
             s,
             LeaderState::Follower {
-                leader_endpoint: None
+                leader_endpoint: None,
+                leader_epoch: Some(Epoch(3))
             }
         );
     }
 
     #[test]
-    fn follower_with_known_leader_still_maps_without_endpoint() {
-        let s = map_leader_state::<TypeConfig>(LeadershipState::Follower {
-            term: 4,
-            leader: Some((
-                2u64,
-                crate::type_config::OpenraftPeer {
-                    addr: "ignored".into(),
-                },
-            )),
-        });
-        // The generic mapper intentionally drops endpoint info; hosts that
-        // want endpoint resolution wrap the driver themselves.
+    fn follower_with_known_leader_resolves_endpoint_and_epoch() {
+        let mut peers = HashMap::new();
+        peers.insert(2u64, "http://node-2:50051".to_string());
+        let s = map_leader_state::<TypeConfig>(
+            LeadershipState::Follower {
+                term: 4,
+                leader: Some((
+                    2u64,
+                    crate::type_config::OpenraftPeer {
+                        addr: "raft-addr".into(),
+                    },
+                )),
+            },
+            &peers,
+        );
         assert_eq!(
             s,
             LeaderState::Follower {
-                leader_endpoint: None
+                leader_endpoint: Some("http://node-2:50051".into()),
+                leader_epoch: Some(Epoch(4)),
+            }
+        );
+    }
+
+    #[test]
+    fn follower_with_leader_absent_from_peer_map_has_no_endpoint() {
+        let peers = HashMap::new();
+        let s = map_leader_state::<TypeConfig>(
+            LeadershipState::Follower {
+                term: 4,
+                leader: Some((
+                    9u64,
+                    crate::type_config::OpenraftPeer {
+                        addr: "raft-addr".into(),
+                    },
+                )),
+            },
+            &peers,
+        );
+        assert_eq!(
+            s,
+            LeaderState::Follower {
+                leader_endpoint: None,
+                leader_epoch: Some(Epoch(4))
+            }
+        );
+    }
+
+    #[test]
+    fn follower_with_leader_absent_from_nonempty_peer_map_has_no_endpoint() {
+        // A populated map that simply does not list the elected leader must
+        // still resolve to `None` — guards against a lookup that falls back to
+        // some other entry rather than the leader's own id.
+        let mut peers = HashMap::new();
+        peers.insert(1u64, "http://node-1:50051".to_string());
+        peers.insert(3u64, "http://node-3:50051".to_string());
+        let s = map_leader_state::<TypeConfig>(
+            LeadershipState::Follower {
+                term: 5,
+                leader: Some((
+                    2u64,
+                    crate::type_config::OpenraftPeer {
+                        addr: "raft-addr".into(),
+                    },
+                )),
+            },
+            &peers,
+        );
+        assert_eq!(
+            s,
+            LeaderState::Follower {
+                leader_endpoint: None,
+                leader_epoch: Some(Epoch(5))
             }
         );
     }
 
     #[test]
     fn candidate_maps_to_unknown() {
-        let s = map_leader_state::<TypeConfig>(LeadershipState::Candidate { term: 5 });
+        let peers = HashMap::new();
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Candidate { term: 5 }, &peers);
         assert_eq!(s, LeaderState::Unknown);
     }
 
     #[test]
     fn learner_maps_to_unknown() {
-        let s = map_leader_state::<TypeConfig>(LeadershipState::Learner);
+        let peers = HashMap::new();
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Learner, &peers);
         assert_eq!(s, LeaderState::Unknown);
     }
 
     #[test]
     fn shutdown_maps_to_unknown() {
-        let s = map_leader_state::<TypeConfig>(LeadershipState::Shutdown);
+        let peers = HashMap::new();
+        let s = map_leader_state::<TypeConfig>(LeadershipState::Shutdown, &peers);
         assert_eq!(s, LeaderState::Unknown);
     }
 }

@@ -59,7 +59,7 @@ The client gives `FAILED_PRECONDITION` special handling: it parses the `tsoracle
 
 ## Advertised endpoints in multi-node deployments
 
-The consensus driver owns the mapping from consensus leader identity to tsoracle endpoint. The source of that mapping is the driver's choice — explicit configuration, consensus membership metadata, service discovery, or anything else. Drivers report the resolved endpoint to the server via `LeaderState::Follower { leader_endpoint }`; the server forwards it in `LeaderHint` trailers so clients can redirect. The library itself never sees the mapping and exposes no flag for it. Single-node deployments (`tsoracle-driver-file`) have no peers to advertise to.
+The consensus driver owns the mapping from consensus leader identity to tsoracle endpoint. The source of that mapping is the driver's choice — explicit configuration, consensus membership metadata, service discovery, or anything else. Drivers report the resolved endpoint to the server via `LeaderState::Follower { leader_endpoint, leader_epoch }`; the server forwards it in `LeaderHint` trailers so clients can redirect. The driver also reports the leader's epoch (raft term) via `leader_epoch`; the server forwards it in the `LeaderHint` trailer so a client can reject a stale follower's lower-epoch redirect. The library itself never sees the mapping and exposes no flag for it. Single-node deployments (`tsoracle-driver-file`) have no peers to advertise to.
 
 ## Deployment topologies
 

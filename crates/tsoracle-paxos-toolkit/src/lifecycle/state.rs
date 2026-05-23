@@ -91,6 +91,7 @@ impl LeadershipState {
             Self::Leader { epoch } => LeaderState::Leader { epoch: *epoch },
             Self::Follower { leader_endpoint } => LeaderState::Follower {
                 leader_endpoint: leader_endpoint.clone(),
+                leader_epoch: None,
             },
             Self::Unknown => LeaderState::Unknown,
         }
@@ -131,6 +132,7 @@ mod tests {
             state.to_consensus(),
             LeaderState::Follower {
                 leader_endpoint: Some("http://node-2:50051".into()),
+                leader_epoch: None,
             },
         );
     }
@@ -148,6 +150,7 @@ mod tests {
             state.to_consensus(),
             LeaderState::Follower {
                 leader_endpoint: None,
+                leader_epoch: None,
             },
         );
     }

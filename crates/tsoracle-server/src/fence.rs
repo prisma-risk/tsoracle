@@ -61,6 +61,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                 // the fence republishes Serving below.
                 let _ = server.state_tx.send(ServingState::NotServing {
                     leader_endpoint: None,
+                    leader_epoch: None,
                 });
                 server.allocator.lock().on_leadership_lost();
 
@@ -168,6 +169,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                         )) => {
                             let _ = server.state_tx.send(ServingState::NotServing {
                                 leader_endpoint: None,
+                                leader_epoch: None,
                             });
                             break;
                         }
@@ -186,6 +188,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                                 );
                                 let _ = server.state_tx.send(ServingState::NotServing {
                                     leader_endpoint: None,
+                                    leader_epoch: None,
                                 });
                                 break;
                             }
@@ -202,16 +205,21 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                     }
                 }
             }
-            LeaderState::Follower { leader_endpoint } => {
+            LeaderState::Follower {
+                leader_endpoint,
+                leader_epoch,
+            } => {
                 server.allocator.lock().on_leadership_lost();
-                let _ = server
-                    .state_tx
-                    .send(ServingState::NotServing { leader_endpoint });
+                let _ = server.state_tx.send(ServingState::NotServing {
+                    leader_endpoint,
+                    leader_epoch,
+                });
             }
             LeaderState::Unknown => {
                 server.allocator.lock().on_leadership_lost();
                 let _ = server.state_tx.send(ServingState::NotServing {
                     leader_endpoint: None,
+                    leader_epoch: None,
                 });
             }
         }

@@ -15,24 +15,41 @@
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tsoracle_consensus::ConsensusError;
-use tsoracle_core::CoreError;
+use tsoracle_core::{CoreError, Epoch};
 use tsoracle_proto::v1::{GetTsRequest, GetTsResponse, LeaderHint, tso_service_server::TsoService};
 
 use crate::leader_hint::not_leader_status;
 use crate::server::{Server, ServingState};
 
+/// Split an optional leader epoch into the two wire halves carried by
+/// `LeaderHint`. Both halves are present together or absent together: the
+/// client requires both to accept an epoch and treats a partial pair as absent.
+fn wire_epoch(epoch: Option<Epoch>) -> (Option<u64>, Option<u64>) {
+    match epoch {
+        Some(epoch) => {
+            let (hi, lo) = epoch.to_wire();
+            (Some(hi), Some(lo))
+        }
+        None => (None, None),
+    }
+}
+
 /// Snapshot the best-available leader hint from `state_rx`. Used wherever we
 /// need to surface a `FAILED_PRECONDITION` "not leader" response from a
 /// service-layer code path; matches what the fast NOT_LEADER gate emits.
 fn leader_hint_from(server: &Server) -> LeaderHint {
-    let endpoint = match server.state_rx.borrow().clone() {
-        ServingState::NotServing { leader_endpoint } => leader_endpoint,
-        ServingState::Serving => None,
+    let (leader_endpoint, leader_epoch) = match server.state_rx.borrow().clone() {
+        ServingState::NotServing {
+            leader_endpoint,
+            leader_epoch,
+        } => (leader_endpoint, leader_epoch),
+        ServingState::Serving => (None, None),
     };
+    let (leader_epoch_hi, leader_epoch_lo) = wire_epoch(leader_epoch);
     LeaderHint {
-        leader_endpoint: endpoint,
-        leader_epoch_hi: None,
-        leader_epoch_lo: None,
+        leader_endpoint,
+        leader_epoch_hi,
+        leader_epoch_lo,
     }
 }
 
@@ -69,12 +86,16 @@ impl TsoService for TsoServiceImpl {
         }
 
         // Fast NOT_LEADER gate.
-        if let ServingState::NotServing { leader_endpoint } = self.server.state_rx.borrow().clone()
+        if let ServingState::NotServing {
+            leader_endpoint,
+            leader_epoch,
+        } = self.server.state_rx.borrow().clone()
         {
+            let (leader_epoch_hi, leader_epoch_lo) = wire_epoch(leader_epoch);
             return Err(not_leader_status(LeaderHint {
                 leader_endpoint,
-                leader_epoch_hi: None,
-                leader_epoch_lo: None,
+                leader_epoch_hi,
+                leader_epoch_lo,
             }));
         }
 
@@ -232,7 +253,6 @@ impl TsoServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tsoracle_core::Epoch;
 
     #[test]
     fn core_status_maps_each_variant_to_documented_code() {
@@ -266,9 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn leader_hint_from_returns_endpoint_when_not_serving() {
-        // Build a Server with the in-memory fake driver so we can mutate
-        // ServingState directly; the helper just snapshots state_rx.
+    fn leader_hint_from_returns_endpoint_and_epoch_when_not_serving() {
         let server = Server::builder()
             .consensus_driver(std::sync::Arc::new(crate::test_fakes::InMemoryDriver::new()))
             .clock(std::sync::Arc::new(tsoracle_core::SystemClock))
@@ -276,22 +294,37 @@ mod tests {
             .unwrap();
         let _ = server.state_tx.send(ServingState::NotServing {
             leader_endpoint: Some("http://other-node:9000".into()),
+            leader_epoch: Some(Epoch(7)),
         });
         let hint = leader_hint_from(&server);
         assert_eq!(
             hint.leader_endpoint.as_deref(),
             Some("http://other-node:9000")
         );
-        assert!(hint.leader_epoch_hi.is_none());
-        assert!(hint.leader_epoch_lo.is_none());
+        let (hi, lo) = Epoch(7).to_wire();
+        assert_eq!(hint.leader_epoch_hi, Some(hi));
+        assert_eq!(hint.leader_epoch_lo, Some(lo));
 
-        // The Serving branch flips the endpoint to None — exercises the
-        // race-window path that's otherwise only reachable when an extension
-        // observes mid-transition state_rx.
+        // The Serving branch flips endpoint and epoch to None.
         let _ = server.state_tx.send(ServingState::Serving);
         let hint = leader_hint_from(&server);
         assert!(hint.leader_endpoint.is_none());
-        // Sanity: Epoch construction itself is unrelated to this helper.
-        let _ = Epoch(1);
+        assert!(hint.leader_epoch_hi.is_none());
+        assert!(hint.leader_epoch_lo.is_none());
+    }
+
+    #[test]
+    fn wire_epoch_splits_some_and_passes_through_none() {
+        // Fits in the low 64 bits (hi == 0).
+        let (hi, lo) = Epoch(7).to_wire();
+        assert_eq!(wire_epoch(Some(Epoch(7))), (Some(hi), Some(lo)));
+
+        // Crosses the 64-bit boundary so hi is non-zero — guards against a
+        // hi/lo swap that the all-low-bits case above cannot detect.
+        let cross = Epoch((1u128 << 64) | 3);
+        let (hi, lo) = cross.to_wire();
+        assert_eq!(wire_epoch(Some(cross)), (Some(hi), Some(lo)));
+
+        assert_eq!(wire_epoch(None), (None, None));
     }
 }

@@ -19,7 +19,7 @@ use tokio::sync::watch;
 use tonic::service::Routes;
 use tonic::transport::Server as TonicServer;
 use tsoracle_consensus::ConsensusDriver;
-use tsoracle_core::{Allocator, Bt, Clock, SystemClock};
+use tsoracle_core::{Allocator, Bt, Clock, Epoch, SystemClock};
 #[cfg(any(test, feature = "test-fakes"))]
 use tsoracle_core::{CoreError, WindowGrant};
 use tsoracle_proto::v1::tso_service_server::TsoServiceServer;
@@ -65,7 +65,10 @@ pub enum ServerError {
 
 #[derive(Clone, Debug)]
 pub enum ServingState {
-    NotServing { leader_endpoint: Option<String> },
+    NotServing {
+        leader_endpoint: Option<String>,
+        leader_epoch: Option<Epoch>,
+    },
     Serving,
 }
 
@@ -126,6 +129,7 @@ impl ServerBuilder {
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
         let (state_tx, state_rx) = watch::channel(ServingState::NotServing {
             leader_endpoint: None,
+            leader_epoch: None,
         });
         Ok(Server {
             consensus,
@@ -192,9 +196,10 @@ impl Server {
     /// NotLeader/Fenced (and reach this helper themselves — it is idempotent).
     pub(crate) fn step_down_due_to_consensus_rejection(&self, leader_endpoint: Option<String>) {
         self.allocator.lock().on_leadership_lost();
-        let _ = self
-            .state_tx
-            .send(ServingState::NotServing { leader_endpoint });
+        let _ = self.state_tx.send(ServingState::NotServing {
+            leader_endpoint,
+            leader_epoch: None,
+        });
     }
 }
 
