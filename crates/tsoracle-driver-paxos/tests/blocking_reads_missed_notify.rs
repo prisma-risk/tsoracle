@@ -43,7 +43,7 @@
 use std::time::Duration;
 
 use tsoracle_driver_paxos::host::PaxosHighWaterHost;
-use tsoracle_driver_paxos::yieldpoint;
+use tsoracle_yieldpoint as yieldpoint;
 
 #[path = "common/mod.rs"]
 mod common;

@@ -274,7 +274,9 @@ where
                 ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
             })?;
         let notifier = self.apply_state.apply_notifier();
-        crate::yieldpoint!("standalone_host::current_high_water::after_append_before_await");
+        tsoracle_yieldpoint::yieldpoint!(
+            "standalone_host::current_high_water::after_append_before_await"
+        );
         loop {
             // Register as waiter before checking state; otherwise a notify_waiters
             // that fires between the previous iteration's check and the next
@@ -301,7 +303,9 @@ where
                 ConsensusError::TransientDriver(Box::new(AdvanceAppendError(format!("{err:?}"))))
             })?;
         let notifier = self.apply_state.apply_notifier();
-        crate::yieldpoint!("standalone_host::submit_advance::after_append_before_await");
+        tsoracle_yieldpoint::yieldpoint!(
+            "standalone_host::submit_advance::after_append_before_await"
+        );
         loop {
             let notified = notifier.notified();
             tokio::pin!(notified);
