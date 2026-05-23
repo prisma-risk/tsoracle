@@ -3287,6 +3287,7 @@ dependencies = [
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-paxos-toolkit",
+ "tsoracle-yieldpoint",
 ]
 
 [[package]]
@@ -3364,6 +3365,7 @@ dependencies = [
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-proto",
+ "tsoracle-yieldpoint",
 ]
 
 [[package]]
@@ -3382,6 +3384,14 @@ dependencies = [
  "tsoracle-core",
  "tsoracle-proto",
  "tsoracle-server",
+]
+
+[[package]]
+name = "tsoracle-yieldpoint"
+version = "0.1.4"
+dependencies = [
+ "parking_lot",
+ "tokio",
 ]
 
 [[package]]

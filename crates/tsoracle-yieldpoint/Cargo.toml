@@ -1,0 +1,23 @@
+[package]
+name         = "tsoracle-yieldpoint"
+description  = "Async yield points: tokio::sync::Notify-backed test injection sites, the async sibling of fail-rs failpoints"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+readme.workspace       = true
+authors.workspace      = true
+keywords      = ["testing", "async", "tokio", "yield", "failpoint"]
+categories    = ["asynchronous", "development-tools::testing"]
+
+[features]
+default     = []
+# Enables the registry + macro body. Off by default so production builds
+# carry zero overhead; `cargo test --all-features` activates it in CI.
+yieldpoints = []
+
+[dependencies]
+parking_lot = { workspace = true }
+tokio       = { workspace = true }

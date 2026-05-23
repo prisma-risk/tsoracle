@@ -15,7 +15,18 @@ Don't add a yield point when a failpoint would already serve — sync injection 
 
 ## Feature gating
 
-Crates that opt in declare a `yieldpoints` Cargo feature. The feature is empty (it gates only macro expansion, not a dep). The macro lives in a `yieldpoint` module on each opting-in crate; the `yieldpoint!(...)` macro is exported at the crate root via `#[macro_export]`. With the feature off, the macro expands to `{}` — production builds carry zero overhead and the `tokio::sync::Notify` registry is never linked. With the feature on, the call site consults the per-process registry and `.await`s the registered `Notify` if armed.
+The registry and the `yieldpoint!` macro live in a shared workspace crate, `tsoracle-yieldpoint`. Consumer crates opt in by adding a thin Cargo feature that pulls in the `yieldpoints` feature on `tsoracle-yieldpoint`:
+
+```toml
+# consumer Cargo.toml
+[features]
+yieldpoints = ["tsoracle-yieldpoint/yieldpoints"]
+
+[dependencies]
+tsoracle-yieldpoint = { workspace = true }
+```
+
+With `tsoracle-yieldpoint/yieldpoints` off the macro expands to `{}` — production builds carry zero overhead and the `tokio::sync::Notify` registry is never linked. With it on, the call site consults the per-process registry and `.await`s the registered `Notify` if armed.
 
 Run the yield-point suite with:
 
@@ -23,15 +34,15 @@ Run the yield-point suite with:
 
 `--all-features` activates `yieldpoints` on every opting-in crate, so the yield-point tests are part of the normal CI gate (same model as failpoints).
 
-## The wrapper macro
+## The macro
 
-Each opting-in crate has a `yieldpoint` module with a small `yieldpoint!` macro. Source sites use the crate's macro and never construct the `Notify` directly. The macro has a single form — yield points have no typed return; they only pause and resume:
+Source sites call `tsoracle_yieldpoint::yieldpoint!(...)` directly — there is no per-crate wrapper. The macro has a single form, since yield points have no typed return; they only pause and resume:
 
 ```rust
-crate::yieldpoint!("standalone_host::apply_task::between_iterations");
+tsoracle_yieldpoint::yieldpoint!("standalone_host::apply_task::between_iterations");
 ```
 
-With `feature = "yieldpoints"` off, the call expands to `{}` — zero code, no `tokio::sync::Notify`, no registry lookup.
+With the feature off, the call expands to `{}` — zero code, no `tokio::sync::Notify`, no registry lookup.
 
 ## Naming convention
 
@@ -47,25 +58,31 @@ The string is matched verbatim against the registry — typos at the call site o
 |---|---|---|
 | `standalone_host::apply_task::between_iterations` | End of the `apply_notify` branch in the apply task's `tokio::select!`, after `drain_decided_into` + `maybe_snapshot` and before the loop returns to the next `select!`. | `stop_delivers_shutdown_when_apply_task_is_mid_iteration` |
 
+### `tsoracle-server` — 1 site in `crates/tsoracle-server/src/fence.rs`
+
+| Site name | Position | Test |
+|---|---|---|
+| `server::fence::after_load_before_persist` | Inside `run_leader_watch`'s Leader branch, between `consensus.load_high_water().await` and the `persist_high_water(requested, epoch)` call. Co-located with the sync failpoint of the same name — the sync variant injects typed-error returns / panics; the async variant parks the fence so a test can deliver a concurrent driver event before releasing. | `fence_parks_at_after_load_yieldpoint_until_released` |
+
 ## Writing a yield-point test
 
 Tests live in `crates/<crate>/tests/<topic>.rs` with `#![cfg(feature = "yieldpoints")]` at the top so cargo silently skips the binary when the feature is off rather than failing the compile.
 
 Each test:
 
-1. Calls `yieldpoint::cfg("name")` to arm the gate. The returned `Arc<Notify>` is the release handle.
+1. Calls `tsoracle_yieldpoint::cfg("name")` to arm the gate. The returned `Arc<Notify>` is the release handle.
 2. Drives production code into the yield point (start the host / spawn the task / fire the input that wakes the await).
 3. Performs the test's side-effect (call `stop()`, or whatever shutdown / interleaving the bug requires).
 4. Calls `handle.notify_one()` on the release handle to wake the production code.
 5. Asserts the observable invariant — typically with `tokio::time::timeout` around the join, so the test fails with `Elapsed(())` rather than hanging if the bug is back.
-6. Calls `yieldpoint::remove("name")` to clear the gate. (Tests that share the registry across iterations also need this; the registry is process-global, like `fail`'s.)
+6. Calls `tsoracle_yieldpoint::remove("name")` to clear the gate. (Tests that share the registry across iterations also need this; the registry is process-global, like `fail`'s.)
 
 The release handle is an ordinary `Arc<Notify>`, so all of `notify_one`, `notify_waiters`, and `notified().await` are available — pick the method whose semantics the test wants. `notify_one` is the common case (single waiter, store-permit-if-no-waiter semantics).
 
 ## Adding a new site
 
 1. Pick a name following `{module}::{site}::{temporal_phrase}`.
-2. Insert `crate::yieldpoint!("name")` at the source position. The crate must already have a `yieldpoint` module and a `yieldpoints` cargo feature — see `tsoracle-driver-paxos` as the canonical reference.
+2. Insert `tsoracle_yieldpoint::yieldpoint!("name")` at the source position. The consumer crate must already declare a `yieldpoints` Cargo feature that pulls in `tsoracle-yieldpoint/yieldpoints` and depend on `tsoracle-yieldpoint = { workspace = true }` — see `tsoracle-driver-paxos` or `tsoracle-server` as the canonical references.
 3. If the call site is inside a critical section guarded by a `parking_lot` mutex (or any non-`Send`-across-`.await` guard), drop the guard before the macro invocation. The macro contains `.await`, so a guard held across it would make the enclosing future `!Send` and `tokio::spawn` would reject it.
 4. Add a test in `crates/<crate>/tests/<topic>.rs`. Follow the pattern in this doc.
 5. Run `cargo test -p <crate> --features yieldpoints` locally and confirm everything still passes. To confirm the test actually catches the bug it's claimed to: temporarily invert the fix, re-run, observe the `Elapsed(())` timeout. Revert the production code before committing.
@@ -81,9 +98,9 @@ Renaming an existing site is a breaking change for any test that referenced it. 
 | Worker behavior while parked | OS thread blocked | Task yielded, worker free |
 | Actions | `off`, `panic`, `pause`, `sleep(ms)`, `print(text)`, `return` / `return(...)` | Implicit single action: pause until released |
 | Typed return injection | Yes (closure form) | No |
-| Crate | [`fail`](https://docs.rs/fail/0.5/) | First-party, per opting-in crate |
+| Crate | [`fail`](https://docs.rs/fail/0.5/) | first-party `tsoracle-yieldpoint` (shared workspace crate) |
 | Cargo feature name | `failpoints` | `yieldpoints` |
-| Source macro | `crate::failpoint!(...)` | `crate::yieldpoint!(...)` |
+| Source macro | `crate::failpoint!(...)` (per-crate wrapper) | `tsoracle_yieldpoint::yieldpoint!(...)` (called directly) |
 | Doc | [Failpoint Testing](failpoint-testing.md) | this file |
 
 Reach for failpoints first if the site is sync or needs to inject a typed return. Reach for yield points when the site is async and the test needs to pause production code without blocking a tokio worker.
