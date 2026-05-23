@@ -274,12 +274,21 @@ where
                 ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
             })?;
         let notifier = self.apply_state.apply_notifier();
+        crate::yieldpoint!("standalone_host::current_high_water::after_append_before_await");
         loop {
-            notifier.notified().await;
+            // Register as waiter before checking state; otherwise a notify_waiters
+            // that fires between the previous iteration's check and the next
+            // notified().await is lost. apply_notifier uses notify_waiters which
+            // does not store permits — Notified::enable() is the supported way
+            // to close that window.
+            let notified = notifier.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let new_decided = self.omnipaxos.lock().get_decided_idx();
             if new_decided > snapshot_decided {
                 return Ok(self.apply_state.high_water());
             }
+            notified.await;
         }
     }
 
@@ -292,12 +301,16 @@ where
                 ConsensusError::TransientDriver(Box::new(AdvanceAppendError(format!("{err:?}"))))
             })?;
         let notifier = self.apply_state.apply_notifier();
+        crate::yieldpoint!("standalone_host::submit_advance::after_append_before_await");
         loop {
-            notifier.notified().await;
+            let notified = notifier.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let new_decided = self.omnipaxos.lock().get_decided_idx();
             if new_decided > snapshot_decided && self.apply_state.high_water() >= at_least {
                 return Ok(self.apply_state.high_water());
             }
+            notified.await;
         }
     }
 }
