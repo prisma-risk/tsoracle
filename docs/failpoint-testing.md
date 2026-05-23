@@ -1,6 +1,8 @@
 # Failpoint testing
 
-Failpoint testing lets a test inject a panic, an error return, a pause, or a sleep at a named site in production code. The injection is gated by a Cargo feature so release builds physically cannot reach any failpoint. tsoracle uses the [`fail`](https://docs.rs/fail/0.5/) crate (the same library used by TiKV, sled, etcd-rs, and openraft itself).
+Failpoint testing lets a test inject a panic, an error return, a pause, or a sleep at a named site in production code. The injection is gated by a Cargo feature so release builds physically cannot reach any failpoint. tsoracle uses the [`fail`](https://docs.rs/fail/0.5/) crate (the same library used by sled, etcd-rs, and openraft itself).
+
+For sites in async code paths that need to park production code without blocking a tokio worker thread, see the async counterpart at [Yield-point Testing](yieldpoint-testing.md). A `fail`-crate `pause` action uses `std::thread::park` — fine for sync code, but blocking a tokio worker can starve the runtime's timer driver and wedge `tokio::time::sleep` for every task on that worker.
 
 ## When to add a failpoint
 

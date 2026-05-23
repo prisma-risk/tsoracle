@@ -121,8 +121,11 @@ where
                 tokio::select! {
                     _ = apply_notify.notified() => {
                         let decided_idx = drain_decided_into(&omnipaxos, &mut cursor, &apply_state);
-                        let mut policy = policy.lock();
-                        maybe_snapshot(&omnipaxos, &mut policy, decided_idx);
+                        {
+                            let mut policy = policy.lock();
+                            maybe_snapshot(&omnipaxos, &mut policy, decided_idx);
+                        }
+                        crate::yieldpoint!("standalone_host::apply_task::between_iterations");
                     }
                     _ = shutdown.notified() => {
                         break;
@@ -139,7 +142,10 @@ where
     /// apply task. Surfaces a `tracing::warn!` if the apply task
     /// terminated abnormally.
     pub async fn stop(&mut self) {
-        self.apply_shutdown.notify_waiters();
+        // notify_one stores a permit; notify_waiters would be lost if the
+        // apply task is mid-drain when stop() fires, livelocking against
+        // the runner's per-tick apply_notify.
+        self.apply_shutdown.notify_one();
         let handle = self.apply_handle.lock().take();
         if let Some(handle) = handle {
             if let Err(err) = handle.await {

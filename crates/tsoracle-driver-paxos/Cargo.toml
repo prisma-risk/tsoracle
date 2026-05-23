@@ -12,6 +12,7 @@ authors.workspace      = true
 [features]
 default          = ["rocksdb-storage"]
 rocksdb-storage  = ["tsoracle-paxos-toolkit/rocksdb-storage"]
+yieldpoints      = []
 
 [dependencies]
 async-trait          = { workspace = true }
