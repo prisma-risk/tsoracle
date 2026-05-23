@@ -717,4 +717,85 @@ mod tests {
             Ok(_) => panic!("spawn should propagate the injected bind failure"),
         }
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_completes_server_tasks() {
+        let topology = PaxosTopology::spawn(3, Duration::from_millis(1000))
+            .await
+            .expect("spawn 3-node paxos topology");
+        let server_handles = topology.server_handles;
+        // Fire the per-node shutdown signals.
+        Box::new(topology.controller).shutdown().await;
+        // Each server task must complete within a generous window after
+        // its shutdown oneshot fires. A hung handle means `shutdown` is
+        // not actually triggering the server's drain path.
+        for (idx, handle) in server_handles.into_iter().enumerate() {
+            match tokio::time::timeout(Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_err)) => panic!("server task {idx} did not exit cleanly: {join_err:?}"),
+                Err(_elapsed) => {
+                    panic!("server task {idx} did not complete within 5s after shutdown")
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "stress-failpoints"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arm_failpoint_returns_skipped_without_feature() {
+        let topology = PaxosTopology::spawn(3, Duration::from_millis(1000))
+            .await
+            .expect("spawn 3-node paxos topology");
+        let event = topology
+            .controller
+            .arm_failpoint("paxos-coverage-test", "panic")
+            .await;
+        match &event.outcome {
+            ChaosOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("stress-failpoints"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        let event = topology
+            .controller
+            .disarm_failpoint("paxos-coverage-test")
+            .await;
+        match &event.outcome {
+            ChaosOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("stress-failpoints"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[cfg(feature = "stress-failpoints")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arm_then_disarm_failpoint_round_trip() {
+        let topology = PaxosTopology::spawn(3, Duration::from_millis(1000))
+            .await
+            .expect("spawn 3-node paxos topology");
+        // Use a unique name so concurrent test runs don't race on a shared
+        // failpoint registry slot.
+        let name = "paxos-stress-coverage-arm-disarm";
+        let armed = topology.controller.arm_failpoint(name, "off").await;
+        assert!(
+            armed.outcome.is_applied(),
+            "arm_failpoint expected Applied, got {:?}",
+            armed.outcome
+        );
+        let disarmed = topology.controller.disarm_failpoint(name).await;
+        assert!(
+            disarmed.outcome.is_applied(),
+            "disarm_failpoint expected Applied, got {:?}",
+            disarmed.outcome
+        );
+        Box::new(topology.controller).shutdown().await;
+    }
 }
