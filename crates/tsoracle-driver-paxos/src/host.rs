@@ -14,54 +14,68 @@
 //!
 //! Implementations decide where the OmniPaxos handle lives, where storage
 //! is persisted, and how `current_high_water` / `submit_advance` interact
-//! with the underlying paxos log. The bundled `StandaloneHost` (landing in
-//! a follow-up sub-issue) owns its own OmniPaxos cluster + state machine.
-//! A larger service (e.g., one that already runs OmniPaxos for other
-//! state) can implement this trait directly and route TSO commands
-//! through its existing log.
+//! with the underlying paxos log. The bundled [`crate::StandaloneHost`]
+//! owns its own OmniPaxos cluster + apply pipeline keyed on
+//! [`HighWaterCommand`]. A larger service that already runs OmniPaxos for
+//! other state can implement this trait against its existing handle and
+//! pick its own [`Entry`](omnipaxos::storage::Entry) — typically an
+//! envelope enum that carries `HighWaterCommand` as one variant alongside
+//! the service's own commands.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use omnipaxos::OmniPaxos;
-use omnipaxos::storage::Storage;
+use omnipaxos::storage::{Entry, Storage};
 use parking_lot::Mutex;
 use tsoracle_consensus::ConsensusError;
-
-use crate::log_entry::HighWaterCommand;
 
 /// Host that knows how to read and advance the TSO high-water mark via
 /// OmniPaxos.
 ///
 /// The driver crate handles the `ConsensusDriver` trait shape and
-/// leadership-event mapping; the host supplies the storage / submission
-/// semantics.
+/// leadership-event mapping; the host supplies the entry shape, the
+/// storage, and the submission semantics.
 #[async_trait]
 pub trait PaxosHighWaterHost: Send + Sync + 'static {
+    /// The OmniPaxos entry type this host's log replicates.
+    ///
+    /// The bundled [`crate::StandaloneHost`] sets this to
+    /// [`crate::log_entry::HighWaterCommand`] directly. A piggyback host
+    /// typically picks a wider envelope enum (e.g.
+    /// `MyAppCommand::{App(_), HighWater(HighWaterCommand)}`) so its TSO
+    /// proposals ride the same log as its existing commands.
+    ///
+    /// The `Snapshot: Send` bound lets the driver move the OmniPaxos
+    /// handle across `.await` points when mapping leader observations.
+    type Entry: Entry<Snapshot: Send> + Send + 'static;
+
     /// The storage type backing this host's OmniPaxos handle. Each host
     /// picks its own — the standalone host uses the toolkit's
-    /// `RocksdbStorage`, a piggy-back host uses whatever Storage its
+    /// `RocksdbStorage`, a piggyback host uses whatever Storage its
     /// larger OmniPaxos instance is built on.
-    type Storage: Storage<HighWaterCommand> + Send + 'static;
+    type Storage: Storage<Self::Entry> + Send + 'static;
 
     /// The OmniPaxos handle the driver reads leadership state from.
-    fn omnipaxos(&self) -> Arc<Mutex<OmniPaxos<HighWaterCommand, Self::Storage>>>;
+    fn omnipaxos(&self) -> Arc<Mutex<OmniPaxos<Self::Entry, Self::Storage>>>;
 
     /// Read the current high-water mark linearizably.
     ///
-    /// Implementations append a `HighWaterCommand::Barrier`, await the
-    /// apply task's notification that the cluster's `decided_idx` has
-    /// advanced past the call's snapshot, and then return the in-memory
-    /// high-water.
+    /// Implementations append a barrier entry (the standalone host uses
+    /// [`crate::log_entry::HighWaterCommand::Barrier`]; piggyback hosts
+    /// wrap it in their envelope variant), await the apply task's
+    /// notification that the cluster's `decided_idx` has advanced past
+    /// the call's snapshot, and then return the in-memory high-water.
     async fn current_high_water(&self) -> Result<u64, ConsensusError>;
 
     /// Submit a "bump to at_least" proposal through the host's OmniPaxos
     /// log and return the new high-water value once the cluster has
     /// applied it (or a later higher value).
     ///
-    /// Implementations append a `HighWaterCommand::Advance { at_least }`
-    /// and wait until both (a) the cluster's `decided_idx` has advanced
-    /// past the call's snapshot AND (b) the in-memory high-water is at
-    /// least `at_least`.
+    /// Implementations append an advance entry (the standalone host uses
+    /// [`crate::log_entry::HighWaterCommand::Advance`]; piggyback hosts
+    /// wrap it in their envelope variant) and wait until both (a) the
+    /// cluster's `decided_idx` has advanced past the call's snapshot AND
+    /// (b) the in-memory high-water is at least `at_least`.
     async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError>;
 }

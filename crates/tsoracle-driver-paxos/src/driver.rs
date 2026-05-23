@@ -166,6 +166,7 @@ mod tests {
 
     #[async_trait]
     impl PaxosHighWaterHost for StubHost {
+        type Entry = HighWaterCommand;
         type Storage = MemStorage<HighWaterCommand>;
 
         fn omnipaxos(

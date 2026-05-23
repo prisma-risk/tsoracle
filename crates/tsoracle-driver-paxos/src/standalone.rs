@@ -259,6 +259,7 @@ where
     S: Storage<HighWaterCommand> + Send + 'static,
     <HighWaterCommand as omnipaxos::storage::Entry>::Snapshot: Send,
 {
+    type Entry = HighWaterCommand;
     type Storage = S;
 
     fn omnipaxos(&self) -> Arc<Mutex<OmniPaxos<HighWaterCommand, S>>> {

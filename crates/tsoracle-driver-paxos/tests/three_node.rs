@@ -222,6 +222,7 @@ impl FollowerProxyHost {
 
 #[async_trait]
 impl PaxosHighWaterHost for FollowerProxyHost {
+    type Entry = HighWaterCommand;
     type Storage = MemStorage<HighWaterCommand>;
 
     fn omnipaxos(&self) -> Arc<Mutex<OmniPaxos<HighWaterCommand, MemStorage<HighWaterCommand>>>> {
