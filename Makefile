@@ -165,7 +165,8 @@ coverage:
 	  --workspace --all-features \
 	  $(COV_EXCLUDES) \
 	  --ignore-filename-regex '$(COV_IGNORE)$$' \
-	  --lcov --output-path lcov.info
+	  --lcov --output-path lcov.info \
+	  -- --nocapture
 
 # Local HTML report. Output at target/llvm-cov/html/index.html; `--open` opens
 # it in the default browser. Re-runs the test suite, same as `coverage`.

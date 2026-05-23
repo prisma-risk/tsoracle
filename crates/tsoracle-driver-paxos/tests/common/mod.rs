@@ -200,17 +200,34 @@ where
 
     /// Stop every node's runner + inbox pump.
     pub async fn stop_all(&mut self) {
+        eprintln!("[diag] stop_all begin");
         for node in &mut self.nodes {
+            let node_id = node.node_id;
             if let Some(stop_tx) = node.pump_stop.take() {
                 let _ = stop_tx.send(());
             }
             if let Some(pump) = node.pump_handle.take() {
-                let _ = pump.await;
+                eprintln!("[diag] stop_all: node {node_id} pump_handle await");
+                if tokio::time::timeout(Duration::from_secs(30), pump)
+                    .await
+                    .is_err()
+                {
+                    panic!("[diag] stop_all: node {node_id} pump_handle TIMED OUT after 30s");
+                }
+                eprintln!("[diag] stop_all: node {node_id} pump_handle done");
             }
             if let Some(mut host) = node.host.take() {
-                host.stop().await;
+                eprintln!("[diag] stop_all: node {node_id} host.stop() begin");
+                if tokio::time::timeout(Duration::from_secs(30), host.stop())
+                    .await
+                    .is_err()
+                {
+                    panic!("[diag] stop_all: node {node_id} host.stop() TIMED OUT after 30s");
+                }
+                eprintln!("[diag] stop_all: node {node_id} host.stop() done");
             }
         }
+        eprintln!("[diag] stop_all done");
     }
 
     /// Stop a single node (runner + inbox pump + host) and drop the
@@ -220,6 +237,7 @@ where
     /// storage drop its directory lock, so that
     /// [`Cluster::rebuild_rocksdb_node`] can reopen the same path.
     pub async fn stop_node(&mut self, node_id: u64) {
+        eprintln!("[diag] stop_node({node_id}) begin");
         let node = self
             .nodes
             .iter_mut()
@@ -229,15 +247,29 @@ where
             let _ = stop_tx.send(());
         }
         if let Some(pump) = node.pump_handle.take() {
-            let _ = pump.await;
+            eprintln!("[diag] stop_node({node_id}): pump_handle await");
+            if tokio::time::timeout(Duration::from_secs(30), pump)
+                .await
+                .is_err()
+            {
+                panic!("[diag] stop_node({node_id}): pump_handle TIMED OUT after 30s");
+            }
         }
         if let Some(mut host) = node.host.take() {
-            host.stop().await;
+            eprintln!("[diag] stop_node({node_id}): host.stop() begin");
+            if tokio::time::timeout(Duration::from_secs(30), host.stop())
+                .await
+                .is_err()
+            {
+                panic!("[diag] stop_node({node_id}): host.stop() TIMED OUT after 30s");
+            }
+            eprintln!("[diag] stop_node({node_id}): host.stop() done");
         }
         // Drop the harness-held Arc last; the host has already released
         // its own clone via `host.stop().await + drop`. Once this take()
         // runs, the underlying OmniPaxos + Storage are deallocated.
         node.omnipaxos.take();
+        eprintln!("[diag] stop_node({node_id}) done");
     }
 
     /// Block until `predicate(self)` returns true.
@@ -252,13 +284,39 @@ where
     where
         F: FnMut(&Self) -> bool,
     {
-        for _ in 0..max_ticks {
+        let started = std::time::Instant::now();
+        eprintln!("[diag] drive_until begin max_ticks={max_ticks}");
+        for tick in 0..max_ticks {
             if predicate(self) {
+                eprintln!(
+                    "[diag] drive_until ok after {tick} ticks ({:?} wall)",
+                    started.elapsed()
+                );
                 return;
+            }
+            if tick > 0 && tick.is_multiple_of(500) {
+                eprintln!(
+                    "[diag] drive_until still polling tick={tick} elapsed={:?} \
+                     leader={:?} decided_per_node={:?}",
+                    started.elapsed(),
+                    self.leader_opt(),
+                    self.nodes
+                        .iter()
+                        .map(|node| (
+                            node.node_id,
+                            node.omnipaxos
+                                .as_ref()
+                                .map(|handle| handle.lock().get_decided_idx())
+                        ))
+                        .collect::<Vec<_>>(),
+                );
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        panic!("predicate did not become true within {max_ticks} ticks");
+        panic!(
+            "[diag] predicate did not become true within {max_ticks} ticks (elapsed {:?} wall)",
+            started.elapsed()
+        );
     }
 
     /// Returns the current leader's node id, or panics if none.
@@ -329,7 +387,14 @@ async fn pump_inbox<S>(
             message = inbox.recv() => {
                 match message {
                     Some(message) => {
+                        let lock_start = std::time::Instant::now();
                         omnipaxos.lock().handle_incoming(message);
+                        let elapsed = lock_start.elapsed();
+                        if elapsed > Duration::from_millis(100) {
+                            eprintln!(
+                                "[diag] pump_inbox: handle_incoming took {elapsed:?}"
+                            );
+                        }
                     }
                     None => return,
                 }
