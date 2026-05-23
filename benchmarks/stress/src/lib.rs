@@ -207,6 +207,9 @@ pub fn run(cfg: StressConfig) -> Result<Report, anyhow::Error> {
                 (controller, endpoints, server_handle)
             }
         }
+        TopologyKind::Paxos => {
+            anyhow::bail!("paxos topology not yet implemented");
+        }
     };
 
     // --- Supervisor task on control runtime. ---
@@ -526,6 +529,7 @@ mod resolve_schedule_tests {
             liveness_deadline: Duration::from_secs(5),
             grace_mem: Duration::from_millis(100),
             grace_raft: Duration::from_millis(750),
+            grace_paxos: Duration::from_millis(1000),
             grace_process: Duration::from_secs(2),
             nodes: 1,
             bind: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),

@@ -68,6 +68,8 @@ struct RunArgs {
     grace_mem: HumantimeDuration,
     #[arg(long, default_value = "750ms")]
     grace_raft: HumantimeDuration,
+    #[arg(long, default_value = "1s")]
+    grace_paxos: HumantimeDuration,
     #[arg(long, default_value = "2s")]
     grace_process: HumantimeDuration,
     #[arg(long, default_value_t = 3)]
@@ -103,6 +105,7 @@ struct InjectArgs {
 enum TopologyArg {
     Mem,
     Raft,
+    Paxos,
     Process,
 }
 
@@ -111,6 +114,7 @@ impl From<TopologyArg> for TopologyKind {
         match t {
             TopologyArg::Mem => TopologyKind::Mem,
             TopologyArg::Raft => TopologyKind::Raft,
+            TopologyArg::Paxos => TopologyKind::Paxos,
             TopologyArg::Process => TopologyKind::Process,
         }
     }
@@ -145,6 +149,7 @@ fn build_config(a: &RunArgs) -> StressConfig {
         liveness_deadline: Duration::from(a.liveness_deadline),
         grace_mem: Duration::from(a.grace_mem),
         grace_raft: Duration::from(a.grace_raft),
+        grace_paxos: Duration::from(a.grace_paxos),
         grace_process: Duration::from(a.grace_process),
         nodes: a.nodes,
         bind: a.bind,
@@ -229,6 +234,7 @@ fn replay_cmd(args: ReplayArgs) -> ExitCode {
         liveness_deadline: Duration::from_secs(5),
         grace_mem: Duration::from_millis(100),
         grace_raft: Duration::from_millis(750),
+        grace_paxos: Duration::from_millis(1000),
         grace_process: Duration::from_secs(2),
         nodes: 1,
         bind: "127.0.0.1:0"
@@ -275,6 +281,7 @@ fn inject_violation_cmd(args: InjectArgs) -> ExitCode {
         liveness_deadline: Duration::from_secs(5),
         grace_mem: Duration::from_millis(100),
         grace_raft: Duration::from_millis(750),
+        grace_paxos: Duration::from_millis(1000),
         grace_process: Duration::from_secs(2),
         nodes: 1,
         bind: SocketAddr::from(([127, 0, 0, 1], 0)),

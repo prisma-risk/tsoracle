@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 pub enum TopologyKind {
     Mem,
     Raft,
+    Paxos,
     Process,
 }
 
@@ -44,6 +45,7 @@ pub struct StressConfig {
     pub liveness_deadline: Duration,
     pub grace_mem: Duration,
     pub grace_raft: Duration,
+    pub grace_paxos: Duration,
     pub grace_process: Duration,
     pub nodes: usize,
     pub bind: SocketAddr,
@@ -75,8 +77,12 @@ impl StressConfig {
         if self.server_threads == 0 {
             return Err("--server-threads must be >= 1".into());
         }
-        if matches!(self.topology, TopologyKind::Raft | TopologyKind::Process) && self.nodes < 1 {
-            return Err("--nodes must be >= 1 for raft/process topology".into());
+        if matches!(
+            self.topology,
+            TopologyKind::Raft | TopologyKind::Paxos | TopologyKind::Process
+        ) && self.nodes < 1
+        {
+            return Err("--nodes must be >= 1 for raft/paxos/process topology".into());
         }
         // `tsoracle serve` is single-node (FileDriver, no cluster protocol).
         // Spawning multiple of them under process topology gives independent
@@ -98,6 +104,7 @@ impl StressConfig {
         match self.topology {
             TopologyKind::Mem => self.grace_mem,
             TopologyKind::Raft => self.grace_raft,
+            TopologyKind::Paxos => self.grace_paxos,
             TopologyKind::Process => self.grace_process,
         }
     }
@@ -123,6 +130,7 @@ mod tests {
             liveness_deadline: Duration::from_secs(5),
             grace_mem: Duration::from_millis(100),
             grace_raft: Duration::from_millis(750),
+            grace_paxos: Duration::from_millis(1000),
             grace_process: Duration::from_secs(2),
             nodes: 3,
             bind: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
@@ -187,6 +195,14 @@ mod tests {
     fn raft_topology_requires_nodes() {
         let mut cfg = ok_config();
         cfg.topology = TopologyKind::Raft;
+        cfg.nodes = 0;
+        assert!(cfg.validate().unwrap_err().contains("--nodes"));
+    }
+
+    #[test]
+    fn paxos_topology_requires_nodes() {
+        let mut cfg = ok_config();
+        cfg.topology = TopologyKind::Paxos;
         cfg.nodes = 0;
         assert!(cfg.validate().unwrap_err().contains("--nodes"));
     }
