@@ -145,7 +145,9 @@ impl<H: OpenraftHighWaterHost> Stream for KeepAlive<H> {
 /// driver themselves and provide their own `ConsensusDriver` impl.
 fn map_leader_state<C: RaftTypeConfig>(s: LeadershipState<C>) -> LeaderState {
     match s {
-        LeadershipState::Leader { term } => LeaderState::Leader { epoch: Epoch(term) },
+        LeadershipState::Leader { term } => LeaderState::Leader {
+            epoch: Epoch(u128::from(term)),
+        },
         LeadershipState::Follower { .. } => LeaderState::Follower {
             leader_endpoint: None,
         },

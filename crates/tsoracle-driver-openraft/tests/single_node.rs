@@ -91,7 +91,7 @@ async fn leader_state_epoch_matches_raft_term() {
         let snap = metrics_rx.borrow_watched();
         snap.current_term.as_u64().unwrap_or(0)
     };
-    assert_eq!(epoch.0, term);
+    assert_eq!(epoch.0, u128::from(term));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

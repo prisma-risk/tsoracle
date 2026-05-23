@@ -58,15 +58,16 @@ pub fn decode_leader_hint(status: &Status) -> LeaderHintLookup {
 
 /// Cached pointer to the endpoint that most recently behaved like the
 /// leader, along with the epoch that confirmed it and the instant the
-/// cache was last validated. `epoch` is `Option<u64>` so an old server
-/// that emits NOT_LEADER hints without `leader_epoch` (or a wire
-/// payload arriving before any successful GetTs has populated the
-/// epoch) can still seat a cache entry; once any source provides an
-/// epoch, monotone-forward comparisons take over.
+/// cache was last validated. `epoch` is `Option<u128>` (the full leader
+/// epoch, reassembled from the wire's two 64-bit halves) so an old server
+/// that emits NOT_LEADER hints without an epoch (or a wire payload arriving
+/// before any successful GetTs has populated the epoch) can still seat a
+/// cache entry; once any source provides an epoch, monotone-forward
+/// comparisons take over.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedLeader {
     pub endpoint: String,
-    pub epoch: Option<u64>,
+    pub epoch: Option<u128>,
     pub last_used: Instant,
 }
 
@@ -140,8 +141,8 @@ impl ChannelPool {
     /// Install or refresh the cached leader entry. `epoch` may be `None`
     /// only when the source did not carry one (old-server `NOT_LEADER`
     /// hints). Successful RPCs always carry the leader's epoch via
-    /// `GetTsResponse.epoch` and go through `record_success`.
-    pub(crate) fn set_leader_with(&self, endpoint: String, epoch: Option<u64>) {
+    /// `GetTsResponse` and go through `record_success`.
+    pub(crate) fn set_leader_with(&self, endpoint: String, epoch: Option<u128>) {
         *self.leader.lock() = Some(CachedLeader {
             endpoint,
             epoch,
@@ -154,7 +155,7 @@ impl ChannelPool {
     /// when the cache already points at `endpoint`, and installs a
     /// fresh entry otherwise. Also upgrades a previously-unknown epoch
     /// to the observed one without disturbing TTL semantics.
-    pub(crate) fn record_success(&self, endpoint: &str, epoch: u64) {
+    pub(crate) fn record_success(&self, endpoint: &str, epoch: u128) {
         let mut guard = self.leader.lock();
         match &mut *guard {
             Some(cached) if cached.endpoint == endpoint => {
@@ -179,7 +180,7 @@ impl ChannelPool {
     /// cases where either side has no epoch yet, so a delayed
     /// NOT_LEADER from an old epoch cannot flap the cache backward
     /// once a higher epoch has been observed.
-    pub(crate) fn accept_hint(&self, hint_epoch: Option<u64>) -> bool {
+    pub(crate) fn accept_hint(&self, hint_epoch: Option<u128>) -> bool {
         match self.fresh_leader() {
             None => true,
             Some(cached) => match (cached.epoch, hint_epoch) {
@@ -312,7 +313,8 @@ mod tests {
             .expect("LEADER_HINT_KEY must be a valid binary metadata key");
         let hint = LeaderHint {
             leader_endpoint: Some("10.0.0.7:50551".into()),
-            leader_epoch: Some(42),
+            leader_epoch_hi: Some(0),
+            leader_epoch_lo: Some(42),
         };
         let value = BinaryMetadataValue::from_bytes(&hint.encode_to_vec());
         status.metadata_mut().insert_bin(key, value);
@@ -320,7 +322,8 @@ mod tests {
         match decode_leader_hint(&status) {
             LeaderHintLookup::Decoded(decoded) => {
                 assert_eq!(decoded.leader_endpoint, hint.leader_endpoint);
-                assert_eq!(decoded.leader_epoch, hint.leader_epoch);
+                assert_eq!(decoded.leader_epoch_hi, hint.leader_epoch_hi);
+                assert_eq!(decoded.leader_epoch_lo, hint.leader_epoch_lo);
             }
             other => panic!(
                 "expected Decoded(_), got something else: {}",
@@ -381,7 +384,7 @@ mod tests {
     /// lower epoch must be rejected regardless of arrival order. The
     /// bootstrap cases (no cache, no cached epoch, no hint epoch) all
     /// accept so the client remains useful against the current server
-    /// that does not populate `leader_epoch`.
+    /// that does not populate the leader epoch.
     #[test]
     fn accept_hint_enforces_monotone_forward_epoch() {
         let pool = ChannelPool::new(
@@ -419,8 +422,8 @@ mod tests {
     #[test]
     fn higher_epoch_hint_wins_regardless_of_arrival_order() {
         for (first_endpoint, first_epoch, second_endpoint, second_epoch, winner) in [
-            ("a:1", 7u64, "b:1", 5u64, "a:1"), // higher arrives first
-            ("a:1", 5u64, "b:1", 7u64, "b:1"), // higher arrives second
+            ("a:1", 7u128, "b:1", 5u128, "a:1"), // higher arrives first
+            ("a:1", 5u128, "b:1", 7u128, "b:1"), // higher arrives second
         ] {
             let pool = ChannelPool::new(
                 vec!["a:1".into(), "b:1".into()],

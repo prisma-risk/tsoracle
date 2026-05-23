@@ -36,11 +36,13 @@ mod tests {
             physical_ms: 0,
             logical_start: 0,
             count: 0,
-            epoch: 0,
+            epoch_hi: 0,
+            epoch_lo: 0,
         };
         let _ = LeaderHint {
             leader_endpoint: Some("127.0.0.1:50551".into()),
-            leader_epoch: Some(1),
+            leader_epoch_hi: Some(0),
+            leader_epoch_lo: Some(1),
         };
     }
 }

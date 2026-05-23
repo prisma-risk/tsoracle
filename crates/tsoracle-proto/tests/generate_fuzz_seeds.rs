@@ -69,7 +69,8 @@ fn generate_get_ts_response_seeds() {
             physical_ms: 0,
             logical_start: 0,
             count: 0,
-            epoch: 0,
+            epoch_hi: 0,
+            epoch_lo: 0,
         }
         .encode_to_vec(),
     );
@@ -80,7 +81,8 @@ fn generate_get_ts_response_seeds() {
             physical_ms: 1_700_000_000_000,
             logical_start: 0,
             count: 100,
-            epoch: 1,
+            epoch_hi: 0,
+            epoch_lo: 1,
         }
         .encode_to_vec(),
     );
@@ -96,7 +98,8 @@ fn generate_leader_hint_seeds() {
         "seed_both_none",
         &LeaderHint {
             leader_endpoint: None,
-            leader_epoch: None,
+            leader_epoch_hi: None,
+            leader_epoch_lo: None,
         }
         .encode_to_vec(),
     );
@@ -105,7 +108,8 @@ fn generate_leader_hint_seeds() {
         "seed_typical",
         &LeaderHint {
             leader_endpoint: Some("127.0.0.1:50551".into()),
-            leader_epoch: Some(1),
+            leader_epoch_hi: Some(0),
+            leader_epoch_lo: Some(1),
         }
         .encode_to_vec(),
     );
@@ -114,7 +118,8 @@ fn generate_leader_hint_seeds() {
         "seed_long_endpoint",
         &LeaderHint {
             leader_endpoint: Some("a".repeat(512)),
-            leader_epoch: Some(u64::MAX),
+            leader_epoch_hi: Some(u64::MAX),
+            leader_epoch_lo: Some(u64::MAX),
         }
         .encode_to_vec(),
     );

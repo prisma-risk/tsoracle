@@ -48,7 +48,8 @@ async fn end_to_end_get_ts() {
         .into_inner();
     assert_eq!(resp.count, 10);
     assert_eq!(resp.logical_start, 0);
-    assert_eq!(resp.epoch, 1);
+    // Epoch(1).to_wire() == (hi: 0, lo: 1).
+    assert_eq!((resp.epoch_hi, resp.epoch_lo), (0, 1));
     // physical_ms must be at least wall-clock-now (the failover fence advances above it).
     assert!(resp.physical_ms > 1_700_000_000_000);
 

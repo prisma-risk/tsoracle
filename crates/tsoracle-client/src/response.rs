@@ -80,7 +80,8 @@ mod tests {
                 physical_ms: PHYSICAL_MS_MAX + 1,
                 logical_start: 0,
                 count: 1,
-                epoch: 0,
+                epoch_hi: 0,
+                epoch_lo: 0,
             },
             1,
         )
@@ -100,7 +101,8 @@ mod tests {
                 physical_ms: 1,
                 logical_start: 0,
                 count: 0,
-                epoch: 0,
+                epoch_hi: 0,
+                epoch_lo: 0,
             },
             0,
         )
@@ -119,7 +121,8 @@ mod tests {
                 physical_ms: 1,
                 logical_start: 0,
                 count: oversized,
-                epoch: 0,
+                epoch_hi: 0,
+                epoch_lo: 0,
             },
             oversized,
         )
@@ -146,7 +149,8 @@ mod tests {
                     physical_ms,
                     logical_start,
                     count,
-                    epoch,
+                    epoch_hi: 0,
+                    epoch_lo: epoch,
                 })
             })
     }
@@ -178,7 +182,8 @@ mod tests {
             count in 1u32..=MAX_TIMESTAMPS_PER_RPC,
         ) {
             prop_assume!((logical_start as u64) + (count as u64) > (LOGICAL_MAX as u64) + 1);
-            let response = GetTsResponse { physical_ms, logical_start, count, epoch: 0 };
+            let response =
+                GetTsResponse { physical_ms, logical_start, count, epoch_hi: 0, epoch_lo: 0 };
             prop_assert!(matches!(
                 decode_get_ts_response(response, count),
                 Err(ClientError::Rpc(_))

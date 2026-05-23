@@ -20,7 +20,7 @@
 //! the end of the round-robin pass, which would leave the current
 //! call to fail if the hinted endpoint wasn't otherwise in the queue.
 //!
-//! A LeaderHint that carries `leader_epoch` is honored only when the
+//! A LeaderHint that carries a leader epoch is honored only when the
 //! cache permits it: a strictly lower-epoch hint is dropped silently
 //! (counted, traced) so a delayed NOT_LEADER from an old epoch cannot
 //! flap the cache backward. Hints with no epoch (the current server's
@@ -51,7 +51,7 @@ use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use tokio::time::Instant;
-use tsoracle_core::Timestamp;
+use tsoracle_core::{Epoch, Timestamp};
 
 use crate::error::ClientError;
 use crate::leader_resolved::{ChannelPool, LeaderHintLookup, decode_leader_hint};
@@ -163,18 +163,19 @@ pub(crate) async fn issue_rpc(
 enum AttemptOutcome {
     Ok {
         timestamps: Vec<Timestamp>,
-        /// Leader epoch carried in `GetTsResponse.epoch`. Plumbed to
+        /// Leader epoch carried in `GetTsResponse` (reassembled from the
+        /// `epoch_hi`/`epoch_lo` halves). Plumbed to
         /// `ChannelPool::record_success` so the cache can compare it
-        /// against future `LeaderHint.leader_epoch` values.
-        epoch: u64,
+        /// against future `LeaderHint` epochs.
+        epoch: u128,
     },
     LeaderHint {
         endpoint: String,
-        /// `None` only when the server omitted `leader_epoch` from the
+        /// `None` only when the server omitted the leader epoch from the
         /// `LeaderHint` payload (current server behaviour; tracked as
         /// a follow-up). Once populated, the cache uses it as the
         /// upper bound future hints must meet to be honored.
-        epoch: Option<u64>,
+        epoch: Option<u128>,
     },
     StaleLeaderHint,
     HintRejected(tonic::Status),
@@ -274,7 +275,7 @@ async fn attempt(
     // Capture before `decode_get_ts_response` consumes the message —
     // it returns only the timestamp vector, but the cache needs the
     // epoch from the same response to gate future `LeaderHint` arrivals.
-    let epoch = inner.epoch;
+    let epoch = Epoch::from_wire(inner.epoch_hi, inner.epoch_lo).0;
     match decode_get_ts_response(inner, count) {
         Ok(timestamps) => AttemptOutcome::Ok { timestamps, epoch },
         Err(err) => {
@@ -305,7 +306,15 @@ fn classify_not_leader_hint(
     // parameter only flows into log fields below.
     let _ = endpoint;
     let (hinted_endpoint, hint_epoch) = match decode_leader_hint(&status) {
-        LeaderHintLookup::Decoded(hint) => (hint.leader_endpoint, hint.leader_epoch),
+        LeaderHintLookup::Decoded(hint) => {
+            // Both halves are present together or absent together; reassemble
+            // the 128-bit epoch only when the server populated them.
+            let epoch = match (hint.leader_epoch_hi, hint.leader_epoch_lo) {
+                (Some(hi), Some(lo)) => Some(Epoch::from_wire(hi, lo).0),
+                _ => None,
+            };
+            (hint.leader_endpoint, epoch)
+        }
         LeaderHintLookup::Absent => {
             #[cfg(feature = "tracing")]
             tracing::warn!(
@@ -589,7 +598,7 @@ mod tests {
         }
     }
 
-    /// A well-formed hint with a higher `leader_epoch` than the
+    /// A well-formed hint with a higher leader epoch than the
     /// cached leader's must be followed. This is the bread-and-butter
     /// case: a freshly-elected leader supersedes our cached one.
     #[test]
@@ -603,7 +612,8 @@ mod tests {
         pool.record_success("a:1", 5);
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
             leader_endpoint: Some("b:1".into()),
-            leader_epoch: Some(7),
+            leader_epoch_hi: Some(0),
+            leader_epoch_lo: Some(7),
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
             AttemptOutcome::LeaderHint { endpoint, epoch } => {
@@ -630,7 +640,8 @@ mod tests {
         pool.record_success("a:1", 10);
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
             leader_endpoint: Some("b:1".into()),
-            leader_epoch: Some(5),
+            leader_epoch_hi: Some(0),
+            leader_epoch_lo: Some(5),
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
             AttemptOutcome::StaleLeaderHint => {}
@@ -654,7 +665,8 @@ mod tests {
         pool.record_success("a:1", 10);
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
             leader_endpoint: Some("b:1".into()),
-            leader_epoch: None,
+            leader_epoch_hi: None,
+            leader_epoch_lo: None,
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
             AttemptOutcome::LeaderHint { endpoint, epoch } => {
@@ -675,7 +687,8 @@ mod tests {
         let pool = ChannelPool::new(vec!["a:1".into()], None, true, RetryPolicy::default());
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
             leader_endpoint: Some("http://attacker:1".into()),
-            leader_epoch: Some(7),
+            leader_epoch_hi: Some(0),
+            leader_epoch_lo: Some(7),
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
             AttemptOutcome::HintRejected(_) => {}

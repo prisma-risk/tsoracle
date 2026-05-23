@@ -31,7 +31,8 @@ fn leader_hint_from(server: &Server) -> LeaderHint {
     };
     LeaderHint {
         leader_endpoint: endpoint,
-        leader_epoch: None,
+        leader_epoch_hi: None,
+        leader_epoch_lo: None,
     }
 }
 
@@ -72,7 +73,8 @@ impl TsoService for TsoServiceImpl {
         {
             return Err(not_leader_status(LeaderHint {
                 leader_endpoint,
-                leader_epoch: None,
+                leader_epoch_hi: None,
+                leader_epoch_lo: None,
             }));
         }
 
@@ -91,11 +93,13 @@ impl TsoService for TsoServiceImpl {
                         metrics::counter!("tsoracle.get_ts.timestamps_issued")
                             .increment(u64::from(grant.count));
                     }
+                    let (epoch_hi, epoch_lo) = grant.epoch.to_wire();
                     return Ok(Response::new(GetTsResponse {
                         physical_ms: grant.physical_ms,
                         logical_start: grant.logical_start,
                         count: grant.count,
-                        epoch: grant.epoch.0,
+                        epoch_hi,
+                        epoch_lo,
                     }));
                 }
                 Err(CoreError::NotLeader) => {
@@ -278,7 +282,8 @@ mod tests {
             hint.leader_endpoint.as_deref(),
             Some("http://other-node:9000")
         );
-        assert!(hint.leader_epoch.is_none());
+        assert!(hint.leader_epoch_hi.is_none());
+        assert!(hint.leader_epoch_lo.is_none());
 
         // The Serving branch flips the endpoint to None — exercises the
         // race-window path that's otherwise only reachable when an extension
