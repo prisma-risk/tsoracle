@@ -203,7 +203,7 @@ async fn build_node(
     runner.start(sink);
 
     // ---- Driver + tsoracle server ----
-    let host = PiggybackHost::new(omnipaxos.clone(), state.clone());
+    let host = PiggybackHost::new(omnipaxos.clone(), state.clone(), id);
     let driver = Arc::new(PaxosDriver::new(host, leader_stream));
     let server = TsoServer::builder().consensus_driver(driver).build()?;
     let serving_state_rx = server.state_rx.clone();
