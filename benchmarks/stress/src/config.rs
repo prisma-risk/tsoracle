@@ -84,6 +84,13 @@ impl StressConfig {
         {
             return Err("--nodes must be >= 1 for raft/paxos/process topology".into());
         }
+        // OmniPaxos rejects single-node `ClusterConfig`s — BLE requires a
+        // quorum of configured nodes alive for leader election.
+        if matches!(self.topology, TopologyKind::Paxos) && self.nodes < 3 {
+            return Err(
+                "--nodes must be >= 3 for paxos topology (OmniPaxos requires a quorum)".into(),
+            );
+        }
         // `tsoracle serve` is single-node (FileDriver, no cluster protocol).
         // Spawning multiple of them under process topology gives independent
         // oracles with independent physical-clock baselines; client failover
@@ -205,6 +212,20 @@ mod tests {
         cfg.topology = TopologyKind::Paxos;
         cfg.nodes = 0;
         assert!(cfg.validate().unwrap_err().contains("--nodes"));
+    }
+
+    #[test]
+    fn paxos_topology_requires_three_nodes() {
+        for n in [1, 2] {
+            let mut cfg = ok_config();
+            cfg.topology = TopologyKind::Paxos;
+            cfg.nodes = n;
+            let err = cfg.validate().unwrap_err();
+            assert!(
+                err.contains(">= 3 for paxos"),
+                "expected paxos quorum error for nodes={n}, got: {err}",
+            );
+        }
     }
 
     #[test]

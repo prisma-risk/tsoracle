@@ -13,6 +13,7 @@
 //! Server topology abstractions: spawn, chaos vocabulary, endpoints.
 
 pub mod mem;
+pub mod paxos;
 #[cfg(unix)]
 pub mod process;
 pub mod raft;
