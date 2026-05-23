@@ -80,3 +80,7 @@ required-features = ["test-fakes"]
 [[test]]
 name = "metrics"
 required-features = ["test-support", "metrics"]
+
+[[test]]
+name = "fence_yieldpoint"
+required-features = ["yieldpoints", "test-fakes"]
