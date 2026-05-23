@@ -107,9 +107,18 @@ async fn stop_delivers_shutdown_when_apply_task_is_mid_iteration() {
     // the loop.
     gate.notify_one();
 
-    tokio::time::timeout(Duration::from_secs(2), stop_handle)
+    // Liveness guard, not a latency assertion. Once the gate releases, the
+    // apply task consumes the stored `apply_shutdown` permit on its next
+    // `select!` turn and `stop()` returns in microseconds. The pre-fix
+    // `notify_waiters` regression livelocked here *forever*, so any generous
+    // finite bound distinguishes "fixed" from "regressed". The bound is wide
+    // (10s) because the `coverage` CI job runs the whole instrumented suite
+    // in parallel: a tighter 2s budget expired intermittently from pure
+    // scheduler starvation — this task simply not getting a worker in time —
+    // not from a lost wakeup.
+    tokio::time::timeout(Duration::from_secs(10), stop_handle)
         .await
-        .expect("host.stop() must complete within 2s after yield-point release")
+        .expect("host.stop() must complete after yield-point release (shutdown livelock?)")
         .expect("stop task must not panic");
 
     yieldpoint::remove(APPLY_TASK_YIELD);
