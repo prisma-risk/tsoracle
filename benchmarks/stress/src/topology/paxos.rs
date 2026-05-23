@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use omnipaxos::messages::Message;
 use omnipaxos::{ClusterConfig, OmniPaxos, OmniPaxosConfig, ServerConfig};
 use parking_lot::Mutex;
-use rocksdb::{DB, Options};
+use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -84,15 +84,19 @@ struct PaxosNode {
     _storage_dir: TempDir,
 }
 
+const PAXOS_CF: &str = "tso_paxos";
+
 #[allow(dead_code)]
 fn open_paxos_storage(dir: &std::path::Path) -> anyhow::Result<RocksdbStorage<HighWaterCommand>> {
     let mut opts = Options::default();
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);
-    // RocksdbStorage uses a single column family; DB::open always registers
-    // the "default" CF, which is the one we target here.
-    let db = Arc::new(DB::open(&opts, dir).context("paxos topology: open rocksdb at storage dir")?);
-    RocksdbStorage::open_in(db, "default")
+    let cfs = vec![ColumnFamilyDescriptor::new(PAXOS_CF, Options::default())];
+    let db = Arc::new(
+        DB::open_cf_descriptors(&opts, dir, cfs)
+            .context("paxos topology: open rocksdb at storage dir")?,
+    );
+    RocksdbStorage::open_in(db, PAXOS_CF)
         .map_err(|e| anyhow::anyhow!("paxos topology: open RocksdbStorage: {e:?}"))
 }
 
@@ -504,6 +508,213 @@ impl ChaosController for PaxosController {
             if let Some(tx) = node.shutdown_tx.lock().take() {
                 let _ = tx.send(());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant as StdInstant;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spawn_3_nodes_reports_endpoints_and_leader() {
+        let topology = PaxosTopology::spawn(3, Duration::from_millis(50))
+            .await
+            .expect("spawn 3-node paxos topology");
+        let endpoints = topology.controller.endpoints();
+        assert_eq!(
+            endpoints.len(),
+            3,
+            "expected 3 endpoints, got {endpoints:?}"
+        );
+        assert!(
+            topology.controller.current_leader().is_some(),
+            "expected a leader after spawn"
+        );
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn kill_leader_triggers_reelection() {
+        let topology = PaxosTopology::spawn(3, Duration::from_millis(1000))
+            .await
+            .expect("spawn 3-node paxos topology");
+        let original_leader = topology
+            .controller
+            .current_leader()
+            .expect("leader at boot");
+
+        let event = topology.controller.kill_leader().await;
+        assert!(
+            event.outcome.is_applied(),
+            "kill_leader expected Applied, got {:?}",
+            event.outcome
+        );
+
+        // Poll for a different leader. OmniPaxos's BLE election runs on a
+        // 20 ms tick, so a re-election typically completes within a few
+        // hundred ms after the partition window. The 30 s wall-clock cap
+        // tolerates CI slowdown.
+        let deadline = StdInstant::now() + Duration::from_secs(30);
+        let mut new_leader = None;
+        while StdInstant::now() < deadline {
+            if let Some(candidate) = topology.controller.current_leader() {
+                if candidate != original_leader {
+                    new_leader = Some(candidate);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let new_leader = match new_leader {
+            Some(id) => id,
+            None => {
+                let snapshots: Vec<String> = topology
+                    .controller
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        let leader = n.omnipaxos.lock().get_current_leader();
+                        format!("node {} sees leader={:?}", n.node_id.0, leader)
+                    })
+                    .collect();
+                panic!(
+                    "re-election should have produced a different leader (was {:?}); \
+                     snapshots:\n  {}",
+                    original_leader,
+                    snapshots.join("\n  ")
+                );
+            }
+        };
+        assert_ne!(original_leader, new_leader);
+
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn kill_leader_heals_on_cancel() {
+        // The outer `--duration` timer in the stress harness wins the
+        // top-level `select!` and drops the in-flight chaos future. Before
+        // the `HealOnDrop` guard, that cancellation parked at the mid-window
+        // `sleep` and `restore` never ran, stranding the cluster partitioned
+        // for the rest of the run. The guard's `Drop` impl is what makes
+        // this test pass: the partition is restored even though the chaos
+        // future never reached its end-of-window point.
+        let topology = PaxosTopology::spawn(3, Duration::from_millis(1000))
+            .await
+            .expect("spawn 3-node paxos topology");
+        let leader_pid: u64 = topology
+            .controller
+            .nodes
+            .iter()
+            .find_map(|n| n.omnipaxos.lock().get_current_leader())
+            .expect("a leader at boot");
+        let partition = topology.controller.network.partition();
+        // kill_leader's mid-window sleep is 1500ms; cancelling at 50ms
+        // reliably parks the future inside it on any sane machine.
+        match tokio::time::timeout(Duration::from_millis(50), topology.controller.kill_leader())
+            .await
+        {
+            Err(_elapsed) => {} // expected: future was dropped mid-sleep
+            Ok(event) => panic!(
+                "kill_leader should not have finished within 50ms; got {:?}",
+                event.outcome,
+            ),
+        }
+        // After the cancel, the partition guard must have restored
+        // reachability — i.e., the leader pid is no longer in the isolated
+        // set. `is_blocked(x, x)` returns true iff x is isolated, so the
+        // probe below asserts the un-isolated state.
+        assert!(
+            !partition.is_blocked(leader_pid, leader_pid),
+            "partition for node {leader_pid} must be restored after the \
+             chaos future is dropped; the node is still in the isolated set"
+        );
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pause_leader_returns_applied() {
+        let topology = PaxosTopology::spawn(3, Duration::from_millis(1000))
+            .await
+            .expect("spawn 3-node paxos topology");
+        let event = topology
+            .controller
+            .pause_leader(Duration::from_millis(200))
+            .await;
+        assert!(
+            event.outcome.is_applied(),
+            "pause_leader expected Applied, got {:?}",
+            event.outcome
+        );
+        Box::new(topology.controller).shutdown().await;
+    }
+
+    struct FailingBackend {
+        fail_step: SpawnStep,
+        fail_at_node: u64,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SpawnStep {
+        PrepareStorage,
+        BindLoopback,
+    }
+
+    #[async_trait]
+    impl PaxosBackend for FailingBackend {
+        async fn prepare_node_storage(
+            &self,
+            id: u64,
+        ) -> anyhow::Result<(TempDir, RocksdbStorage<HighWaterCommand>)> {
+            if self.fail_step == SpawnStep::PrepareStorage && id == self.fail_at_node {
+                bail!("injected: prepare_node_storage failed for node {id}");
+            }
+            DefaultPaxosBackend.prepare_node_storage(id).await
+        }
+
+        async fn bind_loopback(&self, id: u64) -> anyhow::Result<TcpListener> {
+            if self.fail_step == SpawnStep::BindLoopback && id == self.fail_at_node {
+                bail!("injected: bind_loopback failed for node {id}");
+            }
+            DefaultPaxosBackend.bind_loopback(id).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spawn_propagates_storage_failure() {
+        let backend = FailingBackend {
+            fail_step: SpawnStep::PrepareStorage,
+            fail_at_node: 1,
+        };
+        match PaxosTopology::spawn_with(&backend, 3, Duration::from_millis(50)).await {
+            Err(err) => {
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("prepare_node_storage failed"),
+                    "expected storage-failure message, got: {msg}"
+                );
+            }
+            Ok(_) => panic!("spawn should propagate the injected storage failure"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spawn_propagates_bind_failure() {
+        let backend = FailingBackend {
+            fail_step: SpawnStep::BindLoopback,
+            fail_at_node: 2,
+        };
+        match PaxosTopology::spawn_with(&backend, 3, Duration::from_millis(50)).await {
+            Err(err) => {
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("bind_loopback failed"),
+                    "expected bind-failure message, got: {msg}"
+                );
+            }
+            Ok(_) => panic!("spawn should propagate the injected bind failure"),
         }
     }
 }
