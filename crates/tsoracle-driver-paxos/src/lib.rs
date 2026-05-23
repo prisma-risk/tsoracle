@@ -29,6 +29,7 @@ pub mod snapshot_policy;
 pub mod standalone;
 pub mod state_machine;
 pub mod type_config;
+pub mod yieldpoint;
 
 pub use driver::PaxosDriver;
 pub use log_entry::{HighWaterCommand, HighWaterSnapshot};
