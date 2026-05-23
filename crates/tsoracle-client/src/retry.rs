@@ -23,10 +23,10 @@
 //! A LeaderHint that carries a leader epoch is honored only when the
 //! cache permits it: a strictly lower-epoch hint is dropped silently
 //! (counted, traced) so a delayed NOT_LEADER from an old epoch cannot
-//! flap the cache backward. Hints with no epoch (the current server's
-//! wire output) and hints arriving when the cache has no epoch yet
-//! are accepted unconditionally so a transition-state deployment is
-//! not left without leader discovery.
+//! flap the cache backward. Hints with no epoch (a paxos backend, or an
+//! older openraft server from before the epoch was populated) and hints
+//! arriving when the cache has no epoch yet are accepted unconditionally
+//! so a transition-state deployment is not left without leader discovery.
 //!
 //! Three deadlines bound the loop, governed by [`crate::RetryPolicy`]:
 //!
@@ -172,9 +172,9 @@ enum AttemptOutcome {
     LeaderHint {
         endpoint: String,
         /// `None` only when the server omitted the leader epoch from the
-        /// `LeaderHint` payload (current server behaviour; tracked as
-        /// a follow-up). Once populated, the cache uses it as the
-        /// upper bound future hints must meet to be honored.
+        /// `LeaderHint` payload (a paxos backend, or an older openraft
+        /// server). Once populated, the cache uses it as the upper bound
+        /// future hints must meet to be honored.
         epoch: Option<u128>,
     },
     StaleLeaderHint,
@@ -699,9 +699,9 @@ mod tests {
         assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
     }
 
-    /// A hint that carries no `leader_epoch` (the current server's
-    /// behaviour, until #125 lands) is accepted unconditionally so
-    /// the client remains useful during a mixed-version deployment.
+    /// A hint that carries no `leader_epoch` (a paxos backend, or an older
+    /// openraft server) is accepted unconditionally so the client remains
+    /// useful during a mixed-version deployment.
     #[test]
     fn classify_no_epoch_hint_returns_leader_hint() {
         let pool = ChannelPool::new(
