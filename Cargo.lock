@@ -3242,6 +3242,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsoracle-driver-paxos"
+version = "0.1.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "omnipaxos",
+ "parking_lot",
+ "postcard",
+ "proptest",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tsoracle-consensus",
+ "tsoracle-core",
+ "tsoracle-paxos-toolkit",
+]
+
+[[package]]
 name = "tsoracle-openraft-toolkit"
 version = "0.1.3"
 dependencies = [
