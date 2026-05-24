@@ -101,6 +101,65 @@ async fn binary_serves_timestamps() {
     child.kill().await.unwrap();
 }
 
+/// Under Kubernetes / `docker stop` / systemd the supervisor sends SIGTERM,
+/// not SIGINT. The server must treat SIGTERM as a graceful-shutdown trigger so
+/// tonic drains in-flight requests and the process exits 0 — otherwise the
+/// default SIGTERM disposition terminates it by signal and it is SIGKILLed
+/// after the grace period (#245).
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_triggers_graceful_shutdown() {
+    let binary_path = env!("CARGO_BIN_EXE_tsoracle");
+    let state_dir = tempdir().unwrap();
+    let listen_addr = bind_unused().await;
+
+    let mut child = Command::new(binary_path)
+        .arg("serve")
+        .arg("--listen")
+        .arg(listen_addr.to_string())
+        .arg("--state-dir")
+        .arg(state_dir.path())
+        .arg("--log")
+        .arg("warn")
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    // Wait until the SIGTERM handler is live: it is registered when the
+    // shutdown future is first polled, which happens once tonic is serving —
+    // i.e. by the time the listener is accepting connections.
+    let readiness = wait_until_accepting(listen_addr, Duration::from_secs(10));
+    tokio::pin!(readiness);
+    tokio::select! {
+        result = &mut readiness => {
+            result.expect("binary did not start accepting connections");
+        }
+        child_result = child.wait() => {
+            let status = child_result.expect("wait on child failed");
+            panic!("binary exited before accepting connections: status={status}");
+        }
+    }
+
+    let pid = child.id().expect("child has a pid before exit");
+    let kill = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .await
+        .expect("spawn kill");
+    assert!(kill.success(), "failed to deliver SIGTERM to pid {pid}");
+
+    let status = timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("server did not exit within the grace period after SIGTERM")
+        .expect("wait on child failed");
+
+    assert!(
+        status.success(),
+        "expected graceful exit (status 0) after SIGTERM, got {status}"
+    );
+}
+
 async fn wait_until_responsive(client: &Client, budget: Duration) -> Result<(), ClientError> {
     let deadline = Instant::now() + budget;
     let mut last_err: Option<ClientError> = None;

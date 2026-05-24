@@ -140,11 +140,45 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     );
 
     server
-        .serve_with_listener(listener, async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutdown signal received");
-        })
+        .serve_with_listener(listener, shutdown_signal())
         .await
         .context("serve")?;
     Ok(())
+}
+
+/// Resolves when the process receives an OS request to terminate.
+///
+/// Container orchestrators (Kubernetes, `docker stop`) and systemd stop
+/// processes with SIGTERM, while an interactive Ctrl-C sends SIGINT. Both must
+/// drive tonic's graceful drain; otherwise the default SIGTERM disposition
+/// kills the process mid-flight and the supervisor SIGKILLs it after the grace
+/// period (#245). On non-unix targets only Ctrl-C is available.
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(stream) => stream,
+        Err(error) => {
+            // Installing the SIGTERM handler only fails on resource exhaustion
+            // or an invalid signal — neither expected here. Degrade to Ctrl-C
+            // rather than refuse to serve an otherwise-healthy node.
+            tracing::warn!(%error, "could not install SIGTERM handler; only Ctrl-C will trigger shutdown");
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!(signal = "SIGINT", "shutdown signal received");
+            return;
+        }
+    };
+
+    let signal_name = tokio::select! {
+        _ = tokio::signal::ctrl_c() => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
+    };
+    tracing::info!(signal = signal_name, "shutdown signal received");
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!(signal = "SIGINT", "shutdown signal received");
 }
