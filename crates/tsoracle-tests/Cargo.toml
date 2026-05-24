@@ -49,6 +49,9 @@ name = "server_serve_with_listener"
 name = "client_tls"
 
 [[test]]
+name = "client_cached_leader"
+
+[[test]]
 name              = "client_metrics"
 required-features = ["metrics"]
 
