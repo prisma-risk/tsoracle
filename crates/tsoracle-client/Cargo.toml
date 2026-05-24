@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle-client"
-version      = "0.2.0"
+version      = "0.2.1"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -35,8 +35,8 @@ thiserror      = { workspace = true }
 tokio          = { workspace = true }
 tonic          = { workspace = true }
 tracing        = { workspace = true, optional = true }
-tsoracle-core  = { path = "../tsoracle-core", version = "0.2.0" }
-tsoracle-proto = { path = "../tsoracle-proto", version = "0.2.0" }
+tsoracle-core  = { path = "../tsoracle-core", version = "0.2.1" }
+tsoracle-proto = { path = "../tsoracle-proto", version = "0.2.1" }
 
 [dev-dependencies]
 metrics-util = { workspace = true }

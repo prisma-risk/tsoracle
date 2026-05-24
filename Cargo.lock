@@ -3206,7 +3206,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tsoracle"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -3248,7 +3248,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-consensus"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "futures",
@@ -3259,7 +3259,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "husky-rs",
  "proptest",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-file"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "crc32c",
@@ -3289,7 +3289,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-openraft"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3312,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-paxos"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3336,7 +3336,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-openraft-toolkit"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "fail",
@@ -3356,7 +3356,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-paxos-toolkit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "fail",
@@ -3379,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "prost",
  "serde",
@@ -3390,7 +3390,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-server"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "fail",
@@ -3432,7 +3432,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-yieldpoint"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "parking_lot",
  "tokio",

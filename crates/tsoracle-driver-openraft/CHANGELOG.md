@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.2.0...tsoracle-driver-openraft-v0.2.1) - 2026-05-24
+
+### Added
+
+- populate NOT_LEADER hints with leader endpoint and epoch (#88, #125) ([#234](https://github.com/prisma-risk/tsoracle/pull/234))
+
+### Fixed
+
+- *(driver-openraft)* validate snapshot meta.last_log_id against payload.last_applied ([#276](https://github.com/prisma-risk/tsoracle/pull/276))
+
 ## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.1.4...tsoracle-driver-openraft-v0.2.0) - 2026-05-23
 
 ### Fixed
