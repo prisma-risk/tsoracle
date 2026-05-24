@@ -41,7 +41,7 @@ async fn fence_recovers_after_transient_load_error() {
         .consensus_driver(driver.clone())
         .build()
         .unwrap();
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     let (_routes, watch_handle) = server
         .into_router()
         .expect("into_router is infallible without the reflection feature");
@@ -213,7 +213,7 @@ async fn before_allocate_sleep_delays_get_ts() {
         .consensus_driver(driver.clone())
         .build()
         .unwrap();
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     let (routes, _watch_handle) = server
         .into_router()
         .expect("into_router is infallible without the reflection feature");
@@ -273,7 +273,7 @@ async fn extension_gate_held_sleep_delays_get_ts() {
         .failover_advance(Duration::from_millis(1))
         .build()
         .unwrap();
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     let (routes, _watch_handle) = server
         .into_router()
         .expect("into_router is infallible without the reflection feature");

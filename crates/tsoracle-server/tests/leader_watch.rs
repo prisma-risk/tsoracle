@@ -56,7 +56,7 @@ async fn leader_watch_persists_fence_before_serving() {
     driver.become_leader(Epoch(1));
 
     // Wait until serving = true.
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     wait_until_serving(&mut state_rx).await;
 
     // max(prior_max + 1 = 5_001, now = 10_000) + failover_advance = 2_000 = 12_000.
@@ -107,7 +107,7 @@ async fn fence_strictly_above_prior_high_water_when_prior_exceeds_now() {
 
     driver.become_leader(Epoch(1));
 
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     wait_until_serving(&mut state_rx).await;
 
     let persisted = driver.current_high_water();
@@ -162,7 +162,7 @@ async fn first_grant_strictly_above_prior_high_water_when_prior_exceeds_now() {
 
     driver.become_leader(Epoch(1));
 
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     wait_until_serving(&mut state_rx).await;
 
     let grant = server
@@ -209,7 +209,7 @@ async fn fence_retries_transient_persist_error_then_serves() {
 
     driver.become_leader(Epoch(1));
 
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     timeout(Duration::from_secs(5), wait_until_serving(&mut state_rx))
         .await
         .expect("fence must recover from a transient persist error and reach Serving");
@@ -267,7 +267,7 @@ async fn fence_steps_down_on_not_leader_then_serves_next_election() {
 
     // Re-won leadership: the fence must now complete and serve.
     driver.become_leader(Epoch(2));
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     timeout(Duration::from_secs(5), wait_until_serving(&mut state_rx))
         .await
         .expect("fence must serve after re-winning leadership");
@@ -327,7 +327,7 @@ async fn leader_watch_propagates_follower_epoch_into_serving_state() {
 
     driver.become_follower_with_epoch(Some("http://leader:9000".into()), Some(Epoch(7)));
 
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     let snapshot = timeout(Duration::from_secs(1), async {
         loop {
             let current = state_rx.borrow_and_update().clone();

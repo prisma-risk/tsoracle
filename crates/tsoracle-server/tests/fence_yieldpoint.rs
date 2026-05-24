@@ -52,7 +52,7 @@ async fn fence_parks_at_after_load_yieldpoint_until_released() {
             .build()
             .unwrap(),
     );
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
 
     // Arm the yield point BEFORE spawning the watch task so the first
     // Leader iteration is guaranteed to park.

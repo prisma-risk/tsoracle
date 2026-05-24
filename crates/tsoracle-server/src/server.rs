@@ -154,7 +154,7 @@ pub struct Server {
     pub(crate) failover_advance: Duration,
     pub(crate) allocator: Arc<Mutex<Allocator>>,
     pub(crate) state_tx: watch::Sender<ServingState>,
-    pub state_rx: watch::Receiver<ServingState>,
+    pub(crate) state_rx: watch::Receiver<ServingState>,
     /// Serializes window extensions so a stampeding burst of `WindowExhausted`
     /// requests resolves to a single `persist_high_water` round-trip. Acquired
     /// before `extension_gate`; combined with a recheck-after-acquire inside
@@ -174,6 +174,21 @@ pub struct Server {
 impl Server {
     pub fn builder() -> ServerBuilder {
         ServerBuilder::default()
+    }
+
+    /// Subscribe to serving-state transitions.
+    ///
+    /// Returns a fresh `watch::Receiver` observing the same `ServingState`
+    /// the server publishes as leadership comes and goes. Embedders use this
+    /// to gate their own startup on `ServingState::Serving` (see the
+    /// `embedded_router` and piggyback examples). Because `into_router`
+    /// consumes the `Server`, capture the receiver before mounting.
+    ///
+    /// This method is the stable observation API: the underlying field is
+    /// `pub(crate)`, so the receiver's type can evolve (e.g. a future newtype
+    /// around `ServingState`) without breaking embedders that go through it.
+    pub fn subscribe(&self) -> watch::Receiver<ServingState> {
+        self.state_rx.clone()
     }
 
     /// Single transition API used in response to evidence that the current

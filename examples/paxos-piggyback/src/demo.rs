@@ -206,7 +206,7 @@ async fn build_node(
     let host = PiggybackHost::new(omnipaxos.clone(), state.clone(), id);
     let driver = Arc::new(PaxosDriver::new(host, leader_stream));
     let server = TsoServer::builder().consensus_driver(driver).build()?;
-    let serving_state_rx = server.state_rx.clone();
+    let serving_state_rx = server.subscribe();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let tso_port = listener.local_addr()?.port();
