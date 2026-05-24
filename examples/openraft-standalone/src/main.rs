@@ -31,7 +31,7 @@ use openraft::{Config, Raft};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tsoracle_driver_openraft::{
     HighWaterStateMachine, OpenraftDriver, OpenraftPeer, RocksdbSnapshotStore, SnapshotStore,
-    StandaloneHost, TypeConfig,
+    StandaloneHost, TsoPeer, TypeConfig,
 };
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 use tsoracle_server::Server as TsoServer;
@@ -211,7 +211,10 @@ async fn main() -> anyhow::Result<()> {
     // `--tso-peers` is the NodeId -> tsoracle-service-addr map; the driver
     // consults it to populate LeaderHint follower-redirects.
     let host = StandaloneHost::new(raft.clone(), state_machine_for_host);
-    let driver = OpenraftDriver::with_peers(host, tso_addrs);
+    let tso_peers = tso_addrs
+        .into_iter()
+        .map(|(node_id, endpoint)| TsoPeer { node_id, endpoint });
+    let driver = OpenraftDriver::with_peers(host, tso_peers);
 
     // ---- Tsoracle gRPC server ----
     let tso = TsoServer::builder().consensus_driver(driver).build()?;

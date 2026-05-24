@@ -32,7 +32,7 @@ use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, SnapshotPolicy, StandaloneHost};
-use tsoracle_paxos_toolkit::lifecycle::{MessageSink, Peer};
+use tsoracle_paxos_toolkit::lifecycle::{MessageSink, TsoPeer};
 use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
 use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
 use tsoracle_server::Server as TsoServer;
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         flexible_quorum: None,
     };
 
-    // Build a `Peer` list of TSO endpoints so each node's StandaloneHost can
+    // Build a `TsoPeer` list of TSO endpoints so each node's StandaloneHost can
     // populate `LeaderHint` follower-redirect with the leader's address.
     let tso_endpoints: Vec<(u64, SocketAddr)> = node_ids
         .iter()
@@ -112,10 +112,10 @@ async fn main() -> anyhow::Result<()> {
         });
 
         // ---- StandaloneHost ----
-        let toolkit_peers: Vec<Peer> = tso_endpoints
+        let toolkit_peers: Vec<TsoPeer> = tso_endpoints
             .iter()
             .filter(|(peer_id, _)| *peer_id != id)
-            .map(|(peer_id, addr)| Peer {
+            .map(|(peer_id, addr)| TsoPeer {
                 node_id: *peer_id,
                 endpoint: format!("http://{addr}"),
             })

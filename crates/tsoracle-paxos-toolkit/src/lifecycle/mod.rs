@@ -16,7 +16,8 @@ pub mod events;
 pub mod state;
 
 pub use events::{LeaderEventSender, LeaderEventStream, SendError, leader_event_channel};
-pub use state::{LeadershipState, Peer};
+pub use state::LeadershipState;
+pub use tsoracle_core::TsoPeer;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,7 +67,7 @@ where
 {
     omnipaxos: Arc<Mutex<OmniPaxos<T, S>>>,
     my_node_id: u64,
-    peers: Vec<Peer>,
+    peers: Vec<TsoPeer>,
     tick_interval: Duration,
     leader_sender: LeaderEventSender,
     leader_stream: Option<LeaderEventStream>,
@@ -94,7 +95,7 @@ where
     pub fn new(
         omnipaxos: Arc<Mutex<OmniPaxos<T, S>>>,
         my_node_id: u64,
-        peers: Vec<Peer>,
+        peers: Vec<TsoPeer>,
         tick_interval: Duration,
     ) -> Self {
         let (leader_sender, leader_stream) = leader_event_channel();

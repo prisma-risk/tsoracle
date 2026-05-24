@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use openraft::RaftTypeConfig;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
-use tsoracle_core::Epoch;
+use tsoracle_core::{Epoch, TsoPeer};
 use tsoracle_openraft_toolkit::LeadershipState;
 use tsoracle_openraft_toolkit::leadership_events_from_metrics;
 
@@ -60,35 +60,42 @@ impl<H: OpenraftHighWaterHost> OpenraftDriver<H> {
     /// Build a driver from a host value with no endpoint resolution. Follower
     /// hints carry `leader_endpoint: None`; use [`Self::with_peers`] to resolve.
     pub fn new(host: H) -> Arc<Self> {
-        Self::with_peers(host, HashMap::new())
-    }
-
-    /// Build a driver from a host value and a `NodeId -> tsoracle-service-addr`
-    /// map. The map is consulted on the follower branch to resolve the elected
-    /// leader's advertised endpoint for `LeaderHint` redirects.
-    pub fn with_peers(
-        host: H,
-        peers: HashMap<<H::Config as RaftTypeConfig>::NodeId, String>,
-    ) -> Arc<Self> {
         Arc::new(Self {
             host: Arc::new(host),
-            peers: Arc::new(peers),
+            peers: Arc::new(HashMap::new()),
+        })
+    }
+
+    /// Build a driver from a host value and the cluster's [`TsoPeer`] topology.
+    /// The peers are consulted on the follower branch to resolve the elected
+    /// leader's advertised endpoint for `LeaderHint` redirects.
+    pub fn with_peers(host: H, peers: impl IntoIterator<Item = TsoPeer>) -> Arc<Self>
+    where
+        <H::Config as RaftTypeConfig>::NodeId: From<u64>,
+    {
+        Arc::new(Self {
+            host: Arc::new(host),
+            peers: Arc::new(endpoint_map_from_peers::<H::Config>(peers)),
         })
     }
 
     /// Build a driver from a pre-shared `Arc<H>` with no endpoint resolution.
     pub fn from_arc(host: Arc<H>) -> Arc<Self> {
-        Self::from_arc_with_peers(host, HashMap::new())
-    }
-
-    /// Build a driver from a pre-shared `Arc<H>` and a peer map.
-    pub fn from_arc_with_peers(
-        host: Arc<H>,
-        peers: HashMap<<H::Config as RaftTypeConfig>::NodeId, String>,
-    ) -> Arc<Self> {
         Arc::new(Self {
             host,
-            peers: Arc::new(peers),
+            peers: Arc::new(HashMap::new()),
+        })
+    }
+
+    /// Build a driver from a pre-shared `Arc<H>` and the cluster's [`TsoPeer`]
+    /// topology.
+    pub fn from_arc_with_peers(host: Arc<H>, peers: impl IntoIterator<Item = TsoPeer>) -> Arc<Self>
+    where
+        <H::Config as RaftTypeConfig>::NodeId: From<u64>,
+    {
+        Arc::new(Self {
+            host,
+            peers: Arc::new(endpoint_map_from_peers::<H::Config>(peers)),
         })
     }
 }
@@ -165,6 +172,25 @@ impl<H: OpenraftHighWaterHost> Stream for KeepAlive<H> {
     }
 }
 
+/// Build a `NodeId -> tsoracle-service-endpoint` map from a [`TsoPeer`] list.
+///
+/// Each peer's `node_id` (a `u64`) is widened into the config's `NodeId` via
+/// `From<u64>` — the identity for every real config, which keys nodes by `u64`.
+/// The resulting map is what the follower branch consults to resolve the
+/// elected leader's advertised endpoint for `LeaderHint` redirects. A repeated
+/// `node_id` keeps the last endpoint, as a misconfigured topology would.
+fn endpoint_map_from_peers<C: RaftTypeConfig>(
+    peers: impl IntoIterator<Item = TsoPeer>,
+) -> HashMap<C::NodeId, String>
+where
+    C::NodeId: From<u64>,
+{
+    peers
+        .into_iter()
+        .map(|peer| (C::NodeId::from(peer.node_id), peer.endpoint))
+        .collect()
+}
+
 /// Project a toolkit [`LeadershipState`] into a tsoracle-consensus
 /// [`LeaderState`].
 ///
@@ -192,12 +218,58 @@ fn map_leader_state<C: RaftTypeConfig>(
 
 #[cfg(test)]
 mod tests {
-    use super::map_leader_state;
+    use super::{endpoint_map_from_peers, map_leader_state};
     use crate::type_config::TypeConfig;
     use std::collections::HashMap;
     use tsoracle_consensus::LeaderState;
-    use tsoracle_core::Epoch;
+    use tsoracle_core::{Epoch, TsoPeer};
     use tsoracle_openraft_toolkit::LeadershipState;
+
+    #[test]
+    fn endpoint_map_from_peers_keys_each_endpoint_by_node_id() {
+        let map = endpoint_map_from_peers::<TypeConfig>([
+            TsoPeer {
+                node_id: 2,
+                endpoint: "http://node-2:50051".to_string(),
+            },
+            TsoPeer {
+                node_id: 3,
+                endpoint: "http://node-3:50051".to_string(),
+            },
+        ]);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&2), Some(&"http://node-2:50051".to_string()));
+        assert_eq!(map.get(&3), Some(&"http://node-3:50051".to_string()));
+    }
+
+    #[test]
+    fn endpoint_map_from_peers_then_resolves_follower_endpoint() {
+        // The map a TsoPeer list builds must drive the same follower-redirect
+        // resolution as a hand-built NodeId->endpoint map.
+        let peers = endpoint_map_from_peers::<TypeConfig>([TsoPeer {
+            node_id: 2,
+            endpoint: "http://node-2:50051".to_string(),
+        }]);
+        let state = map_leader_state::<TypeConfig>(
+            LeadershipState::Follower {
+                term: 4,
+                leader: Some((
+                    2u64,
+                    crate::type_config::OpenraftPeer {
+                        addr: "raft-addr".into(),
+                    },
+                )),
+            },
+            &peers,
+        );
+        assert_eq!(
+            state,
+            LeaderState::Follower {
+                leader_endpoint: Some("http://node-2:50051".into()),
+                leader_epoch: Some(Epoch(4)),
+            }
+        );
+    }
 
     #[test]
     fn leader_maps_to_leader_with_epoch() {
