@@ -4,6 +4,18 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.2...tsoracle-server-v0.2.3) - 2026-05-24
+
+### Fixed
+
+- *(server)* surface tonic drain errors when the watch arm fires ([#293](https://github.com/prisma-risk/tsoracle/pull/293))
+
+### Other
+
+- lift the leader-hint trailer key and decoder into tsoracle-proto ([#91](https://github.com/prisma-risk/tsoracle/pull/91)) ([#295](https://github.com/prisma-risk/tsoracle/pull/295))
+- *(server)* pin that sustained leader churn never exits the watch loop ([#204](https://github.com/prisma-risk/tsoracle/pull/204)) ([#289](https://github.com/prisma-risk/tsoracle/pull/289))
+- *(server)* route get_ts CoreError mapping through core_status ([#97](https://github.com/prisma-risk/tsoracle/pull/97)) ([#288](https://github.com/prisma-risk/tsoracle/pull/288))
+
 ## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.1...tsoracle-server-v0.2.2) - 2026-05-24
 
 ### Added

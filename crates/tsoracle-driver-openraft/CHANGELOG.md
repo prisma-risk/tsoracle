@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.2.1...tsoracle-driver-openraft-v0.2.2) - 2026-05-24
+
+### Added
+
+- pin an on-disk schema version for snapshots, log entries, and meta records ([#291](https://github.com/prisma-risk/tsoracle/pull/291))
+
+### Other
+
+- *(driver-openraft)* narrow OpenraftHighWaterHost to a metrics-only accessor ([#95](https://github.com/prisma-risk/tsoracle/pull/95)) ([#296](https://github.com/prisma-risk/tsoracle/pull/296))
+
 ## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.2.0...tsoracle-driver-openraft-v0.2.1) - 2026-05-24
 
 ### Added
