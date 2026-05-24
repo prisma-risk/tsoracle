@@ -219,10 +219,20 @@ impl TsoServiceImpl {
             // — letting subsequent try_grant calls keep serving from a
             // fenced epoch, even briefly, is the wrong tradeoff for a TSO.
             // The step_down helper clears the allocator and publishes
-            // NotServing under the single transition API; the hint we pass
-            // back is whatever state_rx most recently knew about.
-            Err(ConsensusError::NotLeader { .. }) | Err(ConsensusError::Fenced { .. }) => {
-                self.server.step_down_due_to_consensus_rejection(None);
+            // NotServing under the single transition API; leader_hint_from
+            // then snapshots that freshly-published state for the redirect.
+            //
+            // Fenced names the epoch that fenced us as `current`; publish it
+            // so the NOT_LEADER hint carries an epoch the client can validate
+            // its next leader against. NotLeader during persist exposes no
+            // such epoch here, so its hint omits one.
+            Err(ConsensusError::Fenced { current, .. }) => {
+                self.server
+                    .step_down_due_to_consensus_rejection(None, Some(current));
+                return Err(not_leader_status(leader_hint_from(&self.server)));
+            }
+            Err(ConsensusError::NotLeader { .. }) => {
+                self.server.step_down_due_to_consensus_rejection(None, None);
                 return Err(not_leader_status(leader_hint_from(&self.server)));
             }
             // Transient driver failure: storage hiccup, peer transport flap,
