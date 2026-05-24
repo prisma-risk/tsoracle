@@ -36,11 +36,20 @@ use tsoracle_driver_openraft::{
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 use tsoracle_server::Server as TsoServer;
 
-use crate::network::{PeerFactory, server as peer_server};
+use crate::network::{MAX_PEER_MESSAGE_BYTES, PeerFactory, server as peer_server};
 
 const LOG_CF: &str = "raft_log";
 const META_CF: &str = "raft_meta";
 const SNAP_CF: &str = "raft_snapshot";
+
+/// Cap on concurrent HTTP/2 streams the peer server will service at once.
+/// Bounds a connection/stream flood; generous for a small cluster's peer fan-in.
+const MAX_CONCURRENT_STREAMS: u32 = 256;
+
+/// Explicit HTTP/2 max frame size for the peer server. Defense-in-depth behind
+/// the per-message decode cap (`network::MAX_PEER_MESSAGE_BYTES`): it bounds an
+/// individual transport frame, not a whole reassembled message.
+const MAX_FRAME_SIZE: u32 = 64 * 1024;
 
 #[derive(Parser, Debug)]
 #[command(name = "openraft-standalone")]
@@ -50,6 +59,17 @@ struct Cli {
     id: u64,
 
     /// Address on which to listen for raft peer RPCs (e.g. 127.0.0.1:51001).
+    ///
+    /// The raft peer transport is UNAUTHENTICATED by design: any client that
+    /// can reach this socket can drive replication (append-entries/vote) and
+    /// stream snapshots into this node. The handler bounds per-message and
+    /// total snapshot memory (see `network.rs`) so a reachable peer cannot OOM
+    /// the process, but it performs no peer-identity check. Bind it only where
+    /// the network is trusted. Operators should do one of:
+    ///   (a) bind loopback or a private subnet reachable only by cluster peers;
+    ///   (b) wrap the transport in mTLS with a client-cert allowlist (see the
+    ///       `tls-mtls` example);
+    ///   (c) front it with an authorizing proxy.
     #[arg(long)]
     raft_addr: SocketAddr,
 
@@ -150,10 +170,19 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     // ---- Peer-transport server (raft-internal RPCs) ----
-    let peer_service = peer_server(raft.clone());
+    // The transport is unauthenticated (see `Cli::raft_addr`); these caps bound
+    // the memory a reachable peer can force this node to allocate. The decode
+    // cap must stay >= one snapshot chunk (`network::MAX_PEER_MESSAGE_BYTES` is
+    // derived from `SNAPSHOT_CHUNK_SIZE` to guarantee that); the total snapshot
+    // reassembly bound lives in the snapshot handler itself.
+    let peer_service = peer_server(raft.clone())
+        .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
     let raft_addr = cli.raft_addr;
     tokio::spawn(async move {
         if let Err(e) = tonic::transport::Server::builder()
+            .max_concurrent_streams(MAX_CONCURRENT_STREAMS)
+            .max_frame_size(MAX_FRAME_SIZE)
             .add_service(peer_service)
             .serve(raft_addr)
             .await

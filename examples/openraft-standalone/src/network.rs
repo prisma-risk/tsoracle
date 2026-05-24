@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use openraft::error::{NetworkError, RPCError, StreamingError, Unreachable};
@@ -61,7 +62,31 @@ use proto::snapshot_chunk::Kind as ChunkKind;
 /// comfortably inside the default gRPC max-frame limit (4 MiB) with room
 /// for proto overhead and to keep per-RPC memory bounded on both sides.
 /// The header chunk is sent separately and is small (a Vote + SnapshotMeta).
-const SNAPSHOT_CHUNK_SIZE: usize = 1024 * 1024;
+pub const SNAPSHOT_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Upper bound on the *total* bytes the snapshot handler will reassemble from a
+/// single client-streaming RPC. The handler refuses (with `ResourceExhausted`)
+/// any stream whose cumulative `data` chunks would cross this line, so a peer
+/// that can reach the raft port cannot drive the receiver to OOM by sending an
+/// endless run of chunks. Sized generously for the example's small high-water
+/// state machine; real deployments should size this against the largest
+/// realistic state-machine snapshot.
+pub const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Per-message decode/encode cap applied to the peer server. It must stay
+/// strictly above `SNAPSHOT_CHUNK_SIZE`: every snapshot `Data` chunk is one
+/// decoded protobuf message of up to that size, so a smaller cap would reject
+/// legitimate chunks. Deriving it from the chunk size (plus headroom for the
+/// proto and postcard framing) keeps that invariant impossible to break by
+/// accident. `append_entries`/`vote` messages are far smaller, so this bounds
+/// them too.
+pub const MAX_PEER_MESSAGE_BYTES: usize = SNAPSHOT_CHUNK_SIZE + 256 * 1024;
+
+/// Wall-clock ceiling on a single snapshot-install stream. Bounds a slow-loris
+/// peer that opens a stream and dribbles bytes to keep the reassembly buffer
+/// alive; sized against `MAX_SNAPSHOT_BYTES` arriving over a slow-but-legitimate
+/// link.
+const SNAPSHOT_STREAM_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // PeerFactory — constructs PeerNetwork instances for each target node.
@@ -278,73 +303,28 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
 
     /// Reassemble a streamed snapshot and hand it to `install_full_snapshot`.
     ///
-    /// Framing contract (mirrors `proto/raft.proto`):
-    ///   - exactly one `header` chunk at the start;
-    ///   - zero or more `data` chunks afterwards;
-    ///   - any other ordering is rejected as `InvalidArgument`.
+    /// Framing and the byte/time bounds live in [`reassemble_snapshot`]; this
+    /// handler just enforces the per-stream wall-clock limit and forwards the
+    /// result to the local `Raft`.
     async fn snapshot(
         &self,
         request: tonic::Request<tonic::Streaming<SnapshotChunk>>,
     ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
-        let mut stream = request.into_inner();
-
-        // The first chunk must be the header.
-        let first = stream
-            .next()
-            .await
-            .ok_or_else(|| tonic::Status::invalid_argument("snapshot stream ended before header"))?
-            .map_err(|e| tonic::Status::internal(format!("snapshot stream error: {e}")))?;
-        let header = match first.kind {
-            Some(ChunkKind::Header(h)) => h,
-            Some(ChunkKind::Data(_)) => {
-                return Err(tonic::Status::invalid_argument(
-                    "first snapshot chunk must be a header",
-                ));
-            }
-            None => {
-                return Err(tonic::Status::invalid_argument(
-                    "snapshot chunk missing kind",
-                ));
-            }
-        };
-
-        let vote: VoteOf<TypeConfig> = postcard::from_bytes(&header.vote)
-            .map_err(|e| tonic::Status::invalid_argument(format!("bad vote: {e}")))?;
-        let meta: openraft::type_config::alias::SnapshotMetaOf<TypeConfig> =
-            postcard::from_bytes(&header.meta)
-                .map_err(|e| tonic::Status::invalid_argument(format!("bad meta: {e}")))?;
-
-        // Reassemble subsequent data chunks. We don't know the total size up
-        // front (the sender doesn't advertise it), so we start with an empty
-        // Vec and let it grow. For tiny snapshots this is one allocation;
-        // for large ones it grows geometrically.
-        let mut data: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|e| tonic::Status::internal(format!("snapshot stream error: {e}")))?;
-            match chunk.kind {
-                Some(ChunkKind::Data(bytes)) => data.extend_from_slice(&bytes),
-                Some(ChunkKind::Header(_)) => {
-                    return Err(tonic::Status::invalid_argument(
-                        "unexpected header chunk after first",
-                    ));
-                }
-                None => {
-                    return Err(tonic::Status::invalid_argument(
-                        "snapshot chunk missing kind",
-                    ));
-                }
-            }
-        }
+        let assembled = tokio::time::timeout(
+            SNAPSHOT_STREAM_TIMEOUT,
+            reassemble_snapshot(request.into_inner(), MAX_SNAPSHOT_BYTES),
+        )
+        .await
+        .map_err(|_| tonic::Status::deadline_exceeded("snapshot stream timed out"))??;
 
         let snapshot = openraft::storage::Snapshot {
-            meta,
-            snapshot: Cursor::new(data),
+            meta: assembled.meta,
+            snapshot: Cursor::new(assembled.data),
         };
 
         let resp = self
             .raft
-            .install_full_snapshot(vote, snapshot)
+            .install_full_snapshot(assembled.vote, snapshot)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
@@ -354,9 +334,164 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
     }
 }
 
+/// A snapshot reassembled from a peer's client-streaming RPC.
+#[derive(Debug)]
+struct AssembledSnapshot {
+    vote: VoteOf<TypeConfig>,
+    meta: openraft::type_config::alias::SnapshotMetaOf<TypeConfig>,
+    data: Vec<u8>,
+}
+
+/// Parse the leading header chunk, then concatenate trailing `data` chunks into
+/// a single buffer, bounding the total at `max_bytes`.
+///
+/// Framing contract (mirrors `proto/raft.proto`):
+///   - exactly one `header` chunk at the start;
+///   - zero or more `data` chunks afterwards;
+///   - any other ordering is rejected as `InvalidArgument`.
+///
+/// The running total is checked *before* each chunk is buffered, so a stream
+/// that would cross `max_bytes` is refused with `ResourceExhausted` without the
+/// buffer ever exceeding the limit — this is what keeps a reachable peer from
+/// driving the receiver to OOM by sending an unbounded run of chunks. Generic
+/// over the stream so the bound is unit-testable: `tonic::Streaming` is not
+/// constructible in a test, but a `futures::stream::iter` is.
+async fn reassemble_snapshot<S>(
+    mut stream: S,
+    max_bytes: usize,
+) -> Result<AssembledSnapshot, tonic::Status>
+where
+    S: futures::Stream<Item = Result<SnapshotChunk, tonic::Status>> + Unpin,
+{
+    // The first chunk must be the header.
+    let first = stream
+        .next()
+        .await
+        .ok_or_else(|| tonic::Status::invalid_argument("snapshot stream ended before header"))?
+        .map_err(|e| tonic::Status::internal(format!("snapshot stream error: {e}")))?;
+    let header = match first.kind {
+        Some(ChunkKind::Header(h)) => h,
+        Some(ChunkKind::Data(_)) => {
+            return Err(tonic::Status::invalid_argument(
+                "first snapshot chunk must be a header",
+            ));
+        }
+        None => {
+            return Err(tonic::Status::invalid_argument(
+                "snapshot chunk missing kind",
+            ));
+        }
+    };
+
+    let vote: VoteOf<TypeConfig> = postcard::from_bytes(&header.vote)
+        .map_err(|e| tonic::Status::invalid_argument(format!("bad vote: {e}")))?;
+    let meta: openraft::type_config::alias::SnapshotMetaOf<TypeConfig> =
+        postcard::from_bytes(&header.meta)
+            .map_err(|e| tonic::Status::invalid_argument(format!("bad meta: {e}")))?;
+
+    // Reassemble subsequent data chunks, refusing the stream the moment its
+    // cumulative size would exceed `max_bytes`.
+    let mut data: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| tonic::Status::internal(format!("snapshot stream error: {e}")))?;
+        match chunk.kind {
+            Some(ChunkKind::Data(bytes)) => {
+                if data.len() + bytes.len() > max_bytes {
+                    return Err(tonic::Status::resource_exhausted(format!(
+                        "snapshot exceeds {max_bytes}-byte reassembly limit"
+                    )));
+                }
+                data.extend_from_slice(&bytes);
+            }
+            Some(ChunkKind::Header(_)) => {
+                return Err(tonic::Status::invalid_argument(
+                    "unexpected header chunk after first",
+                ));
+            }
+            None => {
+                return Err(tonic::Status::invalid_argument(
+                    "snapshot chunk missing kind",
+                ));
+            }
+        }
+    }
+
+    Ok(AssembledSnapshot { vote, meta, data })
+}
+
 /// Construct the tonic server-side handler for the RaftPeerService.
 pub fn server<SM: Send + Sync + 'static>(
     raft: openraft::Raft<TypeConfig, SM>,
 ) -> RaftPeerServiceServer<PeerServiceImpl<SM>> {
     RaftPeerServiceServer::new(PeerServiceImpl { raft })
+}
+
+#[cfg(test)]
+mod tests {
+    use openraft::Vote;
+    use openraft::type_config::alias::SnapshotMetaOf;
+
+    use super::*;
+
+    fn header_chunk() -> SnapshotChunk {
+        let vote: VoteOf<TypeConfig> = Vote::new(1, 1);
+        let meta = SnapshotMetaOf::<TypeConfig> {
+            last_log_id: None,
+            last_membership: Default::default(),
+            snapshot_id: "test-snap".to_string(),
+        };
+        SnapshotChunk {
+            kind: Some(ChunkKind::Header(SnapshotHeader {
+                vote: postcard::to_stdvec(&vote).expect("encode vote"),
+                meta: postcard::to_stdvec(&meta).expect("encode meta"),
+            })),
+        }
+    }
+
+    fn data_chunk(bytes: &[u8]) -> SnapshotChunk {
+        SnapshotChunk {
+            kind: Some(ChunkKind::Data(bytes.to_vec())),
+        }
+    }
+
+    fn ok_stream(
+        chunks: Vec<SnapshotChunk>,
+    ) -> impl futures::Stream<Item = Result<SnapshotChunk, tonic::Status>> + Unpin {
+        futures::stream::iter(chunks.into_iter().map(Ok))
+    }
+
+    #[tokio::test]
+    async fn snapshot_over_limit_is_resource_exhausted() {
+        // Two 600-byte data chunks (1200 bytes total) against a 1 KiB ceiling:
+        // the second chunk pushes the running total past the limit and must be
+        // refused before it is buffered.
+        let chunks = vec![
+            header_chunk(),
+            data_chunk(&[0u8; 600]),
+            data_chunk(&[0u8; 600]),
+        ];
+        let err = reassemble_snapshot(ok_stream(chunks), 1024)
+            .await
+            .expect_err("over-limit stream must be rejected");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[tokio::test]
+    async fn snapshot_under_limit_assembles() {
+        let chunks = vec![header_chunk(), data_chunk(b"hello "), data_chunk(b"world")];
+        let assembled = reassemble_snapshot(ok_stream(chunks), 1024)
+            .await
+            .expect("under-limit stream assembles");
+        assert_eq!(assembled.data, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn data_before_header_is_invalid_argument() {
+        let chunks = vec![data_chunk(b"premature")];
+        let err = reassemble_snapshot(ok_stream(chunks), 1024)
+            .await
+            .expect_err("data before header must be rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
 }
