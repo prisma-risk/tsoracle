@@ -32,7 +32,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::warn;
 use tsoracle_consensus::{AdvancePayload, ConsensusError};
-use tsoracle_paxos_toolkit::lifecycle::{LeaderEventStream, MessageSink, PaxosRunner, Peer};
+use tsoracle_paxos_toolkit::lifecycle::{LeaderEventStream, MessageSink, PaxosRunner, TsoPeer};
 
 use crate::host::PaxosHighWaterHost;
 use crate::log_entry::HighWaterCommand;
@@ -83,7 +83,7 @@ where
     pub fn new(
         omnipaxos: Arc<Mutex<OmniPaxos<HighWaterCommand, S>>>,
         my_node_id: u64,
-        peers: Vec<Peer>,
+        peers: Vec<TsoPeer>,
         tick_interval: Duration,
         policy: SnapshotPolicy,
     ) -> Self {
@@ -258,7 +258,7 @@ where
 {
     omnipaxos: Option<Arc<Mutex<OmniPaxos<HighWaterCommand, S>>>>,
     my_node_id: Option<u64>,
-    peers: Vec<Peer>,
+    peers: Vec<TsoPeer>,
     tick_interval: Duration,
     policy: SnapshotPolicy,
 }
@@ -293,7 +293,7 @@ where
         self
     }
 
-    pub fn peers(mut self, peers: Vec<Peer>) -> Self {
+    pub fn peers(mut self, peers: Vec<TsoPeer>) -> Self {
         self.peers = peers;
         self
     }

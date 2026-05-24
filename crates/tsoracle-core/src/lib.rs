@@ -19,6 +19,7 @@ mod allocator;
 mod bt;
 mod clock;
 mod epoch;
+mod peer;
 mod timestamp;
 
 pub mod docs;
@@ -27,6 +28,7 @@ pub use allocator::{Allocator, CoreError, WindowGrant};
 pub use bt::Bt;
 pub use clock::{Clock, SystemClock};
 pub use epoch::Epoch;
+pub use peer::TsoPeer;
 pub use timestamp::{LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp, TimestampError};
 
 #[cfg(any(test, feature = "test-clock"))]

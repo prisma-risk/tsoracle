@@ -13,20 +13,7 @@
 //! Maps OmniPaxos leadership observations to `tsoracle_consensus::LeaderState`.
 
 use tsoracle_consensus::LeaderState;
-use tsoracle_core::Epoch;
-
-/// A known peer node and the network endpoint where its TSO service can be
-/// reached for follower-redirect hints.
-///
-/// `node_id` is the OmniPaxos `NodeId` (pid) of the peer. `endpoint` is the
-/// advertised tsoracle service address surfaced via
-/// `tsoracle_consensus::LeaderState::Follower::leader_endpoint` when this
-/// peer becomes the elected leader.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Peer {
-    pub node_id: u64,
-    pub endpoint: String,
-}
+use tsoracle_core::{Epoch, TsoPeer};
 
 /// Internal leadership observation, mappable to
 /// [`tsoracle_consensus::LeaderState`] via [`Self::to_consensus`].
@@ -63,7 +50,7 @@ impl LeadershipState {
         my_node_id: u64,
         current_leader: Option<u64>,
         epoch: Option<Epoch>,
-        peers: &[Peer],
+        peers: &[TsoPeer],
     ) -> Self {
         match current_leader {
             Some(leader) if leader == my_node_id => match epoch {
@@ -123,7 +110,7 @@ mod tests {
 
     #[test]
     fn leader_is_other_emits_follower_with_endpoint() {
-        let peers = vec![Peer {
+        let peers = vec![TsoPeer {
             node_id: 2,
             endpoint: "http://node-2:50051".into(),
         }];

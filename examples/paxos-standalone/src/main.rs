@@ -34,7 +34,7 @@ use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
 use parking_lot::Mutex;
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, SnapshotPolicy, StandaloneHost};
-use tsoracle_paxos_toolkit::lifecycle::Peer;
+use tsoracle_paxos_toolkit::lifecycle::TsoPeer;
 use tsoracle_paxos_toolkit::storage::RocksdbStorage;
 use tsoracle_server::Server as TsoServer;
 
@@ -169,10 +169,10 @@ async fn main() -> anyhow::Result<()> {
     // toolkit's `LeadershipState::from_omnipaxos` consults this list when a
     // peer is elected so `LeaderState::Follower::leader_endpoint` points at
     // the leader's tsoracle gRPC address.
-    let toolkit_peers: Vec<Peer> = tso_addrs
+    let toolkit_peers: Vec<TsoPeer> = tso_addrs
         .iter()
         .filter(|(id, _)| **id != cli.node_id)
-        .map(|(id, endpoint)| Peer {
+        .map(|(id, endpoint)| TsoPeer {
             node_id: *id,
             endpoint: format!("http://{endpoint}"),
         })

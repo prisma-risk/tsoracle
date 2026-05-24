@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle-core"
-description  = "Sync algorithm core for tsoracle: window allocator, 46/18-bit timestamp packing, monotonicity invariants."
+description  = "Sync algorithm core for tsoracle: window allocator, 46/18-bit timestamp packing, monotonicity invariants, and the shared cluster peer type."
 version      = "0.2.1"
 edition.workspace      = true
 rust-version.workspace = true

@@ -23,7 +23,7 @@ use common::{TestCommand, build_mem_cluster};
 use futures::StreamExt;
 use omnipaxos::messages::Message;
 use tsoracle_consensus::LeaderState;
-use tsoracle_paxos_toolkit::lifecycle::{MessageSink, PaxosRunner, Peer};
+use tsoracle_paxos_toolkit::lifecycle::{MessageSink, PaxosRunner, TsoPeer};
 use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
 
 struct NetworkSink {
@@ -51,7 +51,7 @@ async fn runners_emit_leader_or_follower_event_after_election() {
             .nodes
             .iter()
             .filter(|peer_node| peer_node.node_id != node.node_id)
-            .map(|peer_node| Peer {
+            .map(|peer_node| TsoPeer {
                 node_id: peer_node.node_id,
                 endpoint: format!("mem://{}", peer_node.node_id),
             })

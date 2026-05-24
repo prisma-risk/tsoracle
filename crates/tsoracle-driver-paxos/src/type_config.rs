@@ -20,14 +20,6 @@
 use omnipaxos::ballot_leader_election::Ballot;
 use tsoracle_core::Epoch;
 
-/// A peer node in the paxos cluster, with the endpoint used to populate
-/// `LeaderState::Follower::leader_endpoint` for follower-redirect hints.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaxosPeer {
-    pub node_id: u64,
-    pub endpoint: String,
-}
-
 /// Pack a Ballot into the 128-bit Epoch space.
 ///
 /// Layout (high bits to low):

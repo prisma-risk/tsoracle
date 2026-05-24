@@ -44,7 +44,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep};
 use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, SnapshotPolicy, StandaloneHost};
-use tsoracle_paxos_toolkit::lifecycle::{MessageSink, Peer};
+use tsoracle_paxos_toolkit::lifecycle::{MessageSink, TsoPeer};
 use tsoracle_paxos_toolkit::storage::RocksdbStorage;
 use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
 use tsoracle_paxos_toolkit::test_fakes::partition::PartitionController;
@@ -259,10 +259,10 @@ impl PaxosTopology {
             });
 
             // ---- StandaloneHost ----
-            let toolkit_peers: Vec<Peer> = tso_endpoints
+            let toolkit_peers: Vec<TsoPeer> = tso_endpoints
                 .iter()
                 .filter(|(peer_id, _)| *peer_id != id)
-                .map(|(peer_id, peer_addr)| Peer {
+                .map(|(peer_id, peer_addr)| TsoPeer {
                     node_id: *peer_id,
                     endpoint: format!("http://{peer_addr}"),
                 })
