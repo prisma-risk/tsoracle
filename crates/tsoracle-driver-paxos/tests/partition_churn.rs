@@ -23,6 +23,7 @@
 //! isolation/heal behave exactly as on the async path — but election +
 //! re-election + catch-up converge in simulated steps with no real-time budget.
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 #[path = "common/mod.rs"]
@@ -39,7 +40,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
         .node(original_leader)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 100 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 100 }))
         .expect("first append succeeds on leader");
 
     // Wait for cluster-wide convergence on 100.
@@ -91,7 +92,7 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
         .node(new_leader)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 200 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 200 }))
         .expect("second append succeeds on the new leader");
 
     // Wait for the two reachable nodes to commit the new value.

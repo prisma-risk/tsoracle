@@ -28,6 +28,7 @@
 //! fires during `apply_once`, so the whole scenario converges in simulated
 //! steps with no real-time budget to overrun.
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::{HighWaterCommand, SnapshotPolicy};
 
 #[path = "common/mod.rs"]
@@ -68,7 +69,7 @@ async fn isolated_node_catches_up_via_snapshot_transfer() {
             .node(leader_id)
             .omnipaxos()
             .lock()
-            .append(HighWaterCommand::Advance { at_least: n })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: n }))
             .expect("append succeeds on leader");
     }
 

@@ -22,6 +22,7 @@
 
 use std::time::Duration;
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 #[path = "common/mod.rs"]
@@ -74,7 +75,7 @@ async fn three_runners_advance_then_converge() {
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 25 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 25 }))
         .expect("append succeeds on leader");
 
     cluster

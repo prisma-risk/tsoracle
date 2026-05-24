@@ -30,6 +30,7 @@ use crate::host::OpenraftHighWaterHost;
 use crate::log_entry::HighWaterCommand;
 use crate::state_machine::HighWaterStateMachine;
 use crate::type_config::TypeConfig;
+use tsoracle_consensus::AdvancePayload;
 
 /// `OpenraftHighWaterHost` that owns its own raft cluster + state machine.
 ///
@@ -79,7 +80,7 @@ impl OpenraftHighWaterHost for StandaloneHost {
     async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError> {
         match self
             .raft
-            .client_write(HighWaterCommand::Bump { target: at_least })
+            .client_write(HighWaterCommand::Advance(AdvancePayload { at_least }))
             .await
         {
             Ok(resp) => Ok(resp.data.value),

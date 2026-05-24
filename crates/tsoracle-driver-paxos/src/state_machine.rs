@@ -40,6 +40,7 @@ use tracing::trace;
 
 use crate::log_entry::HighWaterCommand;
 use crate::snapshot_policy::SnapshotPolicy;
+use tsoracle_consensus::AdvancePayload;
 
 /// Shared apply-task state.
 ///
@@ -125,7 +126,7 @@ where
     if let Some(entries) = entries {
         for entry in &entries {
             match entry {
-                LogEntry::Decided(HighWaterCommand::Advance { at_least }) => {
+                LogEntry::Decided(HighWaterCommand::Advance(AdvancePayload { at_least })) => {
                     let prev = state.high_water.load(Ordering::SeqCst);
                     if *at_least > prev {
                         state.high_water.store(*at_least, Ordering::SeqCst);
@@ -361,7 +362,7 @@ mod drain_tests {
 
         leader_handle(&cluster)
             .lock()
-            .append(HighWaterCommand::Advance { at_least: 42 })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: 42 }))
             .expect("append succeeds on leader");
 
         drive_until(
@@ -394,13 +395,13 @@ mod drain_tests {
             let leader = leader_handle(&cluster);
             let mut handle = leader.lock();
             handle
-                .append(HighWaterCommand::Advance { at_least: 10 })
+                .append(HighWaterCommand::Advance(AdvancePayload { at_least: 10 }))
                 .expect("append");
             handle
-                .append(HighWaterCommand::Advance { at_least: 50 })
+                .append(HighWaterCommand::Advance(AdvancePayload { at_least: 50 }))
                 .expect("append");
             handle
-                .append(HighWaterCommand::Advance { at_least: 30 })
+                .append(HighWaterCommand::Advance(AdvancePayload { at_least: 30 }))
                 .expect("append");
         }
 
@@ -436,7 +437,7 @@ mod drain_tests {
             let leader = leader_handle(&cluster);
             let mut handle = leader.lock();
             handle
-                .append(HighWaterCommand::Advance { at_least: 17 })
+                .append(HighWaterCommand::Advance(AdvancePayload { at_least: 17 }))
                 .expect("append");
             handle
                 .append(HighWaterCommand::Barrier { node: 1, seq: 1 })
@@ -532,7 +533,7 @@ mod drain_tests {
 
         leader_handle(&cluster)
             .lock()
-            .append(HighWaterCommand::Advance { at_least: 7 })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: 7 }))
             .expect("append");
 
         drive_until(
@@ -572,7 +573,7 @@ mod drain_tests {
 
         leader_handle(&cluster)
             .lock()
-            .append(HighWaterCommand::Advance { at_least: 1 })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: 1 }))
             .expect("append");
 
         drive_until(

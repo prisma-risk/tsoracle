@@ -27,6 +27,7 @@ use std::task::{Context, Poll};
 
 use tsoracle_consensus::{ConsensusDriver, ConsensusError};
 use tsoracle_core::Epoch;
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, encode_epoch};
 
 #[path = "common/mod.rs"]
@@ -44,13 +45,13 @@ async fn three_node_quorum_advances_converge_across_replicas() {
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 10 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 10 }))
         .expect("first append succeeds on leader");
     cluster
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 50 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 50 }))
         .expect("second append succeeds on leader");
 
     cluster.step_until(common::all_decided_at_least(2), 1_000);
@@ -236,7 +237,7 @@ impl PaxosHighWaterHost for FollowerProxyHost {
         let snapshot_decided = self.omnipaxos.lock().get_decided_idx();
         self.omnipaxos
             .lock()
-            .append(HighWaterCommand::Advance { at_least })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least }))
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(ProxyAppendError(format!("{err:?}"))))
             })?;

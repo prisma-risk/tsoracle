@@ -13,8 +13,11 @@
 //! The single command type replicated through the OmniPaxos log.
 //!
 //! Two variants:
-//! - [`Advance`](HighWaterCommand::Advance) — bump the high-water to at least
-//!   the given value. Apply is `max(prev, at_least)`.
+//! - [`Advance`](HighWaterCommand::Advance) — advance the high-water to at least
+//!   the [`AdvancePayload::at_least`] value. Apply is `max(prev, at_least)`. The
+//!   payload is the cross-backend [`tsoracle_consensus::AdvancePayload`], shared
+//!   with the openraft driver so the "advance" command carries one name and one
+//!   field across backends.
 //! - [`Barrier`](HighWaterCommand::Barrier) — identified no-op used to
 //!   linearize reads. `current_high_water` mints a `(node, seq)` nonce,
 //!   appends `Barrier { node, seq }`, and waits until the apply path
@@ -27,10 +30,11 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use tsoracle_consensus::AdvancePayload;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HighWaterCommand {
-    Advance { at_least: u64 },
+    Advance(AdvancePayload),
     Barrier { node: u64, seq: u64 },
 }
 
@@ -56,7 +60,7 @@ impl omnipaxos::storage::Snapshot<HighWaterCommand> for HighWaterSnapshot {
         let mut applied_barriers: HashMap<u64, u64> = HashMap::new();
         for command in entries {
             match command {
-                HighWaterCommand::Advance { at_least } => {
+                HighWaterCommand::Advance(AdvancePayload { at_least }) => {
                     if *at_least > value {
                         value = *at_least;
                     }
@@ -98,10 +102,10 @@ mod tests {
     #[test]
     fn snapshot_create_picks_max_advance() {
         let entries = vec![
-            HighWaterCommand::Advance { at_least: 10 },
+            HighWaterCommand::Advance(AdvancePayload { at_least: 10 }),
             HighWaterCommand::Barrier { node: 1, seq: 1 },
-            HighWaterCommand::Advance { at_least: 30 },
-            HighWaterCommand::Advance { at_least: 20 },
+            HighWaterCommand::Advance(AdvancePayload { at_least: 30 }),
+            HighWaterCommand::Advance(AdvancePayload { at_least: 20 }),
         ];
         let snap = HighWaterSnapshot::create(&entries);
         assert_eq!(snap.value, 30);
@@ -151,7 +155,7 @@ mod tests {
     fn snapshot_create_folds_barriers_into_ledger() {
         let entries = vec![
             HighWaterCommand::Barrier { node: 1, seq: 3 },
-            HighWaterCommand::Advance { at_least: 100 },
+            HighWaterCommand::Advance(AdvancePayload { at_least: 100 }),
             HighWaterCommand::Barrier { node: 1, seq: 5 },
             HighWaterCommand::Barrier { node: 2, seq: 9 },
         ];

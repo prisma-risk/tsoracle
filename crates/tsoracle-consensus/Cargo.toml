@@ -27,3 +27,6 @@ futures        = { workspace = true }
 thiserror      = { workspace = true }
 tsoracle-core  = { path = "../tsoracle-core", version = "0.2.1" }
 serde          = { workspace = true, optional = true }
+
+[dev-dependencies]
+postcard       = { workspace = true }

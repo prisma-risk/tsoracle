@@ -31,6 +31,7 @@
 use std::time::Duration;
 
 use omnipaxos::util::LogEntry;
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_driver_paxos::host::PaxosHighWaterHost;
 
@@ -77,7 +78,7 @@ async fn submit_advance_commits_an_attributable_barrier_for_this_call() {
     let mut barrier_from_this_node_after_advance = false;
     for entry in &entries {
         match entry {
-            LogEntry::Decided(HighWaterCommand::Advance { at_least: 42 }) => {
+            LogEntry::Decided(HighWaterCommand::Advance(AdvancePayload { at_least: 42 })) => {
                 saw_this_calls_advance = true;
             }
             LogEntry::Decided(HighWaterCommand::Barrier { node, .. }) if *node == leader_id => {

@@ -21,6 +21,7 @@
 //! plus any missing entries replicated from peers bring the node back
 //! to the latest decided state.
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::{HighWaterCommand, SnapshotPolicy};
 
 #[path = "common/mod.rs"]
@@ -44,7 +45,7 @@ async fn snapshot_policy_persists_across_restart() {
             .node(leader_id)
             .omnipaxos()
             .lock()
-            .append(HighWaterCommand::Advance { at_least: n })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: n }))
             .expect("append succeeds on leader");
     }
 

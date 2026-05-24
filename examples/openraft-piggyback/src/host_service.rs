@@ -35,7 +35,7 @@ use openraft::{
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tsoracle_consensus::ConsensusError;
-use tsoracle_driver_openraft::{HighWaterCommand, OpenraftHighWaterHost};
+use tsoracle_driver_openraft::{AdvancePayload, HighWaterCommand, OpenraftHighWaterHost};
 use tsoracle_openraft_toolkit::declare_raft_types_ext;
 
 // ---------- Envelope shape ----------
@@ -227,10 +227,12 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
                         tso: None,
                     }
                 }
-                EntryPayload::Normal(HostCommand::Tso(HighWaterCommand::Bump { target })) => {
+                EntryPayload::Normal(HostCommand::Tso(HighWaterCommand::Advance(
+                    AdvancePayload { at_least },
+                ))) => {
                     let mut core = self.core.lock();
-                    if *target > core.high_water {
-                        core.high_water = *target;
+                    if *at_least > core.high_water {
+                        core.high_water = *at_least;
                     }
                     core.last_applied = Some(log_id);
                     HostApplied {
@@ -298,7 +300,7 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
 // ---------- OpenraftHighWaterHost impl ----------
 
 /// The integration: 30-ish lines. Owns a clone of the host's raft handle and
-/// the state machine; wraps `HighWaterCommand::Bump` in `HostCommand::Tso`
+/// the state machine; wraps `HighWaterCommand::Advance` in `HostCommand::Tso`
 /// for `submit_advance`.
 pub struct PiggybackHost {
     raft: Raft<HostTypeConfig, HostStateMachine>,
@@ -341,7 +343,7 @@ impl OpenraftHighWaterHost for PiggybackHost {
     async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError> {
         // Envelope: wrap the driver's HighWaterCommand into HostCommand::Tso
         // so it rides the same log entries as the host's KV writes.
-        let cmd = HostCommand::Tso(HighWaterCommand::Bump { target: at_least });
+        let cmd = HostCommand::Tso(HighWaterCommand::Advance(AdvancePayload { at_least }));
         match self.raft.client_write(cmd).await {
             Ok(resp) => Ok(resp
                 .data

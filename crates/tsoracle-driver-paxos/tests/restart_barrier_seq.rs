@@ -31,6 +31,7 @@
 use std::future::Future;
 use std::task::{Context, Poll};
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_driver_paxos::host::PaxosHighWaterHost;
 
@@ -64,7 +65,7 @@ async fn recovered_barrier_ledger_does_not_satisfy_a_fresh_read_after_restart() 
                 .expect("append barrier on leader");
         }
         handle
-            .append(HighWaterCommand::Advance { at_least: 100 })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: 100 }))
             .expect("append advance on leader");
     }
     cluster.step_until(|state| state.high_water_on(reader_id) >= 100, 3_000);
@@ -103,7 +104,7 @@ async fn recovered_barrier_ledger_does_not_satisfy_a_fresh_read_after_restart() 
         let leader = cluster.node(leader_id).omnipaxos();
         leader
             .lock()
-            .append(HighWaterCommand::Advance { at_least: 500 })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: 500 }))
             .expect("append advance(500) on leader");
     }
     for _ in 0..5_000 {

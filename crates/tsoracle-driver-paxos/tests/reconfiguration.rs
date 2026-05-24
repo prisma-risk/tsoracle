@@ -32,6 +32,7 @@
 //! intra-config behavior verified here is the load-bearing contract
 //! for the stopsign path.
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 use omnipaxos::ClusterConfig;
@@ -55,13 +56,13 @@ async fn stopsign_decides_and_seals_old_configuration() {
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 5 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 5 }))
         .expect("pre-stopsign append succeeds");
     cluster
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 17 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 17 }))
         .expect("pre-stopsign append succeeds");
     cluster
         .drive_until(
@@ -145,7 +146,7 @@ async fn stopsign_decides_and_seals_old_configuration() {
         let result = node
             .omnipaxos()
             .lock()
-            .append(HighWaterCommand::Advance { at_least: 99 });
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: 99 }));
         assert!(
             result.is_err(),
             "append on node {} after stopsign must be rejected",

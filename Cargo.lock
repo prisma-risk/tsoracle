@@ -3290,6 +3290,7 @@ version = "0.1.6"
 dependencies = [
  "async-trait",
  "futures",
+ "postcard",
  "serde",
  "thiserror",
  "tsoracle-core",
