@@ -109,10 +109,14 @@ impl ApplyEngine {
 
     /// Spawn the async apply task and return its [`ApplyTask`] handle.
     ///
-    /// On each `apply_notify` wake the task drains and snapshots via
-    /// [`Self::apply_step`] over a task-local cursor seeded at 0; the fold is
-    /// idempotent, so re-draining a recovered suffix is harmless. The task
-    /// runs until the returned [`ApplyTask`] is stopped.
+    /// `cursor` is the shared decided-log cursor the host seeded in
+    /// [`crate::StandaloneHost::new`] past any recovered suffix; the task
+    /// resumes from there rather than re-draining the whole decided log from 0
+    /// on its first wake. It is the same cursor the synchronous stepping path
+    /// (`apply_once`) locks — a host is driven by exactly one path, so the lock
+    /// is uncontended. On each `apply_notify` wake the task drains and
+    /// snapshots via [`Self::apply_step`]. The task runs until the returned
+    /// [`ApplyTask`] is stopped.
     ///
     /// A fresh shutdown `Notify` is minted per spawn rather than reused across
     /// the host's lifetime: `stop` signals with `notify_one`, which stores a
@@ -124,6 +128,7 @@ impl ApplyEngine {
         &self,
         apply_notify: Arc<Notify>,
         omnipaxos: Arc<Mutex<OmniPaxos<HighWaterCommand, S>>>,
+        cursor: Arc<Mutex<u64>>,
     ) -> ApplyTask
     where
         S: Storage<HighWaterCommand> + Send + 'static,
@@ -133,11 +138,16 @@ impl ApplyEngine {
         let task_shutdown = shutdown.clone();
         let engine = self.clone();
         let handle = tokio::spawn(async move {
-            let mut cursor: u64 = 0;
             loop {
                 tokio::select! {
                     _ = apply_notify.notified() => {
-                        engine.apply_step(&omnipaxos, &mut cursor);
+                        // Scope the cursor guard so it drops before the await
+                        // below: the parking_lot guard is !Send and may not be
+                        // held across the yield point.
+                        {
+                            let mut cursor = cursor.lock();
+                            engine.apply_step(&omnipaxos, &mut cursor);
+                        }
                         tsoracle_yieldpoint::yieldpoint!(
                             "standalone_host::apply_task::between_iterations"
                         );
