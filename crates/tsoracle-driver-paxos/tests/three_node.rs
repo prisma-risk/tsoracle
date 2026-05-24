@@ -29,14 +29,14 @@ use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, encode_epoch};
 #[path = "common/mod.rs"]
 mod common;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Driven by the deterministic step-driver (`step_until`). The fence-check test
+// below stays on the async path: its PaxosDriver `persist_high_water` blocks on
+// real cluster progress, which the synchronous step-driver cannot interleave.
+#[tokio::test]
 async fn three_node_quorum_advances_converge_across_replicas() {
     let mut cluster = common::build_mem_cluster(3);
-    cluster.start_all();
 
-    cluster
-        .drive_until(common::some_leader_elected(), 1_000)
-        .await;
+    cluster.step_until(common::some_leader_elected(), 1_000);
     let leader_id = cluster.leader();
 
     cluster
@@ -52,22 +52,16 @@ async fn three_node_quorum_advances_converge_across_replicas() {
         .append(HighWaterCommand::Advance { at_least: 50 })
         .expect("second append succeeds on leader");
 
-    cluster
-        .drive_until(common::all_decided_at_least(2), 1_000)
-        .await;
-    // The apply task wakes on the runner's tick, so the in-memory
-    // high-water may lag the decided_idx by one or two tick intervals.
-    cluster
-        .drive_until(
-            |state| {
-                state
-                    .nodes
-                    .iter()
-                    .all(|node| state.high_water_on(node.node_id) == 50)
-            },
-            1_000,
-        )
-        .await;
+    cluster.step_until(common::all_decided_at_least(2), 1_000);
+    cluster.step_until(
+        |state| {
+            state
+                .nodes
+                .iter()
+                .all(|node| state.high_water_on(node.node_id) == 50)
+        },
+        1_000,
+    );
 
     for node in &cluster.nodes {
         assert_eq!(

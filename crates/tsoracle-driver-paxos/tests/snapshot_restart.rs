@@ -26,14 +26,15 @@ use tsoracle_driver_paxos::{HighWaterCommand, SnapshotPolicy};
 #[path = "common/mod.rs"]
 mod common;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Driven by the deterministic step-driver (`step_until`) rather than async
+// runner/pump tasks + real-time `drive_until`, so the snapshot-policy +
+// restart-replay coverage converges in simulated steps with no wall-clock
+// budget to overrun. Real RocksDB storage + snapshot persistence stay tested.
+#[tokio::test]
 async fn snapshot_policy_persists_across_restart() {
     let mut cluster = common::build_rocksdb_cluster_with_policy(3, SnapshotPolicy::every(10));
-    cluster.start_all();
 
-    cluster
-        .drive_until(common::some_leader_elected(), 2_000)
-        .await;
+    cluster.step_until(common::some_leader_elected(), 2_000);
     let leader_id = cluster.leader();
 
     // Append 20 advances: the policy must fire at least once by
@@ -47,20 +48,16 @@ async fn snapshot_policy_persists_across_restart() {
             .expect("append succeeds on leader");
     }
 
-    cluster
-        .drive_until(common::all_decided_at_least(20), 3_000)
-        .await;
-    cluster
-        .drive_until(
-            |state| {
-                state
-                    .nodes
-                    .iter()
-                    .all(|node| state.high_water_on(node.node_id) >= 20)
-            },
-            3_000,
-        )
-        .await;
+    cluster.step_until(common::all_decided_at_least(20), 3_000);
+    cluster.step_until(
+        |state| {
+            state
+                .nodes
+                .iter()
+                .all(|node| state.high_water_on(node.node_id) >= 20)
+        },
+        3_000,
+    );
 
     // Verify the policy fired on the leader's local OmniPaxos — the
     // compacted index advances when `snapshot(idx, false)` succeeds, so
@@ -109,12 +106,9 @@ async fn snapshot_policy_persists_across_restart() {
         "compacted_idx must survive a restart cycle",
     );
 
-    cluster.start_node(follower_id);
-
-    // The restarted follower must converge to the latest high-water of 20.
-    cluster
-        .drive_until(|state| state.high_water_on(follower_id) >= 20, 3_000)
-        .await;
+    // The rebuilt follower is immediately steppable again (no async start
+    // needed); it must converge to the latest high-water of 20.
+    cluster.step_until(|state| state.high_water_on(follower_id) >= 20, 3_000);
     assert_eq!(cluster.high_water_on(follower_id), 20);
 
     cluster.stop_all().await;
