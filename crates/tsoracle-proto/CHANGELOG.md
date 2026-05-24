@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-proto-v0.2.0...tsoracle-proto-v0.2.1) - 2026-05-24
+
+### Fixed
+
+- *(proto)* bundle LeaderHint epoch into a single nested EpochWire ([#252](https://github.com/prisma-risk/tsoracle/pull/252)) ([#273](https://github.com/prisma-risk/tsoracle/pull/273))
+
 ## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-proto-v0.1.4...tsoracle-proto-v0.2.0) - 2026-05-23
 
 ### Fixed

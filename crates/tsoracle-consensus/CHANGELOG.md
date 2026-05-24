@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.5...tsoracle-consensus-v0.1.6) - 2026-05-24
+
+### Added
+
+- populate NOT_LEADER hints with leader endpoint and epoch (#88, #125) ([#234](https://github.com/prisma-risk/tsoracle/pull/234))
+
 ## [0.1.5](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.4...tsoracle-consensus-v0.1.5) - 2026-05-23
 
 ### Other

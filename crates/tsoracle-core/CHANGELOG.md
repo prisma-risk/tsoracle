@@ -4,6 +4,13 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.2.0...tsoracle-core-v0.2.1) - 2026-05-24
+
+### Fixed
+
+- *(core)* return NotLeader from try_prepare_window_extension off-leader ([#251](https://github.com/prisma-risk/tsoracle/pull/251)) ([#280](https://github.com/prisma-risk/tsoracle/pull/280))
+- *(core)* saturate SystemClock::now_ms instead of truncating ([#249](https://github.com/prisma-risk/tsoracle/pull/249)) ([#272](https://github.com/prisma-risk/tsoracle/pull/272))
+
 ## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.1.4...tsoracle-core-v0.2.0) - 2026-05-23
 
 ### Fixed

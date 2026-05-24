@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v0.2.0...tsoracle-driver-paxos-v0.2.1) - 2026-05-24
+
+### Fixed
+
+- *(driver-paxos)* gate submit_advance on a per-call barrier nonce ([#256](https://github.com/prisma-risk/tsoracle/pull/256)) ([#278](https://github.com/prisma-risk/tsoracle/pull/278))
+- *(driver-paxos)* mint a fresh apply-shutdown Notify per start ([#232](https://github.com/prisma-risk/tsoracle/pull/232))
+
 ## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v0.1.4...tsoracle-driver-paxos-v0.2.0) - 2026-05-23
 
 ### Added
