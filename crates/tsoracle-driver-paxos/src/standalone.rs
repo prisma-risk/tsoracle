@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use omnipaxos::OmniPaxos;
+use omnipaxos::messages::Message;
 use omnipaxos::storage::Storage;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
@@ -63,6 +64,10 @@ where
     /// task is running (stop-before-start, double-stop, stop-after-exit).
     apply_shutdown: Mutex<Option<Arc<Notify>>>,
     policy: Arc<Mutex<SnapshotPolicy>>,
+    /// Decided-log cursor for the synchronous [`Self::step`] / [`Self::apply_once`]
+    /// stepping path, seeded past any recovered suffix. The async apply task
+    /// keeps its own task-local cursor; a host is driven by exactly one path.
+    step_cursor: Mutex<u64>,
 }
 
 impl<S> StandaloneHost<S>
@@ -114,6 +119,7 @@ where
             apply_handle: Mutex::new(None),
             apply_shutdown: Mutex::new(None),
             policy: Arc::new(Mutex::new(policy)),
+            step_cursor: Mutex::new(recovery_cursor),
         }
     }
 
@@ -207,6 +213,32 @@ where
     /// Used internally by `current_high_water` after a barrier decides.
     pub fn current_value(&self) -> u64 {
         self.apply_state.high_water()
+    }
+
+    /// Synchronous single step for deterministic test stepping: tick the runner
+    /// once and apply any newly-decided entries, returning the runner's outbound
+    /// messages for the caller to route. Mutually exclusive with [`Self::start`]
+    /// — a host is driven by exactly one of the two paths.
+    pub fn step(&self) -> Vec<Message<HighWaterCommand>> {
+        let outgoing = self.runner.tick_once();
+        self.apply_once();
+        outgoing
+    }
+
+    /// Apply newly-decided entries into the high-water state and snapshot per
+    /// policy, advancing the step cursor. The synchronous sibling of the async
+    /// apply task; idempotent (max over advances and per-node barrier seqs).
+    pub fn apply_once(&self) {
+        let mut cursor = self.step_cursor.lock();
+        let decided_idx = drain_decided_into(&self.omnipaxos, &mut cursor, &self.apply_state);
+        let mut policy = self.policy.lock();
+        maybe_snapshot(&self.omnipaxos, &mut policy, decided_idx);
+    }
+
+    /// Deliver an inbound message synchronously (deterministic test stepping).
+    /// Mutually exclusive with [`Self::start`]'s pump path.
+    pub fn deliver(&self, message: Message<HighWaterCommand>) {
+        self.runner.handle_incoming(message);
     }
 }
 

@@ -74,6 +74,11 @@ where
     handle: Option<JoinHandle<()>>,
     sender_handle: Option<JoinHandle<()>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Leader-observation state for the synchronous [`Self::tick_once`] stepping
+    /// path: `(last_observed_leader, leader_change_counter)`. The async
+    /// [`Self::start`] loop keeps its own task-local copy; a runner is driven by
+    /// exactly one of the two paths, so they never interleave.
+    step_leader: Mutex<(Option<u64>, u64)>,
 }
 
 impl<T, S> PaxosRunner<T, S>
@@ -104,6 +109,7 @@ where
             handle: None,
             sender_handle: None,
             shutdown_tx: None,
+            step_leader: Mutex::new((None, 0)),
         }
     }
 
@@ -261,6 +267,40 @@ where
             }
         });
         self.handle = Some(handle);
+    }
+
+    /// Synchronous single tick for deterministic test stepping.
+    ///
+    /// Ticks OmniPaxos once, emits the resulting leader transition on the
+    /// leader-event stream, and returns the outbound messages for the caller to
+    /// route (rather than the async sink path that [`Self::start`] uses).
+    /// Mutually exclusive with [`Self::start`] — drive a runner by exactly one
+    /// of the two. Intended for in-process deterministic-simulation tests.
+    pub fn tick_once(&self) -> Vec<Message<T>> {
+        let outgoing = {
+            let mut op = self.omnipaxos.lock();
+            op.tick();
+            op.outgoing_messages()
+        };
+        let leader_pid: Option<u64> = self.omnipaxos.lock().get_current_leader();
+        let mut observed = self.step_leader.lock();
+        if leader_pid != observed.0 {
+            observed.0 = leader_pid;
+            if leader_pid.is_some() {
+                observed.1 = observed.1.wrapping_add(1);
+            }
+        }
+        let epoch = leader_pid.map(|_| Epoch(u128::from(observed.1)));
+        let state =
+            LeadershipState::from_omnipaxos(self.my_node_id, leader_pid, epoch, &self.peers);
+        let _ = self.leader_sender.send(state.to_consensus());
+        outgoing
+    }
+
+    /// Deliver an inbound message synchronously (deterministic test stepping).
+    /// Mutually exclusive with [`Self::start`]'s pump path.
+    pub fn handle_incoming(&self, message: Message<T>) {
+        self.omnipaxos.lock().handle_incoming(message);
     }
 
     /// Signal shutdown and await the tick task.
