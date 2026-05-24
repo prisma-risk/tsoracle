@@ -78,7 +78,16 @@ where
 {
     fn append_entry(&mut self, entry: T) -> StorageResult<u64> {
         let mut inner = self.inner.lock();
-        let next = inner.log.keys().next_back().map(|key| key + 1).unwrap_or(0);
+        // After a full trim the log is empty; the next absolute write index
+        // must floor at `compacted_idx` (matching production `next_log_idx`),
+        // not reset to 0, or the entry lands below the compaction floor and
+        // becomes unreachable via get_suffix(compacted_idx).
+        let next = inner
+            .log
+            .keys()
+            .next_back()
+            .map(|key| key + 1)
+            .unwrap_or(inner.compacted_idx);
         inner.log.insert(next, entry);
         let compacted = inner.compacted_idx;
         Ok((next + 1).saturating_sub(compacted))
@@ -86,7 +95,13 @@ where
 
     fn append_entries(&mut self, entries: Vec<T>) -> StorageResult<u64> {
         let mut inner = self.inner.lock();
-        let start = inner.log.keys().next_back().map(|key| key + 1).unwrap_or(0);
+        // Floor at `compacted_idx` after a full trim; see `append_entry`.
+        let start = inner
+            .log
+            .keys()
+            .next_back()
+            .map(|key| key + 1)
+            .unwrap_or(inner.compacted_idx);
         let count = entries.len() as u64;
         for (offset, entry) in entries.into_iter().enumerate() {
             inner.log.insert(start + offset as u64, entry);
@@ -275,6 +290,62 @@ mod tests {
         let suffix = storage.get_suffix(2).unwrap();
         assert_eq!(suffix.len(), 2);
         assert_eq!(suffix[0].0, 3);
+    }
+
+    #[test]
+    fn append_entry_after_full_trim_writes_at_compacted_idx() {
+        // Conformance with production RocksdbStorage: after a snapshot
+        // trims every physical log key, the next append must continue at
+        // the absolute index `compacted_idx`, not reset to 0. Otherwise
+        // the entry lands below the compaction floor and is unreachable
+        // via get_suffix(compacted_idx).
+        let mut storage: MemStorage<Cmd> = MemStorage::new();
+        storage
+            .append_entries(vec![Cmd(1), Cmd(2), Cmd(3), Cmd(4)])
+            .unwrap();
+        storage.trim(4).unwrap();
+        storage.set_compacted_idx(4).unwrap();
+
+        let new_len = storage.append_entry(Cmd(99)).unwrap();
+        // physical remaining = (compacted + 1) - compacted = 1
+        assert_eq!(new_len, 1);
+        assert_eq!(storage.get_log_len().unwrap(), 1);
+
+        let suffix = storage.get_suffix(4).unwrap();
+        assert_eq!(suffix.len(), 1, "entry must be reachable at absolute idx 4");
+        assert_eq!(suffix[0].0, 99);
+
+        let range = storage.get_entries(4, 5).unwrap();
+        assert_eq!(range.len(), 1);
+        assert_eq!(range[0].0, 99);
+
+        // No phantom write at L/0: the entry lives at L/4, so get_suffix(0)
+        // returns exactly the same single entry.
+        assert_eq!(storage.get_suffix(0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn append_entries_after_full_trim_writes_at_compacted_idx() {
+        // Same conformance guarantee for the batch append path.
+        let mut storage: MemStorage<Cmd> = MemStorage::new();
+        storage
+            .append_entries(vec![Cmd(1), Cmd(2), Cmd(3)])
+            .unwrap();
+        storage.trim(3).unwrap();
+        storage.set_compacted_idx(3).unwrap();
+
+        let new_len = storage.append_entries(vec![Cmd(77), Cmd(88)]).unwrap();
+        // physical remaining = (compacted + 2) - compacted = 2
+        assert_eq!(new_len, 2);
+        assert_eq!(storage.get_log_len().unwrap(), 2);
+
+        let suffix = storage.get_suffix(3).unwrap();
+        assert_eq!(suffix.len(), 2, "entries must continue from absolute idx 3");
+        assert_eq!(suffix[0].0, 77);
+        assert_eq!(suffix[1].0, 88);
+
+        // No phantom writes below the compaction floor.
+        assert_eq!(storage.get_suffix(0).unwrap().len(), 2);
     }
 
     #[test]
