@@ -84,6 +84,18 @@ pub enum ConsensusError {
 #[async_trait::async_trait]
 pub trait ConsensusDriver: Send + Sync + 'static {
     /// Stream of leadership transitions. The server holds this for its lifetime.
+    ///
+    /// **Contract — synchronous first item:** the stream MUST emit the current
+    /// `LeaderState` as its first item, available on the first poll without
+    /// waiting for an external transition; subsequent items reflect later
+    /// transitions. The server's leader-watch task blocks on this first item to
+    /// seed its state, so a driver that emits the initial state lazily (e.g.
+    /// only once the next transition fires) stalls the fence — a node that is
+    /// already leader at subscription time would never seed Serving. When no
+    /// leader is known yet, emit `LeaderState::Unknown` rather than withholding.
+    /// `tokio::sync::watch` + `tokio_stream::wrappers::WatchStream` satisfy this
+    /// because the watch is seeded with an initial value the stream yields
+    /// immediately.
     fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>>;
 
     /// Read the durably-persisted high-water.
@@ -120,7 +132,11 @@ mod tests {
     #[async_trait::async_trait]
     impl ConsensusDriver for Dummy {
         fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
-            Box::pin(stream::empty())
+            // Honour the first-item contract: synchronously emit the current
+            // state. `Dummy` never elects, so that state is `Unknown`, with no
+            // transitions to follow. `stream::empty()` would model a contract
+            // violation that stalls the server's leader-watch task.
+            Box::pin(stream::once(async { LeaderState::Unknown }))
         }
         async fn load_high_water(&self) -> Result<u64, ConsensusError> {
             Ok(0)
@@ -142,13 +158,19 @@ mod tests {
     #[test]
     fn dummy_driver_methods_return_documented_defaults() {
         // Calling each method covers the trait-object dispatch path and
-        // confirms the Dummy's contract: empty stream, zero high-water,
-        // monotonic-advance returns the input. Uses futures' built-in
-        // executor to keep the crate free of a tokio dev-dependency.
+        // confirms the Dummy's contract: the stream synchronously emits the
+        // current state (`Unknown`) as its first item then ends, zero
+        // high-water, monotonic-advance returns the input. Uses futures'
+        // built-in executor to keep the crate free of a tokio dev-dependency.
         let driver: Box<dyn ConsensusDriver> = Box::new(Dummy);
         futures::executor::block_on(async {
             let mut events = driver.leadership_events();
-            assert!(events.next().await.is_none(), "empty stream");
+            assert_eq!(
+                events.next().await,
+                Some(LeaderState::Unknown),
+                "first item must be the current state, synchronously",
+            );
+            assert!(events.next().await.is_none(), "no transitions after");
             assert_eq!(driver.load_high_water().await.unwrap(), 0);
             assert_eq!(
                 driver.persist_high_water(42, Epoch(7)).await.unwrap(),
