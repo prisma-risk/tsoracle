@@ -77,11 +77,14 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                 None => break,
             },
         };
-        // Every state change (Leader, Follower, Unknown) counts as a transition
-        // observed from the driver: the total counter answers "how often is
-        // leadership churning".
-        #[cfg(feature = "metrics")]
-        metrics::counter!("tsoracle.leader_transition.total").increment(1);
+        // `tsoracle.leader_transition.total` is emitted per-arm *after* that
+        // arm's safety state change (clear/publish), never here before the
+        // `match`. The counter answers "how often is leadership churning"; one
+        // increment per observed event (Leader, Follower, Unknown), same as a
+        // pre-`match` emission, but ordered so a (contract-violating) blocking
+        // recorder cannot delay the safety-critical transition. The `metrics`
+        // crate's de facto contract is non-blocking O(1); this placement keeps
+        // the "safety before metrics" invariant structural, not conventional.
         match evt {
             LeaderState::Leader { epoch } => {
                 // Time the full fence: drain-barrier wait, durable persist, and
@@ -97,6 +100,15 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                     leader_epoch: None,
                 });
                 server.allocator.lock().on_leadership_lost();
+
+                // Count the transition after the clear above, not on the fence's
+                // success path below: a Leader event is "observed" the moment we
+                // begin handling it, so it must increment once even if the fence
+                // then steps down (NotLeader/Fenced) or faults — matching the
+                // prior pre-`match` placement exactly. Emitting after the clear
+                // (not before) keeps a blocking recorder from delaying it.
+                #[cfg(feature = "metrics")]
+                metrics::counter!("tsoracle.leader_transition.total").increment(1);
 
                 // Fence with retry. A consensus error here is not automatically
                 // fatal: the post-election window is volatile and `ConsensusError`
@@ -267,6 +279,10 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                     leader_endpoint,
                     leader_epoch,
                 });
+                // Emit after the NotServing publish so a blocking recorder
+                // cannot delay the safety state change.
+                #[cfg(feature = "metrics")]
+                metrics::counter!("tsoracle.leader_transition.total").increment(1);
             }
             LeaderState::Unknown => {
                 server.allocator.lock().on_leadership_lost();
@@ -274,6 +290,10 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                     leader_endpoint: None,
                     leader_epoch: None,
                 });
+                // Emit after the NotServing publish so a blocking recorder
+                // cannot delay the safety state change.
+                #[cfg(feature = "metrics")]
+                metrics::counter!("tsoracle.leader_transition.total").increment(1);
             }
         }
     }
