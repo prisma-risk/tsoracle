@@ -128,6 +128,20 @@ where
             .expect("meta CF was validated at open")
     }
 
+    /// `WriteOptions` with `set_sync(true)`, fsyncing the WAL before the write
+    /// returns.
+    ///
+    /// Every log-store mutation that openraft may treat as durably acknowledged
+    /// is written through this: `save_vote`, `append`, `truncate_after`, and
+    /// `purge`. Each is a single atomic `WriteBatch`, so a crash always loses a
+    /// whole op cleanly; the reason to fsync is durability *skew* across ops.
+    /// openraft's recovery contract assumes these survive a crash together — if
+    /// a synced `save_vote` persisted while an acknowledged `truncate_after` or
+    /// `purge` were lost, recovery would present a durable new-term vote beside
+    /// a non-durable, un-truncated (or un-purged) log, a combination openraft
+    /// expects to be durably consistent. `save_committed` is the lone exception
+    /// (its record is optional and flushed lazily by the next synced write); it
+    /// deliberately uses the non-synced `db.write` and says so at its call site.
     fn write_sync_opts() -> WriteOptions {
         let mut wo = WriteOptions::default();
         wo.set_sync(true);
@@ -298,6 +312,8 @@ where
         let mut batch = WriteBatch::default();
         meta::put::<VoteOf<C>, K>(&mut batch, &cf_meta, &self.keys, MetaLabel::Vote, vote)
             .map_err(io::Error::other)?;
+        // fsync: the vote must be durable before it is acknowledged, or a crash
+        // could let this node vote twice in one term and split the cluster.
         let wo = Self::write_sync_opts();
         self.db.write_opt(batch, &wo).map_err(io::Error::other)?;
         Ok(())
@@ -317,9 +333,9 @@ where
             .map_err(io::Error::other)?,
             None => meta::delete::<K>(&mut batch, &cf_meta, &self.keys, MetaLabel::Committed),
         }
-        // No fsync: persisting the committed id is optional per the openraft
-        // contract. The next append's sync flushes this record along with the
-        // batch.
+        // No fsync (the deliberate exception to `write_sync_opts`): persisting
+        // the committed id is optional per the openraft contract. The next
+        // append's sync flushes this record along with the batch.
         self.db.write(batch).map_err(io::Error::other)?;
         Ok(())
     }
@@ -344,6 +360,8 @@ where
             batch.put_cf(&cf_log, &key, &value);
         }
 
+        // fsync: openraft treats the `IOFlushed` callback below as a durability
+        // signal, so the entries must reach disk before completion is reported.
         let wo = Self::write_sync_opts();
         crate::failpoint!("tsoracle_openraft_toolkit::log_store::before_write_batch");
         let result = self.db.write_opt(batch, &wo).map_err(io::Error::other);
@@ -384,6 +402,9 @@ where
             }
             batch.delete_cf(&cf_log, &k);
         }
+        // fsync: a lost truncate would resurrect conflicting tail entries on
+        // recovery, contradicting the durable vote/append that drove it (see
+        // `write_sync_opts`).
         let wo = Self::write_sync_opts();
         crate::failpoint!("tsoracle_openraft_toolkit::log_store::truncate::before_write_batch");
         self.db.write_opt(batch, &wo).map_err(io::Error::other)?;
@@ -426,6 +447,9 @@ where
         )
         .map_err(io::Error::other)?;
 
+        // fsync: the prefix deletes and the `LastPurged` marker share one
+        // atomic batch; losing them would let recovery rebuild log state from a
+        // prefix openraft believes is already purged (see `write_sync_opts`).
         let wo = Self::write_sync_opts();
         crate::failpoint!("tsoracle_openraft_toolkit::log_store::purge::before_write_batch");
         self.db.write_opt(batch, &wo).map_err(io::Error::other)?;
