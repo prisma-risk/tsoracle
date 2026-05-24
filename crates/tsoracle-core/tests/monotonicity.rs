@@ -60,11 +60,14 @@ proptest! {
                     }
                 }
                 Op::Extend { now_ms, ahead_ms } => {
-                    let target = allocator.try_prepare_window_extension(now_ms, ahead_ms).unwrap();
-                    // Simulate the driver's monotonic-advance: the driver would
-                    // return max(stored, target). For this test we just commit target
-                    // at the allocator's current epoch (commit is no-op if NotLeader).
+                    // prepare now errors with NotLeader off-leader (matching every
+                    // other mutating method), so only attempt it on a leader. The
+                    // driver's monotonic-advance is simulated by committing target
+                    // at the allocator's current epoch.
                     if let Some(epoch) = allocator.epoch() {
+                        let target = allocator
+                            .try_prepare_window_extension(now_ms, ahead_ms)
+                            .unwrap();
                         allocator.try_commit_window_extension(target, epoch).unwrap();
                     }
                 }
