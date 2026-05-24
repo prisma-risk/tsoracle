@@ -30,23 +30,56 @@ use tsoracle_consensus::{ConsensusError, LeaderState};
 
 use crate::server::{Server, ServerError, ServingState};
 
-/// Bounded retry budget for a fence that hits a recoverable (`TransientDriver`)
-/// consensus error in the volatile post-election window. After this many
-/// retries the fence stops trying for the current leadership event, steps down
-/// to `NotServing`, and awaits the next event rather than tearing the server
-/// down. Backoff grows exponentially from `FENCE_RETRY_BASE`, capped at
-/// `FENCE_RETRY_CAP`; the default budget spans well under two seconds — enough
-/// to ride out a failover flap without masking a sustained outage.
-const FENCE_MAX_TRANSIENT_RETRIES: u32 = 8;
+// Fence retry tuning for the volatile post-election window. When a fence hits
+// `TransientDriver`, the retry loop does NOT give up: a still-elected leader
+// has no fresh leadership event coming to re-drive it, so abandoning the fence
+// would strand the node `NotServing` indefinitely. Instead the loop retries
+// with capped exponential backoff and, on every backoff, concurrently watches
+// the leadership stream — so a genuine leadership change (which some drivers,
+// e.g. the paxos host, report as `TransientDriver` rather than `NotLeader`) is
+// observed and dispatched instead of spun past. The loop exits only on success,
+// a `NotLeader`/`Fenced` classification, a permanent fault, or an observed
+// leadership transition. Backoff grows exponentially from `FENCE_RETRY_BASE`,
+// capped at `FENCE_RETRY_CAP`.
 const FENCE_RETRY_BASE: Duration = Duration::from_millis(25);
 const FENCE_RETRY_CAP: Duration = Duration::from_millis(250);
 
+// Rate-limiting for the "fence still stuck" warning (tracing only): warn once
+// when retries first reach WARN_AFTER, then again every WARN_INTERVAL retries
+// (~5s of stuck time at FENCE_RETRY_CAP). Gated with the warn so they don't
+// read as dead code when `tracing` is disabled.
+#[cfg(feature = "tracing")]
+const FENCE_TRANSIENT_RETRY_WARN_AFTER: u32 = 8;
+#[cfg(feature = "tracing")]
+const FENCE_TRANSIENT_RETRY_WARN_INTERVAL: u32 = 20;
+
+/// Whether the stuck-fence warning should fire at this retry count: once at
+/// `FENCE_TRANSIENT_RETRY_WARN_AFTER`, then every `FENCE_TRANSIENT_RETRY_WARN_INTERVAL`
+/// retries after that. The `>=` guards the subtraction against underflow.
+#[cfg(feature = "tracing")]
+fn warn_on_stuck_fence(transient_retries: u32) -> bool {
+    transient_retries >= FENCE_TRANSIENT_RETRY_WARN_AFTER
+        && (transient_retries - FENCE_TRANSIENT_RETRY_WARN_AFTER)
+            % FENCE_TRANSIENT_RETRY_WARN_INTERVAL
+            == 0
+}
+
 pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerError> {
     let mut stream = server.consensus.leadership_events();
-    while let Some(evt) = stream.next().await {
-        // Every state change (Leader, Follower, Unknown) counts as a
-        // transition observed from the driver: the total counter answers
-        // "how often is leadership churning".
+    // A leadership event observed while a fence is mid-retry is stashed here and
+    // dispatched on the next iteration instead of being awaited fresh.
+    let mut pending: Option<LeaderState> = None;
+    loop {
+        let evt = match pending.take() {
+            Some(evt) => evt,
+            None => match stream.next().await {
+                Some(evt) => evt,
+                None => break,
+            },
+        };
+        // Every state change (Leader, Follower, Unknown) counts as a transition
+        // observed from the driver: the total counter answers "how often is
+        // leadership churning".
         #[cfg(feature = "metrics")]
         metrics::counter!("tsoracle.leader_transition.total").increment(1);
         match evt {
@@ -57,40 +90,34 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                 #[cfg(feature = "metrics")]
                 let fence_started_at = std::time::Instant::now();
 
-                // Clear serving so new GetTs requests return NOT_LEADER until
-                // the fence republishes Serving below.
+                // Clear serving so new GetTs requests return NOT_LEADER until the
+                // fence republishes Serving below.
                 let _ = server.state_tx.send(ServingState::NotServing {
                     leader_endpoint: None,
                     leader_epoch: None,
                 });
                 server.allocator.lock().on_leadership_lost();
 
-                // Fence with bounded retry. A consensus error here is not
-                // automatically fatal: the post-election window is volatile and
-                // `ConsensusError` already separates the recoverable classes
-                // from the permanent ones. We honor that split instead of
-                // tearing the whole server down on the first hiccup:
+                // Fence with retry. A consensus error here is not automatically
+                // fatal: the post-election window is volatile and `ConsensusError`
+                // separates the recoverable classes from the permanent ones.
                 //
-                //   * TransientDriver — momentary quorum loss / transport flap
-                //     while this node is still the elected leader. Retry with
-                //     backoff; no fresh leadership event is coming to re-drive
-                //     us.
-                //   * NotLeader / Fenced — leadership moved under us. Step down
-                //     to NotServing and continue the watch loop; the stream
-                //     will deliver the new state (and another Leader event if
-                //     we re-win).
+                //   * TransientDriver — momentary quorum loss / transport flap.
+                //     Retry with backoff, racing the leadership stream so a real
+                //     leadership change is observed even if the driver keeps
+                //     classifying it as transient.
+                //   * NotLeader / Fenced — leadership moved under us. Step down to
+                //     NotServing and continue the watch loop.
                 //   * anything else (PermanentDriver, allocator invariant) —
-                //     fatal: propagate so `into_router` poisons serving state
-                //     and stops serving.
+                //     fatal: propagate so `into_router` poisons serving state.
                 //
-                // Serving stays NotServing until an attempt fully succeeds, so
-                // the invariant "never publish Serving at a stale epoch" holds
-                // on every path.
+                // Serving stays NotServing until an attempt fully succeeds, so the
+                // invariant "never publish Serving at a stale epoch" holds.
                 let mut transient_retries: u32 = 0;
                 loop {
-                    // One fence attempt. `?` short-circuits to `attempt`
-                    // (the async block's output), NOT out of run_leader_watch,
-                    // so the error can be classified below.
+                    // One fence attempt. `?` short-circuits to `attempt` (the async
+                    // block's output), NOT out of run_leader_watch, so the error
+                    // can be classified below.
                     let attempt: Result<(), ServerError> = async {
                         // Drain in-flight extensions from the prior epoch.
                         let drain_guard = server.extension_gate.write().await;
@@ -161,9 +188,9 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                                 .record(fence_started_at.elapsed().as_secs_f64());
                             break;
                         }
-                        // Leadership moved under us. Already NotServing; await
-                        // the next leadership event rather than retrying a
-                        // persist that can only keep failing at this epoch.
+                        // Leadership moved under us. Already NotServing; await the
+                        // next leadership event rather than retrying a persist that
+                        // can only keep failing at this epoch.
                         Err(ServerError::Consensus(
                             ConsensusError::NotLeader { .. } | ConsensusError::Fenced { .. },
                         )) => {
@@ -173,31 +200,41 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                             });
                             break;
                         }
-                        // Recoverable driver hiccup; retry while still leader.
+                        // Recoverable driver hiccup. Retry, but race the backoff
+                        // against the leadership stream so a genuine transition is
+                        // observed instead of spun past.
                         Err(ServerError::Consensus(ConsensusError::TransientDriver(_source))) => {
                             transient_retries += 1;
-                            if transient_retries > FENCE_MAX_TRANSIENT_RETRIES {
-                                // Budget exhausted: stay up, NotServing, and
-                                // await the next leadership event rather than
-                                // tearing down a still-elected leader.
-                                #[cfg(feature = "tracing")]
+                            #[cfg(feature = "metrics")]
+                            metrics::counter!(
+                                "tsoracle.leader_transition.fence_transient_retries.total"
+                            )
+                            .increment(1);
+                            #[cfg(feature = "tracing")]
+                            if warn_on_stuck_fence(transient_retries) {
                                 tracing::warn!(
                                     error = %_source,
                                     retries = transient_retries,
-                                    "fence exhausted transient retries; awaiting next leadership event"
+                                    "fence still retrying a transient consensus error; serving is paused while this node remains leader"
                                 );
-                                let _ = server.state_tx.send(ServingState::NotServing {
-                                    leader_endpoint: None,
-                                    leader_epoch: None,
-                                });
-                                break;
                             }
                             let backoff = core::cmp::min(
                                 FENCE_RETRY_BASE
                                     .saturating_mul(1u32 << (transient_retries - 1).min(16)),
                                 FENCE_RETRY_CAP,
                             );
-                            tokio::time::sleep(backoff).await;
+                            tokio::select! {
+                                _ = tokio::time::sleep(backoff) => {}
+                                next = stream.next() => {
+                                    match next {
+                                        Some(evt) => {
+                                            pending = Some(evt);
+                                            break;
+                                        }
+                                        None => return Err(ServerError::WatchStreamClosed),
+                                    }
+                                }
+                            }
                         }
                         // Permanent fault or allocator invariant: fail fast so
                         // into_router poisons serving state and stops serving.

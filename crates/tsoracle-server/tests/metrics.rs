@@ -27,7 +27,7 @@ use metrics_util::{
 use tokio::time::sleep;
 use tsoracle_core::Epoch;
 use tsoracle_proto::v1::{GetTsRequest, tso_service_client::TsoServiceClient};
-use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::test_fakes::{FaultKind, FaultyDriver};
 use tsoracle_server::test_support::{
     boot_server, wait_for_grpc_handshake, wait_until, wait_until_serving,
 };
@@ -74,10 +74,14 @@ fn histogram_sample_count(snapshot: &[RecordedMetric], name: &str) -> usize {
 async fn emits_documented_signals_end_to_end() {
     let snapshotter = install_recorder();
 
-    let driver = Arc::new(InMemoryDriver::new());
+    let driver = Arc::new(FaultyDriver::new());
+    // Two transient persist faults make the initial fence retry twice (driving
+    // the fence_transient_retries counter) before succeeding; the queue is empty
+    // by the time extend_window persists, so the rest of the scenario is intact.
+    driver.fail_next_persists(2, FaultKind::Transient);
     // Small failover_advance so sleeping past it forces a WindowExhausted
     // retry in the GetTs handler, which drives extend_window → the
-    // documented window.* signals. The InMemoryDriver's persist is in-
+    // documented window.* signals. The FaultyDriver's persist is in-
     // memory, so the latency sample we record is tiny but nonzero.
     let server = Server::builder()
         .consensus_driver(driver.clone())
@@ -161,6 +165,13 @@ async fn emits_documented_signals_end_to_end() {
     assert!(
         counter_value(&snapshot, "tsoracle.leader_transition.total") >= 2,
         "tsoracle.leader_transition.total missed at least one of Leader/Follower transitions"
+    );
+    assert!(
+        counter_value(
+            &snapshot,
+            "tsoracle.leader_transition.fence_transient_retries.total"
+        ) >= 1,
+        "tsoracle.leader_transition.fence_transient_retries.total never incremented despite injected transient faults"
     );
     assert!(
         histogram_sample_count(&snapshot, "tsoracle.leader_transition.fence_latency") >= 1,

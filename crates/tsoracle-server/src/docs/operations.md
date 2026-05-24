@@ -31,6 +31,7 @@ The server emits the following signals through the [`metrics`](https://docs.rs/m
 - `tsoracle.window.extension_latency` — duration of persist_high_water (histogram, seconds)
 - `tsoracle.leader_transition.total` — leader-watch saw a state change (counter)
 - `tsoracle.leader_transition.fence_latency` — duration of the failover fence (histogram, seconds)
+- `tsoracle.leader_transition.fence_transient_retries.total` — fence retried a transient consensus error during failover (counter)
 - `tsoracle.not_leader.total` — RPCs rejected with `NOT_LEADER` (counter)
 
 The library is exporter-agnostic: embedders install whichever recorder they want (`metrics-exporter-prometheus`, `metrics-exporter-influx`, a custom sink) before constructing the [`Server`]. The example below wires Prometheus over an HTTP listener:

@@ -24,6 +24,7 @@ Both `tsoracle-server` and `tsoracle-client` emit signals through the [`metrics`
 - `tsoracle.window.extension_latency` — duration of persist_high_water (histogram, seconds)
 - `tsoracle.leader_transition.total` — leader-watch saw a state change (counter)
 - `tsoracle.leader_transition.fence_latency` — duration of the failover fence (histogram, seconds)
+- `tsoracle.leader_transition.fence_transient_retries.total` — fence retried a transient consensus error during failover (counter)
 - `tsoracle.not_leader.total` — RPCs rejected with `NOT_LEADER` (counter)
 
 **Client signals**

@@ -34,9 +34,10 @@ use std::time::Duration;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::{Epoch, testing::MockClock};
 use tsoracle_proto::v1::{GetTsRequest, tso_service_client::TsoServiceClient};
-use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::test_fakes::{FaultKind, FaultyDriver, InMemoryDriver};
 use tsoracle_server::test_support::{
-    BootedServer, boot_server, wait_for_grpc_handshake, wait_until_not_serving, wait_until_serving,
+    BootedServer, boot_server, wait_for_grpc_handshake, wait_until, wait_until_not_serving,
+    wait_until_serving,
 };
 use tsoracle_server::{Server, ServerError, ServingState};
 
@@ -118,6 +119,55 @@ impl ConsensusDriver for FaultyLoadDriver {
     }
 
     async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
+        self.inner.persist_high_water(at_least, epoch).await
+    }
+}
+
+/// Returns `TransientDriver` from every `persist_high_water` call while the
+/// latch is set, modelling a driver (e.g. the paxos host) that reports
+/// leadership loss as a transient append failure rather than `NotLeader`.
+/// Leadership events and `load_high_water` delegate to the inner driver.
+struct LatchingTransientDriver {
+    inner: Arc<InMemoryDriver>,
+    fail_persists: AtomicBool,
+    persist_calls: AtomicUsize,
+}
+
+impl LatchingTransientDriver {
+    fn new(inner: Arc<InMemoryDriver>) -> Self {
+        Self {
+            inner,
+            fail_persists: AtomicBool::new(true),
+            persist_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn clear_faults(&self) {
+        self.fail_persists.store(false, Ordering::SeqCst);
+    }
+
+    fn persist_call_count(&self) -> usize {
+        self.persist_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl ConsensusDriver for LatchingTransientDriver {
+    fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
+        self.inner.leadership_events()
+    }
+
+    async fn load_high_water(&self) -> Result<u64, ConsensusError> {
+        self.inner.load_high_water().await
+    }
+
+    async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
+        self.persist_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_persists.load(Ordering::SeqCst) {
+            return Err(ConsensusError::TransientDriver(Box::new(
+                std::io::Error::other("latched transient persist fault"),
+            )));
+        }
         self.inner.persist_high_water(at_least, epoch).await
     }
 }
@@ -329,4 +379,112 @@ async fn serve_with_shutdown_exits_when_watch_returns_error() {
         matches!(*state_rx.borrow(), ServingState::NotServing { .. }),
         "state must be poisoned to NotServing when watch terminates"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fence_recovers_after_transient_burst_exceeding_old_budget() {
+    // 10 transient persist faults is past the historical bound of 8. The fence
+    // must keep retrying — on a node that never stops being leader — until the
+    // 11th persist succeeds and the server reaches Serving. No leadership
+    // transition is ever emitted, so recovery proves the retry loop does not
+    // give up while still leader.
+    let driver = Arc::new(FaultyDriver::new());
+    driver.fail_next_persists(10, FaultKind::Transient);
+
+    let server = Server::builder()
+        .consensus_driver(driver.clone())
+        .clock(Arc::new(MockClock::new(1_000)))
+        .build()
+        .unwrap();
+    let mut booted = boot_server(server).await;
+
+    driver.become_leader(Epoch(1));
+
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        wait_until_serving(&mut booted.state_rx),
+    )
+    .await
+    .expect("fence must reach Serving despite a transient burst past the old budget");
+
+    assert_eq!(
+        driver.persist_call_count(),
+        11,
+        "expected 10 failed persists + 1 success"
+    );
+
+    booted.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fence_observes_follower_transition_during_unbounded_transient_retry() {
+    let inner = Arc::new(InMemoryDriver::new());
+    let driver = Arc::new(LatchingTransientDriver::new(inner.clone()));
+
+    let server = Server::builder()
+        .consensus_driver(driver.clone())
+        .clock(Arc::new(MockClock::new(1_000)))
+        .build()
+        .unwrap();
+    let mut booted = boot_server(server).await;
+
+    // Fence enters an effectively infinite transient-retry loop.
+    inner.become_leader(Epoch(1));
+
+    // Retries must climb well past the historical bound of 8 — proving the loop
+    // no longer gives up while still leader.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if driver.persist_call_count() >= 12 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("fence must keep retrying past the old budget while latched transient");
+
+    // A real leadership change arrives while the fence is mid-retry. The race
+    // against the leadership stream must observe it. The Follower handler
+    // publishes NotServing carrying the hint; the fence's own NotServing uses
+    // leader_endpoint: None, so observing Some(hint) proves the event was
+    // dispatched rather than spun past.
+    inner.become_follower(Some("10.1.2.3:50551".into()));
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        wait_until(&mut booted.state_rx, |s| {
+            matches!(
+                s,
+                ServingState::NotServing {
+                    leader_endpoint: Some(_),
+                    ..
+                }
+            )
+        }),
+    )
+    .await
+    .expect("Follower transition during retry must be observed and published with its hint");
+
+    // Once the Follower is dispatched the loop is back on stream.next(), so no
+    // further persist attempts occur.
+    let settled = driver.persist_call_count();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        driver.persist_call_count(),
+        settled,
+        "no more fence persist attempts after stepping down to Follower"
+    );
+
+    // Recovery: clear the fault and re-win leadership at a new epoch.
+    driver.clear_faults();
+    inner.become_leader(Epoch(2));
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        wait_until_serving(&mut booted.state_rx),
+    )
+    .await
+    .expect("fence must reach Serving after re-winning leadership");
+
+    booted.shutdown().await.unwrap();
 }
