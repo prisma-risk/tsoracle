@@ -316,7 +316,10 @@ impl Server {
     /// 2. Watch returns `Ok(Err(e))` → poisoned state is already published;
     ///    `cancel_tx` triggers tonic's graceful shutdown; in-flight `GetTs`
     ///    calls whose `try_grant` already succeeded complete with the
-    ///    timestamps they were allocated; new calls fail fast. Returns `Err(e)`.
+    ///    timestamps they were allocated; new calls fail fast. Returns `Err(e)`
+    ///    — the watch error wins even if the drain itself also errors (see
+    ///    `combine_watch_and_drain`); a drain error is surfaced only when the
+    ///    watch ended cleanly.
     /// 3. Watch task panics → returns `Err(ServerError::WatchPanic{..})`
     ///    with the panic payload stringified. Same drain semantics as (2).
     pub async fn serve_with_shutdown(
@@ -358,11 +361,13 @@ impl Server {
 
             watch_result = &mut watch_handle => {
                 // Watch terminated. State is already poisoned (see watch
-                // task body in into_router). Trigger tonic drain and wait
-                // for it to finish, then report the watch's outcome.
+                // task body in into_router). Trigger tonic drain, wait for
+                // it to finish, then report the watch's outcome — preferring
+                // it over any drain error, which surfaces only if the watch
+                // itself ended cleanly.
                 let _ = cancel_tx.send(());
-                let _ = serve.await;
-                join_to_server_result(watch_result)
+                let drain_result = serve.await;
+                combine_watch_and_drain(watch_result, drain_result)
             }
             serve_result = &mut serve => {
                 // User shutdown fired (or our cancel — but watch arm has
@@ -394,7 +399,9 @@ impl Server {
     ///    the caller-provided shutdown is cancelled internally so tonic begins
     ///    graceful shutdown; in-flight `GetTs` calls whose `try_grant` already
     ///    succeeded complete with the timestamps they were allocated; new calls
-    ///    fail fast. Returns `Err(e)`.
+    ///    fail fast. Returns `Err(e)` — the watch error wins even if the drain
+    ///    itself also errors (see `combine_watch_and_drain`); a drain error is
+    ///    surfaced only when the watch ended cleanly.
     /// 3. Watch task panics → returns `Err(ServerError::WatchPanic{..})`
     ///    with the panic payload stringified. Same drain semantics as (2).
     pub async fn serve_with_listener(
@@ -432,8 +439,8 @@ impl Server {
 
             watch_result = &mut watch_handle => {
                 let _ = cancel_tx.send(());
-                let _ = serve.await;
-                join_to_server_result(watch_result)
+                let drain_result = serve.await;
+                combine_watch_and_drain(watch_result, drain_result)
             }
             serve_result = &mut serve => {
                 watch_handle.abort();
@@ -467,6 +474,34 @@ fn join_to_server_result(
             })
         }
         Err(_cancelled) => Ok(()),
+    }
+}
+
+/// Combine the leader-watch outcome with the tonic graceful-drain outcome
+/// after the watch arm fired.
+///
+/// When the watch task terminates first we trigger the drain and then must
+/// report a single result. The watch error is the root cause — poisoned
+/// serving state was already published before the task returned — so it wins
+/// when both fail. A drain error (port stolen, resource exhaustion) is only
+/// surfaced when the watch outcome is otherwise `Ok`; previously it was
+/// discarded via `let _ = serve.await`, hiding a failed drain behind a clean
+/// shutdown report.
+///
+/// Generic over the drain error so the precedence logic is unit-testable
+/// without fabricating a `tonic::transport::Error` (which has no public
+/// constructor): production passes `Result<(), tonic::transport::Error>`,
+/// tests pass `Result<(), ServerError>` via the reflexive `From` impl.
+fn combine_watch_and_drain<E>(
+    watch_result: Result<Result<(), ServerError>, tokio::task::JoinError>,
+    drain_result: Result<(), E>,
+) -> Result<(), ServerError>
+where
+    ServerError: From<E>,
+{
+    match join_to_server_result(watch_result) {
+        Err(watch_err) => Err(watch_err),
+        Ok(()) => drain_result.map_err(ServerError::from),
     }
 }
 
@@ -620,6 +655,61 @@ mod tests {
         handle.abort();
         let join = handle.await;
         assert!(matches!(join_to_server_result(join), Ok(())));
+    }
+
+    #[tokio::test]
+    async fn combine_watch_and_drain_surfaces_drain_error_when_watch_ok() {
+        // Watch ended cleanly but the graceful drain failed (port stolen,
+        // resource exhaustion). The drain error must not be swallowed.
+        let watch = tokio::spawn(async { Ok::<(), ServerError>(()) }).await;
+        let drain: Result<(), ServerError> = Err(ServerError::WatchStreamClosed);
+        assert!(matches!(
+            combine_watch_and_drain(watch, drain),
+            Err(ServerError::WatchStreamClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn combine_watch_and_drain_returns_ok_when_both_succeed() {
+        // Watch clean, drain clean — the only fully-Ok outcome.
+        let watch = tokio::spawn(async { Ok::<(), ServerError>(()) }).await;
+        let drain: Result<(), ServerError> = Ok(());
+        assert!(matches!(combine_watch_and_drain(watch, drain), Ok(())));
+    }
+
+    #[tokio::test]
+    async fn combine_watch_and_drain_prefers_watch_error_over_drain_error() {
+        // Both failed. The watch error is the root cause (poisoned state was
+        // already published), so it wins; the drain error is dropped.
+        let watch = tokio::spawn(async {
+            Err::<(), ServerError>(ServerError::WatchPanic {
+                payload: "watch".into(),
+                bt: Bt::capture(),
+            })
+        })
+        .await;
+        let drain: Result<(), ServerError> = Err(ServerError::WatchStreamClosed);
+        match combine_watch_and_drain(watch, drain) {
+            Err(ServerError::WatchPanic { payload, .. }) => assert_eq!(payload, "watch"),
+            other => panic!("expected watch error to win, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn combine_watch_and_drain_returns_watch_error_when_drain_ok() {
+        // Watch failed, drain succeeded — forward the watch error verbatim.
+        let watch = tokio::spawn(async {
+            Err::<(), ServerError>(ServerError::WatchPanic {
+                payload: "watch".into(),
+                bt: Bt::capture(),
+            })
+        })
+        .await;
+        let drain: Result<(), ServerError> = Ok(());
+        match combine_watch_and_drain(watch, drain) {
+            Err(ServerError::WatchPanic { payload, .. }) => assert_eq!(payload, "watch"),
+            other => panic!("expected forwarded watch error, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "reflection")]
