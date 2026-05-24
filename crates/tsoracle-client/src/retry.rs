@@ -617,8 +617,8 @@ mod tests {
         hint.encode(&mut buf)
             .expect("LeaderHint encode is infallible");
         let mut status = tonic::Status::failed_precondition("not leader");
-        let key =
-            MetadataKey::from_bytes(b"tsoracle-leader-hint-bin").expect("static ASCII key parses");
+        let key = MetadataKey::from_bytes(tsoracle_proto::v1::LEADER_HINT_TRAILER_KEY.as_bytes())
+            .expect("static ASCII key parses");
         status
             .metadata_mut()
             .insert_bin(key, BinaryMetadataValue::from_bytes(&buf));
@@ -648,7 +648,8 @@ mod tests {
         use tonic::metadata::{BinaryMetadataValue, MetadataKey};
         let pool = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
         let mut status = tonic::Status::failed_precondition("not leader");
-        let key = MetadataKey::from_bytes(b"tsoracle-leader-hint-bin").unwrap();
+        let key = MetadataKey::from_bytes(tsoracle_proto::v1::LEADER_HINT_TRAILER_KEY.as_bytes())
+            .unwrap();
         status.metadata_mut().insert_bin(
             key,
             BinaryMetadataValue::from_bytes(&[0xff, 0xff, 0xff, 0xff]),

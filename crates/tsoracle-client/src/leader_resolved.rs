@@ -13,50 +13,24 @@
 //! Channel pool with leader-cache and NOT_LEADER redirect handling.
 
 use parking_lot::Mutex;
-use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
-use tonic::Status;
-use tonic::metadata::MetadataKey;
 use tonic::transport::{Channel, Endpoint};
-use tsoracle_proto::v1::LeaderHint;
 use tsoracle_proto::v1::tso_service_client::TsoServiceClient;
 
 use crate::RetryPolicy;
 use crate::error::ClientError;
 use crate::transport::apply_endpoint_config;
 
-const LEADER_HINT_KEY: &str = "tsoracle-leader-hint-bin";
-
-/// Outcome of inspecting a `Status`'s trailers for the leader-hint payload.
-///
-/// The retry loop treats the three cases differently: `Absent` is the normal
-/// "this peer doesn't know who the leader is" signal and stays silent;
-/// `Malformed` is a wire-protocol bug worth a warning + counter; `Decoded`
-/// is the followable redirect.
-pub enum LeaderHintLookup {
-    Absent,
-    Decoded(LeaderHint),
-    Malformed,
-}
-
-pub fn decode_leader_hint(status: &Status) -> LeaderHintLookup {
-    let Ok(key) = MetadataKey::from_bytes(LEADER_HINT_KEY.as_bytes()) else {
-        return LeaderHintLookup::Absent;
-    };
-    let Some(value) = status.metadata().get_bin(key) else {
-        return LeaderHintLookup::Absent;
-    };
-    let Ok(bytes) = value.to_bytes() else {
-        return LeaderHintLookup::Malformed;
-    };
-    match LeaderHint::decode(bytes.as_ref()) {
-        Ok(hint) => LeaderHintLookup::Decoded(hint),
-        Err(_) => LeaderHintLookup::Malformed,
-    }
-}
+// The leader-hint trailer key, the `LeaderHintLookup` classifier, and the
+// `decode_leader_hint` helper now live in `tsoracle-proto` as the single
+// source of truth for the wire contract (the server inserts the trailer; this
+// client decodes it). Re-exported here so the retry loop's existing
+// `crate::leader_resolved::{LeaderHintLookup, decode_leader_hint}` import path
+// is unchanged.
+pub use tsoracle_proto::v1::{LeaderHintLookup, decode_leader_hint};
 
 /// Cached pointer to the endpoint that most recently behaved like the
 /// leader, along with the epoch that confirmed it and the instant the
@@ -353,83 +327,10 @@ mod tests {
     use crate::RetryPolicy;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tonic::Status;
-    use tonic::metadata::BinaryMetadataKey;
-    use tonic::metadata::BinaryMetadataValue;
-    use tsoracle_proto::v1::EpochWire;
 
-    /// A `Status` without a `tsoracle-leader-hint-bin` trailer must
-    /// decode to `Absent` — this is the steady-state case (every
-    /// response other than NOT_LEADER, plus NOT_LEADER from a server
-    /// that has no known leader) and must not surface as `Malformed`,
-    /// which would cause the retry loop to count it against the
-    /// wire-protocol-bug bucket.
-    #[test]
-    fn decode_leader_hint_returns_absent_when_no_trailer_present() {
-        let status = Status::failed_precondition("not leader");
-        assert!(matches!(
-            decode_leader_hint(&status),
-            LeaderHintLookup::Absent
-        ));
-    }
-
-    /// A `Status` with a `tsoracle-leader-hint-bin` trailer whose
-    /// payload is not a valid `LeaderHint` protobuf must surface as
-    /// `Malformed` — the distinction from `Absent` is what lets the
-    /// retry loop count wire-protocol bugs separately from "this peer
-    /// doesn't know the leader." Without this case the enum would be
-    /// observationally equivalent to the prior `Option<LeaderHint>` and
-    /// the type-level distinction would be lost.
-    #[test]
-    fn decode_leader_hint_returns_malformed_on_bad_protobuf() {
-        let mut status = Status::failed_precondition("not leader");
-        let key = BinaryMetadataKey::from_bytes(LEADER_HINT_KEY.as_bytes())
-            .expect("LEADER_HINT_KEY must be a valid binary metadata key");
-        // Bytes that are not a valid `LeaderHint` proto. Any sequence
-        // that doesn't decode to one or two tagged fields works; we use
-        // a wire-tag-shaped run of `0xff` so the decoder enters varint
-        // parsing and then fails.
-        let value = BinaryMetadataValue::from_bytes(&[0xff, 0xff, 0xff, 0xff]);
-        status.metadata_mut().insert_bin(key, value);
-        assert!(matches!(
-            decode_leader_hint(&status),
-            LeaderHintLookup::Malformed
-        ));
-    }
-
-    /// A well-formed trailer round-trips through `encode` ↔ `decode`
-    /// and surfaces as `Decoded(hint)` with the original payload
-    /// preserved. This is the client-side companion to the server-side
-    /// `roundtrip` test in `tsoracle-server::leader_hint`; both must
-    /// agree on the wire shape or NOT_LEADER redirects will silently
-    /// degrade.
-    #[test]
-    fn decode_leader_hint_decodes_well_formed_trailer() {
-        let mut status = Status::failed_precondition("not leader");
-        let key = BinaryMetadataKey::from_bytes(LEADER_HINT_KEY.as_bytes())
-            .expect("LEADER_HINT_KEY must be a valid binary metadata key");
-        let hint = LeaderHint {
-            leader_endpoint: Some("10.0.0.7:50551".into()),
-            leader_epoch: Some(EpochWire { hi: 0, lo: 42 }),
-        };
-        let value = BinaryMetadataValue::from_bytes(&hint.encode_to_vec());
-        status.metadata_mut().insert_bin(key, value);
-
-        match decode_leader_hint(&status) {
-            LeaderHintLookup::Decoded(decoded) => {
-                assert_eq!(decoded.leader_endpoint, hint.leader_endpoint);
-                assert_eq!(decoded.leader_epoch, hint.leader_epoch);
-            }
-            other => panic!(
-                "expected Decoded(_), got something else: {}",
-                match other {
-                    LeaderHintLookup::Absent => "Absent",
-                    LeaderHintLookup::Malformed => "Malformed",
-                    LeaderHintLookup::Decoded(_) => unreachable!(),
-                }
-            ),
-        }
-    }
+    // The `decode_leader_hint` Absent/Malformed/Decoded classification tests
+    // live alongside the helper in `tsoracle-proto`; this module covers the
+    // channel-pool and leader-cache behavior that is unique to the client.
 
     #[test]
     fn iter_starts_with_cached_leader() {

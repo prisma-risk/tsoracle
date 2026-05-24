@@ -33,7 +33,7 @@ use tonic::{
 use tsoracle_client::Client;
 use tsoracle_core::Epoch;
 use tsoracle_proto::v1::{
-    GetTsRequest, GetTsResponse,
+    GetTsRequest, GetTsResponse, LEADER_HINT_TRAILER_KEY,
     tso_service_server::{TsoService, TsoServiceServer},
 };
 use tsoracle_server::test_fakes::InMemoryDriver;
@@ -41,8 +41,6 @@ use tsoracle_server::test_support::{
     boot_server, wait_for_grpc_handshake, wait_until, wait_until_serving,
 };
 use tsoracle_server::{Server, ServingState};
-
-const LEADER_HINT_TRAILER: &str = "tsoracle-leader-hint-bin";
 
 type RecordedMetric = (
     CompositeKey,
@@ -140,8 +138,8 @@ impl TsoService for MalformedHintService {
         _request: Request<GetTsRequest>,
     ) -> Result<Response<GetTsResponse>, Status> {
         let mut status = Status::failed_precondition("not leader");
-        let key =
-            MetadataKey::from_bytes(LEADER_HINT_TRAILER.as_bytes()).expect("trailer key is ascii");
+        let key = MetadataKey::from_bytes(LEADER_HINT_TRAILER_KEY.as_bytes())
+            .expect("trailer key is ascii");
         let garbage: &[u8] = &[0x0a, 0x05, b'h', b'i'];
         status
             .metadata_mut()

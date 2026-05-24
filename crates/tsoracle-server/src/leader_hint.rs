@@ -15,20 +15,18 @@
 use prost::Message;
 use tonic::Status;
 use tonic::metadata::errors::InvalidMetadataKey;
-use tonic::metadata::{BinaryMetadataKey, BinaryMetadataValue, MetadataKey};
-use tsoracle_proto::v1::LeaderHint;
+use tonic::metadata::{BinaryMetadataKey, BinaryMetadataValue};
+use tsoracle_proto::v1::{LEADER_HINT_TRAILER_KEY, LeaderHint, LeaderHintLookup};
 
-pub const KEY: &str = "tsoracle-leader-hint-bin";
-
-/// Confirms [`KEY`] is a valid binary metadata key.
+/// Confirms [`LEADER_HINT_TRAILER_KEY`] is a valid binary metadata key.
 ///
 /// Called from [`ServerBuilder::build`](crate::server::ServerBuilder::build)
-/// so an invalid `KEY` (only reachable via developer error) surfaces as a
+/// so an invalid key (only reachable via developer error) surfaces as a
 /// startup failure rather than as a silent runtime degradation in which the
 /// `tsoracle-leader-hint-bin` trailer is dropped from every NOT_LEADER
 /// response.
 pub fn validate_key() -> Result<(), InvalidMetadataKey> {
-    BinaryMetadataKey::from_bytes(KEY.as_bytes()).map(|_| ())
+    BinaryMetadataKey::from_bytes(LEADER_HINT_TRAILER_KEY.as_bytes()).map(|_| ())
 }
 
 pub fn not_leader_status(hint: LeaderHint) -> Status {
@@ -37,7 +35,11 @@ pub fn not_leader_status(hint: LeaderHint) -> Status {
     // once per rejection regardless of which call site detected it.
     #[cfg(feature = "metrics")]
     metrics::counter!("tsoracle.not_leader.total").increment(1);
-    with_leader_hint(Status::failed_precondition("not leader"), hint, KEY)
+    with_leader_hint(
+        Status::failed_precondition("not leader"),
+        hint,
+        LEADER_HINT_TRAILER_KEY,
+    )
 }
 
 /// Inserts a [`LeaderHint`] trailer keyed by `key_str` and returns `status`.
@@ -68,11 +70,16 @@ fn with_leader_hint(mut status: Status, hint: LeaderHint, key_str: &str) -> Stat
     status
 }
 
+/// Server-side `Option` view over the shared
+/// [`tsoracle_proto::v1::decode_leader_hint`] classifier: both "no trailer"
+/// (`Absent`) and "garbage trailer" (`Malformed`) collapse to `None`, since the
+/// server's only decode caller is its own test surface, which has no use for
+/// the wire-protocol-bug distinction the client tracks.
 pub fn decode_leader_hint(status: &Status) -> Option<LeaderHint> {
-    let key = MetadataKey::from_bytes(KEY.as_bytes()).ok()?;
-    let value = status.metadata().get_bin(key)?;
-    let bytes = value.to_bytes().ok()?;
-    LeaderHint::decode(bytes.as_ref()).ok()
+    match tsoracle_proto::v1::decode_leader_hint(status) {
+        LeaderHintLookup::Decoded(hint) => Some(hint),
+        LeaderHintLookup::Absent | LeaderHintLookup::Malformed => None,
+    }
 }
 
 #[cfg(test)]
