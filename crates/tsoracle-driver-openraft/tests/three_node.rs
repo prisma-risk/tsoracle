@@ -46,7 +46,7 @@ async fn find_leader_idx(cluster: &TestCluster) -> usize {
     .expect("some node became leader within 10s")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn three_node_leader_persists_and_followers_converge() {
     let cluster = build_three_node().await;
 
@@ -76,7 +76,7 @@ async fn three_node_leader_persists_and_followers_converge() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn three_node_follower_returns_not_leader() {
     let cluster = build_three_node().await;
 

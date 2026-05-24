@@ -61,7 +61,7 @@ fn aggressive_snapshot_config() -> Arc<Config> {
     )
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn snapshot_persists_across_restart_when_log_is_purged() {
     let cluster = build_single_node_with_config(aggressive_snapshot_config()).await;
     let TestCluster {
