@@ -214,6 +214,15 @@ impl ChannelPool {
     /// the one cell, so the dial — and its `connect.duration` / failure
     /// metrics — runs exactly once; later callers and cache hits clone the
     /// already-initialized `Channel` (itself an `Arc`-backed cheap clone).
+    ///
+    /// A failed dial does not stay cached: the endpoint's entry is evicted on
+    /// the error path so a stream of distinct *failing* endpoints cannot grow
+    /// the map without bound. That matters because wire-supplied leader hints
+    /// (`LeaderHint.leader_endpoint`) reach this method as arbitrary endpoint
+    /// strings, so a contacted peer handing back a fresh unparseable hint per
+    /// request would otherwise leak one uninitialized cell each time. The next
+    /// caller for the same endpoint re-inserts a fresh cell and re-dials, so
+    /// the retry semantics are unchanged — only the dead slot is reclaimed.
     pub async fn client(&self, endpoint: &str) -> Result<TsoServiceClient<Channel>, ClientError> {
         let cell = {
             let mut guard = self.channels.lock();
@@ -223,7 +232,7 @@ impl ChannelPool {
                 .clone()
         };
 
-        let channel = cell
+        let result = cell
             .get_or_try_init(|| async {
                 // Cache miss: we are about to actually dial. Time the dial so
                 // the `connect.duration` histogram only captures real connect
@@ -256,7 +265,30 @@ impl ChannelPool {
                 }
                 result
             })
-            .await?;
+            .await;
+
+        let channel = match result {
+            Ok(channel) => channel,
+            Err(err) => {
+                // The dial failed, so `cell` is still uninitialized — a
+                // `OnceCell` only stores a value on a successful init, and
+                // `get_or_try_init` runs the closure at most once across every
+                // caller sharing this cell, so no concurrent caller initialized
+                // it either. Reclaim the map slot. The identity check
+                // (`Arc::ptr_eq`) ensures we only drop the entry while it still
+                // holds *this* cell: if a concurrent caller has meanwhile
+                // re-inserted a fresh cell under the same key (and may already
+                // be dialing into it), that cell is left untouched.
+                let mut guard = self.channels.lock();
+                if guard
+                    .get(endpoint)
+                    .is_some_and(|current| Arc::ptr_eq(current, &cell))
+                {
+                    guard.remove(endpoint);
+                }
+                return Err(err);
+            }
+        };
 
         Ok(TsoServiceClient::new(channel.clone()))
     }
@@ -655,5 +687,67 @@ mod tests {
         let _ = pool.client("hinted:1").await;
         let seen = captured.lock().clone();
         assert_eq!(seen, vec!["hinted:1".to_string()]);
+    }
+
+    /// A failed dial must not leave a permanent entry in the channel cache.
+    /// #286 began inserting the endpoint's `OnceCell` under the map lock
+    /// *before* the parse/dial, so a parse or connect failure left an
+    /// uninitialized cell behind forever. Because wire-supplied leader hints
+    /// (`LeaderHint.leader_endpoint`) flow into `client()` as arbitrary
+    /// endpoint strings, a contacted peer returning a fresh invalid hint per
+    /// request could grow this map without bound. Each failed dial must
+    /// reclaim its own slot, so a run of distinct failing endpoints leaves
+    /// nothing behind.
+    #[tokio::test]
+    async fn failed_dials_do_not_accumulate_in_channel_cache() {
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|endpoint: &str| {
+            let endpoint_owned = endpoint.to_string();
+            Box::pin(async move { Err(crate::error::ClientError::InvalidEndpoint(endpoint_owned)) })
+        });
+        let pool = ChannelPool::new(Vec::new(), Some(connector), false, RetryPolicy::default());
+
+        for i in 0..8 {
+            let endpoint = format!("attacker-hint-{i}:1");
+            assert!(
+                pool.client(&endpoint).await.is_err(),
+                "the failing connector must surface an error for {endpoint}"
+            );
+        }
+
+        let guard = pool.channels.lock();
+        assert_eq!(
+            guard.len(),
+            0,
+            "failed dials must not be retained in the channel cache"
+        );
+    }
+
+    /// The flip side of the eviction-on-failure rule: a successful dial must
+    /// still be cached so the single-flight fast path (and the #286
+    /// per-endpoint `OnceCell`) keeps working. Removing the entry only when
+    /// the cell is still uninitialized is what preserves this.
+    #[tokio::test]
+    async fn successful_dials_are_retained_in_channel_cache() {
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async {
+                Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+            })
+        });
+        let pool = ChannelPool::new(Vec::new(), Some(connector), false, RetryPolicy::default());
+
+        pool.client("a:1")
+            .await
+            .expect("dial against the success connector must succeed");
+
+        let guard = pool.channels.lock();
+        assert_eq!(guard.len(), 1, "a successful dial must stay cached");
+        assert!(
+            guard
+                .get("a:1")
+                .expect("the dialed endpoint must have a cache entry")
+                .get()
+                .is_some(),
+            "the retained cell must be initialized"
+        );
     }
 }
