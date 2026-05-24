@@ -132,10 +132,59 @@ impl Allocator {
         }
     }
 
+    /// Single source of truth for the window-advance simulation and its bounds
+    /// checks, shared by `try_grant` and `would_grant`. Pure: it takes the
+    /// relevant state fields by value and mutates nothing, so a failed
+    /// projection cannot leave allocator state advanced.
+    ///
+    /// On success returns the `(physical_ms, logical_start)` the grant would
+    /// occupy. The two failure variants are kept distinct so `try_grant` can
+    /// surface the precise error its callers (and tests) expect;
+    /// `would_grant` collapses both to `false` via `.is_ok()`.
+    fn project_grant(
+        next_physical_ms: u64,
+        next_logical: u32,
+        committed_high_water: u64,
+        now_ms: u64,
+        count: u32,
+    ) -> Result<(u64, u32), CoreError> {
+        let mut physical_ms = next_physical_ms;
+        let mut logical = next_logical;
+
+        // Advance physical_ms toward wall clock if ahead. next_physical_ms is
+        // already at or above fence_floor, so a low now_ms simply leaves it there.
+        if now_ms > physical_ms {
+            physical_ms = now_ms;
+            logical = 0;
+        }
+
+        // If the current physical_ms cannot fit the request in its remaining
+        // logical range, advance to the next physical_ms.
+        if logical as u64 + count as u64 > LOGICAL_MAX as u64 + 1 {
+            physical_ms += 1;
+            logical = 0;
+        }
+
+        if physical_ms > PHYSICAL_MS_MAX {
+            return Err(CoreError::PhysicalMsOutOfRange(physical_ms));
+        }
+
+        // The fence: never issue a timestamp at a physical_ms above the committed
+        // high-water. If we are at or past the bound, the caller must extend.
+        if physical_ms > committed_high_water {
+            return Err(CoreError::WindowExhausted);
+        }
+
+        Ok((physical_ms, logical))
+    }
+
     /// Hot path. Issue `count` timestamps from the in-memory window.
     ///
     /// Returns `WindowExhausted` when the in-memory remainder cannot cover the request;
     /// the caller (typically the server) then runs prepare → persist → commit and retries.
+    ///
+    /// State is written back only on success: a failed grant (out-of-range or
+    /// exhausted window) leaves `next_physical_ms`/`next_logical` untouched.
     pub fn try_grant(&mut self, now_ms: u64, count: u32) -> Result<WindowGrant, CoreError> {
         if count == 0 {
             return Err(CoreError::InvalidCount(0));
@@ -153,47 +202,32 @@ impl Allocator {
             return Err(CoreError::NotLeader);
         };
 
-        // Advance physical_ms toward wall clock if ahead. next_physical_ms is
-        // already at or above fence_floor, so a low now_ms simply leaves it there.
-        if now_ms > *next_physical_ms {
-            *next_physical_ms = now_ms;
-            *next_logical = 0;
-        }
-
-        // If the current physical_ms cannot fit the request in its remaining
-        // logical range, advance to the next physical_ms.
-        if *next_logical as u64 + count as u64 > LOGICAL_MAX as u64 + 1 {
-            *next_physical_ms += 1;
-            *next_logical = 0;
-        }
-
-        if *next_physical_ms > PHYSICAL_MS_MAX {
-            return Err(CoreError::PhysicalMsOutOfRange(*next_physical_ms));
-        }
-
-        // The fence: never issue a timestamp at a physical_ms above the committed
-        // high-water. If we are at or past the bound, the caller must extend.
-        if *next_physical_ms > *committed_high_water {
-            return Err(CoreError::WindowExhausted);
-        }
+        let (physical_ms, logical_start) = Self::project_grant(
+            *next_physical_ms,
+            *next_logical,
+            *committed_high_water,
+            now_ms,
+            count,
+        )?;
 
         let grant = WindowGrant {
-            physical_ms: *next_physical_ms,
-            logical_start: *next_logical,
+            physical_ms,
+            logical_start,
             count,
             epoch: *epoch,
         };
-        *next_logical += count;
+        *next_physical_ms = physical_ms;
+        *next_logical = logical_start + count;
         Ok(grant)
     }
 
     /// Non-mutating predicate: would `try_grant(now_ms, count)` succeed right
     /// now? Used by the server's extension single-flight to decide whether a
     /// peer extender has already added enough room, avoiding a redundant
-    /// `persist_high_water` round-trip. Mirrors `try_grant`'s exhaustion check
-    /// exactly — a coarser predicate would risk false positives (skip the
-    /// extension, then fail the outer retry) for requests whose `count`
-    /// straddles the window edge.
+    /// `persist_high_water` round-trip. Delegates to the same `project_grant`
+    /// helper `try_grant` uses, so the exhaustion check cannot drift — a
+    /// coarser predicate would risk false positives (skip the extension, then
+    /// fail the outer retry) for requests whose `count` straddles the window edge.
     pub fn would_grant(&self, now_ms: u64, count: u32) -> bool {
         if count == 0 || count > LOGICAL_MAX + 1 {
             return false;
@@ -208,19 +242,14 @@ impl Allocator {
             return false;
         };
 
-        let mut physical_ms = *next_physical_ms;
-        let mut logical = *next_logical;
-        if now_ms > physical_ms {
-            physical_ms = now_ms;
-            logical = 0;
-        }
-        if logical as u64 + count as u64 > LOGICAL_MAX as u64 + 1 {
-            physical_ms += 1;
-        }
-        if physical_ms > PHYSICAL_MS_MAX {
-            return false;
-        }
-        physical_ms <= *committed_high_water
+        Self::project_grant(
+            *next_physical_ms,
+            *next_logical,
+            *committed_high_water,
+            now_ms,
+            count,
+        )
+        .is_ok()
     }
 
     /// Compute the high-water value the caller should durably persist before
@@ -397,6 +426,36 @@ mod tests {
             allocator.try_grant(5_001, 1),
             Err(CoreError::WindowExhausted)
         );
+    }
+
+    #[test]
+    fn failed_try_grant_does_not_advance_state() {
+        // A grant that fails the exhaustion check must leave the allocator's
+        // advance state untouched, so a later grant at a lower `now_ms` is not
+        // pinned to the failed attempt's wall clock.
+        let mut allocator = Allocator::new();
+        // Tight initial window: fence_floor == ceiling == 1_000.
+        allocator
+            .try_on_leadership_gained(1_000, 1_000, Epoch(1))
+            .unwrap();
+        // now_ms far past the ceiling exhausts the window.
+        assert_eq!(
+            allocator.try_grant(5_000, 1),
+            Err(CoreError::WindowExhausted)
+        );
+        // Extend the durable bound to exactly 2_000.
+        let target = allocator.try_prepare_window_extension(2_000, 0).unwrap();
+        assert_eq!(target, 2_000); // max(committed+1=1_001, now=2_000) + 0
+        allocator
+            .try_commit_window_extension(target, Epoch(1))
+            .unwrap();
+        // The failed grant must not have pinned next_physical_ms at 5_000: a
+        // grant at now_ms=2_000 advances cleanly to physical_ms=2_000 (<= the
+        // committed 2_000). If state had advanced on the failure, next_physical_ms
+        // would still be 5_000 and this would exhaust the window again.
+        let grant = allocator.try_grant(2_000, 1).unwrap();
+        assert_eq!(grant.physical_ms, 2_000);
+        assert_eq!(grant.logical_start, 0);
     }
 
     #[test]
