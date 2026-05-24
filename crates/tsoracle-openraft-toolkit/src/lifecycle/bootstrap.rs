@@ -18,16 +18,20 @@
 //! coverage; the compile-time signature shim in `tests/lifecycle.rs` is what
 //! catches openraft API drift inside this file.
 //!
-//! Most raft consumers need one of three startup modes:
+//! A node coming up as a voter needs one of two startup modes:
 //!
 //! - **Fresh**: first-time start; the caller knows the initial voter set.
 //! - **Reopen**: restart against existing on-disk state; do nothing special.
-//! - **Join**: start as a learner; an orchestrator will promote later.
 //!
 //! [`bootstrap`] folds these into a single async call, mapping openraft's
 //! `InitializeError::NotAllowed` (raised when the raft already has log/snapshot
 //! state) to success under `Reopen` and to a clear `BootstrapError` under
 //! `Fresh`.
+//!
+//! A node joining an existing cluster as a learner uses neither mode: it does
+//! no local initialization, so it calls [`join`] (a documented no-op on the
+//! joining side) and waits for the leader to register it via
+//! [`add_learner`](super::membership::add_learner).
 
 use std::collections::BTreeMap;
 
@@ -35,9 +39,16 @@ use openraft::error::{InitializeError, RaftError};
 use openraft::storage::RaftStateMachine;
 use openraft::{Raft, RaftTypeConfig};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Startup mode for [`bootstrap`].
+///
+/// A learner joining an existing cluster is intentionally **not** a variant
+/// here: the joining node does no local initialization, so it calls [`join`]
+/// and waits for the leader to register it via
+/// [`add_learner`](super::membership::add_learner). Keeping it out of this enum
+/// means every arm performs a distinct local action — there is no mode whose
+/// only difference from another is the log line it emits.
 #[derive(Debug)]
 pub enum BootstrapMode<C: RaftTypeConfig> {
     /// First-time start: initialize with the given voter set.
@@ -46,8 +57,6 @@ pub enum BootstrapMode<C: RaftTypeConfig> {
     },
     /// Restart against existing on-disk state.
     Reopen,
-    /// Start as a learner; orchestrator will promote later.
-    Join,
 }
 
 /// Failure modes for [`bootstrap`].
@@ -72,8 +81,9 @@ pub enum BootstrapError {
 ///   surface as [`BootstrapError::Initialize`].
 /// - `Reopen`: does not touch the raft. The caller is expected to have opened
 ///   existing storage; openraft replays the log on its own.
-/// - `Join`: does not touch the raft. The node will sit as a learner until an
-///   orchestrator promotes it via membership change.
+///
+/// A node joining as a learner does not call [`bootstrap`] at all — see
+/// [`join`].
 pub async fn bootstrap<C, SM>(
     raft: &Raft<C, SM>,
     mode: BootstrapMode<C>,
@@ -97,9 +107,22 @@ where
             info!("tsoracle-openraft-toolkit: reopen mode; relying on existing raft state");
             Ok(())
         }
-        BootstrapMode::Join => {
-            warn!("tsoracle-openraft-toolkit: join mode; node will sit as learner until promoted");
-            Ok(())
-        }
     }
+}
+
+/// Record that this node is joining an existing cluster as a learner.
+///
+/// This is a deliberate no-op on the joining node and never touches the raft:
+/// a learner must not initialize its own membership — doing so would fork the
+/// cluster into two single-node clusters. The node simply comes up against
+/// empty or replayed storage and sits idle until it is promoted.
+///
+/// The join itself is driven from the **leader**, which registers this node by
+/// calling [`add_learner`](super::membership::add_learner). Call [`join`] only
+/// to record the startup intent in the logs; use [`bootstrap`] with
+/// [`BootstrapMode::Fresh`] or [`BootstrapMode::Reopen`] for the voter paths.
+pub fn join() {
+    info!(
+        "tsoracle-openraft-toolkit: join mode; node will sit as learner until the leader calls add_learner"
+    );
 }

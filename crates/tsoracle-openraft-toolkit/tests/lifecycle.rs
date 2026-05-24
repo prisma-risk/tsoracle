@@ -38,7 +38,15 @@ fn bootstrap_mode_constructs_in_each_shape() {
         initial_members: members,
     };
     let _reopen: BootstrapMode<TestTypeConfig> = BootstrapMode::Reopen;
-    let _join: BootstrapMode<TestTypeConfig> = BootstrapMode::Join;
+}
+
+// `join` is the learner-side counterpart to `bootstrap`: a raft-free no-op
+// whose substance lives in its docstring (it points callers at the leader's
+// `membership::add_learner`). It takes no arguments and touches no openraft
+// API, so unlike the signature shims below it can be invoked directly.
+#[test]
+fn join_is_a_callable_no_op() {
+    tsoracle_openraft_toolkit::join();
 }
 
 // Verifies the `bootstrap` function has the expected signature.
