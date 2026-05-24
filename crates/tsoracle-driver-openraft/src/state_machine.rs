@@ -15,8 +15,11 @@
 //! persistence.
 //!
 //! State is one `u64` plus the openraft-required apply-progress metadata
-//! (`last_applied`, `last_membership`). Snapshots are postcard-encoded blobs of
-//! that tuple, written through to a [`SnapshotStore`] so they survive a
+//! (`last_applied`, `last_membership`). Snapshots are encoded with the toolkit's
+//! version-prefixed codec ([`tsoracle_openraft_toolkit::encode`] /
+//! [`tsoracle_openraft_toolkit::decode`] at [`SCHEMA_VERSION`]) — a leading
+//! version byte followed by the postcard body — written through to a
+//! [`SnapshotStore`] so they survive a
 //! process restart. The default store is in-memory
 //! ([`HighWaterStateMachine::new`]); production deployments construct via
 //! [`HighWaterStateMachine::with_store`] and supply a durable backend such as
@@ -43,6 +46,8 @@ use openraft::type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMe
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use tsoracle_openraft_toolkit::{SCHEMA_VERSION, decode, encode};
+
 use crate::log_entry::HighWaterCommand;
 use crate::snapshot_store::{InMemorySnapshotStore, SnapshotStore};
 use crate::type_config::{HighWaterApplied, TypeConfig};
@@ -53,7 +58,10 @@ type SnapOf = SnapshotOf<TypeConfig>;
 type SnapData = Cursor<Vec<u8>>;
 type StoredMem = StoredMembershipOf<TypeConfig>;
 
-/// Snapshot payload — postcard-encoded under the hood.
+/// Snapshot payload. The persisted/streamed bytes are version-framed as
+/// `[SCHEMA_VERSION | postcard(Self)]`, so decode them through the toolkit codec
+/// ([`tsoracle_openraft_toolkit::decode`] with [`SCHEMA_VERSION`]) rather than
+/// raw `postcard::from_bytes`.
 ///
 /// Exposed at the crate root so callers building tooling around the snapshot
 /// format (e.g. inspectors, migration tools) can decode it without re-deriving
@@ -66,9 +74,11 @@ pub struct HighWaterStateMachineSnapshot {
 }
 
 /// On-disk envelope written to the [`SnapshotStore`]: pairs the openraft
-/// snapshot meta with the postcard-encoded [`HighWaterStateMachineSnapshot`]
-/// bytes. Kept private — embedders that need to inspect persisted snapshots
-/// decode the inner `data` blob as [`HighWaterStateMachineSnapshot`].
+/// snapshot meta with the version-framed payload, where `data` holds
+/// `[SCHEMA_VERSION | postcard(HighWaterStateMachineSnapshot)]`. Kept private —
+/// embedders that need to inspect persisted snapshots decode the inner `data`
+/// blob through the toolkit codec ([`tsoracle_openraft_toolkit::decode`] with
+/// [`SCHEMA_VERSION`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSnapshot {
     meta: SnapMeta,
@@ -94,6 +104,19 @@ struct Core {
 struct StoredSnapshot {
     meta: SnapMeta,
     data: Vec<u8>,
+}
+
+/// Map a toolkit codec failure to `io::Error`, surfacing a version mismatch as
+/// `InvalidData` (a distinguishable, structured error) and prefixing `context`
+/// so the failing boundary is identifiable.
+fn codec_io_error(context: &str, err: tsoracle_openraft_toolkit::CodecError) -> io::Error {
+    use tsoracle_openraft_toolkit::CodecError;
+    match err {
+        e @ CodecError::Version { .. } => {
+            io::Error::new(io::ErrorKind::InvalidData, format!("{context}: {e}"))
+        }
+        other => io::Error::other(format!("{context}: {other}")),
+    }
 }
 
 /// `RaftStateMachine` for the high-water counter, with pluggable snapshot
@@ -160,11 +183,10 @@ impl HighWaterStateMachine {
             current_snapshot: None,
         };
         if let Some(bytes) = store.load()? {
-            let persisted: PersistedSnapshot = postcard::from_bytes(&bytes).map_err(|e| {
-                io::Error::other(format!("persisted snapshot envelope decode: {e}"))
-            })?;
-            let payload: HighWaterStateMachineSnapshot = postcard::from_bytes(&persisted.data)
-                .map_err(|e| io::Error::other(format!("persisted snapshot payload decode: {e}")))?;
+            let persisted: PersistedSnapshot = decode(SCHEMA_VERSION, &bytes)
+                .map_err(|e| codec_io_error("persisted snapshot envelope decode", e))?;
+            let payload: HighWaterStateMachineSnapshot = decode(SCHEMA_VERSION, &persisted.data)
+                .map_err(|e| codec_io_error("persisted snapshot payload decode", e))?;
             core.current_value = payload.current_value;
             core.last_applied = payload.last_applied;
             core.last_membership = payload.last_membership;
@@ -215,8 +237,8 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
                 last_membership: core.last_membership.clone(),
                 snapshot_id,
             };
-            let bytes = postcard::to_stdvec(&payload)
-                .map_err(|e| io::Error::other(format!("snapshot payload serialize: {e}")))?;
+            let bytes = encode(SCHEMA_VERSION, &payload)
+                .map_err(|e| codec_io_error("snapshot payload serialize", e))?;
             (bytes, meta)
         };
 
@@ -224,8 +246,8 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
             meta: meta.clone(),
             data: snapshot_payload.clone(),
         };
-        let envelope = postcard::to_stdvec(&persisted)
-            .map_err(|e| io::Error::other(format!("snapshot envelope serialize: {e}")))?;
+        let envelope = encode(SCHEMA_VERSION, &persisted)
+            .map_err(|e| codec_io_error("snapshot envelope serialize", e))?;
         // Persist BEFORE publishing to `current_snapshot`. If the store write
         // fails openraft sees a `build_snapshot` error and `current_snapshot`
         // stays at the prior (already-persisted) value, so a follower
@@ -313,8 +335,8 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
         snapshot: SnapData,
     ) -> Result<(), io::Error> {
         let bytes = snapshot.into_inner();
-        let payload: HighWaterStateMachineSnapshot = postcard::from_bytes(&bytes)
-            .map_err(|e| io::Error::other(format!("snapshot payload decode: {e}")))?;
+        let payload: HighWaterStateMachineSnapshot = decode(SCHEMA_VERSION, &bytes)
+            .map_err(|e| codec_io_error("snapshot payload decode", e))?;
 
         // `meta.last_log_id` is read back by `get_current_snapshot` while
         // `payload.last_applied` is read back by `applied_state`. `build_snapshot`
@@ -338,8 +360,8 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
             meta: meta.clone(),
             data: bytes.clone(),
         };
-        let envelope = postcard::to_stdvec(&persisted)
-            .map_err(|e| io::Error::other(format!("snapshot envelope serialize: {e}")))?;
+        let envelope = encode(SCHEMA_VERSION, &persisted)
+            .map_err(|e| codec_io_error("snapshot envelope serialize", e))?;
         // Persist BEFORE mutating in-memory state. If the store write fails
         // openraft retries the install and the SM stays at its prior state —
         // safer than advancing the apply progress past a snapshot we could
@@ -501,7 +523,8 @@ mod tests {
         let snap = sm.build_snapshot().await.expect("build_snapshot");
         let bytes = snap.snapshot.into_inner();
         let payload: HighWaterStateMachineSnapshot =
-            postcard::from_bytes(&bytes).expect("decode snapshot");
+            tsoracle_openraft_toolkit::decode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &bytes)
+                .expect("decode snapshot");
         assert_eq!(payload.current_value, 500);
         assert_eq!(payload.last_applied.map(|l| l.index), Some(1));
     }
@@ -532,7 +555,9 @@ mod tests {
             last_applied: Some(log_id(5)),
             last_membership: StoredMem::default(),
         };
-        let bytes = postcard::to_stdvec(&payload).expect("serialize payload");
+        let bytes =
+            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
+                .expect("serialize payload");
 
         let meta = SnapMeta {
             last_log_id: payload.last_applied,
@@ -664,7 +689,9 @@ mod tests {
             meta: SnapMeta::default(),
             data: b"not a postcard payload".to_vec(),
         };
-        let bytes = postcard::to_stdvec(&envelope).unwrap();
+        let bytes =
+            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &envelope)
+                .unwrap();
         let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
         store.save(&bytes).unwrap();
         let Err(err) = HighWaterStateMachine::with_store(store) else {
@@ -683,7 +710,9 @@ mod tests {
             last_applied: Some(log_id(10)),
             last_membership: StoredMem::default(),
         };
-        let bytes = postcard::to_stdvec(&payload).unwrap();
+        let bytes =
+            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
+                .unwrap();
         let meta = SnapMeta {
             last_log_id: payload.last_applied,
             last_membership: payload.last_membership.clone(),
@@ -715,7 +744,9 @@ mod tests {
             last_applied: Some(log_id(5)),
             last_membership: StoredMem::default(),
         };
-        let bytes = postcard::to_stdvec(&payload).expect("serialize payload");
+        let bytes =
+            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
+                .expect("serialize payload");
 
         let meta = SnapMeta {
             last_log_id: Some(log_id(6)),
@@ -826,5 +857,71 @@ mod tests {
                 Ok(())
             })?;
         }
+    }
+
+    #[test]
+    fn snapshot_payload_pins_v1_layout() {
+        // Hand-built v1 frame: [SCHEMA_VERSION | postcard(payload)]. The
+        // postcard body of {current_value: 7, last_applied: None,
+        // last_membership: default} is [7, 0, 0, 0, 0] — value 7, Option::None,
+        // then default StoredMembership (None log id + empty configs + empty
+        // nodes). Reordering or inserting a field changes these bytes and
+        // trips this test, forcing a SCHEMA_VERSION bump.
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 7,
+            last_applied: None,
+            last_membership: StoredMembership::default(),
+        };
+        let framed =
+            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
+                .expect("encode");
+        assert_eq!(framed, vec![1, 7, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn log_entry_pins_v1_layout() {
+        // The bytes RocksdbLogStore<TypeConfig> persists per entry: the v1
+        // frame around a Normal entry carrying Bump { target: 5 } at log id
+        // (term 1, node 1, index 1). Body [1,1,1,1,0,5] = leader (term 1,
+        // node 1), index 1, EntryPayload::Normal tag (1), Bump variant (0),
+        // target 5.
+        let lid = openraft::testing::log_id::<TypeConfig>(1, 1, 1);
+        let entry: EntryOf<TypeConfig> =
+            EntryOf::<TypeConfig>::new_normal(lid, HighWaterCommand::Bump { target: 5 });
+        let framed =
+            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &entry)
+                .expect("encode");
+        assert_eq!(framed, vec![1, 1, 1, 1, 1, 0, 5]);
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_rejects_foreign_schema_version() {
+        // A streamed snapshot framed with a foreign version must be rejected
+        // as InvalidData before any store write or state mutation.
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let mut sm = HighWaterStateMachine::with_store(store.clone()).expect("with_store");
+        let meta = SnapMeta {
+            last_log_id: None,
+            last_membership: StoredMembership::default(),
+            snapshot_id: "test".to_string(),
+        };
+        let foreign = vec![0xFF, 7, 0, 0, 0, 0];
+        let err = sm
+            .install_snapshot(&meta, Cursor::new(foreign))
+            .await
+            .expect_err("must reject foreign version");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        assert_eq!(sm.current_value().await, 0);
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(last, None);
+        assert!(
+            sm.get_current_snapshot().await.unwrap().is_none(),
+            "rejected install must not publish a current snapshot"
+        );
+        assert!(
+            store.load().expect("load").is_none(),
+            "rejected install must not persist an envelope"
+        );
     }
 }
