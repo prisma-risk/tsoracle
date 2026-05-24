@@ -225,6 +225,15 @@ where
         outgoing
     }
 
+    /// Tick the runner once *without* applying decided entries, returning its
+    /// outbound messages. Lets a deterministic test hold a node's apply "parked"
+    /// (decided_idx advances via consensus, but the high-water / barrier ledger
+    /// does not fold) — the synchronous analogue of pausing the async apply task
+    /// at its yield point. Pair with an explicit [`Self::apply_once`] to release.
+    pub fn tick_only(&self) -> Vec<Message<HighWaterCommand>> {
+        self.runner.tick_once()
+    }
+
     /// Apply newly-decided entries into the high-water state and snapshot per
     /// policy, advancing the step cursor. The synchronous sibling of the async
     /// apply task; idempotent (max over advances and per-node barrier seqs).

@@ -378,6 +378,26 @@ where
         }
         panic!("predicate did not become true within {max_steps} steps");
     }
+
+    /// Drain a node's inbox synchronously, returning its queued inbound
+    /// messages. For tests that drive a node "by hand" — e.g. after taking its
+    /// host out of the cluster (`node.host.take()`) to poll a blocking driver
+    /// call against it — and route the messages themselves while `step()` drives
+    /// the rest of the cluster (which skips the host-less node).
+    pub fn drain_inbox(&mut self, node_id: u64) -> Vec<Message<HighWaterCommand>> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == node_id)
+            .expect("node id present");
+        let mut drained = Vec::new();
+        if let Some(inbox) = node.inbox.as_mut() {
+            while let Ok(message) = inbox.try_recv() {
+                drained.push(message);
+            }
+        }
+        drained
+    }
 }
 
 /// Spawn-target: drain `inbox` into `omnipaxos.handle_incoming` until the
