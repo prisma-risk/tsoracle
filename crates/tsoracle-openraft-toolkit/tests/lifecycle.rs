@@ -122,9 +122,9 @@ async fn leadership_events_emits_initial_state_and_terminates_on_drop() {
     // runtime-abstracted alias `WatchReceiverOf<C, RaftMetrics<C>>` exactly.
     let (tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
 
-    let mut stream = std::pin::pin!(
-        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
-    );
+    let mut stream = std::pin::pin!(tsoracle_openraft_toolkit::leadership_events_from_metrics::<
+        TestTypeConfig,
+    >(rx));
 
     // Initial state emits unconditionally.
     let first = stream.next().await.expect("initial state emitted");
@@ -160,9 +160,9 @@ async fn leadership_events_dedups_repeated_class_until_transition() {
     let initial: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
     let (tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(initial);
 
-    let mut stream = std::pin::pin!(
-        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
-    );
+    let mut stream = std::pin::pin!(tsoracle_openraft_toolkit::leadership_events_from_metrics::<
+        TestTypeConfig,
+    >(rx));
 
     // First poll yields the initial Follower.
     let first = stream.next().await.expect("initial");
@@ -212,11 +212,10 @@ async fn leadership_events_projects_candidate_learner_and_shutdown() {
         metrics.state = state;
         metrics.current_term = term;
         let (_tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
-        let mut stream = std::pin::pin!(
-            tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(
-                rx
-            )
-        );
+        let mut stream =
+            std::pin::pin!(tsoracle_openraft_toolkit::leadership_events_from_metrics::<
+                TestTypeConfig,
+            >(rx));
         stream.next().await.expect("initial state emitted")
     }
 
@@ -273,9 +272,9 @@ async fn leadership_events_resolves_follower_leader_when_in_membership() {
     metrics.membership_config = Arc::new(stored);
 
     let (_tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
-    let mut stream = std::pin::pin!(
-        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
-    );
+    let mut stream = std::pin::pin!(tsoracle_openraft_toolkit::leadership_events_from_metrics::<
+        TestTypeConfig,
+    >(rx));
 
     let first = stream.next().await.expect("initial state emitted");
     match first {
@@ -324,9 +323,9 @@ async fn leadership_events_emits_leader_after_coalesced_term_change() {
     initial.current_term = 1;
     let (tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(initial);
 
-    let mut stream = std::pin::pin!(
-        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
-    );
+    let mut stream = std::pin::pin!(tsoracle_openraft_toolkit::leadership_events_from_metrics::<
+        TestTypeConfig,
+    >(rx));
 
     let first = stream.next().await.expect("initial Leader");
     assert!(
@@ -382,9 +381,9 @@ async fn leadership_events_suppresses_identical_projection() {
     let initial: RaftMetrics<TestTypeConfig> = RaftMetrics::new_initial(1u64);
     let (tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(initial);
 
-    let mut stream = std::pin::pin!(
-        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
-    );
+    let mut stream = std::pin::pin!(tsoracle_openraft_toolkit::leadership_events_from_metrics::<
+        TestTypeConfig,
+    >(rx));
 
     let first = stream.next().await.expect("initial Follower");
     assert!(
@@ -448,9 +447,9 @@ async fn leadership_events_drops_follower_leader_when_not_in_membership() {
     metrics.membership_config = Arc::new(stored);
 
     let (_tx, rx) = <TestTypeConfig as TypeConfigExt>::watch_channel(metrics);
-    let mut stream = std::pin::pin!(
-        tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver::<TestTypeConfig>(rx)
-    );
+    let mut stream = std::pin::pin!(tsoracle_openraft_toolkit::leadership_events_from_metrics::<
+        TestTypeConfig,
+    >(rx));
 
     let first = stream.next().await.expect("initial state emitted");
     assert!(
