@@ -14,20 +14,8 @@
 
 use prost::Message;
 use tonic::Status;
-use tonic::metadata::errors::InvalidMetadataKey;
 use tonic::metadata::{BinaryMetadataKey, BinaryMetadataValue};
 use tsoracle_proto::v1::{LEADER_HINT_TRAILER_KEY, LeaderHint, LeaderHintLookup};
-
-/// Confirms [`LEADER_HINT_TRAILER_KEY`] is a valid binary metadata key.
-///
-/// Called from [`ServerBuilder::build`](crate::server::ServerBuilder::build)
-/// so an invalid key (only reachable via developer error) surfaces as a
-/// startup failure rather than as a silent runtime degradation in which the
-/// `tsoracle-leader-hint-bin` trailer is dropped from every NOT_LEADER
-/// response.
-pub fn validate_key() -> Result<(), InvalidMetadataKey> {
-    BinaryMetadataKey::from_bytes(LEADER_HINT_TRAILER_KEY.as_bytes()).map(|_| ())
-}
 
 pub fn not_leader_status(hint: LeaderHint) -> Status {
     // Single chokepoint: every NOT_LEADER rejection in the service layer
@@ -48,9 +36,10 @@ pub fn not_leader_status(hint: LeaderHint) -> Status {
 /// returns `status` without the trailer. The client's retry path tolerates a
 /// missing trailer (it round-robins over configured endpoints instead of
 /// jumping directly to the hinted leader), so a corrupted key degrades
-/// latency rather than correctness. [`validate_key`] additionally gates this
-/// at startup so the no-trailer fallback only ever runs in a worst-case
-/// developer-error scenario.
+/// latency rather than correctness. [`LEADER_HINT_TRAILER_KEY`] is a
+/// `const &'static str`, so this fallback only ever runs in a worst-case
+/// developer-error scenario; the `validate_key_accepts_real_key` unit test
+/// proves the real key parses on every build.
 fn with_leader_hint(mut status: Status, hint: LeaderHint, key_str: &str) -> Status {
     match BinaryMetadataKey::from_bytes(key_str.as_bytes()) {
         Ok(key) => {
@@ -101,7 +90,11 @@ mod tests {
 
     #[test]
     fn validate_key_accepts_real_key() {
-        validate_key().expect("KEY is a valid binary metadata key");
+        // The build-time guard that LEADER_HINT_TRAILER_KEY is a valid binary
+        // metadata key. If a future edit breaks the const, this test fails
+        // rather than letting `with_leader_hint` silently drop the trailer.
+        BinaryMetadataKey::from_bytes(LEADER_HINT_TRAILER_KEY.as_bytes())
+            .expect("LEADER_HINT_TRAILER_KEY is a valid binary metadata key");
     }
 
     #[test]
