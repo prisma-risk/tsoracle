@@ -77,15 +77,26 @@ where
     C: RaftTypeConfig,
     SM: RaftStateMachine<C>,
 {
-    stream_from_receiver::<C>(raft.metrics())
+    leadership_events_from_metrics::<C>(raft.metrics())
 }
 
-/// Internal: build the dedup stream from a constructed receiver without going
-/// through `Raft<C, SM>`. Exposed (with `#[doc(hidden)]`) so the crate's
-/// integration tests can drive the dedup logic with a synthetic watch channel;
-/// not part of the public API and may change without notice.
-#[doc(hidden)]
-pub fn stream_from_receiver<C: RaftTypeConfig>(
+/// The by-value counterpart to [`leadership_events`]: build the same dedup
+/// stream directly from a metrics receiver instead of borrowing a `Raft<C, SM>`.
+///
+/// Reach for this when you hold a `WatchReceiverOf<C, RaftMetrics<C>>` (e.g.
+/// from `Raft::metrics()` cloned out of a host) and need a `'static` stream.
+/// [`leadership_events`] borrows the `raft` argument, so the stream it returns
+/// is tied to that borrow; when you instead want a stream that outlives the
+/// raft handle — to wrap it with endpoint resolution and keep the cluster
+/// alive alongside it — take the receiver by value here. `tsoracle-driver-openraft`
+/// uses exactly this to build a `'static` leadership stream that carries its
+/// host along for the ride.
+///
+/// The emission and dedup contract is identical to [`leadership_events`]: the
+/// first observed state emits unconditionally, subsequent states emit only when
+/// the full projection differs (full-value dedup, not role-class only — see
+/// issue #77), and the stream terminates when openraft drops its sender.
+pub fn leadership_events_from_metrics<C: RaftTypeConfig>(
     rx: WatchReceiverOf<C, RaftMetrics<C>>,
 ) -> impl Stream<Item = LeadershipState<C>> {
     // (receiver, last-emitted projection) carried across unfold iterations.

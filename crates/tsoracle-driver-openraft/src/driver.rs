@@ -39,7 +39,7 @@ use openraft::RaftTypeConfig;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
 use tsoracle_openraft_toolkit::LeadershipState;
-use tsoracle_openraft_toolkit::lifecycle::leader::stream_from_receiver;
+use tsoracle_openraft_toolkit::leadership_events_from_metrics;
 
 use crate::host::OpenraftHighWaterHost;
 
@@ -97,8 +97,9 @@ impl<H: OpenraftHighWaterHost> OpenraftDriver<H> {
 impl<H: OpenraftHighWaterHost> ConsensusDriver for OpenraftDriver<H> {
     /// Return a stream of [`LeaderState`] transitions.
     ///
-    /// Goes through the toolkit's `stream_from_receiver` (the by-value entry
-    /// point) rather than `leadership_events(&raft)` to side-step a Rust 2024
+    /// Goes through the toolkit's `leadership_events_from_metrics` (the
+    /// by-value entry point) rather than `leadership_events(&raft)` to
+    /// side-step a Rust 2024
     /// lifetime-over-capture issue: the `&raft` form would require the
     /// returned stream to borrow from `raft`, but we want `'static`. The
     /// cloned host then rides along inside [`KeepAlive`] so dropping the
@@ -138,7 +139,7 @@ fn owned_leadership_stream<H: OpenraftHighWaterHost>(
 ) -> impl Stream<Item = LeaderState> + Send + 'static {
     let rx = host.metrics();
     let inner: Pin<Box<dyn Stream<Item = LeaderState> + Send>> = Box::pin(
-        stream_from_receiver::<H::Config>(rx)
+        leadership_events_from_metrics::<H::Config>(rx)
             .map(move |state| map_leader_state::<H::Config>(state, peers.as_ref())),
     );
     KeepAlive { _host: host, inner }
