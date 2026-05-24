@@ -38,7 +38,13 @@ use tsoracle_driver_paxos::host::PaxosHighWaterHost;
 #[path = "common/mod.rs"]
 mod common;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Runs under tokio virtual time (`start_paused`): the runner's `interval`
+// ticks, the apply task's `notified()`, the test's `drive_until` polls, and
+// the `timeout(5s)` guard all advance in simulated time the moment the
+// runtime goes idle — so the async apply task that folds the attributable
+// barrier still runs (the regression lives in that path), but without
+// wall-clock variance. `start_paused` implies the current-thread runtime.
+#[tokio::test(start_paused = true)]
 async fn submit_advance_commits_an_attributable_barrier_for_this_call() {
     let mut cluster = common::build_mem_cluster(3);
     cluster.start_all();

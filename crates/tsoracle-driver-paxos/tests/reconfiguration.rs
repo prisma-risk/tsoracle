@@ -41,14 +41,12 @@ use omnipaxos::util::LogEntry;
 #[path = "common/mod.rs"]
 mod common;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Driven by the deterministic step-driver (`step_until`).
+#[tokio::test]
 async fn stopsign_decides_and_seals_old_configuration() {
     let mut cluster = common::build_mem_cluster(3);
-    cluster.start_all();
 
-    cluster
-        .drive_until(common::some_leader_elected(), 2_000)
-        .await;
+    cluster.step_until(common::some_leader_elected(), 2_000);
     let leader_id = cluster.leader();
 
     // Decide a few Advances under the original 3-node config.
@@ -64,17 +62,15 @@ async fn stopsign_decides_and_seals_old_configuration() {
         .lock()
         .append(HighWaterCommand::Advance(AdvancePayload { at_least: 17 }))
         .expect("pre-stopsign append succeeds");
-    cluster
-        .drive_until(
-            |state| {
-                state
-                    .nodes
-                    .iter()
-                    .all(|node| state.high_water_on(node.node_id) >= 17)
-            },
-            2_000,
-        )
-        .await;
+    cluster.step_until(
+        |state| {
+            state
+                .nodes
+                .iter()
+                .all(|node| state.high_water_on(node.node_id) >= 17)
+        },
+        2_000,
+    );
 
     // Issue the reconfiguration. The new 5-node config takes effect once
     // the stopsign is decided cluster-wide.
@@ -91,17 +87,15 @@ async fn stopsign_decides_and_seals_old_configuration() {
         .expect("reconfigure submits a stopsign proposal");
 
     // Drive until every node has decided the stopsign.
-    cluster
-        .drive_until(
-            |state| {
-                state
-                    .nodes
-                    .iter()
-                    .all(|node| node.omnipaxos().lock().is_reconfigured().is_some())
-            },
-            3_000,
-        )
-        .await;
+    cluster.step_until(
+        |state| {
+            state
+                .nodes
+                .iter()
+                .all(|node| node.omnipaxos().lock().is_reconfigured().is_some())
+        },
+        3_000,
+    );
 
     // Every node must agree on the next configuration's metadata.
     for node in &cluster.nodes {

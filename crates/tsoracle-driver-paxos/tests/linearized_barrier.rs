@@ -30,6 +30,16 @@
 //! returns the stale `high_water` (0) the moment `decided_idx` advances;
 //! with the fix it waits until the apply task folds its own barrier and
 //! returns the correct post-fold value (500).
+//!
+//! Runs under tokio virtual time (`start_paused`). The interleaving this
+//! regression needs — apply tasks parked at their yield point while an
+//! `Advance` decides beneath an as-yet-unfolded `Barrier`, then a paced
+//! release — is built from `tokio::time::sleep` delays, which under a
+//! paused clock define a deterministic ordering instead of racing the
+//! wall clock. The apply tasks and the reader future remain real async
+//! tasks, so the yield-point gating still exercises the missed-fold path;
+//! only the timing nondeterminism is removed. `start_paused` implies the
+//! current-thread runtime.
 
 #![cfg(feature = "yieldpoints")]
 
@@ -46,7 +56,7 @@ mod common;
 const APPLY_TASK_YIELD: &str = "standalone_host::apply_task::between_iterations";
 const CURRENT_HW_YIELD: &str = "standalone_host::current_high_water::after_append_before_await";
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn current_high_water_returns_value_advanced_before_call_under_paused_apply() {
     let mut cluster = common::build_mem_cluster(3);
     cluster.start_all();

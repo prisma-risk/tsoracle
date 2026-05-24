@@ -37,6 +37,16 @@
 //! with the fix in place, the recheck after `enable()` returns the value
 //! immediately. Without the fix the reader hangs and the test panics on
 //! the `tokio::time::timeout`.
+//!
+//! Both tests run under tokio virtual time (`start_paused`): the runner's
+//! `interval` ticks, the apply task's `notify_waiters`, the `spawn_release`
+//! delay, and the `timeout(2s)` guard all advance in simulated time the
+//! moment the runtime goes idle. The async apply task — the very thing
+//! whose drain-before-register the reader must not miss — still runs as a
+//! real task, so the race is preserved; only the wall-clock variance is
+//! removed. The paused clock guarantees the releaser's delay outlasts the
+//! apply drain without a real-time gamble. `start_paused` implies the
+//! current-thread runtime.
 
 #![cfg(feature = "yieldpoints")]
 
@@ -66,7 +76,7 @@ fn spawn_release(
     })
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn current_high_water_returns_when_apply_drained_before_register() {
     let mut cluster = common::build_mem_cluster(3);
     cluster.start_all();
@@ -102,7 +112,7 @@ async fn current_high_water_returns_when_apply_drained_before_register() {
     cluster.stop_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn submit_advance_returns_when_apply_drained_before_register() {
     let mut cluster = common::build_mem_cluster(3);
     cluster.start_all();

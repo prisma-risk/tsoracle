@@ -28,7 +28,15 @@ use tsoracle_driver_paxos::HighWaterCommand;
 #[path = "common/mod.rs"]
 mod common;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Runs under tokio virtual time (`start_paused`). The poison this regression
+// guards lives in the async apply task spawned by `start` (a stale permit
+// makes it exit on its first `select!` turn), so the test keeps `start_all` +
+// `drive_until` rather than the synchronous step-driver, which would apply via
+// `apply_once` and never spawn the task under test. Virtual time only removes
+// the wall-clock variance: the runner ticks, the apply drain, and the
+// `drive_until` polls all advance in simulated time. `start_paused` implies the
+// current-thread runtime.
+#[tokio::test(start_paused = true)]
 async fn stop_before_start_does_not_poison_apply_task() {
     let mut cluster = common::build_mem_cluster(3);
 
