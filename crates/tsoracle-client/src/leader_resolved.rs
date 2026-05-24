@@ -256,6 +256,7 @@ mod tests {
     use tonic::Status;
     use tonic::metadata::BinaryMetadataKey;
     use tonic::metadata::BinaryMetadataValue;
+    use tsoracle_proto::v1::EpochWire;
 
     /// A `Status` without a `tsoracle-leader-hint-bin` trailer must
     /// decode to `Absent` — this is the steady-state case (every
@@ -309,8 +310,7 @@ mod tests {
             .expect("LEADER_HINT_KEY must be a valid binary metadata key");
         let hint = LeaderHint {
             leader_endpoint: Some("10.0.0.7:50551".into()),
-            leader_epoch_hi: Some(0),
-            leader_epoch_lo: Some(42),
+            leader_epoch: Some(EpochWire { hi: 0, lo: 42 }),
         };
         let value = BinaryMetadataValue::from_bytes(&hint.encode_to_vec());
         status.metadata_mut().insert_bin(key, value);
@@ -318,8 +318,7 @@ mod tests {
         match decode_leader_hint(&status) {
             LeaderHintLookup::Decoded(decoded) => {
                 assert_eq!(decoded.leader_endpoint, hint.leader_endpoint);
-                assert_eq!(decoded.leader_epoch_hi, hint.leader_epoch_hi);
-                assert_eq!(decoded.leader_epoch_lo, hint.leader_epoch_lo);
+                assert_eq!(decoded.leader_epoch, hint.leader_epoch);
             }
             other => panic!(
                 "expected Decoded(_), got something else: {}",

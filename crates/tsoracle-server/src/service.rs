@@ -16,22 +16,22 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tsoracle_consensus::ConsensusError;
 use tsoracle_core::{CoreError, Epoch};
-use tsoracle_proto::v1::{GetTsRequest, GetTsResponse, LeaderHint, tso_service_server::TsoService};
+use tsoracle_proto::v1::{
+    EpochWire, GetTsRequest, GetTsResponse, LeaderHint, tso_service_server::TsoService,
+};
 
 use crate::leader_hint::not_leader_status;
 use crate::server::{Server, ServingState};
 
-/// Split an optional leader epoch into the two wire halves carried by
-/// `LeaderHint`. Both halves are present together or absent together: the
-/// client requires both to accept an epoch and treats a partial pair as absent.
-fn wire_epoch(epoch: Option<Epoch>) -> (Option<u64>, Option<u64>) {
-    match epoch {
-        Some(epoch) => {
-            let (hi, lo) = epoch.to_wire();
-            (Some(hi), Some(lo))
-        }
-        None => (None, None),
-    }
+/// Convert an optional leader epoch into the nested wire form carried by
+/// `LeaderHint`. Bundling the two 64-bit halves in one `EpochWire` means the
+/// epoch is present in full or absent entirely — a half-populated epoch is
+/// unrepresentable, so the client never has to reason about a partial pair.
+fn wire_epoch(epoch: Option<Epoch>) -> Option<EpochWire> {
+    epoch.map(|epoch| {
+        let (hi, lo) = epoch.to_wire();
+        EpochWire { hi, lo }
+    })
 }
 
 /// Snapshot the best-available leader hint from `state_rx`. Used wherever we
@@ -45,11 +45,9 @@ fn leader_hint_from(server: &Server) -> LeaderHint {
         } => (leader_endpoint, leader_epoch),
         ServingState::Serving => (None, None),
     };
-    let (leader_epoch_hi, leader_epoch_lo) = wire_epoch(leader_epoch);
     LeaderHint {
         leader_endpoint,
-        leader_epoch_hi,
-        leader_epoch_lo,
+        leader_epoch: wire_epoch(leader_epoch),
     }
 }
 
@@ -91,11 +89,9 @@ impl TsoService for TsoServiceImpl {
             leader_epoch,
         } = self.server.state_rx.borrow().clone()
         {
-            let (leader_epoch_hi, leader_epoch_lo) = wire_epoch(leader_epoch);
             return Err(not_leader_status(LeaderHint {
                 leader_endpoint,
-                leader_epoch_hi,
-                leader_epoch_lo,
+                leader_epoch: wire_epoch(leader_epoch),
             }));
         }
 
@@ -302,29 +298,27 @@ mod tests {
             Some("http://other-node:9000")
         );
         let (hi, lo) = Epoch(7).to_wire();
-        assert_eq!(hint.leader_epoch_hi, Some(hi));
-        assert_eq!(hint.leader_epoch_lo, Some(lo));
+        assert_eq!(hint.leader_epoch, Some(EpochWire { hi, lo }));
 
         // The Serving branch flips endpoint and epoch to None.
         let _ = server.state_tx.send(ServingState::Serving);
         let hint = leader_hint_from(&server);
         assert!(hint.leader_endpoint.is_none());
-        assert!(hint.leader_epoch_hi.is_none());
-        assert!(hint.leader_epoch_lo.is_none());
+        assert!(hint.leader_epoch.is_none());
     }
 
     #[test]
-    fn wire_epoch_splits_some_and_passes_through_none() {
+    fn wire_epoch_bundles_some_and_passes_through_none() {
         // Fits in the low 64 bits (hi == 0).
         let (hi, lo) = Epoch(7).to_wire();
-        assert_eq!(wire_epoch(Some(Epoch(7))), (Some(hi), Some(lo)));
+        assert_eq!(wire_epoch(Some(Epoch(7))), Some(EpochWire { hi, lo }));
 
         // Crosses the 64-bit boundary so hi is non-zero — guards against a
         // hi/lo swap that the all-low-bits case above cannot detect.
         let cross = Epoch((1u128 << 64) | 3);
         let (hi, lo) = cross.to_wire();
-        assert_eq!(wire_epoch(Some(cross)), (Some(hi), Some(lo)));
+        assert_eq!(wire_epoch(Some(cross)), Some(EpochWire { hi, lo }));
 
-        assert_eq!(wire_epoch(None), (None, None));
+        assert_eq!(wire_epoch(None), None);
     }
 }

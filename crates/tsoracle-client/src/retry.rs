@@ -331,12 +331,12 @@ fn classify_not_leader_hint(
     let _ = endpoint;
     let (hinted_endpoint, hint_epoch) = match decode_leader_hint(&status) {
         LeaderHintLookup::Decoded(hint) => {
-            // Both halves are present together or absent together; reassemble
-            // the 128-bit epoch only when the server populated them.
-            let epoch = match (hint.leader_epoch_hi, hint.leader_epoch_lo) {
-                (Some(hi), Some(lo)) => Some(Epoch::from_wire(hi, lo).0),
-                _ => None,
-            };
+            // `leader_epoch` is present in full or absent — the nested
+            // `EpochWire` makes a half-populated epoch unrepresentable — so
+            // reassembly is a single map with no partial-pair case.
+            let epoch = hint
+                .leader_epoch
+                .map(|epoch| Epoch::from_wire(epoch.hi, epoch.lo).0);
             (hint.leader_endpoint, epoch)
         }
         LeaderHintLookup::Absent => {
@@ -636,8 +636,7 @@ mod tests {
         pool.record_success("a:1", 5);
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
             leader_endpoint: Some("b:1".into()),
-            leader_epoch_hi: Some(0),
-            leader_epoch_lo: Some(7),
+            leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 7 }),
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
             AttemptOutcome::LeaderHint { endpoint, epoch } => {
@@ -666,13 +665,11 @@ mod tests {
 
             let fresh = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
                 leader_endpoint: Some("c:1".into()),
-                leader_epoch_hi: Some(0),
-                leader_epoch_lo: Some(9),
+                leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 9 }),
             });
             let stale = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
                 leader_endpoint: Some("b:1".into()),
-                leader_epoch_hi: Some(0),
-                leader_epoch_lo: Some(4),
+                leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 4 }),
             });
             let ordered = if stale_first {
                 vec![stale, fresh]
@@ -713,8 +710,7 @@ mod tests {
         pool.record_success("a:1", 10);
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
             leader_endpoint: Some("b:1".into()),
-            leader_epoch_hi: Some(0),
-            leader_epoch_lo: Some(5),
+            leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
             AttemptOutcome::StaleLeaderHint(status) => {
@@ -740,8 +736,7 @@ mod tests {
         pool.record_success("a:1", 10);
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
             leader_endpoint: Some("b:1".into()),
-            leader_epoch_hi: None,
-            leader_epoch_lo: None,
+            leader_epoch: None,
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
             AttemptOutcome::LeaderHint { endpoint, epoch } => {
@@ -762,8 +757,7 @@ mod tests {
         let pool = ChannelPool::new(vec!["a:1".into()], None, true, RetryPolicy::default());
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
             leader_endpoint: Some("http://attacker:1".into()),
-            leader_epoch_hi: Some(0),
-            leader_epoch_lo: Some(7),
+            leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 7 }),
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
             AttemptOutcome::HintRejected(_) => {}
@@ -883,8 +877,7 @@ mod tests {
                 // epoch-monotone gate drops it: AttemptOutcome::StaleLeaderHint.
                 Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
                     leader_endpoint: Some("b:1".into()),
-                    leader_epoch_hi: Some(0),
-                    leader_epoch_lo: Some(5),
+                    leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
                 }))
             }
         }

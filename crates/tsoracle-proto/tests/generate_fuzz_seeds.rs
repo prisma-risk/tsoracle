@@ -23,7 +23,7 @@
 use prost::Message;
 use std::fs;
 use std::path::PathBuf;
-use tsoracle_proto::v1::{GetTsRequest, GetTsResponse, LeaderHint};
+use tsoracle_proto::v1::{EpochWire, GetTsRequest, GetTsResponse, LeaderHint};
 
 fn fuzz_corpus_dir(target: &str) -> PathBuf {
     PathBuf::from("../..").join("fuzz/corpus").join(target)
@@ -95,11 +95,10 @@ fn generate_leader_hint_seeds() {
     write_seed(target, "seed_empty", &[]);
     write_seed(
         target,
-        "seed_both_none",
+        "seed_no_epoch",
         &LeaderHint {
             leader_endpoint: None,
-            leader_epoch_hi: None,
-            leader_epoch_lo: None,
+            leader_epoch: None,
         }
         .encode_to_vec(),
     );
@@ -108,8 +107,7 @@ fn generate_leader_hint_seeds() {
         "seed_typical",
         &LeaderHint {
             leader_endpoint: Some("127.0.0.1:50551".into()),
-            leader_epoch_hi: Some(0),
-            leader_epoch_lo: Some(1),
+            leader_epoch: Some(EpochWire { hi: 0, lo: 1 }),
         }
         .encode_to_vec(),
     );
@@ -118,8 +116,10 @@ fn generate_leader_hint_seeds() {
         "seed_long_endpoint",
         &LeaderHint {
             leader_endpoint: Some("a".repeat(512)),
-            leader_epoch_hi: Some(u64::MAX),
-            leader_epoch_lo: Some(u64::MAX),
+            leader_epoch: Some(EpochWire {
+                hi: u64::MAX,
+                lo: u64::MAX,
+            }),
         }
         .encode_to_vec(),
     );
