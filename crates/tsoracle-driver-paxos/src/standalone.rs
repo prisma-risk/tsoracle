@@ -56,10 +56,19 @@ where
     /// needs no `Mutex` because `start`/`stop` take `&mut self`. `None`
     /// covers stop-before-start, double-stop, and stop-after-exit.
     task: Option<ApplyTask>,
-    /// Decided-log cursor for the synchronous [`Self::step`] / [`Self::apply_once`]
-    /// stepping path, seeded past any recovered suffix. The async apply task
-    /// keeps its own task-local cursor; a host is driven by exactly one path.
-    step_cursor: Mutex<u64>,
+    /// Decided-log cursor for the apply path, seeded once in [`Self::new`] past
+    /// any recovered suffix so the first drain after construction does not
+    /// re-read the entries the constructor already folded.
+    ///
+    /// Shared (cloned `Arc`) by both drive paths: the synchronous
+    /// [`Self::step`] / [`Self::apply_once`] stepping path locks it directly,
+    /// and [`Self::start`]'s spawned apply task ([`ApplyEngine::spawn`]) clones
+    /// it and locks it per drain. A host is driven by exactly one path, so the
+    /// lock is uncontended; making the seed a single shared value is what keeps
+    /// the async task from re-draining the whole decided log from index 0 on
+    /// every startup (the two paths can no longer disagree on where recovery
+    /// left off).
+    apply_cursor: Arc<Mutex<u64>>,
 }
 
 impl<S> StandaloneHost<S>
@@ -93,9 +102,15 @@ where
         // allocator below the prior ceiling. Folding the recovered decided
         // suffix here learns this node's highest durable seq and lifts the
         // counter above it, so a freshly minted seq can only be satisfied by
-        // this lifetime's own barrier. The apply task re-drains from its own
-        // cursor on start; the fold is idempotent (max over advances and
-        // per-node seqs), so seeding the shared state early is safe.
+        // this lifetime's own barrier.
+        //
+        // The same recovery fold also yields the recovered decided index, which
+        // seeds `apply_cursor`: whichever drive path runs (sync stepping or the
+        // spawned apply task) resumes from where this fold left off rather than
+        // re-draining the whole decided log from 0. The fold is idempotent (max
+        // over advances and per-node seqs), so the worst the old cursor-from-0
+        // behaviour did was redundant work; seeding the cursor here removes that
+        // O(decided-log) startup cost on long-lived nodes.
         let engine = ApplyEngine::new(policy);
         let mut recovery_cursor = 0u64;
         engine.recover(&omnipaxos, &mut recovery_cursor);
@@ -109,7 +124,7 @@ where
             leader_stream: Mutex::new(leader_stream),
             engine,
             task: None,
-            step_cursor: Mutex::new(recovery_cursor),
+            apply_cursor: Arc::new(Mutex::new(recovery_cursor)),
         }
     }
 
@@ -141,10 +156,14 @@ where
             "StandaloneHost::start called while already running",
         );
 
-        self.task = Some(
-            self.engine
-                .spawn(self.runner.apply_notify(), self.omnipaxos.clone()),
-        );
+        // Hand the apply task the shared cursor (seeded in `new` past the
+        // recovered suffix) so it resumes there instead of re-draining the
+        // decided log from 0 on its first wake.
+        self.task = Some(self.engine.spawn(
+            self.runner.apply_notify(),
+            self.omnipaxos.clone(),
+            self.apply_cursor.clone(),
+        ));
         self.runner.start(sink);
     }
 
@@ -187,10 +206,11 @@ where
     }
 
     /// Apply newly-decided entries into the high-water state and snapshot per
-    /// policy, advancing the step cursor. The synchronous sibling of the async
-    /// apply task; idempotent (max over advances and per-node barrier seqs).
+    /// policy, advancing the shared apply cursor. The synchronous sibling of
+    /// the async apply task; idempotent (max over advances and per-node barrier
+    /// seqs).
     pub fn apply_once(&self) {
-        let mut cursor = self.step_cursor.lock();
+        let mut cursor = self.apply_cursor.lock();
         self.engine.apply_step(&self.omnipaxos, &mut cursor);
     }
 
@@ -412,6 +432,135 @@ mod tests {
         <HighWaterCommand as omnipaxos::storage::Entry>::Snapshot: Send,
     {
         let _ = StandaloneHost::<S>::builder();
+    }
+
+    /// A `StandaloneHost` rebuilt over a decided log (the post-restart shape)
+    /// must seed its apply cursor at the recovered decided index, not 0. The
+    /// recovery fold in `new` is idempotent, so a cursor of 0 is *correct* but
+    /// re-drains the entire decided log on the apply task's first wake —
+    /// O(decided-log) redundant work on every long-lived node's startup. The
+    /// recovered seed is the single shared `apply_cursor` both drive paths
+    /// consume (the spawned apply task clones this exact `Arc`), so asserting
+    /// it here pins the value the apply task begins from.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn apply_cursor_is_seeded_from_recovered_decided_suffix() {
+        use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+        use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
+        use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
+
+        type Handle = Arc<Mutex<OmniPaxos<HighWaterCommand, MemStorage<HighWaterCommand>>>>;
+
+        let network: Arc<MemNetwork<HighWaterCommand>> = Arc::new(MemNetwork::new());
+        let node_ids = vec![1u64, 2, 3];
+        let cluster_config = ClusterConfig {
+            configuration_id: 1,
+            nodes: node_ids.clone(),
+            flexible_quorum: None,
+        };
+        let mut handles: Vec<(u64, Handle)> = Vec::new();
+        let mut inboxes: Vec<(u64, mpsc::Receiver<Message<HighWaterCommand>>)> = Vec::new();
+        for &node_id in &node_ids {
+            let server_config = ServerConfig {
+                pid: node_id,
+                election_tick_timeout: 5,
+                resend_message_tick_timeout: 5,
+                ..Default::default()
+            };
+            let config = OmniPaxosConfig {
+                cluster_config: cluster_config.clone(),
+                server_config,
+            };
+            let omnipaxos = config
+                .build(MemStorage::<HighWaterCommand>::new())
+                .expect("build omnipaxos");
+            inboxes.push((node_id, network.register(node_id)));
+            handles.push((node_id, Arc::new(Mutex::new(omnipaxos))));
+        }
+
+        // Drive ticks + message routing until the cluster decides our appended
+        // entries. Returns once `predicate` holds; panics after `max_ticks`.
+        let mut drive_until = |predicate: &dyn Fn() -> bool, max_ticks: usize| {
+            for _ in 0..max_ticks {
+                let mut outgoing = Vec::new();
+                for (_, handle) in &handles {
+                    let mut omnipaxos = handle.lock();
+                    omnipaxos.tick();
+                    outgoing.extend(omnipaxos.outgoing_messages());
+                }
+                for message in outgoing {
+                    network.deliver_now(message);
+                }
+                for (node_id, inbox) in &mut inboxes {
+                    while let Ok(message) = inbox.try_recv() {
+                        let handle = &handles
+                            .iter()
+                            .find(|(id, _)| id == node_id)
+                            .expect("node present")
+                            .1;
+                        handle.lock().handle_incoming(message);
+                    }
+                }
+                if predicate() {
+                    return;
+                }
+            }
+            panic!("predicate did not hold within {max_ticks} ticks");
+        };
+
+        let leader_id = || {
+            handles
+                .iter()
+                .find_map(|(_, handle)| handle.lock().get_current_leader())
+        };
+        drive_until(&|| leader_id().is_some(), 500);
+        let leader = leader_id().expect("leader elected");
+        let leader_handle = handles
+            .iter()
+            .find(|(id, _)| *id == leader)
+            .expect("leader present")
+            .1
+            .clone();
+
+        // Decide three Advance entries on the leader.
+        {
+            let mut omnipaxos = leader_handle.lock();
+            for at_least in [10u64, 20, 30] {
+                omnipaxos
+                    .append(HighWaterCommand::Advance(AdvancePayload { at_least }))
+                    .expect("append on leader");
+            }
+        }
+        drive_until(
+            &|| {
+                handles
+                    .iter()
+                    .all(|(_, handle)| handle.lock().get_decided_idx() >= 3)
+            },
+            500,
+        );
+
+        let recovered_decided = leader_handle.lock().get_decided_idx();
+        assert!(
+            recovered_decided >= 3,
+            "fixture must produce a non-empty decided log",
+        );
+
+        // Build a fresh host over the already-decided handle (restart shape).
+        let host = StandaloneHost::new(
+            leader_handle.clone(),
+            leader,
+            Vec::new(),
+            Duration::from_millis(2),
+            SnapshotPolicy::disabled(),
+        );
+
+        assert_eq!(
+            *host.apply_cursor.lock(),
+            recovered_decided,
+            "apply cursor must be seeded at the recovered decided index, not re-drained from 0",
+        );
     }
 
     #[test]
