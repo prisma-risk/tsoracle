@@ -129,7 +129,13 @@ pub(crate) async fn issue_rpc(
                 continue;
             }
             AttemptOutcome::HintRejected(status) => {
-                pool.clear_leader();
+                // A NOT_LEADER whose hint we could not act on — absent or
+                // malformed trailer, or a hinted endpoint dropped by the
+                // TLS-downgrade guard — is not evidence the cached leader is
+                // wrong, only that this peer could not redirect us. Leave the
+                // cache intact (clearing it stampedes every coalesced caller
+                // back onto a cold worklist on each flap) and advance the
+                // worklist, preserving the status to surface once exhausted.
                 last_err = Some(ClientError::Rpc(status));
                 attempt_index = attempt_index.saturating_add(1);
                 continue;
@@ -742,5 +748,88 @@ mod tests {
             AttemptOutcome::HintRejected(_) => {}
             other => panic!("expected HintRejected, got {other:?}"),
         }
+    }
+
+    /// A NOT_LEADER answer that carries no actionable hint (here: no trailer
+    /// at all → `AttemptOutcome::HintRejected`) must leave the cached leader
+    /// in place. The cached leader is not evidence-wrong just because the
+    /// contacted peer could not redirect us; clearing it stampedes every
+    /// coalesced caller back onto a cold worklist on each NOT_LEADER flap.
+    ///
+    /// Drives the real `issue_rpc` loop against a loopback fake server so the
+    /// `attempt → classify_not_leader_hint → HintRejected` path — and the
+    /// loop's reaction to it — is exercised end to end, not stubbed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hint_rejected_preserves_cached_leader() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct HintlessFollower;
+
+        #[tonic::async_trait]
+        impl TsoService for HintlessFollower {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                // No `tsoracle-leader-hint-bin` trailer → LeaderHintLookup::Absent
+                // → AttemptOutcome::HintRejected in the retry loop.
+                Err(tonic::Status::failed_precondition("not leader"))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(HintlessFollower))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let endpoint = format!("http://{addr}");
+        let pool = ChannelPool::new(vec![endpoint.clone()], None, false, short_policy());
+
+        // Wait until the fake server accepts and replies FAILED_PRECONDITION.
+        // The first successful connect also caches the channel in the pool, so
+        // the later `issue_rpc` reaches the RPC layer instead of racing the dial.
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(mut client) = pool.client(&endpoint).await {
+                let replied_not_leader = client
+                    .get_ts(tsoracle_proto::v1::GetTsRequest { count: 1 })
+                    .await
+                    .err()
+                    .is_some_and(|status| status.code() == tonic::Code::FailedPrecondition);
+                if replied_not_leader {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "fake follower never came up",
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Seed a cached leader, as a prior successful RPC against it would.
+        pool.record_success(&endpoint, 1);
+        assert_eq!(pool.cached_leader().as_deref(), Some(endpoint.as_str()));
+
+        // The only endpoint answers NOT_LEADER without a usable hint, so the
+        // loop exhausts the worklist and surfaces the preserved status.
+        let result = issue_rpc(&pool, 1).await;
+        assert!(result.is_err(), "hintless NOT_LEADER must surface as Err");
+
+        assert_eq!(
+            pool.cached_leader().as_deref(),
+            Some(endpoint.as_str()),
+            "HintRejected (absent/malformed/TLS-rejected hint) must not \
+             invalidate the cached leader",
+        );
     }
 }

@@ -33,7 +33,7 @@ The client never asks "who's the leader" before issuing an RPC. It picks an endp
 
 - **`Ok(response)`** — the endpoint is the leader. Cache it.
 - **`Err(FAILED_PRECONDITION)` with a `tsoracle-leader-hint-bin` trailer pointing at an unvisited endpoint** — move the hinted endpoint to the front of the retry worklist and try it next.
-- **`Err(FAILED_PRECONDITION)` without a usable hint** — clear the cached leader, fall back to the next endpoint in the worklist (round-robin across configured endpoints).
+- **`Err(FAILED_PRECONDITION)` without a usable hint** — fall back to the next endpoint in the worklist (round-robin across configured endpoints). The cached leader is left in place: an unactionable NOT_LEADER (no trailer, a malformed trailer, or a hint dropped by the TLS-downgrade guard) is not evidence the cached leader is wrong, and clearing it would stampede every coalesced caller back onto a cold worklist on each flap.
 - **Any other error** — try the next endpoint in the worklist.
 
 The implementation is in `crates/tsoracle-client/src/retry.rs::issue_rpc`. The worklist starts with the cached leader (if any) followed by the configured endpoints in round-robin order; each endpoint is tried at most once per RPC. If a `FAILED_PRECONDITION` response carries a usable leader hint, that endpoint is moved to the front of the current worklist. Other gRPC statuses are recorded and the client continues through the remaining endpoints. If the worklist is exhausted without success, the last error is returned (or `ClientError::NoReachableEndpoints` if nothing was tried).
