@@ -154,10 +154,18 @@ async fn tls_handshake_fails_without_ca() {
     .expect("build does not connect")
     .get_ts()
     .await;
+    // The coalescing driver fans every per-RPC error out through
+    // `clone_client_error` (even to a lone waiter), so an eager-handshake
+    // `Transport` failure reaches the caller as `TransportFanout`, never the
+    // raw `Transport`. `NoReachableEndpoints` remains the retry-exhaustion
+    // fallback.
     match result {
         Err(tsoracle_client::ClientError::Transport(_))
+        | Err(tsoracle_client::ClientError::TransportFanout(_))
         | Err(tsoracle_client::ClientError::NoReachableEndpoints) => {}
-        other => panic!("expected Transport/NoReachableEndpoints, got {other:?}"),
+        other => {
+            panic!("expected Transport/TransportFanout/NoReachableEndpoints, got {other:?}")
+        }
     }
     booted.shutdown().await.expect("server exit");
 }
@@ -500,13 +508,17 @@ async fn mtls_handshake_fails_without_client_identity() {
     // The mTLS failure mode is tonic-version dependent: the channel may open
     // lazily and the handshake error surface during the RPC as `Rpc` with
     // code `Unknown` ("transport error"), or the retry loop may exhaust to
-    // `NoReachableEndpoints`, or the eager handshake may fail with `Transport`.
-    // All three are valid signals of "server rejected the connection."
+    // `NoReachableEndpoints`, or the eager handshake may fail with `Transport`
+    // (which the coalescing driver fans out as `TransportFanout`). All are
+    // valid signals of "server rejected the connection."
     match result {
         Err(tsoracle_client::ClientError::Transport(_))
+        | Err(tsoracle_client::ClientError::TransportFanout(_))
         | Err(tsoracle_client::ClientError::NoReachableEndpoints)
         | Err(tsoracle_client::ClientError::Rpc(_)) => {}
-        other => panic!("expected Transport/NoReachableEndpoints/Rpc, got {other:?}"),
+        other => {
+            panic!("expected Transport/TransportFanout/NoReachableEndpoints/Rpc, got {other:?}")
+        }
     }
     booted.shutdown().await.expect("server exit");
 }

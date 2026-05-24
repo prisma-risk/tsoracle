@@ -243,6 +243,11 @@ async fn step_mtls_misconfigured(bundle: &certs::CertBundle) -> Result<()> {
         Err(ClientError::Transport(err)) => {
             println!("  [expected] mTLS without identity -> ClientError::Transport: {err}");
         }
+        Err(ClientError::TransportFanout(message)) => {
+            println!(
+                "  [expected] mTLS without identity -> ClientError::TransportFanout: {message}"
+            );
+        }
         Err(ClientError::NoReachableEndpoints) => {
             println!("  [expected] mTLS without identity -> NoReachableEndpoints");
         }

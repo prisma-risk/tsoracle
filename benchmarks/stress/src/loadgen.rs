@@ -22,7 +22,7 @@ use tsoracle_client::ClientError;
 
 pub fn is_transient(err: &ClientError) -> bool {
     match err {
-        ClientError::Transport(_) => true,
+        ClientError::Transport(_) | ClientError::TransportFanout(_) => true,
         ClientError::Rpc(status) => matches!(
             status.code(),
             Code::Unavailable

@@ -16,6 +16,15 @@ pub enum ClientError {
     NoReachableEndpoints,
     #[error("transport: {0}")]
     Transport(#[from] tonic::transport::Error),
+    /// A [`Self::Transport`] failure observed on one endpoint, fanned out to
+    /// the sibling waiters of a coalesced request chunk. `tonic::transport::Error`
+    /// is not `Clone`, so the originating value cannot be duplicated across
+    /// waiters; this variant carries its `Display` text instead. Distinct
+    /// from [`Self::NoReachableEndpoints`]: a single endpoint's transport
+    /// failed, *not* the whole cluster — collapsing the two would mislead
+    /// tracing/alerting on the receiving side.
+    #[error("transport (fanned out to coalesced waiter): {0}")]
+    TransportFanout(String),
     #[error("rpc: {0}")]
     Rpc(#[from] tonic::Status),
     #[error("invalid endpoint: {0}")]
