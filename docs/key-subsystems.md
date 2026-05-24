@@ -63,9 +63,16 @@ When a follower receives a `GetTs` RPC, it responds with `FAILED_PRECONDITION` (
 ```protobuf
 message LeaderHint {
   optional string leader_endpoint = 1;
-  optional uint64 leader_epoch = 2;
+  optional EpochWire leader_epoch = 2;
+}
+
+message EpochWire {
+  uint64 hi = 1;
+  uint64 lo = 2;
 }
 ```
+
+The 128-bit leader epoch travels as a nested `EpochWire` (two 64-bit halves, `hi` more significant) rather than two top-level `optional uint64` fields, so its presence implies *both* halves: the hint carries a complete epoch or none, and a half-populated (corrupt) epoch is unrepresentable on the wire.
 
 `leader_endpoint` is the *advertised tsoracle service address* of the current leader — the gRPC endpoint a client should retry against — not the underlying raft / consensus node ID. The driver provides this via [`LeaderState::Follower { leader_endpoint }`](consensus-integration.md#leadership_events); mapping consensus node IDs to advertised tsoracle endpoints is the driver's job, and the library never sees raw node IDs.
 

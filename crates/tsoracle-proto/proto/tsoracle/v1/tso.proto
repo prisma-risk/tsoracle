@@ -30,8 +30,17 @@ message GetTsResponse {
 // the leader.
 message LeaderHint {
   optional string leader_endpoint = 1;
-  // Leader epoch as two 64-bit halves (see GetTsResponse). Both are present
-  // or both absent.
-  optional uint64 leader_epoch_hi = 2;
-  optional uint64 leader_epoch_lo = 3;
+  // Leader epoch as a single nested message, so its presence implies both
+  // halves: the hint either carries a complete epoch or none. Bundling the
+  // halves makes a half-populated (corrupt) epoch unrepresentable on the
+  // wire and in the generated Rust types.
+  optional EpochWire leader_epoch = 2;
+}
+
+// The 128-bit leader epoch split into two 64-bit halves (`hi` is the more
+// significant half), matching `GetTsResponse.epoch_hi`/`epoch_lo`.
+// Lexicographic (hi, lo) order equals numeric order.
+message EpochWire {
+  uint64 hi = 1;
+  uint64 lo = 2;
 }
