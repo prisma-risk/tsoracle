@@ -117,14 +117,17 @@ pub(crate) async fn issue_rpc(
                 attempt_index = attempt_index.saturating_add(1);
                 continue;
             }
-            AttemptOutcome::StaleLeaderHint => {
+            AttemptOutcome::StaleLeaderHint(status) => {
                 #[cfg(feature = "metrics")]
                 metrics::counter!("tsoracle.client.leader_hint.stale.total").increment(1);
                 // A stale hint means the contacted peer is out of date,
-                // not that our cache is wrong. Keep the cache, advance
+                // not that our cache is wrong. Keep the cache and advance
                 // the worklist without backoff (this is still a
-                // FAILED_PRECONDITION redirect attempt — just one we
-                // refuse to follow).
+                // FAILED_PRECONDITION redirect attempt — just one we refuse
+                // to follow). Preserve the status as last_err so a worklist
+                // that empties after only stale redirects surfaces the real
+                // NOT_LEADER, not a misleading NoReachableEndpoints.
+                last_err = Some(ClientError::Rpc(status));
                 attempt_index = attempt_index.saturating_add(1);
                 continue;
             }
@@ -162,9 +165,11 @@ pub(crate) async fn issue_rpc(
 /// Per-attempt outcome. Surfaces FAILED_PRECONDITION redirects as
 /// their own variants so the caller can preserve the existing "no
 /// backoff on hint" behaviour while still applying backoff to other
-/// retriable failures. `StaleLeaderHint` carries no payload because
-/// it neither mutates the cache nor surfaces an error — it is purely
-/// the "skip this hint, keep going" signal.
+/// retriable failures. `StaleLeaderHint` carries the originating
+/// `FAILED_PRECONDITION` status: the arm does not mutate the cache, but it
+/// records the status as `last_err` so a worklist that empties after only
+/// stale redirects surfaces the real NOT_LEADER rather than the misleading
+/// `NoReachableEndpoints` fallback.
 #[cfg_attr(test, derive(Debug))]
 enum AttemptOutcome {
     Ok {
@@ -183,7 +188,7 @@ enum AttemptOutcome {
         /// future hints must meet to be honored.
         epoch: Option<u128>,
     },
-    StaleLeaderHint,
+    StaleLeaderHint(tonic::Status),
     HintRejected(tonic::Status),
     Err(ClientError),
 }
@@ -359,7 +364,7 @@ fn classify_not_leader_hint(
                     "tsoracle-client: dropping stale leader hint with epoch \
                      behind the cached leader's epoch",
                 );
-                AttemptOutcome::StaleLeaderHint
+                AttemptOutcome::StaleLeaderHint(status)
             }
         }
         None => AttemptOutcome::HintRejected(status),
@@ -680,9 +685,10 @@ mod tests {
 
     /// A well-formed hint whose `leader_epoch` is strictly less than
     /// the cached leader's epoch must be dropped — that is the whole
-    /// point of the epoch-monotone gate. The retry loop's
-    /// `StaleLeaderHint` arm consumes this outcome and continues
-    /// without mutating the cache.
+    /// point of the epoch-monotone gate. The outcome carries the
+    /// originating `FAILED_PRECONDITION` so the retry loop's
+    /// `StaleLeaderHint` arm can record it as `last_err`; the arm
+    /// continues without mutating the cache.
     #[test]
     fn classify_stale_epoch_hint_returns_stale_leader_hint() {
         let pool = ChannelPool::new(
@@ -698,7 +704,9 @@ mod tests {
             leader_epoch_lo: Some(5),
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
-            AttemptOutcome::StaleLeaderHint => {}
+            AttemptOutcome::StaleLeaderHint(status) => {
+                assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+            }
             other => panic!("expected StaleLeaderHint, got {other:?}"),
         }
         // Cache must be untouched.
@@ -831,5 +839,98 @@ mod tests {
             "HintRejected (absent/malformed/TLS-rejected hint) must not \
              invalidate the cached leader",
         );
+    }
+
+    /// When every endpoint in the worklist redirects us to a strictly
+    /// lower-epoch (stale) leader, the loop drops each hint and exhausts the
+    /// worklist. The surfaced error must be the originating
+    /// `FAILED_PRECONDITION`, not `NoReachableEndpoints` — the network was
+    /// fine, the peer just pointed at an out-of-date leader. Surfacing
+    /// `NoReachableEndpoints` would mislead callers during epoch transitions
+    /// and mixed-version clusters, where stale redirects are common.
+    ///
+    /// Drives the real `issue_rpc` loop against a loopback peer so the
+    /// `attempt → classify_not_leader_hint → StaleLeaderHint` path — and the
+    /// loop's `last_err` bookkeeping — is exercised end to end.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_leader_hint_surfaces_failed_precondition_not_no_reachable_endpoints() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct StaleHintingFollower;
+
+        #[tonic::async_trait]
+        impl TsoService for StaleHintingFollower {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                // NOT_LEADER with a well-formed hint at epoch 5 — strictly
+                // behind the epoch-10 leader the client has cached, so the
+                // epoch-monotone gate drops it: AttemptOutcome::StaleLeaderHint.
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: Some("b:1".into()),
+                    leader_epoch_hi: Some(0),
+                    leader_epoch_lo: Some(5),
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(StaleHintingFollower))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let endpoint = format!("http://{addr}");
+        let pool = ChannelPool::new(vec![endpoint.clone()], None, false, short_policy());
+
+        // Wait until the fake peer accepts and replies FAILED_PRECONDITION; the
+        // first successful connect also caches the channel so `issue_rpc` reaches
+        // the RPC layer instead of racing the dial.
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(mut client) = pool.client(&endpoint).await {
+                let replied_not_leader = client
+                    .get_ts(tsoracle_proto::v1::GetTsRequest { count: 1 })
+                    .await
+                    .err()
+                    .is_some_and(|status| status.code() == tonic::Code::FailedPrecondition);
+                if replied_not_leader {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "fake follower never came up",
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Cache the only endpoint as leader at epoch 10, so the epoch-5 hint is
+        // strictly stale and gets dropped rather than followed.
+        pool.record_success(&endpoint, 10);
+
+        let err = issue_rpc(&pool, 1)
+            .await
+            .expect_err("a stale-hint-only worklist must surface an error");
+        match err {
+            ClientError::Rpc(status) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "stale redirect must surface as FAILED_PRECONDITION",
+            ),
+            other => panic!(
+                "expected ClientError::Rpc(FailedPrecondition), got {other:?} \
+                 (NoReachableEndpoints means the StaleLeaderHint arm dropped last_err)"
+            ),
+        }
     }
 }
