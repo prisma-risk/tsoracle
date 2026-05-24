@@ -10,12 +10,14 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! Coverage for `Server::serve`, `Server::serve_with_shutdown`, and the
-//! watch-task panic translation path.
+//! Coverage for the leader-watch lifecycle plumbing on the serve path: a
+//! clean `Ok` when the caller's shutdown fires, `WatchStreamClosed` on a
+//! leadership-stream EOF, and `WatchPanic` when the watch task panics.
 //!
-//! `boot_server` (in `test_support`) uses `serve_with_listener`, so the
-//! `(addr-binding) serve*` entry points and their watch-panic plumbing have
-//! no other integration-test caller.
+//! These drive the server through `serve_with_listener` with a pre-bound
+//! listener (as `boot_server` in `test_support` does). Binding the listener
+//! up front and handing it over avoids the bind/drop/rebind race that an
+//! `addr`-binding `serve*` call would reintroduce (#248).
 
 use core::pin::Pin;
 use std::sync::Arc;
@@ -29,13 +31,11 @@ use tsoracle_core::{Epoch, SystemClock};
 use tsoracle_server::{Server, ServerError, test_fakes::InMemoryDriver};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn serve_with_shutdown_returns_ok_when_user_shutdown_fires() {
-    // Build a server on a known-free port, spawn `serve_with_shutdown`, then
-    // trigger the user-shutdown future. Asserts the function returns Ok and
-    // the spawned task drops the watch handle cleanly.
+async fn serve_with_listener_returns_ok_when_user_shutdown_fires() {
+    // Bind a listener, hand it to `serve_with_listener`, then trigger the
+    // user-shutdown future. Asserts the function returns Ok and the spawned
+    // task drops the watch handle cleanly.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener); // free the port; tonic will rebind
 
     let driver = Arc::new(InMemoryDriver::new());
     driver.become_leader(Epoch(1));
@@ -49,36 +49,34 @@ async fn serve_with_shutdown_returns_ok_when_user_shutdown_fires() {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let serve_task = tokio::spawn(async move {
         server
-            .serve_with_shutdown(addr, async {
+            .serve_with_listener(listener, async {
                 let _ = shutdown_rx.await;
             })
             .await
     });
 
-    // Give tonic a moment to bind, then trigger user shutdown.
+    // Give the server a moment to start accepting, then trigger user shutdown.
     tokio::time::sleep(Duration::from_millis(100)).await;
     shutdown_tx.send(()).unwrap();
 
     let outcome = tokio::time::timeout(Duration::from_secs(5), serve_task)
         .await
-        .expect("serve_with_shutdown must return after user shutdown")
+        .expect("serve_with_listener must return after user shutdown")
         .expect("spawned task panicked");
     assert!(outcome.is_ok(), "expected Ok, got {outcome:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn serve_method_resolves_when_watch_task_terminates() {
-    // `Server::serve(addr)` delegates to `serve_with_shutdown` with a
-    // never-resolving user-shutdown future; the only exit path is the
-    // watch task. Use a driver whose leadership stream closes immediately
-    // (no leader ever published) to drive that exit deterministically.
+async fn serve_with_listener_resolves_when_watch_task_terminates() {
+    // With a never-resolving user-shutdown future, the only exit path is the
+    // watch task — the same configuration `Server::serve` sets up internally.
+    // Use a driver whose leadership stream closes immediately (no leader ever
+    // published) to drive that exit deterministically.
     //
     // Per #72, an EOF on the leadership stream is anomalous: the watch task
-    // poisons serving state and returns `ServerError::WatchStreamClosed`.
-    // `serve` forwards that verbatim.
+    // poisons serving state and returns `ServerError::WatchStreamClosed`,
+    // which the serve loop forwards verbatim.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
 
     let driver: Arc<dyn ConsensusDriver> = Arc::new(ClosedStreamDriver);
 
@@ -88,7 +86,11 @@ async fn serve_method_resolves_when_watch_task_terminates() {
         .build()
         .unwrap();
 
-    let serve_task = tokio::spawn(async move { server.serve(addr).await });
+    let serve_task = tokio::spawn(async move {
+        server
+            .serve_with_listener(listener, futures::future::pending())
+            .await
+    });
     let outcome = tokio::time::timeout(Duration::from_secs(5), serve_task)
         .await
         .expect("serve must return after watch stream closes")
@@ -100,16 +102,14 @@ async fn serve_method_resolves_when_watch_task_terminates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn serve_with_shutdown_translates_watch_panic_to_server_error() {
+async fn serve_with_listener_translates_watch_panic_to_server_error() {
     // A driver whose `leadership_events()` panics on first poll triggers
     // `catch_unwind` in `into_router`, which republishes NotServing and
-    // re-raises. The outer `serve_with_shutdown` then surfaces it as
+    // re-raises. The outer serve loop then surfaces it as
     // `ServerError::WatchPanic`. This path exercises the catch_unwind
     // branch (server.rs:200-210), `panic_payload_to_string`, and the
     // join-handle error mapping in `join_to_server_result`.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
 
     let driver: Arc<dyn ConsensusDriver> = Arc::new(PanickingDriver);
 
@@ -122,7 +122,7 @@ async fn serve_with_shutdown_translates_watch_panic_to_server_error() {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let serve_task = tokio::spawn(async move {
         server
-            .serve_with_shutdown(addr, async {
+            .serve_with_listener(listener, async {
                 let _ = shutdown_rx.await;
             })
             .await
@@ -130,7 +130,7 @@ async fn serve_with_shutdown_translates_watch_panic_to_server_error() {
 
     let outcome = tokio::time::timeout(Duration::from_secs(5), serve_task)
         .await
-        .expect("serve_with_shutdown must return after watch panic")
+        .expect("serve_with_listener must return after watch panic")
         .expect("spawned task panicked");
     let _ = shutdown_tx; // unused; the watch arm exits first
 
