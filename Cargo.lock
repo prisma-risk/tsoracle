@@ -3431,9 +3431,12 @@ dependencies = [
 name = "tsoracle-server"
 version = "0.2.4"
 dependencies = [
+ "async-stream",
  "async-trait",
  "fail",
  "futures",
+ "hyper",
+ "hyper-util",
  "metrics",
  "metrics-util 0.19.1",
  "parking_lot",
@@ -3444,29 +3447,27 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-reflection",
+ "tower",
  "tracing",
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-proto",
  "tsoracle-yieldpoint",
+ "turmoil",
 ]
 
 [[package]]
 name = "tsoracle-tests"
 version = "0.1.4"
 dependencies = [
- "async-stream",
  "fail",
  "futures",
- "hyper",
- "hyper-util",
  "metrics",
  "metrics-util 0.19.1",
  "rcgen",
  "tokio",
  "tokio-stream",
  "tonic",
- "tower",
  "tsoracle-client",
  "tsoracle-core",
  "tsoracle-proto",
