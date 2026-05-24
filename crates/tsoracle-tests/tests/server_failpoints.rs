@@ -34,7 +34,7 @@ static FAILPOINT_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 #[tokio::test]
 async fn fence_recovers_after_transient_load_error() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let driver = Arc::new(InMemoryDriver::new());
     let server = Server::builder()
@@ -48,7 +48,7 @@ async fn fence_recovers_after_transient_load_error() {
 
     // Fire the transient error exactly once; the retry sees the failpoint
     // disabled and completes the fence.
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "server::fence::after_load_before_persist",
         "1*return(transient)",
     )
@@ -84,7 +84,7 @@ async fn fence_recovers_after_transient_load_error() {
 #[tokio::test]
 async fn fence_panic_after_persist_advances_durable_but_not_serving() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let driver = Arc::new(InMemoryDriver::new());
     let server = Server::builder()
@@ -95,7 +95,7 @@ async fn fence_panic_after_persist_advances_durable_but_not_serving() {
         .into_router()
         .expect("into_router is infallible without the reflection feature");
 
-    fail::cfg("server::fence::after_persist_before_publish", "panic").unwrap();
+    tsoracle_failpoint::fail::cfg("server::fence::after_persist_before_publish", "panic").unwrap();
 
     driver.become_leader(Epoch(1));
 
@@ -137,7 +137,7 @@ async fn fence_panic_after_persist_advances_durable_but_not_serving() {
 #[tokio::test]
 async fn panic_after_serving_published_poisons_state_when_handle_dropped() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let driver = Arc::new(InMemoryDriver::new());
     let server = Server::builder()
@@ -154,7 +154,7 @@ async fn panic_after_serving_published_poisons_state_when_handle_dropped() {
 
     let booted = boot_router(routes).await;
 
-    fail::cfg("server::fence::after_serving_published", "panic").unwrap();
+    tsoracle_failpoint::fail::cfg("server::fence::after_serving_published", "panic").unwrap();
     driver.become_leader(Epoch(1));
 
     wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
@@ -206,7 +206,7 @@ async fn panic_after_serving_published_poisons_state_when_handle_dropped() {
 #[tokio::test]
 async fn before_allocate_sleep_delays_get_ts() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let driver = Arc::new(InMemoryDriver::new());
     let server = Server::builder()
@@ -231,11 +231,11 @@ async fn before_allocate_sleep_delays_get_ts() {
         .await
         .unwrap();
 
-    fail::cfg("server::service::before_allocate", "sleep(150)").unwrap();
+    tsoracle_failpoint::fail::cfg("server::service::before_allocate", "sleep(150)").unwrap();
     let start = Instant::now();
     let result = client.get_ts().await;
     let elapsed = start.elapsed();
-    fail::cfg("server::service::before_allocate", "off").unwrap();
+    tsoracle_failpoint::fail::cfg("server::service::before_allocate", "off").unwrap();
 
     let err = result.err();
     assert!(
@@ -261,7 +261,7 @@ async fn before_allocate_sleep_delays_get_ts() {
 #[tokio::test]
 async fn extension_gate_held_sleep_delays_get_ts() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     // A 1ms failover_advance ensures the initial fence window expires almost
     // immediately, so the first get_ts hits WindowExhausted and calls
@@ -291,11 +291,11 @@ async fn extension_gate_held_sleep_delays_get_ts() {
         .await
         .unwrap();
 
-    fail::cfg("server::service::extension_gate_held", "sleep(150)").unwrap();
+    tsoracle_failpoint::fail::cfg("server::service::extension_gate_held", "sleep(150)").unwrap();
     let start = Instant::now();
     let result = client.get_ts().await;
     let elapsed = start.elapsed();
-    fail::cfg("server::service::extension_gate_held", "off").unwrap();
+    tsoracle_failpoint::fail::cfg("server::service::extension_gate_held", "off").unwrap();
 
     let err = result.err();
     assert!(

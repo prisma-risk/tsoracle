@@ -129,7 +129,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                         // above prior_max — hence the +1 below.
                         let prior_max = server.consensus.load_high_water().await?;
 
-                        crate::failpoint!(
+                        tsoracle_failpoint::failpoint!(
                             "server::fence::after_load_before_persist",
                             |arg: Option<String>| -> Result<(), ServerError> {
                                 let _ = arg;
@@ -160,7 +160,9 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                             .persist_high_water(requested, epoch)
                             .await?;
 
-                        crate::failpoint!("server::fence::after_persist_before_publish");
+                        tsoracle_failpoint::failpoint!(
+                            "server::fence::after_persist_before_publish"
+                        );
 
                         // Seed the allocator with both bounds: the floor pins
                         // the lower bound; committed_ceiling = actual is the
@@ -176,7 +178,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                         let _ = server.state_tx.send(ServingState::Serving);
                         drop(drain_guard);
 
-                        crate::failpoint!("server::fence::after_serving_published");
+                        tsoracle_failpoint::failpoint!("server::fence::after_serving_published");
                         Ok(())
                     }
                     .await;

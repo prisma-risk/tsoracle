@@ -69,12 +69,12 @@ fn blank_entry_at(index: u64) -> Entry<TestLeaderId, common::TestAppData, u64, c
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn panic_at_before_write_batch_leaves_log_empty() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
 
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::before_write_batch",
         "panic",
     )
@@ -96,7 +96,7 @@ async fn panic_at_before_write_batch_leaves_log_empty() {
         "expected JoinError::is_panic(), got {join_err:?}"
     );
 
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::before_write_batch",
         "off",
     )
@@ -124,14 +124,14 @@ async fn panic_at_before_write_batch_leaves_log_empty() {
 #[tokio::test]
 async fn return_at_after_write_before_sync_persists_entry() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
     let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
         RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
 
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::after_write_before_sync",
         "return",
     )
@@ -139,7 +139,7 @@ async fn return_at_after_write_before_sync_persists_entry() {
     let result = store
         .append(std::iter::once(blank_entry_at(42)), IOFlushed::noop())
         .await;
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::after_write_before_sync",
         "off",
     )
@@ -181,13 +181,13 @@ async fn seed_three_entries(db: &Arc<DB>) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn panic_at_truncate_before_write_batch_leaves_log_intact() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
     seed_three_entries(&db).await;
 
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::truncate::before_write_batch",
         "panic",
     )
@@ -207,7 +207,7 @@ async fn panic_at_truncate_before_write_batch_leaves_log_intact() {
         "expected JoinError::is_panic(), got {join_err:?}"
     );
 
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::truncate::before_write_batch",
         "off",
     )
@@ -235,7 +235,7 @@ async fn panic_at_truncate_before_write_batch_leaves_log_intact() {
 #[tokio::test]
 async fn return_at_truncate_after_write_before_sync_persists_truncation() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
@@ -243,13 +243,13 @@ async fn return_at_truncate_after_write_before_sync_persists_truncation() {
 
     let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
         RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::truncate::after_write_before_sync",
         "return",
     )
     .unwrap();
     let result = store.truncate_after(Some(log_id_at(1))).await;
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::truncate::after_write_before_sync",
         "off",
     )
@@ -281,13 +281,13 @@ async fn return_at_truncate_after_write_before_sync_persists_truncation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn panic_at_purge_before_write_batch_leaves_log_intact() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
     seed_three_entries(&db).await;
 
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::purge::before_write_batch",
         "panic",
     )
@@ -307,7 +307,7 @@ async fn panic_at_purge_before_write_batch_leaves_log_intact() {
         "expected JoinError::is_panic(), got {join_err:?}"
     );
 
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::purge::before_write_batch",
         "off",
     )
@@ -334,7 +334,7 @@ async fn panic_at_purge_before_write_batch_leaves_log_intact() {
 #[tokio::test]
 async fn return_at_purge_after_write_before_sync_persists_purge() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
@@ -342,13 +342,13 @@ async fn return_at_purge_after_write_before_sync_persists_purge() {
 
     let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
         RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::purge::after_write_before_sync",
         "return",
     )
     .unwrap();
     let result = store.purge(log_id_at(2)).await;
-    fail::cfg(
+    tsoracle_failpoint::fail::cfg(
         "tsoracle_openraft_toolkit::log_store::purge::after_write_before_sync",
         "off",
     )

@@ -14,14 +14,13 @@ tls-rustls = ["tsoracle-server/tls-rustls", "tsoracle-client/tls-rustls"]
 tls-native = ["tsoracle-server/tls-native", "tsoracle-client/tls-native"]
 # Mirror tsoracle-server's `failpoints` feature so the failpoint-driven
 # integration tests can be opted in. `cargo test -p tsoracle-tests --features failpoints`.
-failpoints = ["tsoracle-server/failpoints", "dep:fail"]
+failpoints = ["tsoracle-server/failpoints", "tsoracle-failpoint/failpoints"]
 # Opt-in mirror of `tsoracle-client`'s `metrics` feature so `client_metrics`
 # can drive the recorder-fake test that asserts the documented client signals.
 metrics = ["tsoracle-client/metrics", "dep:metrics", "dep:metrics-util", "dep:tokio-stream"]
 dst = ["dep:turmoil", "tsoracle-server/dst"]
 
 [dependencies]
-fail            = { workspace = true, optional = true }
 futures         = { workspace = true }
 metrics         = { workspace = true, optional = true }
 metrics-util    = { workspace = true, optional = true }
@@ -32,6 +31,7 @@ tonic           = { workspace = true }
 turmoil         = { version = "0.7", optional = true }
 tsoracle-client = { path = "../tsoracle-client" }
 tsoracle-core   = { path = "../tsoracle-core" }
+tsoracle-failpoint = { path = "../tsoracle-failpoint" }
 tsoracle-proto  = { path = "../tsoracle-proto" }
 tsoracle-server = { path = "../tsoracle-server", features = ["test-support"] }
 

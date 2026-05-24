@@ -15,8 +15,6 @@
 // for the lib's own unit tests; integration tests are separate compilation units.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
-#[macro_use]
-mod failpoint;
 mod fence;
 mod leader_hint;
 mod server;

@@ -21,7 +21,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 default            = ["rocksdb-log-store"]
 rocksdb-log-store  = ["dep:rocksdb"]
 test-fakes         = ["dep:parking_lot"]
-failpoints         = ["dep:fail", "fail/failpoints"]
+failpoints         = ["tsoracle-failpoint/failpoints"]
 
 [dependencies]
 async-trait      = { workspace = true }
@@ -35,7 +35,7 @@ thiserror        = { workspace = true }
 tokio            = { workspace = true }
 tokio-stream     = { workspace = true }
 tracing          = { workspace = true }
-fail             = { workspace = true, optional = true }
+tsoracle-failpoint = { workspace = true }
 
 [dev-dependencies]
 openraft         = { workspace = true, features = ["serde", "type-alias"] }

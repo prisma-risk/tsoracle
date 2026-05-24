@@ -14,7 +14,7 @@ categories    = ["database-implementations", "filesystem"]
 
 [features]
 default    = []
-failpoints = ["dep:fail", "fail/failpoints"]
+failpoints = ["tsoracle-failpoint/failpoints"]
 bt         = ["tsoracle-core/bt", "tsoracle-consensus/bt"]
 
 [package.metadata.docs.rs]
@@ -23,7 +23,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 async-trait        = { workspace = true }
-fail               = { workspace = true, optional = true }
 crc32c             = { workspace = true }
 fs2                = "0.4"
 futures            = { workspace = true }
@@ -34,6 +33,7 @@ tokio              = { workspace = true }
 tokio-stream       = { workspace = true }
 tsoracle-core      = { path = "../tsoracle-core", version = "0.2.1" }
 tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.6" }
+tsoracle-failpoint = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

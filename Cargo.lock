@@ -3312,7 +3312,6 @@ version = "0.1.6"
 dependencies = [
  "async-trait",
  "crc32c",
- "fail",
  "fs2",
  "futures",
  "libc",
@@ -3324,6 +3323,7 @@ dependencies = [
  "tokio-stream",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-failpoint",
 ]
 
 [[package]]
@@ -3374,11 +3374,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsoracle-failpoint"
+version = "0.1.0"
+dependencies = [
+ "fail",
+]
+
+[[package]]
 name = "tsoracle-openraft-toolkit"
 version = "0.1.7"
 dependencies = [
  "async-trait",
- "fail",
  "futures",
  "openraft",
  "parking_lot",
@@ -3391,6 +3397,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tsoracle-failpoint",
 ]
 
 [[package]]
@@ -3398,7 +3405,6 @@ name = "tsoracle-paxos-toolkit"
 version = "0.2.2"
 dependencies = [
  "async-trait",
- "fail",
  "futures",
  "omnipaxos",
  "parking_lot",
@@ -3414,6 +3420,7 @@ dependencies = [
  "tracing",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-failpoint",
 ]
 
 [[package]]
@@ -3433,7 +3440,6 @@ version = "0.2.4"
 dependencies = [
  "async-stream",
  "async-trait",
- "fail",
  "futures",
  "hyper",
  "hyper-util",
@@ -3451,6 +3457,7 @@ dependencies = [
  "tracing",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-failpoint",
  "tsoracle-proto",
  "tsoracle-yieldpoint",
  "turmoil",
@@ -3460,7 +3467,6 @@ dependencies = [
 name = "tsoracle-tests"
 version = "0.1.4"
 dependencies = [
- "fail",
  "futures",
  "metrics",
  "metrics-util 0.19.1",
@@ -3470,6 +3476,7 @@ dependencies = [
  "tonic",
  "tsoracle-client",
  "tsoracle-core",
+ "tsoracle-failpoint",
  "tsoracle-proto",
  "tsoracle-server",
  "turmoil",

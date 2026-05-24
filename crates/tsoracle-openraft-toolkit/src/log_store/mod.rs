@@ -377,10 +377,10 @@ where
         // fsync: openraft treats the `IOFlushed` callback below as a durability
         // signal, so the entries must reach disk before completion is reported.
         let wo = Self::write_sync_opts();
-        crate::failpoint!("tsoracle_openraft_toolkit::log_store::before_write_batch");
+        tsoracle_failpoint::failpoint!("tsoracle_openraft_toolkit::log_store::before_write_batch");
         let result = self.db.write_opt(batch, &wo).map_err(io::Error::other);
 
-        crate::failpoint!(
+        tsoracle_failpoint::failpoint!(
             "tsoracle_openraft_toolkit::log_store::after_write_before_sync",
             |_arg: Option<String>| -> Result<(), io::Error> {
                 Err(io::Error::other(
@@ -420,9 +420,11 @@ where
         // recovery, contradicting the durable vote/append that drove it (see
         // `write_sync_opts`).
         let wo = Self::write_sync_opts();
-        crate::failpoint!("tsoracle_openraft_toolkit::log_store::truncate::before_write_batch");
+        tsoracle_failpoint::failpoint!(
+            "tsoracle_openraft_toolkit::log_store::truncate::before_write_batch"
+        );
         self.db.write_opt(batch, &wo).map_err(io::Error::other)?;
-        crate::failpoint!(
+        tsoracle_failpoint::failpoint!(
             "tsoracle_openraft_toolkit::log_store::truncate::after_write_before_sync",
             |_arg: Option<String>| -> Result<(), io::Error> {
                 Err(io::Error::other(
@@ -465,9 +467,11 @@ where
         // atomic batch; losing them would let recovery rebuild log state from a
         // prefix openraft believes is already purged (see `write_sync_opts`).
         let wo = Self::write_sync_opts();
-        crate::failpoint!("tsoracle_openraft_toolkit::log_store::purge::before_write_batch");
+        tsoracle_failpoint::failpoint!(
+            "tsoracle_openraft_toolkit::log_store::purge::before_write_batch"
+        );
         self.db.write_opt(batch, &wo).map_err(io::Error::other)?;
-        crate::failpoint!(
+        tsoracle_failpoint::failpoint!(
             "tsoracle_openraft_toolkit::log_store::purge::after_write_before_sync",
             |_arg: Option<String>| -> Result<(), io::Error> {
                 Err(io::Error::other(
