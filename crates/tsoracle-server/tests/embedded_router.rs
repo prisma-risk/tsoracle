@@ -34,7 +34,9 @@ async fn embedded_router_serves_via_caller_owned_listener() {
 
     // Clone state_rx before into_router consumes the Server.
     let mut state_rx = tsoracle.state_rx.clone();
-    let (router, _leader_watch) = tsoracle.into_router();
+    let (router, _leader_watch) = tsoracle
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
 
     let booted = boot_router(router).await;
 
@@ -84,7 +86,9 @@ async fn embedded_router_poisons_when_leadership_stream_closes() {
     let tsoracle = Server::builder().consensus_driver(driver).build().unwrap();
 
     let mut state_rx = tsoracle.state_rx.clone();
-    let (router, leader_watch) = tsoracle.into_router();
+    let (router, leader_watch) = tsoracle
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
 
     // Drop the JoinHandle so the test exercises the embedder shape that
     // never observes watch-task termination directly.

@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Capture state_rx BEFORE consuming server via into_router.
     let mut state_rx = server.state_rx.clone();
-    let (router, _watch_handle) = server.into_router();
+    let (router, _watch_handle) = server.into_router()?;
 
     let addr = bind_unused().await;
     let (sd_tx, sd_rx) = oneshot::channel::<()>();
