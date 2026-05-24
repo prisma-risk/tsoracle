@@ -126,8 +126,11 @@ impl ChannelPool {
     }
 
     /// Internal helper returning the full `CachedLeader` only when it is
-    /// within the configured `leader_ttl`. Used by `iter_round_robin`,
-    /// `accept_hint`, and the test surface.
+    /// within the configured `leader_ttl`. Used by `cached_leader` (and
+    /// thus `iter_round_robin`) and the test surface. The monotone-forward
+    /// freshness check in `compare_and_set_leader` is inlined there instead
+    /// of routed through this helper, because that path must hold the lock
+    /// across both the check and the write.
     pub(crate) fn fresh_leader(&self) -> Option<CachedLeader> {
         let guard = self.leader.lock();
         match &*guard {
@@ -136,18 +139,6 @@ impl ChannelPool {
             }
             _ => None,
         }
-    }
-
-    /// Install or refresh the cached leader entry. `epoch` may be `None`
-    /// only when the source did not carry one (old-server `NOT_LEADER`
-    /// hints). Successful RPCs always carry the leader's epoch via
-    /// `GetTsResponse` and go through `record_success`.
-    pub(crate) fn set_leader_with(&self, endpoint: String, epoch: Option<u128>) {
-        *self.leader.lock() = Some(CachedLeader {
-            endpoint,
-            epoch,
-            last_used: Instant::now(),
-        });
     }
 
     /// Record a successful RPC against `endpoint` that observed the
@@ -172,22 +163,38 @@ impl ChannelPool {
         }
     }
 
-    /// Decide whether to honor a `LeaderHint` carrying `hint_epoch`.
-    /// The rule is monotone-forward: a hint is rejected only when the
-    /// cache is fresh (within `leader_ttl`), both epochs are known, and
-    /// the hint's epoch is strictly less than the cached one. All
-    /// other combinations accept the hint — including the bootstrap
-    /// cases where either side has no epoch yet, so a delayed
-    /// NOT_LEADER from an old epoch cannot flap the cache backward
-    /// once a higher epoch has been observed.
-    pub(crate) fn accept_hint(&self, hint_epoch: Option<u128>) -> bool {
-        match self.fresh_leader() {
-            None => true,
-            Some(cached) => match (cached.epoch, hint_epoch) {
-                (Some(cached_epoch), Some(hint_epoch)) => hint_epoch >= cached_epoch,
-                _ => true,
-            },
+    /// Atomically apply the monotone-forward rule and, if it holds, seat
+    /// `endpoint`/`epoch` as the cached leader. Returns whether the write
+    /// happened.
+    ///
+    /// The check and the write share one lock acquisition, so a concurrent
+    /// `record_success(higher_epoch)` cannot land between "the hint passed
+    /// the gate" and "the hint was written" and then be clobbered by the
+    /// lower-epoch hint. The rule itself is unchanged from the former
+    /// `accept_hint` gate: reject only when the cache is fresh (within
+    /// `leader_ttl`), both epochs are known, and the hint's epoch is
+    /// strictly below the cached one. An absent or expired entry, or
+    /// either epoch being unknown, accepts the hint — covering the
+    /// bootstrap and old-server cases.
+    pub(crate) fn compare_and_set_leader(&self, endpoint: String, epoch: Option<u128>) -> bool {
+        let mut guard = self.leader.lock();
+        let accept = match &*guard {
+            Some(cached) if cached.last_used.elapsed() < self.retry_policy.leader_ttl => {
+                match (cached.epoch, epoch) {
+                    (Some(cached_epoch), Some(hint_epoch)) => hint_epoch >= cached_epoch,
+                    _ => true,
+                }
+            }
+            _ => true,
+        };
+        if accept {
+            *guard = Some(CachedLeader {
+                endpoint,
+                epoch,
+                last_used: Instant::now(),
+            });
         }
+        accept
     }
 
     /// Returns a tonic client for `endpoint`, opening the channel on first use.
@@ -356,47 +363,10 @@ mod tests {
         assert_eq!(order, vec!["a:1", "b:1", "c:1"]);
     }
 
-    /// Direct table-test of the epoch-monotone rule. The rule is the
-    /// safety predicate quoted in the cache-invalidation issue — once
-    /// the cache pins a leader at some epoch, a delayed hint from a
-    /// lower epoch must be rejected regardless of arrival order. The
-    /// bootstrap cases (no cache, no cached epoch, no hint epoch) all
-    /// accept so the client remains useful against the current server
-    /// that does not populate the leader epoch.
-    #[test]
-    fn accept_hint_enforces_monotone_forward_epoch() {
-        let pool = ChannelPool::new(
-            vec!["a:1".into(), "b:1".into()],
-            None,
-            false,
-            RetryPolicy::default(),
-        );
-        // Empty cache: any hint is accepted, including a `None` epoch.
-        assert!(pool.accept_hint(None));
-        assert!(pool.accept_hint(Some(7)));
-
-        // Pin the cache at epoch 5. A lower-epoch hint is now stale;
-        // an equal-or-higher hint, or a hint that carries no epoch at
-        // all (old-server fallback), is accepted.
-        pool.record_success("b:1", 5);
-        assert!(!pool.accept_hint(Some(4)));
-        assert!(pool.accept_hint(Some(5)));
-        assert!(pool.accept_hint(Some(6)));
-        // Old-server fallback: a hint without an epoch must remain
-        // acceptable until the server is upgraded to populate one.
-        assert!(pool.accept_hint(None));
-
-        // Promoting via a higher-epoch hint must not allow the older
-        // epoch to flap the cache backward on a later arrival.
-        pool.set_leader_with("a:1".into(), Some(9));
-        assert!(!pool.accept_hint(Some(4)));
-        assert!(!pool.accept_hint(Some(8)));
-    }
-
     /// A higher-epoch hint must win regardless of arrival order — the
-    /// `accept_hint` gate plus `set_leader_with` is what enforces this.
-    /// Two orderings of the same pair of hints are exercised here; both
-    /// must land the pool on the higher-epoch endpoint.
+    /// single-lock `compare_and_set_leader` is what enforces this. Two
+    /// orderings of the same pair of hints are exercised here; both must
+    /// land the pool on the higher-epoch endpoint.
     #[test]
     fn higher_epoch_hint_wins_regardless_of_arrival_order() {
         for (first_endpoint, first_epoch, second_endpoint, second_epoch, winner) in [
@@ -409,18 +379,83 @@ mod tests {
                 false,
                 RetryPolicy::default(),
             );
-            if pool.accept_hint(Some(first_epoch)) {
-                pool.set_leader_with(first_endpoint.into(), Some(first_epoch));
-            }
-            if pool.accept_hint(Some(second_epoch)) {
-                pool.set_leader_with(second_endpoint.into(), Some(second_epoch));
-            }
+            pool.compare_and_set_leader(first_endpoint.into(), Some(first_epoch));
+            pool.compare_and_set_leader(second_endpoint.into(), Some(second_epoch));
             assert_eq!(
                 pool.cached_leader().as_deref(),
                 Some(winner),
                 "ordering {first_endpoint}@{first_epoch} then {second_endpoint}@{second_epoch}"
             );
         }
+    }
+
+    /// `compare_and_set_leader` folds the monotone-forward check and the
+    /// write into one lock acquisition, closing the TOCTOU window that
+    /// existed when the gate (`accept_hint`) and the write
+    /// (`set_leader_with`) were separate lock acquisitions. The return
+    /// value reports whether the write happened, and — crucially — a
+    /// rejected hint must leave the cache exactly where it was.
+    #[test]
+    fn compare_and_set_leader_checks_and_writes_atomically() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        // Empty cache: any hint is accepted and seated, even a `None` epoch.
+        assert!(pool.compare_and_set_leader("a:1".into(), None));
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+
+        // Pin the cache at epoch 5 via a confirmed RPC.
+        pool.record_success("b:1", 5);
+
+        // A lower-epoch hint is rejected and must not move the cache.
+        assert!(!pool.compare_and_set_leader("a:1".into(), Some(4)));
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
+
+        // An equal-epoch hint is accepted (the rule is `>=`) and seated.
+        assert!(pool.compare_and_set_leader("a:1".into(), Some(5)));
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+
+        // A strictly higher epoch promotes the cache forward.
+        assert!(pool.compare_and_set_leader("b:1".into(), Some(9)));
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
+
+        // Once seated forward at epoch 9, an intermediate epoch (8) is
+        // still behind and must be rejected without disturbing the cache.
+        assert!(!pool.compare_and_set_leader("a:1".into(), Some(8)));
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
+
+        // Old-server fallback: a hint without an epoch stays acceptable
+        // even once a known epoch has been observed.
+        assert!(pool.compare_and_set_leader("a:1".into(), None));
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+    }
+
+    /// A cache entry that has aged past `leader_ttl` is treated as absent,
+    /// so `compare_and_set_leader` accepts and seats any hint — including
+    /// one whose epoch is below the stale entry's. Re-checking freshness
+    /// under the same lock as the write is what makes this safe; a TOCTOU
+    /// between a freshness read and the write could otherwise resurrect a
+    /// just-expired entry.
+    #[tokio::test(start_paused = true)]
+    async fn compare_and_set_leader_accepts_any_hint_once_cache_expires() {
+        let policy = RetryPolicy {
+            leader_ttl: std::time::Duration::from_millis(50),
+            ..RetryPolicy::default()
+        };
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None, false, policy);
+        pool.record_success("a:1", 9);
+        // Fresh: a lower-epoch hint is still rejected.
+        assert!(!pool.compare_and_set_leader("b:1".into(), Some(4)));
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+        // Advance past the TTL; the epoch-9 entry is now stale.
+        tokio::time::advance(std::time::Duration::from_millis(75)).await;
+        // The same lower-epoch hint now seats, because an expired entry
+        // imposes no monotone-forward floor.
+        assert!(pool.compare_and_set_leader("b:1".into(), Some(4)));
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
     }
 
     /// Per the cache-invalidation issue's acceptance criterion: a cached
