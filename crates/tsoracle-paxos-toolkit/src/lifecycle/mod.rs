@@ -623,4 +623,37 @@ mod tests {
             "stop() must complete even when a send is wedged",
         );
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tick_loop_exits_when_leader_stream_dropped() {
+        // The tick loop emits every leadership transition through the
+        // leader-event channel. Once every subscriber has dropped the stream,
+        // `LeaderEventSender::send` returns `SendError::Closed`, and the loop
+        // must exit on its own rather than spin forever emitting into a closed
+        // channel. Take the stream and drop it before starting, so the first
+        // tick's leader-event send observes the closed channel and breaks —
+        // without anyone firing the shutdown signal. This is the only path
+        // that ends the loop here, so the task finishing before we call
+        // `stop()` is proof the closed-channel arm ran.
+        let mut runner = build_runner(1);
+        let stream = runner.take_leader_stream().expect("stream");
+        drop(stream);
+        runner.start(Arc::new(NoopSink));
+
+        let exited = wait_until(Duration::from_secs(1), || {
+            runner
+                .handle
+                .as_ref()
+                .map(JoinHandle::is_finished)
+                .unwrap_or(false)
+        })
+        .await;
+        assert!(
+            exited,
+            "tick loop must exit once the leader-event stream is dropped",
+        );
+
+        // `stop()` remains safe to call after the task has already exited.
+        runner.stop().await;
+    }
 }
