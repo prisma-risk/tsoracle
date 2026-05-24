@@ -232,6 +232,10 @@ async fn extend_window_maps_not_leader_to_failed_precondition_with_hint() {
     // We did not set an endpoint, so the hint endpoint is None — but the
     // metadata itself MUST exist so clients know this is a redirectable error.
     assert!(hint.leader_endpoint.is_none());
+    // The service-layer step-down does not propagate NotLeader's `observed`
+    // epoch into the hint: the persist path that fences a stale leader returns
+    // Fenced (which does carry it), so #244 scoped epoch propagation there.
+    assert!(hint.leader_epoch.is_none());
 
     // Allocator must have been cleared (no current epoch).
     wait_until_not_serving(&mut booted.state_rx).await;
@@ -272,8 +276,18 @@ async fn extend_window_maps_fenced_to_failed_precondition_with_hint() {
         .expect_err("should fail with fenced during extension");
 
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-    let _hint = tsoracle_server::__priv_decode_leader_hint(&status)
+    let hint = tsoracle_server::__priv_decode_leader_hint(&status)
         .expect("leader hint metadata must be present for Fenced");
+
+    // Fenced { current: Epoch(2) } names the epoch that fenced us. The hint
+    // must carry it so the client can validate its next leader against it,
+    // rather than dropping it as a bare FAILED_PRECONDITION redirect.
+    let (hi, lo) = Epoch(2).to_wire();
+    assert_eq!(
+        hint.leader_epoch,
+        Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+        "Fenced hint must propagate the current (new-leader) epoch"
+    );
 
     wait_until_not_serving(&mut booted.state_rx).await;
 

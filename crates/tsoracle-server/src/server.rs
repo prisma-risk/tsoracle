@@ -194,11 +194,21 @@ impl Server {
     /// `persist_high_water`. Those in-flights will either complete cleanly
     /// (the next `try_grant` then sees `NotServing`) or fail with
     /// NotLeader/Fenced (and reach this helper themselves — it is idempotent).
-    pub(crate) fn step_down_due_to_consensus_rejection(&self, leader_endpoint: Option<String>) {
+    ///
+    /// `leader_epoch` carries the authoritative new-leader epoch when the
+    /// rejection reveals it — e.g. `ConsensusError::Fenced { current, .. }`
+    /// names the epoch that fenced us. Publishing it lets the resulting
+    /// `NotServing` hint redirect clients with an epoch to validate against;
+    /// callers with no epoch to offer (stream closure, panic) pass `None`.
+    pub(crate) fn step_down_due_to_consensus_rejection(
+        &self,
+        leader_endpoint: Option<String>,
+        leader_epoch: Option<Epoch>,
+    ) {
         self.allocator.lock().on_leadership_lost();
         let _ = self.state_tx.send(ServingState::NotServing {
             leader_endpoint,
-            leader_epoch: None,
+            leader_epoch,
         });
     }
 }
@@ -243,7 +253,7 @@ impl Server {
                     if let Err(ref _e) = result {
                         // Poison BEFORE returning so embedders who do not observe
                         // the JoinHandle still get fail-safe behavior.
-                        watch_server.step_down_due_to_consensus_rejection(None);
+                        watch_server.step_down_due_to_consensus_rejection(None, None);
                         #[cfg(feature = "tracing")]
                         tracing::error!(error = %_e, "leader-watch terminated; serving disabled");
                     }
@@ -252,7 +262,7 @@ impl Server {
                 Err(panic_payload) => {
                     // Mirror the Err branch: poison BEFORE re-raising so
                     // handle-dropping embedders still observe NotServing.
-                    watch_server.step_down_due_to_consensus_rejection(None);
+                    watch_server.step_down_due_to_consensus_rejection(None, None);
                     #[cfg(feature = "tracing")]
                     tracing::error!("leader-watch panicked; serving disabled");
                     std::panic::resume_unwind(panic_payload);
