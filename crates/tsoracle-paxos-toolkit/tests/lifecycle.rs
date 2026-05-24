@@ -37,7 +37,12 @@ impl MessageSink<TestCommand> for NetworkSink {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Runs under tokio virtual time (`start_paused`): the runners' `interval`
+// ticks, the leader-stream `next()` awaits, and the `timeout(3s)` guard all
+// advance in simulated time once the runtime goes idle, so the election still
+// runs through the real async runner tasks but without wall-clock variance.
+// `start_paused` implies the current-thread runtime.
+#[tokio::test(start_paused = true)]
 async fn runners_emit_leader_or_follower_event_after_election() {
     let cluster = build_mem_cluster(3);
     let sink = Arc::new(NetworkSink {

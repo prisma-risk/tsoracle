@@ -173,7 +173,7 @@ impl RaftStateMachine<SmokeConfig> for SmokeStateMachine {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn three_node_mem_network_elects_and_replicates() {
     use rocksdb::{ColumnFamilyDescriptor, DB, Options};
     use tempfile::TempDir;
@@ -273,7 +273,7 @@ async fn three_node_mem_network_elects_and_replicates() {
 /// moved incidentally (if an automatic election timer happened to re-elect the
 /// target). This test pins that the RPC now delivers and the chosen target takes
 /// over.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn transfer_leader_moves_leadership_to_target() {
     use rocksdb::{ColumnFamilyDescriptor, DB, Options};
     use tempfile::TempDir;

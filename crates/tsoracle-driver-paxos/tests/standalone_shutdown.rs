@@ -76,7 +76,12 @@ fn build_host() -> StandaloneHost<MemStorage<HighWaterCommand>> {
         .expect("build standalone host")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Runs under tokio virtual time (`start_paused`). The livelock this regression
+// guards is in the async apply task, so the test keeps the real `start` /
+// `stop` machinery and only removes wall-clock variance: the runner's
+// `interval` ticks, the coordinating `sleep`s, and the `timeout` guard all
+// advance in simulated time. `start_paused` implies the current-thread runtime.
+#[tokio::test(start_paused = true)]
 async fn stop_delivers_shutdown_when_apply_task_is_mid_iteration() {
     // Arm the yield point. The apply task will await this Notify
     // between iterations of its `apply_notify` branch — yielding its
@@ -109,13 +114,12 @@ async fn stop_delivers_shutdown_when_apply_task_is_mid_iteration() {
 
     // Liveness guard, not a latency assertion. Once the gate releases, the
     // apply task consumes the stored `apply_shutdown` permit on its next
-    // `select!` turn and `stop()` returns in microseconds. The pre-fix
-    // `notify_waiters` regression livelocked here *forever*, so any generous
-    // finite bound distinguishes "fixed" from "regressed". The bound is wide
-    // (10s) because the `coverage` CI job runs the whole instrumented suite
-    // in parallel: a tighter 2s budget expired intermittently from pure
-    // scheduler starvation — this task simply not getting a worker in time —
-    // not from a lost wakeup.
+    // `select!` turn and `stop()` returns. The pre-fix `notify_waiters`
+    // regression livelocked here *forever*; under virtual time the runner
+    // ticks pace that livelock, so the runtime still goes idle between ticks
+    // and the paused clock advances to this (simulated) deadline, tripping the
+    // timeout. Any finite bound distinguishes "fixed" from "regressed"; the
+    // duration is sim-time, so it costs no wall clock.
     tokio::time::timeout(Duration::from_secs(10), stop_handle)
         .await
         .expect("host.stop() must complete after yield-point release (shutdown livelock?)")

@@ -17,10 +17,12 @@
 //! ticking. Without quorum the runner cannot elect a leader, cannot decide
 //! anything, and must not panic — this test confirms it stays inert.
 //!
-//! Then the same node count under `start_all` reaches a stable leader,
-//! decides an `Advance`, and converges across all replicas.
-
-use std::time::Duration;
+//! Then the full 3-node cluster reaches a stable leader, decides an
+//! `Advance`, and converges across all replicas.
+//!
+//! Both tests use the deterministic step-driver (`step` / `step_until`)
+//! instead of async runner/pump tasks + real-time `drive_until`, so the
+//! liveness contracts are exercised without wall-clock variance.
 
 use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
@@ -28,24 +30,27 @@ use tsoracle_driver_paxos::HighWaterCommand;
 #[path = "common/mod.rs"]
 mod common;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn single_started_runner_stays_inert_without_quorum() {
     let mut cluster = common::build_mem_cluster(3);
 
-    // Start only node 1's runner + pump. Nodes 2 and 3 exist in the
-    // ClusterConfig but never tick, so no quorum is reachable.
-    let sink = std::sync::Arc::new(common::MeshSink::new(cluster.network.clone()));
-    let host = cluster.node_mut(1).host.as_mut().expect("host present");
-    host.start(sink);
+    // Take nodes 2 and 3's hosts out so only node 1 steps. They remain in
+    // the ClusterConfig but never tick (the step-driver skips host-less
+    // nodes), so no quorum is reachable and node 1's prepares go
+    // unanswered.
+    cluster.node_mut(2).host.take();
+    cluster.node_mut(3).host.take();
 
-    // Give the single runner a healthy window to flap around. Without peer
+    // Step the lone node well past an election timeout. Without peer
     // responses no entry can be decided and `decided_idx` stays at 0; the
     // apply state machine never observes a folded `Advance`. OmniPaxos's
     // BLE may unilaterally observe itself as a leader candidate before a
     // remote promise lands, so we do NOT assert leadership is absent —
     // the contract under test is "runner stays in a sane state, nothing
     // decides, no panic."
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..200 {
+        cluster.step();
+    }
 
     assert_eq!(cluster.decided_idx_on(1), 0, "decided_idx stays at 0");
     assert_eq!(
@@ -53,24 +58,17 @@ async fn single_started_runner_stays_inert_without_quorum() {
         0,
         "the apply state never observes a decided entry"
     );
-
-    // Tear down the lone running host without touching the others.
-    let mut host = cluster.node_mut(1).host.take().expect("host present");
-    host.stop().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn three_runners_advance_then_converge() {
     let mut cluster = common::build_mem_cluster(3);
-    cluster.start_all();
 
-    cluster
-        .drive_until(common::some_leader_elected(), 1_000)
-        .await;
+    cluster.step_until(common::some_leader_elected(), 1_000);
     let leader_id = cluster.leader();
 
-    // Append directly on the leader's OmniPaxos handle. The harness's
-    // apply task picks it up via `apply_notify` after the runner ticks.
+    // Append directly on the leader's OmniPaxos handle. `step` folds it via
+    // `apply_once` once consensus decides it.
     cluster
         .node(leader_id)
         .omnipaxos()
@@ -78,25 +76,17 @@ async fn three_runners_advance_then_converge() {
         .append(HighWaterCommand::Advance(AdvancePayload { at_least: 25 }))
         .expect("append succeeds on leader");
 
-    cluster
-        .drive_until(common::all_decided_at_least(1), 1_000)
-        .await;
+    cluster.step_until(common::all_decided_at_least(1), 1_000);
 
-    // Give every apply task a couple of ticks to drain (the apply task
-    // wakes on the runner's tick — not on the decided-idx transition
-    // directly — so a one-tick window after decided_idx advances is
-    // enough for the in-memory state to catch up on every node).
-    cluster
-        .drive_until(
-            |state| {
-                state
-                    .nodes
-                    .iter()
-                    .all(|node| state.high_water_on(node.node_id) >= 25)
-            },
-            1_000,
-        )
-        .await;
+    cluster.step_until(
+        |state| {
+            state
+                .nodes
+                .iter()
+                .all(|node| state.high_water_on(node.node_id) >= 25)
+        },
+        1_000,
+    );
 
     for node in &cluster.nodes {
         assert_eq!(
@@ -106,6 +96,4 @@ async fn three_runners_advance_then_converge() {
             node.node_id
         );
     }
-
-    cluster.stop_all().await;
 }
