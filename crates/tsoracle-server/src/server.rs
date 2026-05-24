@@ -30,7 +30,7 @@ use crate::service::TsoServiceImpl;
 pub enum BuildError {
     #[error("consensus_driver is required")]
     MissingConsensusDriver,
-    /// Surfaced when [`crate::leader_hint::KEY`] fails [`crate::leader_hint::validate_key`].
+    /// Surfaced when [`tsoracle_proto::v1::LEADER_HINT_TRAILER_KEY`] fails [`crate::leader_hint::validate_key`].
     /// Today the key is a valid `const &'static str`, so this variant is
     /// developer-error insurance: a future edit that breaks the key triggers
     /// a startup failure rather than silently stripping the trailer from
