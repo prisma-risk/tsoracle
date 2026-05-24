@@ -20,8 +20,10 @@
 
 use async_trait::async_trait;
 use openraft::Raft;
+use openraft::RaftMetrics;
 use openraft::ReadPolicy;
 use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
+use openraft::type_config::alias::WatchReceiverOf;
 use tsoracle_consensus::ConsensusError;
 
 use crate::host::OpenraftHighWaterHost;
@@ -56,10 +58,9 @@ impl StandaloneHost {
 #[async_trait]
 impl OpenraftHighWaterHost for StandaloneHost {
     type Config = TypeConfig;
-    type StateMachine = HighWaterStateMachine;
 
-    fn raft(&self) -> &Raft<Self::Config, Self::StateMachine> {
-        &self.raft
+    fn metrics(&self) -> WatchReceiverOf<Self::Config, RaftMetrics<Self::Config>> {
+        self.raft.metrics()
     }
 
     async fn current_high_water(&self) -> Result<u64, ConsensusError> {

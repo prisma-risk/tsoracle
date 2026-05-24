@@ -19,9 +19,9 @@
 //! and route TSO commands through its existing log.
 
 use async_trait::async_trait;
-use openraft::Raft;
+use openraft::RaftMetrics;
 use openraft::RaftTypeConfig;
-use openraft::storage::RaftStateMachine;
+use openraft::type_config::alias::WatchReceiverOf;
 use tsoracle_consensus::ConsensusError;
 
 /// Host that knows how to read and advance the TSO high-water mark via openraft.
@@ -35,11 +35,15 @@ pub trait OpenraftHighWaterHost: Send + Sync + 'static {
     /// `TypeConfig` its larger raft is built on.
     type Config: RaftTypeConfig;
 
-    /// The host's state machine. Same indirection as `Config`.
-    type StateMachine: RaftStateMachine<Self::Config>;
-
-    /// The raft handle the driver reads leadership metrics from.
-    fn raft(&self) -> &Raft<Self::Config, Self::StateMachine>;
+    /// The metrics watch the driver reads leadership transitions from.
+    ///
+    /// This is the only window the driver needs onto the host's raft, so the
+    /// trait hands out the watch receiver directly rather than a
+    /// `&Raft<C, SM>`. A piggy-back host whose raft binds to its own state
+    /// machine can satisfy the trait without that state machine having to match
+    /// the standalone host's — the trait carries no `StateMachine` type. Hosts
+    /// that own a `Raft` implement this as `self.raft.metrics()`.
+    fn metrics(&self) -> WatchReceiverOf<Self::Config, RaftMetrics<Self::Config>>;
 
     /// Read the current high-water mark linearizably. Implementations are
     /// expected to issue an `ensure_linearizable` barrier before reading their
@@ -50,4 +54,62 @@ pub trait OpenraftHighWaterHost: Send + Sync + 'static {
     /// return the new high-water value after apply. The state machine must
     /// enforce monotonicity (`max(prev, at_least)`); the driver does not.
     async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::type_config::TypeConfig;
+    use openraft::RaftMetrics;
+    use openraft::type_config::TypeConfigExt;
+    use openraft::type_config::alias::WatchReceiverOf;
+
+    /// A host backed *only* by a metrics watch receiver — it owns no
+    /// `Raft<TypeConfig, HighWaterStateMachine>`. This is the piggy-back shape
+    /// the narrowed trait must admit: a larger service whose raft binds to its
+    /// own state machine can satisfy the trait because the driver only needs a
+    /// metrics watch, never a `&Raft<C, SM>`.
+    struct MetricsOnlyHost {
+        rx: WatchReceiverOf<TypeConfig, RaftMetrics<TypeConfig>>,
+    }
+
+    #[async_trait]
+    impl OpenraftHighWaterHost for MetricsOnlyHost {
+        type Config = TypeConfig;
+
+        fn metrics(&self) -> WatchReceiverOf<Self::Config, RaftMetrics<Self::Config>> {
+            self.rx.clone()
+        }
+
+        async fn current_high_water(&self) -> Result<u64, ConsensusError> {
+            Ok(0)
+        }
+
+        async fn submit_advance(&self, _at_least: u64) -> Result<u64, ConsensusError> {
+            Ok(0)
+        }
+    }
+
+    /// Compile-time proof the trait is satisfiable without a `StateMachine`
+    /// associated type or a `&Raft<C, SM>` accessor.
+    fn assert_implements_host<H: OpenraftHighWaterHost>() {}
+
+    #[tokio::test]
+    async fn metrics_only_host_satisfies_and_drives_trait() {
+        assert_implements_host::<MetricsOnlyHost>();
+
+        // The narrowed accessor yields a usable receiver built from a synthetic
+        // metrics watch — no raft cluster required.
+        let metrics: RaftMetrics<TypeConfig> = RaftMetrics::new_initial(1u64);
+        let (_tx, rx) = <TypeConfig as TypeConfigExt>::watch_channel(metrics);
+        let host = MetricsOnlyHost { rx };
+
+        // Drive every method on the trait surface, not just `metrics()`, to
+        // prove a host owning no `Raft<C, HighWaterStateMachine>` is fully
+        // usable through the trait — type-checking alone wouldn't exercise the
+        // async read/submit path.
+        let _rx = host.metrics();
+        assert!(host.current_high_water().await.is_ok());
+        assert!(host.submit_advance(7).await.is_ok());
+    }
 }

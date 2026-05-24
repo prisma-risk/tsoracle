@@ -136,7 +136,7 @@ fn owned_leadership_stream<H: OpenraftHighWaterHost>(
     host: Arc<H>,
     peers: Arc<HashMap<<H::Config as RaftTypeConfig>::NodeId, String>>,
 ) -> impl Stream<Item = LeaderState> + Send + 'static {
-    let rx = host.raft().metrics();
+    let rx = host.metrics();
     let inner: Pin<Box<dyn Stream<Item = LeaderState> + Send>> = Box::pin(
         stream_from_receiver::<H::Config>(rx)
             .map(move |state| map_leader_state::<H::Config>(state, peers.as_ref())),

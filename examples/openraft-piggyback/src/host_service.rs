@@ -26,8 +26,12 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
 use openraft::storage::{EntryResponder, RaftStateMachine, Snapshot};
-use openraft::type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
-use openraft::{EntryPayload, Raft, RaftSnapshotBuilder, ReadPolicy, StoredMembership};
+use openraft::type_config::alias::{
+    LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf, WatchReceiverOf,
+};
+use openraft::{
+    EntryPayload, Raft, RaftMetrics, RaftSnapshotBuilder, ReadPolicy, StoredMembership,
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tsoracle_consensus::ConsensusError;
@@ -313,10 +317,9 @@ impl PiggybackHost {
 #[async_trait]
 impl OpenraftHighWaterHost for PiggybackHost {
     type Config = HostTypeConfig;
-    type StateMachine = HostStateMachine;
 
-    fn raft(&self) -> &Raft<Self::Config, Self::StateMachine> {
-        &self.raft
+    fn metrics(&self) -> WatchReceiverOf<Self::Config, RaftMetrics<Self::Config>> {
+        self.raft.metrics()
     }
 
     async fn current_high_water(&self) -> Result<u64, ConsensusError> {
