@@ -154,7 +154,6 @@ impl ClientBuilder {
 }
 
 pub struct Client {
-    #[allow(dead_code)]
     pool: Arc<ChannelPool>,
     driver: driver::Driver,
 }
@@ -162,6 +161,19 @@ pub struct Client {
 impl Client {
     pub async fn connect(endpoints: Vec<String>) -> Result<Self, ClientError> {
         ClientBuilder::endpoints(endpoints).build().await
+    }
+
+    /// The endpoint the client currently believes is the leader, or `None`
+    /// if no leader has been observed yet or the cached entry has aged past
+    /// the configured `leader_ttl`.
+    ///
+    /// Read-only diagnostic surface for ops dashboards and integration tests
+    /// asserting that a client has converged to the expected leader. It
+    /// reflects the cache as last updated by a completed RPC — it neither
+    /// triggers nor waits on any network round-trip, and the TTL check is
+    /// lazy (an expired entry reads as `None`).
+    pub fn cached_leader(&self) -> Option<String> {
+        self.pool.cached_leader()
     }
 
     pub async fn get_ts(&self) -> Result<Timestamp, ClientError> {
@@ -179,6 +191,19 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cached_leader_is_none_before_any_rpc() {
+        // A freshly built client has issued no RPC, so the channel pool's
+        // leader cache is empty and `cached_leader()` reports `None`. This
+        // pins the "nothing observed yet" branch of the diagnostic accessor
+        // without needing a server; the post-RPC `Some(addr)` case is covered
+        // end-to-end in `tsoracle-tests`.
+        let client = Client::connect(vec!["http://127.0.0.1:1".into()])
+            .await
+            .expect("build with a non-empty endpoint list must succeed");
+        assert_eq!(client.cached_leader(), None);
+    }
 
     #[tokio::test]
     async fn build_rejects_empty_endpoint_list() {
