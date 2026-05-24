@@ -15,6 +15,8 @@
 use parking_lot::Mutex;
 use prost::Message;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 use tokio::time::Instant;
 use tonic::Status;
 use tonic::metadata::MetadataKey;
@@ -73,7 +75,14 @@ pub(crate) struct CachedLeader {
 
 pub struct ChannelPool {
     configured: Vec<String>,
-    channels: Mutex<HashMap<String, Channel>>,
+    /// One lazily-dialed channel per endpoint. The `parking_lot::Mutex`
+    /// guards only the map structure — never an `await` — so it stays a
+    /// cheap synchronous lock. Each value is an `Arc<OnceCell<Channel>>`:
+    /// concurrent first-callers to the same endpoint look up (or insert) the
+    /// shared cell under the lock, drop the lock, then race into the cell's
+    /// `get_or_try_init`, which runs the dial exactly once. A failed dial
+    /// leaves the cell uninitialized so the next caller retries.
+    channels: Mutex<HashMap<String, Arc<OnceCell<Channel>>>>,
     leader: Mutex<Option<CachedLeader>>,
     connector: Option<std::sync::Arc<crate::transport::ChannelConnector>>,
     /// Set by `ClientBuilder::tls_config`; cleared by `channel_connector`.
@@ -198,45 +207,58 @@ impl ChannelPool {
     }
 
     /// Returns a tonic client for `endpoint`, opening the channel on first use.
+    ///
+    /// Look up (or insert) the endpoint's shared `OnceCell` under the
+    /// synchronous map lock, release the lock, then drive the dial through
+    /// `get_or_try_init`. Concurrent first-callers to the same endpoint share
+    /// the one cell, so the dial — and its `connect.duration` / failure
+    /// metrics — runs exactly once; later callers and cache hits clone the
+    /// already-initialized `Channel` (itself an `Arc`-backed cheap clone).
     pub async fn client(&self, endpoint: &str) -> Result<TsoServiceClient<Channel>, ClientError> {
-        if let Some(channel) = self.channels.lock().get(endpoint).cloned() {
-            return Ok(TsoServiceClient::new(channel));
-        }
-        // Cache miss: we are about to actually dial. Time the dial so the
-        // `connect.duration` histogram only captures real connect work, not
-        // the cache-hit fast path.
-        #[cfg(feature = "metrics")]
-        let connect_started = std::time::Instant::now();
-        let channel = match &self.connector {
-            Some(connector) => connector(endpoint).await,
-            None => match crate::transport::normalize_uri(endpoint, false).parse::<Endpoint>() {
-                Ok(transport_endpoint) => {
-                    let transport_endpoint =
-                        apply_endpoint_config(transport_endpoint, &self.retry_policy);
-                    transport_endpoint
-                        .connect()
-                        .await
-                        .map_err(ClientError::from)
-                }
-                Err(_) => Err(ClientError::InvalidEndpoint(endpoint.into())),
-            },
+        let cell = {
+            let mut guard = self.channels.lock();
+            guard
+                .entry(endpoint.to_string())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
         };
-        match channel {
-            Ok(channel) => {
+
+        let channel = cell
+            .get_or_try_init(|| async {
+                // Cache miss: we are about to actually dial. Time the dial so
+                // the `connect.duration` histogram only captures real connect
+                // work, not the cache-hit fast path.
                 #[cfg(feature = "metrics")]
-                metrics::histogram!("tsoracle.client.connect.duration")
-                    .record(connect_started.elapsed().as_secs_f64());
-                self.channels
-                    .lock()
-                    .insert(endpoint.to_string(), channel.clone());
-                Ok(TsoServiceClient::new(channel))
-            }
-            Err(error) => {
+                let connect_started = std::time::Instant::now();
+                let result = match &self.connector {
+                    Some(connector) => connector(endpoint).await,
+                    None => {
+                        match crate::transport::normalize_uri(endpoint, false).parse::<Endpoint>() {
+                            Ok(transport_endpoint) => {
+                                let transport_endpoint =
+                                    apply_endpoint_config(transport_endpoint, &self.retry_policy);
+                                transport_endpoint
+                                    .connect()
+                                    .await
+                                    .map_err(ClientError::from)
+                            }
+                            Err(_) => Err(ClientError::InvalidEndpoint(endpoint.into())),
+                        }
+                    }
+                };
                 #[cfg(feature = "metrics")]
-                metrics::counter!("tsoracle.client.connect.failures.total").increment(1);
-                Err(error)
-            }
-        }
+                match &result {
+                    Ok(_) => metrics::histogram!("tsoracle.client.connect.duration")
+                        .record(connect_started.elapsed().as_secs_f64()),
+                    Err(_) => {
+                        metrics::counter!("tsoracle.client.connect.failures.total").increment(1)
+                    }
+                }
+                result
+            })
+            .await?;
+
+        Ok(TsoServiceClient::new(channel.clone()))
     }
 
     pub fn iter_round_robin(&self) -> Vec<String> {
@@ -562,6 +584,58 @@ mod tests {
             .await
             .expect("second client() must hit cache");
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Per issue #99's acceptance criterion: N concurrent first-callers
+    /// racing a fresh pool for the *same* endpoint must observe exactly one
+    /// `connect()`. The connector sleeps inside its future to widen the
+    /// cache-miss window; under the pre-fix check-without-lock → connect →
+    /// lock-and-insert sequence every racer misses the cache and dials, so
+    /// the count would equal the number of tasks. The per-endpoint
+    /// `OnceCell` collapses them onto a single shared init.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_first_callers_connect_endpoint_exactly_once() {
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connect_count_for_closure = connect_count.clone();
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                connect_count_for_closure.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    // Hold the dial open long enough that every spawned racer
+                    // has cleared the cache-miss check before the first finishes.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    Ok(
+                        tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
+                            .connect_lazy(),
+                    )
+                })
+            });
+        let pool = Arc::new(ChannelPool::new(
+            vec!["a:1".into()],
+            Some(connector),
+            false,
+            RetryPolicy::default(),
+        ));
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(
+                async move { pool.client("a:1").await.map(|_| ()) },
+            ));
+        }
+        for handle in handles {
+            handle
+                .await
+                .expect("racer task must not panic")
+                .expect("client() must succeed");
+        }
+
+        assert_eq!(
+            connect_count.load(Ordering::SeqCst),
+            1,
+            "concurrent first-callers must share a single connect()"
+        );
     }
 
     #[tokio::test]
