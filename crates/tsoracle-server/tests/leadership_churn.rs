@@ -431,6 +431,105 @@ async fn fence_recovers_after_transient_burst_exceeding_old_budget() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sustained_leader_churn_never_exits_watch_loop() {
+    // #204: under paxos's frequent leader churn, every new election opens a
+    // volatile window where the first fence persist can fail as a transient
+    // append error (paxos reports a step-down that way, not as NotLeader). The
+    // earlier behavior exhausted the fence's retry budget and let the watch loop
+    // return Err, poisoning serving and taking the server task down with it — so
+    // the stress harness recorded zero successful client calls.
+    //
+    // `fence_observes_follower_transition_during_unbounded_transient_retry`
+    // already pins a *single* step-down observed mid-retry plus one recovery.
+    // This test pins the part #204 actually names: *sustained* oscillation. We
+    // drive several Leader -> Follower -> Leader cycles, each opening with a
+    // transient fence burst, and assert the watch task survives every cycle and
+    // re-serves each time leadership returns.
+    let driver = Arc::new(FaultyDriver::new());
+
+    let server = Server::builder()
+        .consensus_driver(driver.clone())
+        .clock(Arc::new(MockClock::new(1_000)))
+        .window_ahead(Duration::from_millis(50))
+        .failover_advance(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let mut booted = boot_server(server).await;
+
+    // A transient burst per leader window: load_high_water succeeds, then the
+    // first `BURST` persists fail transiently before one succeeds. Three is
+    // already past nothing pathological but exercises the backoff path several
+    // times per cycle.
+    const BURST: usize = 3;
+    const CYCLES: u128 = 4;
+
+    for epoch in 1..=CYCLES {
+        driver.fail_next_persists(BURST, FaultKind::Transient);
+        driver.become_leader(Epoch(epoch));
+
+        // Reaching Serving proves the fence rode through the transient burst
+        // without giving up — i.e. the watch loop is still alive and re-fenced
+        // at this epoch rather than having exited.
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_until_serving(&mut booted.state_rx),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("fence must reach Serving on epoch {epoch} despite churn"));
+        assert!(
+            !booted.serve_handle.is_finished(),
+            "watch/serve task must stay alive while Serving on epoch {epoch}",
+        );
+
+        // Lose leadership again. The watch loop publishes NotServing and loops
+        // back to await the next event — it must not exit.
+        driver.become_follower(None);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_until_not_serving(&mut booted.state_rx),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("must step down to NotServing on epoch {epoch}"));
+        assert!(
+            !booted.serve_handle.is_finished(),
+            "watch/serve task must stay alive after stepping down on epoch {epoch}",
+        );
+    }
+
+    // After sustained churn the server is still alive end-to-end: win one more
+    // term and serve a real GetTs over gRPC.
+    driver.fail_next_persists(BURST, FaultKind::Transient);
+    driver.become_leader(Epoch(CYCLES + 1));
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        wait_until_serving(&mut booted.state_rx),
+    )
+    .await
+    .expect("fence must reach Serving on the final term");
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
+
+    let mut client = TsoServiceClient::connect(format!("http://{}", booted.addr))
+        .await
+        .unwrap();
+    let granted = client
+        .get_ts(GetTsRequest { count: 1 })
+        .await
+        .expect("GetTs must succeed after sustained churn");
+    assert_eq!(granted.into_inner().count, 1);
+
+    // The transient-fault path was actually exercised, not vacuously skipped:
+    // every cycle (plus the final term) attempted at least BURST + 1 persists.
+    assert!(
+        driver.persist_call_count() > CYCLES as u64,
+        "transient fence faults must have been exercised across cycles",
+    );
+
+    booted.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fence_observes_follower_transition_during_unbounded_transient_retry() {
     let inner = Arc::new(InMemoryDriver::new());
     let driver = Arc::new(LatchingTransientDriver::new(inner.clone()));
