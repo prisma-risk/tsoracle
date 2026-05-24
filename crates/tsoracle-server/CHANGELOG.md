@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.3...tsoracle-server-v0.2.4) - 2026-05-24
+
+### Fixed
+
+- *(server)* sample now_ms once per get_ts to close the window-extension race ([#303](https://github.com/prisma-risk/tsoracle/pull/303))
+
 ## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.2...tsoracle-server-v0.2.3) - 2026-05-24
 
 ### Fixed

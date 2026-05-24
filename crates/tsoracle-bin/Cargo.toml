@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle"
-version      = "0.1.8"
+version      = "0.1.9"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -28,7 +28,7 @@ tokio                 = { workspace = true, features = ["signal"] }
 tracing               = { workspace = true }
 tracing-subscriber    = { workspace = true }
 tsoracle-core         = { path = "../tsoracle-core", version = "0.2.1" }
-tsoracle-server       = { path = "../tsoracle-server", version = "0.2.3" }
+tsoracle-server       = { path = "../tsoracle-server", version = "0.2.4" }
 tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "0.1.6" }
 
 [dev-dependencies]
