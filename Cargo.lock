@@ -3285,6 +3285,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsoracle-codec"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "proptest",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "tsoracle-consensus"
 version = "0.1.6"
 dependencies = [
@@ -3396,6 +3406,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tsoracle-codec",
  "tsoracle-failpoint",
 ]
 
@@ -3408,8 +3419,6 @@ dependencies = [
  "omnipaxos",
  "parking_lot",
  "pastey",
- "postcard",
- "proptest",
  "rocksdb",
  "serde",
  "tempfile",
@@ -3417,6 +3426,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tsoracle-codec",
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-failpoint",
