@@ -346,23 +346,55 @@ where
     }
 
     async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError> {
-        let snapshot_decided = self.omnipaxos.lock().get_decided_idx();
+        // Append the Advance, then a (my_node_id, seq) barrier nonce, and
+        // wait until the apply path folds *this specific* barrier — exactly
+        // as `current_high_water` does. The barrier is appended immediately
+        // after the Advance, so a folded `Barrier { node: self, seq }`
+        // proves every earlier decided entry (this call's own Advance among
+        // them) has already been folded: the returned high-water is
+        // provably attributable to this call.
+        //
+        // A bare `new_decided > snapshot_decided && high_water() >= at_least`
+        // threshold could not make that guarantee — both halves can be
+        // satisfied by a *racing* caller's Advance before this call's own
+        // entry is applied, so the value returned would not be provably
+        // this call's. The trailing `high_water() >= at_least` guard keeps
+        // the floor postcondition (unique to `submit_advance`; a read has
+        // no floor) even in the corner where a mid-call leadership change
+        // drops this Advance while the barrier still decides under the new
+        // leader — there the floor is unmet, so we wait rather than return a
+        // sub-floor value. The outer epoch fence is the safety net that
+        // surfaces the leadership change to the caller.
         self.omnipaxos
             .lock()
             .append(HighWaterCommand::Advance { at_least })
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(AdvanceAppendError(format!("{err:?}"))))
             })?;
+        let seq = self.barrier_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        self.omnipaxos
+            .lock()
+            .append(HighWaterCommand::Barrier {
+                node: self.my_node_id,
+                seq,
+            })
+            .map_err(|err| {
+                ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
+            })?;
         let notifier = self.apply_state.apply_notifier();
         tsoracle_yieldpoint::yieldpoint!(
             "standalone_host::submit_advance::after_append_before_await"
         );
         loop {
+            // Register as waiter before checking state; otherwise a
+            // notify_waiters that fires between the previous iteration's
+            // check and the next notified().await is lost.
             let notified = notifier.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let new_decided = self.omnipaxos.lock().get_decided_idx();
-            if new_decided > snapshot_decided && self.apply_state.high_water() >= at_least {
+            if self.apply_state.applied_barrier_seq(self.my_node_id) >= seq
+                && self.apply_state.high_water() >= at_least
+            {
                 return Ok(self.apply_state.high_water());
             }
             notified.await;
