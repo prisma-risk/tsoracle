@@ -126,7 +126,7 @@ async fn build_cluster() -> anyhow::Result<(Vec<Node>, Arc<MemNetwork<HostTypeCo
         let host = PiggybackHost::new(raft.clone(), sm_for_host.clone());
         let driver = OpenraftDriver::new(host);
         let server = TsoServer::builder().consensus_driver(driver).build()?;
-        let serving_state_rx = server.state_rx.clone();
+        let serving_state_rx = server.subscribe();
 
         // Bind on port 0 so the OS assigns a free port, avoiding conflicts when
         // the smoke test runs alongside other services or in parallel CI jobs.

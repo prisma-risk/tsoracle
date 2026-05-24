@@ -67,7 +67,7 @@ async fn step_plain_tls(bundle: &certs::CertBundle) -> Result<()> {
         .tls_config(ServerTlsConfig::new().identity(server_identity(bundle)))
         .build()?;
 
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     let server_handle = tokio::spawn(async move {
         server
             .serve_with_listener(listener, futures::future::pending())
@@ -112,7 +112,7 @@ async fn step_mtls(bundle: &certs::CertBundle) -> Result<()> {
         )
         .build()?;
 
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     let server_handle = tokio::spawn(async move {
         server
             .serve_with_listener(listener, futures::future::pending())
@@ -161,7 +161,7 @@ async fn step_custom_connector_against_mtls(bundle: &certs::CertBundle) -> Resul
         )
         .build()?;
 
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     let server_handle = tokio::spawn(async move {
         server
             .serve_with_listener(listener, futures::future::pending())
@@ -222,7 +222,7 @@ async fn step_mtls_misconfigured(bundle: &certs::CertBundle) -> Result<()> {
         )
         .build()?;
 
-    let mut state_rx = server.state_rx.clone();
+    let mut state_rx = server.subscribe();
     let server_handle = tokio::spawn(async move {
         server
             .serve_with_listener(listener, futures::future::pending())

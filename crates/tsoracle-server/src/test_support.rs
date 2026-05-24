@@ -95,7 +95,7 @@ pub async fn boot_server(server: Server) -> BootedServer {
     let addr = listener
         .local_addr()
         .expect("local_addr on freshly bound listener");
-    let state_rx = server.state_rx.clone();
+    let state_rx = server.subscribe();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let serve_handle = tokio::spawn(async move {
         server
@@ -304,7 +304,7 @@ pub mod dst {
     /// leader-watch task on the calling host's executor, so the fence begins
     /// running under simulated time as soon as this returns.
     pub fn into_sim_parts(server: Server) -> Result<SimParts, ServerError> {
-        let state_rx = server.state_rx.clone();
+        let state_rx = server.subscribe();
         let (routes, watch) = server.into_router()?;
         Ok(SimParts {
             routes,
