@@ -95,9 +95,22 @@ impl TsoService for TsoServiceImpl {
             }));
         }
 
-        // Two attempts: first one may return WindowExhausted, in which case we
-        // extend and retry once. A second WindowExhausted is a driver bug.
-        for attempt in 0..2 {
+        // At most two attempts: the first may return WindowExhausted, in which
+        // case we extend the window and retry once. Every error other than a
+        // first-attempt WindowExhausted — and NotLeader, which needs a metadata
+        // trailer core_status cannot attach — routes through the single
+        // exhaustive CoreError -> Status mapping in `core_status`, so a new
+        // variant compiles and is handled here without editing this match. A
+        // second WindowExhausted (the extension did not help — a driver bug)
+        // therefore surfaces as `core_status`'s Internal mapping.
+        //
+        // This is a divergent `loop` (no `break`, only `return`/`continue`) so
+        // it has type `!` and needs no trailing expression: the `attempt`
+        // counter bounds it to two iterations, and the second iteration's
+        // WindowExhausted falls through the guard into the `core_status` arm
+        // rather than continuing.
+        let mut attempt = 0;
+        loop {
             let outcome = {
                 let mut allocator = self.server.allocator.lock();
                 allocator.try_grant(self.server.clock.now_ms(), count)
@@ -122,27 +135,14 @@ impl TsoService for TsoServiceImpl {
                 Err(CoreError::NotLeader) => {
                     return Err(not_leader_status(leader_hint_from(&self.server)));
                 }
-                Err(CoreError::InvalidCount(c)) => {
-                    return Err(Status::invalid_argument(format!("invalid count: {c}")));
-                }
-                Err(CoreError::PhysicalMsOutOfRange(v)) => {
-                    return Err(Status::out_of_range(format!(
-                        "physical_ms {v} exceeds 46-bit timestamp field"
-                    )));
-                }
-                Err(e @ CoreError::InvalidLeadershipWindow { .. }) => {
-                    return Err(core_status(e));
-                }
                 Err(CoreError::WindowExhausted) if attempt == 0 => {
                     self.extend_window(count).await?;
+                    attempt += 1;
                     continue;
                 }
-                Err(CoreError::WindowExhausted) => {
-                    return Err(Status::internal("window still exhausted after extension"));
-                }
+                Err(other) => return Err(core_status(other)),
             }
         }
-        unreachable!("loop returns or continues exactly twice")
     }
 }
 
