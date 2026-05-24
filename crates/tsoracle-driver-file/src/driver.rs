@@ -53,7 +53,14 @@ pub struct FileDriver {
     // without holding any state lock and then publish via a Release store.
     state: Arc<AtomicU64>,
     write_lock: tokio::sync::Mutex<()>,
-    #[allow(dead_code)]
+    // Held to keep the watch channel open; FileDriver never sends after the
+    // initial Leader { epoch: 0 } published at construction. Dropping it would
+    // close the channel and terminate every `WatchStream::new(leader_rx.clone())`
+    // consumer prematurely.
+    #[expect(
+        dead_code,
+        reason = "kept to hold the watch channel open for leader_rx consumers"
+    )]
     leader_tx: watch::Sender<LeaderState>,
     leader_rx: watch::Receiver<LeaderState>,
     // Holds the OS-level exclusive lock on `dir/LOCK` for the driver's
