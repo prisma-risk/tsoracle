@@ -64,7 +64,7 @@ async fn find_leader_excluding(cluster: &TestCluster, exclude_idx: usize) -> usi
     .expect("a new leader (excluding old) was elected within 10s")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn partition_then_heal_converges_monotonically() {
     let cluster = build_three_node().await;
     let partitions = cluster

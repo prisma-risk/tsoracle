@@ -27,7 +27,7 @@ use tsoracle_consensus::{ConsensusDriver, LeaderState};
 
 use common::build_single_node;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn single_node_leader_persists_high_water() {
     let cluster = build_single_node().await;
     let driver = &cluster.drivers[0];
@@ -64,7 +64,7 @@ async fn single_node_leader_persists_high_water() {
     assert_eq!(driver.load_high_water().await.unwrap(), 200);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn leader_state_epoch_matches_raft_term() {
     let cluster = build_single_node().await;
     let driver = &cluster.drivers[0];
@@ -94,7 +94,7 @@ async fn leader_state_epoch_matches_raft_term() {
     assert_eq!(epoch.0, u128::from(term));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn leadership_stream_outlives_driver_drop() {
     let cluster = build_single_node().await;
 
@@ -109,7 +109,7 @@ async fn leadership_stream_outlives_driver_drop() {
         .expect("event stream alive");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn persist_high_water_ignores_epoch_arg() {
     use tsoracle_core::Epoch;
 

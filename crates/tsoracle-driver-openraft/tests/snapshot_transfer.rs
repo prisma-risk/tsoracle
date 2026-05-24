@@ -98,7 +98,7 @@ async fn find_leader_idx(nodes: &[SnapshotNode]) -> usize {
     .expect("a leader elected within 10s")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn isolated_follower_catches_up_via_snapshot_transfer() {
     let net = MemNetwork::<TypeConfig>::new();
     let cfg = snapshot_aggressive_config();

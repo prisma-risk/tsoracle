@@ -29,7 +29,7 @@ use tsoracle_core::Epoch;
 
 use common::{TestCluster, build_single_node, eventually_eq, reopen_node};
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn restart_replays_high_water_from_rocksdb_log() {
     let cluster = build_single_node().await;
     let TestCluster {
