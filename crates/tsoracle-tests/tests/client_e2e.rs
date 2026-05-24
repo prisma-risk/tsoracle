@@ -103,9 +103,10 @@ async fn client_follows_leader_hint_on_first_call() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_surfaces_error_when_only_endpoint_is_a_hintless_follower() {
     // A follower with no known leader replies FailedPrecondition with an empty
-    // LeaderHint. The retry loop must clear its cached leader (the cache is
-    // now stale), exhaust the worklist, and surface the RPC error — not loop
-    // on the same dead endpoint or swallow the status.
+    // LeaderHint. With no actionable hint to follow, the retry loop exhausts
+    // the worklist and surfaces the RPC error — not loop on the same dead
+    // endpoint or swallow the status. The cached leader is left untouched: an
+    // unactionable NOT_LEADER is not evidence the cache is wrong.
     let driver = Arc::new(InMemoryDriver::new());
 
     let server = Server::builder()
