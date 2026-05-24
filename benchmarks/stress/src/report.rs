@@ -264,6 +264,17 @@ fn violation_summary(v: &crate::violation::Violation) -> serde_json::Value {
                 "first_post_window_ts": first_post_window_ts.0,
             })
         }
+        ViolationKind::CrossClientRealtimeMonotonicity {
+            prior_completed_ts,
+            got,
+            ..
+        } => {
+            serde_json::json!({
+                "kind": "CrossClientRealtimeMonotonicity",
+                "prior_completed_ts": prior_completed_ts.0,
+                "got": got.0,
+            })
+        }
         ViolationKind::Liveness { incident } => {
             serde_json::json!({ "kind": "Liveness", "incident": format!("{:?}", incident.kind) })
         }
@@ -591,6 +602,14 @@ mod tests {
                 at: now,
             },
             Violation {
+                kind: ViolationKind::CrossClientRealtimeMonotonicity {
+                    prior_completed_ts: Timestamp(100),
+                    got: Timestamp(80),
+                    sample: sample.clone(),
+                },
+                at: now,
+            },
+            Violation {
                 kind: ViolationKind::Liveness {
                     incident: LivenessIncident {
                         kind: LivenessIncidentKind::DeadlineExceeded {
@@ -608,15 +627,16 @@ mod tests {
 
         let v: serde_json::Value = serde_json::from_str(&r.render_json()).unwrap();
         let arr = v["violations"].as_array().unwrap();
-        assert_eq!(arr.len(), 4);
+        assert_eq!(arr.len(), 5);
         let kinds: Vec<&str> = arr.iter().map(|v| v["kind"].as_str().unwrap()).collect();
         assert!(kinds.contains(&"Monotonicity"));
         assert!(kinds.contains(&"BatchInternalOrdering"));
         assert!(kinds.contains(&"FenceFreshness"));
+        assert!(kinds.contains(&"CrossClientRealtimeMonotonicity"));
         assert!(kinds.contains(&"Liveness"));
 
         // Also covers the text-renderer count line.
         let text = r.render_text();
-        assert!(text.contains("violations: 4"), "{text}");
+        assert!(text.contains("violations: 5"), "{text}");
     }
 }
