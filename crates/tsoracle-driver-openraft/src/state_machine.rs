@@ -316,6 +316,24 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
         let payload: HighWaterStateMachineSnapshot = postcard::from_bytes(&bytes)
             .map_err(|e| io::Error::other(format!("snapshot payload decode: {e}")))?;
 
+        // `meta.last_log_id` is read back by `get_current_snapshot` while
+        // `payload.last_applied` is read back by `applied_state`. `build_snapshot`
+        // derives both from the same `last_applied`, so they always agree for an
+        // honest peer. Reject any disagreement before persisting or mutating: a
+        // mismatch would otherwise desync those two reader methods permanently
+        // and silently. Checked before `store.save` so a rejected install leaves
+        // both the store and in-memory state untouched for openraft to retry.
+        if meta.last_log_id != payload.last_applied {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "snapshot meta/payload disagree on last_log_id: \
+                     meta.last_log_id={:?}, payload.last_applied={:?}",
+                    meta.last_log_id, payload.last_applied
+                ),
+            ));
+        }
+
         let persisted = PersistedSnapshot {
             meta: meta.clone(),
             data: bytes.clone(),
@@ -679,6 +697,55 @@ mod tests {
         assert_eq!(sm2.current_value().await, 700);
         let (last, _) = sm2.applied_state().await.unwrap();
         assert_eq!(last.map(|l| l.index), Some(10));
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_rejects_meta_payload_log_id_mismatch() {
+        // `meta.last_log_id` (read back by `get_current_snapshot`) and
+        // `payload.last_applied` (read back by `applied_state`) must agree —
+        // honest peers always build them from the same `last_applied`, so a
+        // disagreement signals corruption or a peer bug. Installing it anyway
+        // would silently desync the two reader methods, so the install must be
+        // rejected, leave state untouched, and persist nothing.
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let mut sm = HighWaterStateMachine::with_store(store.clone()).expect("with_store");
+
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 123,
+            last_applied: Some(log_id(5)),
+            last_membership: StoredMem::default(),
+        };
+        let bytes = postcard::to_stdvec(&payload).expect("serialize payload");
+
+        let meta = SnapMeta {
+            last_log_id: Some(log_id(6)),
+            last_membership: payload.last_membership.clone(),
+            snapshot_id: "mismatch-1".into(),
+        };
+
+        let Err(err) = sm
+            .install_snapshot(&meta, std::io::Cursor::new(bytes))
+            .await
+        else {
+            panic!("install_snapshot must reject meta/payload last_log_id mismatch");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("last_log_id"),
+            "error should name the mismatched field: {msg}"
+        );
+
+        assert_eq!(sm.current_value().await, 0);
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(last, None);
+        assert!(
+            sm.get_current_snapshot().await.unwrap().is_none(),
+            "rejected install must not publish a current snapshot"
+        );
+        assert!(
+            store.load().expect("load").is_none(),
+            "rejected install must not persist an envelope"
+        );
     }
 
     // ---- Property tests ----
