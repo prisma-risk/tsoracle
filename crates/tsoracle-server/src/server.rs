@@ -30,13 +30,6 @@ use crate::service::TsoServiceImpl;
 pub enum BuildError {
     #[error("consensus_driver is required")]
     MissingConsensusDriver,
-    /// Surfaced when [`tsoracle_proto::v1::LEADER_HINT_TRAILER_KEY`] fails [`crate::leader_hint::validate_key`].
-    /// Today the key is a valid `const &'static str`, so this variant is
-    /// developer-error insurance: a future edit that breaks the key triggers
-    /// a startup failure rather than silently stripping the trailer from
-    /// every NOT_LEADER response.
-    #[error("invalid leader-hint metadata key: {0}")]
-    InvalidLeaderHintKey(#[from] tonic::metadata::errors::InvalidMetadataKey),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -132,7 +125,6 @@ impl ServerBuilder {
     }
 
     pub fn build(self) -> Result<Server, BuildError> {
-        crate::leader_hint::validate_key()?;
         let consensus = self.consensus.ok_or(BuildError::MissingConsensusDriver)?;
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
         let (state_tx, state_rx) = watch::channel(ServingState::NotServing {
