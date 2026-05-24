@@ -384,7 +384,17 @@ where
             }
             batch.delete_cf(&cf_log, &k);
         }
-        self.db.write(batch).map_err(io::Error::other)?;
+        let wo = Self::write_sync_opts();
+        crate::failpoint!("tsoracle_openraft_toolkit::log_store::truncate::before_write_batch");
+        self.db.write_opt(batch, &wo).map_err(io::Error::other)?;
+        crate::failpoint!(
+            "tsoracle_openraft_toolkit::log_store::truncate::after_write_before_sync",
+            |_arg: Option<String>| -> Result<(), io::Error> {
+                Err(io::Error::other(
+                    "failpoint: tsoracle_openraft_toolkit::log_store::truncate::after_write_before_sync",
+                ))
+            }
+        );
         Ok(())
     }
 
@@ -416,7 +426,17 @@ where
         )
         .map_err(io::Error::other)?;
 
-        self.db.write(batch).map_err(io::Error::other)?;
+        let wo = Self::write_sync_opts();
+        crate::failpoint!("tsoracle_openraft_toolkit::log_store::purge::before_write_batch");
+        self.db.write_opt(batch, &wo).map_err(io::Error::other)?;
+        crate::failpoint!(
+            "tsoracle_openraft_toolkit::log_store::purge::after_write_before_sync",
+            |_arg: Option<String>| -> Result<(), io::Error> {
+                Err(io::Error::other(
+                    "failpoint: tsoracle_openraft_toolkit::log_store::purge::after_write_before_sync",
+                ))
+            }
+        );
         Ok(())
     }
 }

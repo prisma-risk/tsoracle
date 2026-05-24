@@ -66,12 +66,16 @@ With `feature = "failpoints"` off, both forms expand to `()` — zero code, no d
 | `server::service::before_allocate` | In `Service::get_ts`, before the allocator lock is taken. | `sleep(ms)`, `pause`. Used for timing-shape tests only — closure-form `return` would produce a `Status` directly and bypass the production `ConsensusError → Status` classification path. | `before_allocate_sleep_delays_get_ts` |
 | `server::service::extension_gate_held` | In `Service::extend_window`, immediately after the `extension_gate.read().await` guard is bound. | `pause`, `sleep(ms)`. | `extension_gate_held_sleep_delays_get_ts` |
 
-### `tsoracle-openraft-toolkit` — 2 sites in `crates/tsoracle-openraft-toolkit/src/log_store/mod.rs`
+### `tsoracle-openraft-toolkit` — 6 sites in `crates/tsoracle-openraft-toolkit/src/log_store/mod.rs`
 
 | Site name | Position | Useful actions | Test |
 |---|---|---|---|
 | `tsoracle_openraft_toolkit::log_store::before_write_batch` | In `RocksdbLogStore::append`, immediately before `self.db.write_opt(batch, &wo)`. | `panic`. | `panic_at_before_write_batch_leaves_log_empty` |
 | `tsoracle_openraft_toolkit::log_store::after_write_before_sync` | In `RocksdbLogStore::append`, between the rocksdb write and the `callback.io_completed(...)` notification. | `return` via the closure form (closure produces `Err(io::Error)`); `panic`. | `return_at_after_write_before_sync_persists_entry` |
+| `tsoracle_openraft_toolkit::log_store::truncate::before_write_batch` | In `RocksdbLogStore::truncate_after`, immediately before `self.db.write_opt(batch, &wo)`. | `panic`. | `panic_at_truncate_before_write_batch_leaves_log_intact` |
+| `tsoracle_openraft_toolkit::log_store::truncate::after_write_before_sync` | In `RocksdbLogStore::truncate_after`, after the rocksdb write returns. | `return` via the closure form (closure produces `Err(io::Error)`); `panic`. | `return_at_truncate_after_write_before_sync_persists_truncation` |
+| `tsoracle_openraft_toolkit::log_store::purge::before_write_batch` | In `RocksdbLogStore::purge`, immediately before `self.db.write_opt(batch, &wo)`. | `panic`. | `panic_at_purge_before_write_batch_leaves_log_intact` |
+| `tsoracle_openraft_toolkit::log_store::purge::after_write_before_sync` | In `RocksdbLogStore::purge`, after the rocksdb write returns. | `return` via the closure form (closure produces `Err(io::Error)`); `panic`. | `return_at_purge_after_write_before_sync_persists_purge` |
 
 ## Writing a failpoint test
 
