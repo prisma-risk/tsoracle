@@ -112,7 +112,7 @@ To mount tsoracle inside an existing tonic server (sharing a listener with your 
 let server = Server::builder()
     .consensus_driver(driver)
     .build()?;
-let (tsoracle_routes, _watch_handle) = server.into_router();
+let (tsoracle_routes, _watch_handle) = server.into_router()?;
 
 tonic::transport::Server::builder()
     .add_routes(tsoracle_routes)
@@ -121,7 +121,7 @@ tonic::transport::Server::builder()
     .await?;
 ```
 
-`into_router` returns the tonic `Routes` plus a `JoinHandle<Result<(), ServerError>>` for the spawned leader-watch task. Keep and observe that handle: if leadership watch fails, the task poisons serving state and returns the error so embedders can shut down or restart intentionally. For HA setups, swap `FileDriver` for a `ConsensusDriver` implementation backed by your replicated log — see [Consensus Integration](consensus-integration.md).
+`into_router` returns a `Result` wrapping the tonic `Routes` plus a `JoinHandle<Result<(), ServerError>>` for the spawned leader-watch task; with the `reflection` feature enabled it returns `Err(ServerError::ReflectionInit)` if the embedded descriptor set fails to decode, so propagate it (`?`) rather than unwrapping. Keep and observe the handle: if leadership watch fails, the task poisons serving state and returns the error so embedders can shut down or restart intentionally. For HA setups, swap `FileDriver` for a `ConsensusDriver` implementation backed by your replicated log — see [Consensus Integration](consensus-integration.md).
 
 ## Migrating from an existing timestamp source
 

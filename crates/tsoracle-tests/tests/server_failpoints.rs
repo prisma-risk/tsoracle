@@ -42,7 +42,9 @@ async fn fence_recovers_after_transient_load_error() {
         .build()
         .unwrap();
     let mut state_rx = server.state_rx.clone();
-    let (_routes, watch_handle) = server.into_router();
+    let (_routes, watch_handle) = server
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
 
     // Fire the transient error exactly once; the retry sees the failpoint
     // disabled and completes the fence.
@@ -89,7 +91,9 @@ async fn fence_panic_after_persist_advances_durable_but_not_serving() {
         .consensus_driver(driver.clone())
         .build()
         .unwrap();
-    let (_routes, watch_handle) = server.into_router();
+    let (_routes, watch_handle) = server
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
 
     fail::cfg("server::fence::after_persist_before_publish", "panic").unwrap();
 
@@ -140,7 +144,9 @@ async fn panic_after_serving_published_poisons_state_when_handle_dropped() {
         .consensus_driver(driver.clone())
         .build()
         .unwrap();
-    let (routes, watch_handle) = server.into_router();
+    let (routes, watch_handle) = server
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
 
     // Drop (detach) the JoinHandle: the embedder shape #27 names. Drop, not
     // abort — aborting would cancel the task before it ever runs.
@@ -208,7 +214,9 @@ async fn before_allocate_sleep_delays_get_ts() {
         .build()
         .unwrap();
     let mut state_rx = server.state_rx.clone();
-    let (routes, _watch_handle) = server.into_router();
+    let (routes, _watch_handle) = server
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
 
     let booted = boot_router(routes).await;
 
@@ -266,7 +274,9 @@ async fn extension_gate_held_sleep_delays_get_ts() {
         .build()
         .unwrap();
     let mut state_rx = server.state_rx.clone();
-    let (routes, _watch_handle) = server.into_router();
+    let (routes, _watch_handle) = server
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
 
     let booted = boot_router(routes).await;
 
