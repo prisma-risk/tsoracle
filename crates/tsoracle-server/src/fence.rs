@@ -120,6 +120,20 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                     // can be classified below.
                     let attempt: Result<(), ServerError> = async {
                         // Drain in-flight extensions from the prior epoch.
+                        //
+                        // Lock-ordering invariant: the fence takes ONLY
+                        // `extension_gate.write()` here and intentionally does
+                        // NOT acquire `extension_lock`. Extenders acquire in the
+                        // order `extension_lock` → `extension_gate.read()` (see
+                        // `service::extend_window`), so the safe global order is
+                        // `extension_lock` before `extension_gate`. The fence
+                        // holds no `extension_lock`, so it cannot close a cycle:
+                        // it just waits for in-flight readers to drain. A future
+                        // path that took these in the opposite order — grabbing
+                        // `extension_gate.write()` and then `extension_lock` —
+                        // would deadlock against an extender holding
+                        // `extension_lock` and waiting on `read()`. Keep the
+                        // fence `extension_lock`-free.
                         let drain_guard = server.extension_gate.write().await;
 
                         // Linearized load of the durably-persisted high-water.
