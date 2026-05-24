@@ -335,6 +335,23 @@ pub mod dst {
         Ok(TsoServiceClient::new(channel))
     }
 
+    /// Build a lazy tonic [`Channel`] that dials `endpoint` over the turmoil
+    /// network. Bare `host:port` is rewritten to `http://host:port`.
+    ///
+    /// This is the per-endpoint building block for driving the *high-level*
+    /// [`tsoracle_client::Client`] over turmoil: pass a closure delegating to
+    /// it into `ClientBuilder::channel_connector`, and the client's pool —
+    /// including leader-hint redirects — dials every endpoint through the
+    /// simulated network.
+    pub fn sim_channel(endpoint: &str) -> Result<Channel, tonic::transport::Error> {
+        let uri = if endpoint.contains("://") {
+            endpoint.to_string()
+        } else {
+            format!("http://{endpoint}")
+        };
+        Ok(Endpoint::new(uri)?.connect_with_connector_lazy(connector()))
+    }
+
     /// Server-side transport glue: wrap an accepted turmoil stream so tonic
     /// treats it as a connected transport.
     struct Accepted(TcpStream);
