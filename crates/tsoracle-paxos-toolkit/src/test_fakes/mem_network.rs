@@ -68,6 +68,14 @@ impl<T: Entry + Send + 'static> MemNetwork<T> {
     /// - the destination node has not been registered,
     /// - the destination's channel is full (best-effort delivery).
     pub async fn deliver(&self, message: Message<T>) {
+        self.deliver_now(message);
+    }
+
+    /// Synchronous (non-`async`) sibling of [`Self::deliver`], for deterministic
+    /// test stepping that routes messages without an executor. Delivery is
+    /// already non-blocking (`try_send`), so this shares the same routing and
+    /// drop semantics.
+    pub fn deliver_now(&self, message: Message<T>) {
         let (from, to) = endpoints(&message);
         if self.partition.is_blocked(from, to) {
             return;

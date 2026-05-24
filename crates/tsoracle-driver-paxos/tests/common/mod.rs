@@ -309,6 +309,75 @@ where
             .find(|node| node.node_id == node_id)
             .expect("node id present")
     }
+
+    /// Advance the cluster by one deterministic step (no wall-clock time):
+    /// tick every running node, route its outbound messages through the
+    /// `MemNetwork`, deliver each node's queued inbound messages, then apply
+    /// newly-decided entries. A node is "running" iff it currently holds a host
+    /// and OmniPaxos handle (i.e. not between [`Self::stop_node`] and
+    /// [`Self::rebuild_rocksdb_node`]).
+    ///
+    /// Used by [`Self::step_until`]. Drive a step-mode cluster with these
+    /// instead of [`Self::start_all`] + [`Self::drive_until`] — the two models
+    /// are mutually exclusive (a stepped node must not also run its async
+    /// runner/pump tasks).
+    pub fn step(&mut self) {
+        // Phase 1: tick each running node; collect and route its outbound.
+        let mut outbound = Vec::new();
+        for node in &self.nodes {
+            if node.omnipaxos.is_none() {
+                continue;
+            }
+            if let Some(host) = node.host.as_ref() {
+                outbound.extend(host.step());
+            }
+        }
+        for message in outbound {
+            self.network.deliver_now(message);
+        }
+        // Phase 2: deliver each running node's queued inbound messages.
+        for node in &mut self.nodes {
+            if node.host.is_none() || node.omnipaxos.is_none() {
+                continue;
+            }
+            let mut inbound = Vec::new();
+            if let Some(inbox) = node.inbox.as_mut() {
+                while let Ok(message) = inbox.try_recv() {
+                    inbound.push(message);
+                }
+            }
+            let host = node.host.as_ref().expect("host present");
+            for message in inbound {
+                host.deliver(message);
+            }
+        }
+        // Phase 3: apply newly-decided entries (delivery may have advanced
+        // decided_idx).
+        for node in &self.nodes {
+            if node.omnipaxos.is_none() {
+                continue;
+            }
+            if let Some(host) = node.host.as_ref() {
+                host.apply_once();
+            }
+        }
+    }
+
+    /// Synchronous, deterministic replacement for [`Self::drive_until`]: step
+    /// the cluster until `predicate` holds, with no wall-clock sleeps. Panics
+    /// after `max_steps` steps without success.
+    pub fn step_until<F>(&mut self, mut predicate: F, max_steps: usize)
+    where
+        F: FnMut(&Self) -> bool,
+    {
+        for _ in 0..max_steps {
+            if predicate(self) {
+                return;
+            }
+            self.step();
+        }
+        panic!("predicate did not become true within {max_steps} steps");
+    }
 }
 
 /// Spawn-target: drain `inbox` into `omnipaxos.handle_incoming` until the

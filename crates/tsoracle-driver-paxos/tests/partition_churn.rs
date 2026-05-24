@@ -10,28 +10,29 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! Partition + heal coverage.
+//! Partition + heal coverage, driven deterministically.
 //!
-//! Boots a 3-node cluster, decides an Advance, isolates the current
-//! leader via [`PartitionController::isolate`], drives until the
-//! remaining majority elects a new leader, decides a higher Advance,
-//! heals the partition, and asserts the entire cluster converges to the
-//! higher value. Confirms the driver's monotonic-advance contract under
-//! a leader churn event with no consensus regressions.
+//! Boots a 3-node cluster, decides an Advance, isolates the current leader via
+//! [`PartitionController::isolate`], drives until the remaining majority elects
+//! a new leader, decides a higher Advance, heals the partition, and asserts the
+//! entire cluster converges to the higher value. Confirms the monotonic-advance
+//! contract under a leader churn event with no consensus regressions.
+//!
+//! Driven by the deterministic step-driver (`step_until`): `step()` routes
+//! messages through the `MemNetwork`, which honors the `PartitionController`, so
+//! isolation/heal behave exactly as on the async path — but election +
+//! re-election + catch-up converge in simulated steps with no real-time budget.
 
 use tsoracle_driver_paxos::HighWaterCommand;
 
 #[path = "common/mod.rs"]
 mod common;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn partition_then_heal_preserves_monotonic_high_water() {
     let mut cluster = common::build_mem_cluster(3);
-    cluster.start_all();
 
-    cluster
-        .drive_until(common::some_leader_elected(), 1_000)
-        .await;
+    cluster.step_until(common::some_leader_elected(), 1_000);
     let original_leader = cluster.leader();
 
     cluster
@@ -42,42 +43,37 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
         .expect("first append succeeds on leader");
 
     // Wait for cluster-wide convergence on 100.
-    cluster
-        .drive_until(
-            |state| {
-                state
-                    .nodes
-                    .iter()
-                    .all(|node| state.high_water_on(node.node_id) >= 100)
-            },
-            1_500,
-        )
-        .await;
+    cluster.step_until(
+        |state| {
+            state
+                .nodes
+                .iter()
+                .all(|node| state.high_water_on(node.node_id) >= 100)
+        },
+        1_500,
+    );
 
-    // Isolate the original leader. Outbound + inbound traffic for that
-    // node is now dropped on the shared MemNetwork.
+    // Isolate the original leader. Outbound + inbound traffic for that node is
+    // now dropped on the shared MemNetwork (step() routes via deliver_now, which
+    // consults the PartitionController).
     cluster.network.partition().isolate(original_leader);
 
     // Drive until a new leader emerges among the two reachable nodes.
-    // Election timeouts add latency under the in-memory transport, so
-    // give this plenty of headroom.
-    cluster
-        .drive_until(
-            |state| {
-                state
-                    .nodes
-                    .iter()
-                    .filter(|node| node.node_id != original_leader)
-                    .any(|node| {
-                        node.omnipaxos()
-                            .lock()
-                            .get_current_leader()
-                            .is_some_and(|leader| leader != original_leader)
-                    })
-            },
-            10_000,
-        )
-        .await;
+    cluster.step_until(
+        |state| {
+            state
+                .nodes
+                .iter()
+                .filter(|node| node.node_id != original_leader)
+                .any(|node| {
+                    node.omnipaxos()
+                        .lock()
+                        .get_current_leader()
+                        .is_some_and(|leader| leader != original_leader)
+                })
+        },
+        10_000,
+    );
     let new_leader = cluster
         .nodes
         .iter()
@@ -99,34 +95,30 @@ async fn partition_then_heal_preserves_monotonic_high_water() {
         .expect("second append succeeds on the new leader");
 
     // Wait for the two reachable nodes to commit the new value.
-    cluster
-        .drive_until(
-            |state| {
-                state
-                    .nodes
-                    .iter()
-                    .filter(|node| node.node_id != original_leader)
-                    .all(|node| state.high_water_on(node.node_id) >= 200)
-            },
-            10_000,
-        )
-        .await;
+    cluster.step_until(
+        |state| {
+            state
+                .nodes
+                .iter()
+                .filter(|node| node.node_id != original_leader)
+                .all(|node| state.high_water_on(node.node_id) >= 200)
+        },
+        10_000,
+    );
 
-    // Heal the partition. The isolated old leader rejoins the cluster
-    // and must catch up to high_water = 200.
+    // Heal the partition. The isolated old leader rejoins the cluster and must
+    // catch up to high_water = 200.
     cluster.network.partition().heal();
 
-    cluster
-        .drive_until(
-            |state| {
-                state
-                    .nodes
-                    .iter()
-                    .all(|node| state.high_water_on(node.node_id) >= 200)
-            },
-            10_000,
-        )
-        .await;
+    cluster.step_until(
+        |state| {
+            state
+                .nodes
+                .iter()
+                .all(|node| state.high_water_on(node.node_id) >= 200)
+        },
+        10_000,
+    );
 
     for node in &cluster.nodes {
         let high_water = cluster.high_water_on(node.node_id);
