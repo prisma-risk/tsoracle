@@ -44,14 +44,18 @@ fn open_db(dir: &TempDir) -> Arc<DB> {
     Arc::new(DB::open_cf_descriptors(&opts, dir.path(), cfs).unwrap())
 }
 
-fn blank_entry_at(index: u64) -> Entry<TestLeaderId, common::TestAppData, u64, common::TestPeer> {
-    Entry::new_blank(LogId::new(
+fn log_id_at(index: u64) -> LogId<TestLeaderId> {
+    LogId::new(
         TestLeaderId {
             term: 1,
             node_id: 1,
         },
         index,
-    ))
+    )
+}
+
+fn blank_entry_at(index: u64) -> Entry<TestLeaderId, common::TestAppData, u64, common::TestPeer> {
+    Entry::new_blank(log_id_at(index))
 }
 
 /// `tsoracle_openraft_toolkit::log_store::before_write_batch` fires immediately before
@@ -155,5 +159,214 @@ async fn return_at_after_write_before_sync_persists_entry() {
         "return at after_write_before_sync must fire after db.write_opt; \
          expected last_log_id index = 42 but get_log_state returned {:?}",
         state.last_log_id,
+    );
+}
+
+/// Seed three durable entries (indices 1..=3) into a fresh store, then drop it.
+async fn seed_three_entries(db: &Arc<DB>) {
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(Arc::clone(db), LOG_CF, META_CF, Flat).unwrap();
+    store
+        .append((1..=3).map(blank_entry_at), IOFlushed::noop())
+        .await
+        .unwrap();
+}
+
+/// `tsoracle_openraft_toolkit::log_store::truncate::before_write_batch` fires
+/// immediately before `db.write_opt(batch, ...)` in `truncate_after`. A `panic`
+/// action terminates the task before the deletions reach RocksDB; after
+/// reopening, the log tail must be intact (`last_log_id` index = 3). If a
+/// regression moves the failpoint to after the write, the truncation lands and
+/// `last_log_id` drops to 1, failing this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panic_at_truncate_before_write_batch_leaves_log_intact() {
+    let _serial = FAILPOINT_TEST_SERIAL.lock().await;
+    let _scenario = fail::FailScenario::setup();
+
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    seed_three_entries(&db).await;
+
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::truncate::before_write_batch",
+        "panic",
+    )
+    .unwrap();
+
+    let writer_db = Arc::clone(&db);
+    let join = tokio::spawn(async move {
+        let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+            RocksdbLogStore::open(writer_db, LOG_CF, META_CF, Flat).unwrap();
+        store.truncate_after(Some(log_id_at(1))).await
+    });
+    let join_err = join
+        .await
+        .expect_err("expected the panic action to surface as a JoinError");
+    assert!(
+        join_err.is_panic(),
+        "expected JoinError::is_panic(), got {join_err:?}"
+    );
+
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::truncate::before_write_batch",
+        "off",
+    )
+    .unwrap();
+
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+    let state = store.get_log_state().await.unwrap();
+    assert_eq!(
+        state.last_log_id.as_ref().map(|id| id.index),
+        Some(3),
+        "panic at truncate::before_write_batch must fire before db.write_opt; \
+         expected the log tail intact (last_log_id index = 3) but got {:?}",
+        state.last_log_id,
+    );
+}
+
+/// `tsoracle_openraft_toolkit::log_store::truncate::after_write_before_sync`
+/// fires after the rocksdb write returns. A `return` action makes
+/// `truncate_after` produce `Err(io::Error)` while the WriteBatch has already
+/// been applied — the truncation is durable even though the call reported
+/// failure. After reopening, `last_log_id` reflects the truncation (index = 1).
+/// If a regression moves the failpoint to before the write, the truncation is
+/// lost and `last_log_id` stays 3, failing this test.
+#[tokio::test]
+async fn return_at_truncate_after_write_before_sync_persists_truncation() {
+    let _serial = FAILPOINT_TEST_SERIAL.lock().await;
+    let _scenario = fail::FailScenario::setup();
+
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    seed_three_entries(&db).await;
+
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::truncate::after_write_before_sync",
+        "return",
+    )
+    .unwrap();
+    let result = store.truncate_after(Some(log_id_at(1))).await;
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::truncate::after_write_before_sync",
+        "off",
+    )
+    .unwrap();
+    assert!(
+        result.is_err(),
+        "expected return action to surface as Err from truncate_after, got {result:?}"
+    );
+
+    drop(store);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+    let state = store.get_log_state().await.unwrap();
+    assert_eq!(
+        state.last_log_id.as_ref().map(|id| id.index),
+        Some(1),
+        "return at truncate::after_write_before_sync must fire after db.write_opt; \
+         expected the truncation persisted (last_log_id index = 1) but got {:?}",
+        state.last_log_id,
+    );
+}
+
+/// `tsoracle_openraft_toolkit::log_store::purge::before_write_batch` fires
+/// immediately before `db.write_opt(batch, ...)` in `purge`. A `panic` action
+/// terminates the task before the deletions and the `LastPurged` marker reach
+/// RocksDB; after reopening, nothing must be purged (`last_purged_log_id` is
+/// `None`). If a regression moves the failpoint to after the write, the purge
+/// lands and `last_purged_log_id` becomes `Some(_)`, failing this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panic_at_purge_before_write_batch_leaves_log_intact() {
+    let _serial = FAILPOINT_TEST_SERIAL.lock().await;
+    let _scenario = fail::FailScenario::setup();
+
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    seed_three_entries(&db).await;
+
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::purge::before_write_batch",
+        "panic",
+    )
+    .unwrap();
+
+    let writer_db = Arc::clone(&db);
+    let join = tokio::spawn(async move {
+        let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+            RocksdbLogStore::open(writer_db, LOG_CF, META_CF, Flat).unwrap();
+        store.purge(log_id_at(2)).await
+    });
+    let join_err = join
+        .await
+        .expect_err("expected the panic action to surface as a JoinError");
+    assert!(
+        join_err.is_panic(),
+        "expected JoinError::is_panic(), got {join_err:?}"
+    );
+
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::purge::before_write_batch",
+        "off",
+    )
+    .unwrap();
+
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+    let state = store.get_log_state().await.unwrap();
+    assert!(
+        state.last_purged_log_id.is_none(),
+        "panic at purge::before_write_batch must fire before db.write_opt; \
+         expected nothing purged but get_log_state returned last_purged_log_id = {:?}",
+        state.last_purged_log_id,
+    );
+}
+
+/// `tsoracle_openraft_toolkit::log_store::purge::after_write_before_sync` fires
+/// after the rocksdb write returns. A `return` action makes `purge` produce
+/// `Err(io::Error)` while the WriteBatch has already been applied — the purge
+/// is durable even though the call reported failure. After reopening,
+/// `last_purged_log_id` reflects the purge (index = 2). If a regression moves
+/// the failpoint to before the write, the purge is lost and
+/// `last_purged_log_id` stays `None`, failing this test.
+#[tokio::test]
+async fn return_at_purge_after_write_before_sync_persists_purge() {
+    let _serial = FAILPOINT_TEST_SERIAL.lock().await;
+    let _scenario = fail::FailScenario::setup();
+
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    seed_three_entries(&db).await;
+
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::purge::after_write_before_sync",
+        "return",
+    )
+    .unwrap();
+    let result = store.purge(log_id_at(2)).await;
+    fail::cfg(
+        "tsoracle_openraft_toolkit::log_store::purge::after_write_before_sync",
+        "off",
+    )
+    .unwrap();
+    assert!(
+        result.is_err(),
+        "expected return action to surface as Err from purge, got {result:?}"
+    );
+
+    drop(store);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+    let state = store.get_log_state().await.unwrap();
+    assert_eq!(
+        state.last_purged_log_id.as_ref().map(|id| id.index),
+        Some(2),
+        "return at purge::after_write_before_sync must fire after db.write_opt; \
+         expected the purge persisted (last_purged_log_id index = 2) but got {:?}",
+        state.last_purged_log_id,
     );
 }
