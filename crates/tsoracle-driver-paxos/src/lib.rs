@@ -14,6 +14,7 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+mod apply;
 pub mod driver;
 pub mod host;
 pub mod log_entry;
