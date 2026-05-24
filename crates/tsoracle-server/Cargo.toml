@@ -72,8 +72,8 @@ name = "embedded_router"
 required-features = ["test-support"]
 
 [[test]]
-name = "extension_stampede"
-required-features = ["test-support"]
+name = "extension_stampede_dst"
+required-features = ["dst"]
 
 [[test]]
 name = "leadership_churn"
