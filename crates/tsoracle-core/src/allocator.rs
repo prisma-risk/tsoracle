@@ -229,13 +229,18 @@ impl Allocator {
     /// Returns `max(committed_high_water + 1, now_ms) + ahead_ms`. The +1 on
     /// `committed_high_water` guarantees forward progress when wall clock is
     /// behind the persisted bound (rare, but possible after a clock-step-back).
+    ///
+    /// Returns `Err(CoreError::NotLeader)` off-leader, matching every other
+    /// mutating method. A `0` sentinel here would be indistinguishable from a
+    /// legitimately prepared bound, letting a caller that skipped `is_leader()`
+    /// proceed as if preparation had succeeded.
     pub fn try_prepare_window_extension(
         &self,
         now_ms: u64,
         ahead_ms: u64,
     ) -> Result<u64, CoreError> {
         match &self.state {
-            State::NotLeader => Ok(0),
+            State::NotLeader => Err(CoreError::NotLeader),
             State::Leader {
                 committed_high_water,
                 ..
@@ -407,6 +412,17 @@ mod tests {
         assert_eq!(grant.physical_ms, 5_000);
         assert_eq!(grant.logical_start, 0);
         assert_eq!(grant.epoch, Epoch(1));
+    }
+
+    #[test]
+    fn prepare_window_extension_not_leader() {
+        // Off-leader prepare must error like every other mutating method, not
+        // return a `0` that a caller could mistake for a prepared bound.
+        let allocator = Allocator::new();
+        assert_eq!(
+            allocator.try_prepare_window_extension(1000, 3000),
+            Err(CoreError::NotLeader)
+        );
     }
 
     #[test]
