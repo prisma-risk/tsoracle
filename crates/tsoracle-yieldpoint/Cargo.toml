@@ -16,8 +16,8 @@ categories    = ["asynchronous", "development-tools::testing"]
 default     = []
 # Enables the registry + macro body. Off by default so production builds
 # carry zero overhead; `cargo test --all-features` activates it in CI.
-yieldpoints = []
+yieldpoints = ["dep:tokio", "dep:parking_lot"]
 
 [dependencies]
-parking_lot = { workspace = true }
-tokio       = { workspace = true }
+parking_lot = { workspace = true, optional = true }
+tokio       = { workspace = true, optional = true }
