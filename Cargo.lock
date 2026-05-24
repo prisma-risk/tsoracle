@@ -3269,7 +3269,6 @@ dependencies = [
 name = "tsoracle-client"
 version = "0.2.2"
 dependencies = [
- "async-trait",
  "futures",
  "metrics",
  "metrics-util 0.19.1",
