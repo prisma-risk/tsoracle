@@ -36,13 +36,7 @@ tsoracle-proto  = { path = "../tsoracle-proto" }
 tsoracle-server = { path = "../tsoracle-server", features = ["test-support"] }
 
 [[test]]
-name = "client_e2e"
-
-[[test]]
 name = "client_backpressure"
-
-[[test]]
-name = "client_freshness"
 
 [[test]]
 name              = "server_failpoints"
@@ -60,4 +54,12 @@ required-features = ["metrics"]
 
 [[test]]
 name              = "dst_window_race"
+required-features = ["dst"]
+
+[[test]]
+name              = "client_e2e_dst"
+required-features = ["dst"]
+
+[[test]]
+name              = "client_freshness_dst"
 required-features = ["dst"]
