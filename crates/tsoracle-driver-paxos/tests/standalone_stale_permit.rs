@@ -22,6 +22,7 @@
 //! loop immediately — so decided entries are never drained into the in-memory
 //! high-water, and reads that wait on the apply notifier hang forever.
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 #[path = "common/mod.rs"]
@@ -51,7 +52,7 @@ async fn stop_before_start_does_not_poison_apply_task() {
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 25 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 25 }))
         .expect("append succeeds on leader");
 
     cluster

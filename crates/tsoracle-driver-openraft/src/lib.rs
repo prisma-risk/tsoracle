@@ -31,4 +31,7 @@ pub use snapshot_store::RocksdbSnapshotStore;
 pub use snapshot_store::{InMemorySnapshotStore, SnapshotStore};
 pub use standalone::StandaloneHost;
 pub use state_machine::{HighWaterStateMachine, HighWaterStateMachineSnapshot};
+/// Re-export of the cross-backend advance payload that [`HighWaterCommand::Advance`]
+/// wraps, so consumers can build commands without depending on `tsoracle-consensus`.
+pub use tsoracle_consensus::AdvancePayload;
 pub use type_config::{HighWaterApplied, OpenraftPeer, TypeConfig};

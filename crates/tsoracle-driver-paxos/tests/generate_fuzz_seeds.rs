@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::{HighWaterCommand, HighWaterSnapshot};
 
 fn fuzz_corpus_dir(target: &str) -> PathBuf {
@@ -51,7 +52,7 @@ fn generate_paxos_log_entry_decode_seeds() {
         ("seed_advance_one", 1u64),
         ("seed_advance_max", u64::MAX),
     ] {
-        let bytes = postcard::to_stdvec(&HighWaterCommand::Advance { at_least })
+        let bytes = postcard::to_stdvec(&HighWaterCommand::Advance(AdvancePayload { at_least }))
             .expect("serialize Advance");
         write_seed(target, name, &bytes);
     }

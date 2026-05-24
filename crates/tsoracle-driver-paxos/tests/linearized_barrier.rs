@@ -35,6 +35,7 @@
 
 use std::time::Duration;
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_driver_paxos::host::PaxosHighWaterHost;
 use tsoracle_yieldpoint as yieldpoint;
@@ -68,7 +69,7 @@ async fn current_high_water_returns_value_advanced_before_call_under_paused_appl
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 500 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 500 }))
         .expect("append Advance on leader");
     cluster
         .drive_until(common::all_decided_at_least(1), 1_000)

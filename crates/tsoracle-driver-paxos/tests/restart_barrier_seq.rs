@@ -43,6 +43,7 @@
 
 use std::time::Duration;
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_driver_paxos::host::PaxosHighWaterHost;
 use tsoracle_yieldpoint as yieldpoint;
@@ -84,7 +85,7 @@ async fn recovered_barrier_ledger_does_not_satisfy_a_fresh_read_after_restart() 
                 .expect("append barrier on leader");
         }
         handle
-            .append(HighWaterCommand::Advance { at_least: 100 })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: 100 }))
             .expect("append advance on leader");
     }
     cluster
@@ -125,7 +126,7 @@ async fn recovered_barrier_ledger_does_not_satisfy_a_fresh_read_after_restart() 
         let leader = cluster.node(leader_id).omnipaxos();
         leader
             .lock()
-            .append(HighWaterCommand::Advance { at_least: 500 })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least: 500 }))
             .expect("append advance(500) on leader");
     }
     cluster

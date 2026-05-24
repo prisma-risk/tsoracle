@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tracing::trace;
 use tsoracle_consensus::ConsensusError;
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_driver_paxos::host::PaxosHighWaterHost;
 use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
@@ -107,7 +108,7 @@ fn apply_into_snapshot(entry: &MyAppCommand, snap: &mut MyAppSnap) {
         MyAppCommand::Kv(KvOp::Delete { key }) => {
             snap.kv.remove(key);
         }
-        MyAppCommand::HighWater(HighWaterCommand::Advance { at_least }) => {
+        MyAppCommand::HighWater(HighWaterCommand::Advance(AdvancePayload { at_least })) => {
             if *at_least > snap.high_water {
                 snap.high_water = *at_least;
             }
@@ -198,7 +199,7 @@ pub fn apply_decided_into(cmd: &MyAppCommand, state: &HostState) {
         MyAppCommand::Kv(KvOp::Delete { key }) => {
             state.kv.lock().remove(key);
         }
-        MyAppCommand::HighWater(HighWaterCommand::Advance { at_least }) => {
+        MyAppCommand::HighWater(HighWaterCommand::Advance(AdvancePayload { at_least })) => {
             let prev = state.high_water.load(Ordering::SeqCst);
             if *at_least > prev {
                 state.high_water.store(*at_least, Ordering::SeqCst);
@@ -371,9 +372,9 @@ impl PaxosHighWaterHost for PiggybackHost {
         let snapshot_decided = self.omnipaxos.lock().get_decided_idx();
         self.omnipaxos
             .lock()
-            .append(MyAppCommand::HighWater(HighWaterCommand::Advance {
-                at_least,
-            }))
+            .append(MyAppCommand::HighWater(HighWaterCommand::Advance(
+                AdvancePayload { at_least },
+            )))
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(PiggybackAppendError(format!("{err:?}"))))
             })?;
@@ -412,7 +413,7 @@ mod tests {
     }
 
     fn advance(at_least: u64) -> MyAppCommand {
-        MyAppCommand::HighWater(HighWaterCommand::Advance { at_least })
+        MyAppCommand::HighWater(HighWaterCommand::Advance(AdvancePayload { at_least }))
     }
 
     fn barrier(node: u64, seq: u64) -> MyAppCommand {
@@ -423,9 +424,10 @@ mod tests {
 
     #[test]
     fn from_highwatercommand_wraps_into_envelope() {
-        let wrapped: MyAppCommand = HighWaterCommand::Advance { at_least: 5 }.into();
+        let wrapped: MyAppCommand =
+            HighWaterCommand::Advance(AdvancePayload { at_least: 5 }).into();
         match wrapped {
-            MyAppCommand::HighWater(HighWaterCommand::Advance { at_least }) => {
+            MyAppCommand::HighWater(HighWaterCommand::Advance(AdvancePayload { at_least })) => {
                 assert_eq!(at_least, 5);
             }
             other => panic!("expected envelope wrap, got {other:?}"),

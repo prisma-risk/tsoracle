@@ -51,6 +51,7 @@ use tsoracle_openraft_toolkit::{SCHEMA_VERSION, decode, encode};
 use crate::log_entry::HighWaterCommand;
 use crate::snapshot_store::{InMemorySnapshotStore, SnapshotStore};
 use crate::type_config::{HighWaterApplied, TypeConfig};
+use tsoracle_consensus::AdvancePayload;
 
 type LogId = LogIdOf<TypeConfig>;
 type SnapMeta = SnapshotMetaOf<TypeConfig>;
@@ -294,10 +295,10 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                     }
                 }
                 EntryPayload::Normal(cmd) => {
-                    let HighWaterCommand::Bump { target } = cmd;
+                    let HighWaterCommand::Advance(AdvancePayload { at_least }) = cmd;
                     let mut core = self.core.lock();
-                    if *target > core.current_value {
-                        core.current_value = *target;
+                    if *at_least > core.current_value {
+                        core.current_value = *at_least;
                     }
                     core.last_applied = Some(log_id);
                     HighWaterApplied {
@@ -402,6 +403,7 @@ mod tests {
 
     use crate::log_entry::HighWaterCommand;
     use crate::type_config::TypeConfig;
+    use tsoracle_consensus::AdvancePayload;
 
     // --- Test helpers ---
 
@@ -450,7 +452,7 @@ mod tests {
         apply_one(
             &mut sm,
             1,
-            EntryPayload::Normal(HighWaterCommand::Bump { target: 100 }),
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 100 })),
         )
         .await;
         assert_eq!(sm.current_value().await, 100);
@@ -462,13 +464,13 @@ mod tests {
         apply_one(
             &mut sm,
             1,
-            EntryPayload::Normal(HighWaterCommand::Bump { target: 100 }),
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 100 })),
         )
         .await;
         apply_one(
             &mut sm,
             2,
-            EntryPayload::Normal(HighWaterCommand::Bump { target: 50 }),
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 50 })),
         )
         .await;
         assert_eq!(sm.current_value().await, 100);
@@ -480,13 +482,13 @@ mod tests {
         apply_one(
             &mut sm,
             1,
-            EntryPayload::Normal(HighWaterCommand::Bump { target: 100 }),
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 100 })),
         )
         .await;
         apply_one(
             &mut sm,
             2,
-            EntryPayload::Normal(HighWaterCommand::Bump { target: 100 }),
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 100 })),
         )
         .await;
         assert_eq!(sm.current_value().await, 100);
@@ -498,7 +500,7 @@ mod tests {
         apply_one(
             &mut sm,
             1,
-            EntryPayload::Normal(HighWaterCommand::Bump { target: 42 }),
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 42 })),
         )
         .await;
         let mem = openraft::Membership::new_with_defaults(vec![BTreeSet::from([1u64])], [1u64]);
@@ -516,7 +518,7 @@ mod tests {
         apply_one(
             &mut sm,
             1,
-            EntryPayload::Normal(HighWaterCommand::Bump { target: 500 }),
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 500 })),
         )
         .await;
 
@@ -535,7 +537,7 @@ mod tests {
         apply_one(
             &mut sm,
             1,
-            EntryPayload::Normal(HighWaterCommand::Bump { target: 7 }),
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 7 })),
         )
         .await;
 
@@ -601,7 +603,7 @@ mod tests {
         apply_one(
             &mut sm,
             1,
-            EntryPayload::Normal(HighWaterCommand::Bump { target: 42 }),
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 42 })),
         )
         .await;
         sm.build_snapshot().await.expect("build_snapshot");
@@ -619,7 +621,7 @@ mod tests {
             apply_one(
                 &mut sm,
                 1,
-                EntryPayload::Normal(HighWaterCommand::Bump { target: 99 }),
+                EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 99 })),
             )
             .await;
             sm.build_snapshot().await.expect("build_snapshot");
@@ -791,8 +793,8 @@ mod tests {
     }
 
     proptest! {
-        /// Monotonicity invariant: applying an arbitrary sequence of `Bump`
-        /// targets leaves the state machine at `max(0, max(targets))`, and
+        /// Monotonicity invariant: applying an arbitrary sequence of `Advance`
+        /// values leaves the state machine at `max(0, max(at_leasts))`, and
         /// `current_value` is non-decreasing at every intermediate step.
         #[test]
         fn p1_monotonicity_under_arbitrary_bumps(
@@ -807,7 +809,7 @@ mod tests {
                     apply_one(
                         &mut sm,
                         idx,
-                        EntryPayload::Normal(HighWaterCommand::Bump { target: *t }),
+                        EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: *t })),
                     )
                     .await;
                     let now = sm.current_value().await;
@@ -835,7 +837,7 @@ mod tests {
                     apply_one(
                         &mut sm,
                         idx,
-                        EntryPayload::Normal(HighWaterCommand::Bump { target: *t }),
+                        EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: *t })),
                     )
                     .await;
                 }
@@ -881,13 +883,15 @@ mod tests {
     #[test]
     fn log_entry_pins_v1_layout() {
         // The bytes RocksdbLogStore<TypeConfig> persists per entry: the v1
-        // frame around a Normal entry carrying Bump { target: 5 } at log id
-        // (term 1, node 1, index 1). Body [1,1,1,1,0,5] = leader (term 1,
-        // node 1), index 1, EntryPayload::Normal tag (1), Bump variant (0),
-        // target 5.
+        // frame around a Normal entry carrying Advance(AdvancePayload { at_least: 5 })
+        // at log id (term 1, node 1, index 1). Body [1,1,1,1,0,5] = leader
+        // (term 1, node 1), index 1, EntryPayload::Normal tag (1), Advance
+        // variant (0), at_least 5 — byte-identical to the pre-newtype layout.
         let lid = openraft::testing::log_id::<TypeConfig>(1, 1, 1);
-        let entry: EntryOf<TypeConfig> =
-            EntryOf::<TypeConfig>::new_normal(lid, HighWaterCommand::Bump { target: 5 });
+        let entry: EntryOf<TypeConfig> = EntryOf::<TypeConfig>::new_normal(
+            lid,
+            HighWaterCommand::Advance(AdvancePayload { at_least: 5 }),
+        );
         let framed =
             tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &entry)
                 .expect("encode");

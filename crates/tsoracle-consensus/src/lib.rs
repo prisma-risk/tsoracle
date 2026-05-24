@@ -21,6 +21,24 @@ use core::pin::Pin;
 use futures::Stream;
 use tsoracle_core::Epoch;
 
+/// The payload of an "advance the high-water to at least `at_least`" command,
+/// shared by every consensus backend's replicated log entry.
+///
+/// Each backend's `HighWaterCommand` newtype-wraps this in its `Advance`
+/// variant, so the "advance" semantics carry one name and one field across
+/// backends. Apply semantics are `current = max(current, at_least)`, which
+/// makes the command idempotent under retries and monotone under reordering —
+/// matching the [`ConsensusDriver::persist_high_water`] "advance to at least"
+/// contract.
+///
+/// `serde` is feature-gated to match the crate's optional-serde design; the
+/// drivers that persist this enable `tsoracle-consensus`'s `serde` feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AdvancePayload {
+    pub at_least: u64,
+}
+
 /// Leadership state surfaced to the server's leader-watch task.
 ///
 /// `PartialEq`/`Eq` allow drivers to implement payload-aware debounce on a
@@ -192,6 +210,30 @@ mod tests {
         // Debug round-trips through the derive (covers the derive impl).
         let rendered = format!("{l1:?}");
         assert!(rendered.contains("Leader"));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn advance_payload_postcard_pins_at_least_varint() {
+        // Both backends embed this payload after their `Advance` variant tag,
+        // so its on-the-wire shape is a cross-backend contract: a bare varint
+        // of `at_least`, with no struct framing of its own.
+        let payload = AdvancePayload { at_least: 5 };
+        let bytes = postcard::to_stdvec(&payload).expect("serialize");
+        assert_eq!(bytes, vec![5]);
+        let back: AdvancePayload = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, payload);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn advance_payload_postcard_round_trips_extremes() {
+        for at_least in [0u64, 1, u64::MAX] {
+            let payload = AdvancePayload { at_least };
+            let bytes = postcard::to_stdvec(&payload).expect("serialize");
+            let back: AdvancePayload = postcard::from_bytes(&bytes).expect("deserialize");
+            assert_eq!(back, payload);
+        }
     }
 
     #[test]

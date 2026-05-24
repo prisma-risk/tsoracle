@@ -24,6 +24,7 @@
 //! election + replication + catch-up converge in simulated steps with no
 //! wall-clock budget to overrun. Real RocksDB storage + replay stay under test.
 
+use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 #[path = "common/mod.rs"]
@@ -40,13 +41,13 @@ async fn restart_recovers_decided_state_from_storage() {
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 10 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 10 }))
         .expect("first append succeeds on leader");
     cluster
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 50 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 50 }))
         .expect("second append succeeds on leader");
 
     cluster.step_until(
@@ -76,7 +77,7 @@ async fn restart_recovers_decided_state_from_storage() {
         .node(leader_id)
         .omnipaxos()
         .lock()
-        .append(HighWaterCommand::Advance { at_least: 100 })
+        .append(HighWaterCommand::Advance(AdvancePayload { at_least: 100 }))
         .expect("third append succeeds on leader");
     cluster.step_until(
         |state| {

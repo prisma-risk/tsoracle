@@ -31,7 +31,7 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::warn;
-use tsoracle_consensus::ConsensusError;
+use tsoracle_consensus::{AdvancePayload, ConsensusError};
 use tsoracle_paxos_toolkit::lifecycle::{LeaderEventStream, MessageSink, PaxosRunner, Peer};
 
 use crate::host::PaxosHighWaterHost;
@@ -399,7 +399,7 @@ where
         // surfaces the leadership change to the caller.
         self.omnipaxos
             .lock()
-            .append(HighWaterCommand::Advance { at_least })
+            .append(HighWaterCommand::Advance(AdvancePayload { at_least }))
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(AdvanceAppendError(format!("{err:?}"))))
             })?;

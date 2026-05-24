@@ -25,6 +25,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use openraft::type_config::alias::StoredMembershipOf;
+use tsoracle_driver_openraft::AdvancePayload;
 use tsoracle_driver_openraft::{HighWaterCommand, HighWaterStateMachineSnapshot, TypeConfig};
 
 fn fuzz_corpus_dir(target: &str) -> PathBuf {
@@ -43,16 +44,16 @@ fn generate_log_entry_decode_seeds() {
     let target = "log_entry_decode";
     // Empty input — exercises the postcard "unexpected EOF" branch.
     write_seed(target, "seed_empty", &[]);
-    // Three boundary `Bump` targets mirror the existing hand-written
+    // Three boundary `Advance` values mirror the existing hand-written
     // roundtrip tests in `log_entry.rs::tests`.
     for (name, target_value) in [
         ("seed_bump_zero", 0u64),
         ("seed_bump_one", 1u64),
         ("seed_bump_max", u64::MAX),
     ] {
-        let bytes = postcard::to_stdvec(&HighWaterCommand::Bump {
-            target: target_value,
-        })
+        let bytes = postcard::to_stdvec(&HighWaterCommand::Advance(AdvancePayload {
+            at_least: target_value,
+        }))
         .expect("serialize HighWaterCommand");
         write_seed(target, name, &bytes);
     }

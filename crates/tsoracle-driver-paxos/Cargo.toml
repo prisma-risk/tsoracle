@@ -25,7 +25,7 @@ thiserror            = { workspace = true }
 tokio                = { workspace = true }
 tokio-stream         = { workspace = true }
 tracing              = { workspace = true }
-tsoracle-consensus   = { path = "../tsoracle-consensus", version = "0.1.6" }
+tsoracle-consensus   = { path = "../tsoracle-consensus", version = "0.1.6", features = ["serde"] }
 tsoracle-core        = { path = "../tsoracle-core", version = "0.2.1" }
 tsoracle-paxos-toolkit = { path = "../tsoracle-paxos-toolkit", version = "0.2.2", default-features = false }
 tsoracle-yieldpoint  = { workspace = true }

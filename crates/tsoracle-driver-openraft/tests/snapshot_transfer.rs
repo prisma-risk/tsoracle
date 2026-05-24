@@ -35,6 +35,7 @@ use openraft::{Config, Raft, SnapshotPolicy};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 use tokio::time::timeout;
+use tsoracle_driver_openraft::AdvancePayload;
 use tsoracle_driver_openraft::{HighWaterCommand, HighWaterStateMachine, OpenraftPeer, TypeConfig};
 use tsoracle_openraft_toolkit::test_fakes::MemNetwork;
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
@@ -146,7 +147,7 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     // follower — converge so we know the test's starting state.
     nodes[leader_idx]
         .raft
-        .client_write(HighWaterCommand::Bump { target: 10 })
+        .client_write(HighWaterCommand::Advance(AdvancePayload { at_least: 10 }))
         .await
         .expect("baseline bump");
     for node in &nodes {
@@ -163,15 +164,15 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     // quorum so writes succeed.
     net.partitions().isolate(follower_id);
 
-    // Apply enough Bumps to comfortably cross LogsSinceLast(4) and grow the
+    // Apply enough Advances to comfortably cross LogsSinceLast(4) and grow the
     // committed-log distance between the leader and the trailing follower.
     let final_target = 80u64;
     for next_target in [20u64, 30, 40, 50, 60, 70, final_target] {
         nodes[leader_idx]
             .raft
-            .client_write(HighWaterCommand::Bump {
-                target: next_target,
-            })
+            .client_write(HighWaterCommand::Advance(AdvancePayload {
+                at_least: next_target,
+            }))
             .await
             .expect("partition-side bump");
     }
