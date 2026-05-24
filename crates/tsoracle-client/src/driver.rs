@@ -344,15 +344,20 @@ fn deliver(
 /// `ClientError` contains `tonic::Status` and `tonic::transport::Error`,
 /// neither of which is `Clone`. To fan one RPC error out across every
 /// waiter in a failed chunk we have to reconstruct an equivalent error.
-/// `Transport` collapses to `NoReachableEndpoints` because the underlying
-/// transport details aren't useful for downstream callers, and we can't
-/// duplicate the original error value.
+/// `Transport` maps to [`ClientError::TransportFanout`], carrying the
+/// original error's `Display` text: the value itself cannot be duplicated,
+/// but the failure is still a single-endpoint transport failure and must
+/// stay distinct from `NoReachableEndpoints` (whole cluster unreachable),
+/// which a coalesced waiter's tracing/alerting would otherwise misread.
 fn clone_client_error(error: &ClientError) -> ClientError {
     match error {
         ClientError::Rpc(status) => {
             ClientError::Rpc(tonic::Status::new(status.code(), status.message()))
         }
-        ClientError::Transport(_) => ClientError::NoReachableEndpoints,
+        ClientError::Transport(transport_error) => {
+            ClientError::TransportFanout(transport_error.to_string())
+        }
+        ClientError::TransportFanout(message) => ClientError::TransportFanout(message.clone()),
         ClientError::NoReachableEndpoints => ClientError::NoReachableEndpoints,
         ClientError::InvalidEndpoint(endpoint) => ClientError::InvalidEndpoint(endpoint.clone()),
         ClientError::InvalidCount(count) => ClientError::InvalidCount(*count),
@@ -561,19 +566,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_client_error_collapses_transport_to_no_reachable_endpoints() {
+    async fn clone_client_error_maps_transport_to_transport_fanout() {
         // Constructing a `tonic::transport::Error` directly isn't possible —
         // it has no public constructor. Trigger one by attempting to dial a
         // closed port; the resulting error is then handed to
-        // `clone_client_error` to confirm the collapse.
+        // `clone_client_error`. The fanned-out copy must be a
+        // `TransportFanout` carrying the original message — *not*
+        // `NoReachableEndpoints`, which carries the distinct meaning "the
+        // whole cluster is unreachable" and would mislead tracing/alerting
+        // on every sibling waiter in the coalesced chunk.
         let endpoint = tonic::transport::Endpoint::from_static("http://127.0.0.1:1");
         let transport_err = endpoint
             .connect()
             .await
             .expect_err("connecting to a closed port must fail");
+        let expected_message = transport_err.to_string();
         let original = ClientError::Transport(transport_err);
-        let cloned = clone_client_error(&original);
-        assert!(matches!(cloned, ClientError::NoReachableEndpoints));
+        match clone_client_error(&original) {
+            ClientError::TransportFanout(message) => {
+                assert_eq!(message, expected_message);
+            }
+            other => panic!("expected TransportFanout, got {other:?}"),
+        }
     }
 
     #[test]
@@ -596,6 +610,22 @@ mod tests {
 
         let driver_gone = clone_client_error(&ClientError::DriverGone);
         assert!(matches!(driver_gone, ClientError::DriverGone));
+    }
+
+    #[test]
+    fn clone_client_error_reclones_transport_fanout_preserving_message() {
+        // `run_chunks` fail-fast stores the *cloned* error and re-clones it
+        // for every subsequent chunk, so `clone_client_error` is called on a
+        // value it already produced. Re-cloning a `TransportFanout` must keep
+        // it a `TransportFanout` with the same message — never silently decay
+        // into `NoReachableEndpoints` on the second and later chunks.
+        let original = ClientError::TransportFanout("dial 10.0.0.7:50051 refused".into());
+        match clone_client_error(&original) {
+            ClientError::TransportFanout(message) => {
+                assert_eq!(message, "dial 10.0.0.7:50051 refused");
+            }
+            other => panic!("expected TransportFanout, got {other:?}"),
+        }
     }
 
     /// `run_chunks` fail-fast: once one chunk errors, every subsequent

@@ -37,8 +37,9 @@ pub const HISTO_MAX_US: u64 = 60_000_000;
 /// Classify a `ClientError` as transient (worth retrying once) or fatal.
 ///
 /// Transient cases for a single-server, single-leader, no-real-network bench:
-/// - `Transport(_)`: typically a connection blip during server startup or
-///   graceful shutdown drain. Retry is harmless and usually quick.
+/// - `Transport(_)` / `TransportFanout(_)`: typically a connection blip during
+///   server startup or graceful shutdown drain (the latter is the same failure
+///   fanned out to a coalesced sibling waiter). Retry is harmless and usually quick.
 /// - `Rpc` with `Unavailable`/`DeadlineExceeded`/`ResourceExhausted`: the
 ///   server is up but unhealthy or backpressuring; retry.
 ///
@@ -47,7 +48,7 @@ pub const HISTO_MAX_US: u64 = 60_000_000;
 /// the run loudly.
 pub fn is_transient(err: &ClientError) -> bool {
     match err {
-        ClientError::Transport(_) => true,
+        ClientError::Transport(_) | ClientError::TransportFanout(_) => true,
         ClientError::Rpc(status) => matches!(
             status.code(),
             Code::Unavailable | Code::DeadlineExceeded | Code::ResourceExhausted

@@ -125,7 +125,10 @@ pub(crate) fn is_transport_failure(error: &crate::error::ClientError) -> bool {
             status.code(),
             tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
         ),
-        ClientError::Transport(_) => true,
+        // `TransportFanout` is the fanned-out copy of a `Transport` failure
+        // (a coalesced sibling waiter's view), so it carries the same
+        // transport-failure semantics.
+        ClientError::Transport(_) | ClientError::TransportFanout(_) => true,
         ClientError::NoReachableEndpoints
         | ClientError::InvalidEndpoint(_)
         | ClientError::InvalidCount(_)
@@ -270,6 +273,11 @@ mod tests {
             tonic::Status::failed_precondition("fp")
         )));
         assert!(!should_backoff(&ClientError::NoReachableEndpoints));
+        // `TransportFanout` is the coalesced-waiter copy of a `Transport`
+        // failure and must stay in the transport-failure class — distinct
+        // from the `NoReachableEndpoints` case directly above, which the
+        // fanout previously collapsed into (issue #241).
+        assert!(should_backoff(&ClientError::TransportFanout("t".into())));
         assert!(!should_backoff(&ClientError::InvalidEndpoint("e".into())));
         assert!(!should_backoff(&ClientError::InvalidCount(0)));
         // `DriverGone` is deterministic: the local driver task is dead,
