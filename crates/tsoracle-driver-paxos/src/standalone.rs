@@ -28,16 +28,13 @@ use omnipaxos::OmniPaxos;
 use omnipaxos::messages::Message;
 use omnipaxos::storage::Storage;
 use parking_lot::Mutex;
-use tokio::sync::Notify;
-use tokio::task::JoinHandle;
-use tracing::warn;
 use tsoracle_consensus::{AdvancePayload, ConsensusError};
 use tsoracle_paxos_toolkit::lifecycle::{LeaderEventStream, MessageSink, PaxosRunner, TsoPeer};
 
+use crate::apply::{ApplyEngine, ApplyTask};
 use crate::host::PaxosHighWaterHost;
 use crate::log_entry::HighWaterCommand;
 use crate::snapshot_policy::SnapshotPolicy;
-use crate::state_machine::{ApplyState, drain_decided_into, maybe_snapshot};
 
 /// Standalone host owning its own paxos cluster + apply pipeline.
 pub struct StandaloneHost<S>
@@ -48,22 +45,17 @@ where
     my_node_id: u64,
     barrier_seq: AtomicU64,
     runner: PaxosRunner<HighWaterCommand, S>,
-    apply_state: ApplyState,
     leader_stream: Mutex<Option<LeaderEventStream>>,
-    apply_handle: Mutex<Option<JoinHandle<()>>>,
-    /// Shutdown handle for the *currently running* apply task, installed by
-    /// `start` and taken by `stop`. `None` whenever no apply task is live.
-    ///
-    /// Each `start` mints a fresh `Notify` rather than reusing one across the
-    /// host's lifetime. `stop` signals shutdown with `notify_one`, which
-    /// stores a permit when no task is parked on `notified()`; a reused
-    /// `Notify` would carry such a stale permit into the next `start`, where
-    /// the newly spawned apply task would consume it and exit immediately. A
-    /// per-`start` `Notify` confines every permit to the task it was minted
-    /// for, and the `Option` lets `stop` skip signalling entirely when no
-    /// task is running (stop-before-start, double-stop, stop-after-exit).
-    apply_shutdown: Mutex<Option<Arc<Notify>>>,
-    policy: Arc<Mutex<SnapshotPolicy>>,
+    /// Apply state + snapshot policy + the drain/snapshot step. Drives the
+    /// synchronous stepping path and the barrier-linearized reads directly,
+    /// and the async apply path via a clone moved into the spawned task.
+    engine: ApplyEngine,
+    /// The running apply task, or `None` when no task is live. `start`
+    /// installs one; `stop` takes and consumes it. A single `Option` makes
+    /// "running" structural — the apply task cannot be half-installed — and
+    /// needs no `Mutex` because `start`/`stop` take `&mut self`. `None`
+    /// covers stop-before-start, double-stop, and stop-after-exit.
+    task: Option<ApplyTask>,
     /// Decided-log cursor for the synchronous [`Self::step`] / [`Self::apply_once`]
     /// stepping path, seeded past any recovered suffix. The async apply task
     /// keeps its own task-local cursor; a host is driven by exactly one path.
@@ -104,21 +96,19 @@ where
         // this lifetime's own barrier. The apply task re-drains from its own
         // cursor on start; the fold is idempotent (max over advances and
         // per-node seqs), so seeding the shared state early is safe.
-        let apply_state = ApplyState::new();
+        let engine = ApplyEngine::new(policy);
         let mut recovery_cursor = 0u64;
-        drain_decided_into(&omnipaxos, &mut recovery_cursor, &apply_state);
-        let recovered_seq = apply_state.applied_barrier_seq(my_node_id);
+        engine.recover(&omnipaxos, &mut recovery_cursor);
+        let recovered_seq = engine.applied_barrier_seq(my_node_id);
 
         Self {
             omnipaxos,
             my_node_id,
             barrier_seq: AtomicU64::new(recovered_seq),
             runner,
-            apply_state,
             leader_stream: Mutex::new(leader_stream),
-            apply_handle: Mutex::new(None),
-            apply_shutdown: Mutex::new(None),
-            policy: Arc::new(Mutex::new(policy)),
+            engine,
+            task: None,
             step_cursor: Mutex::new(recovery_cursor),
         }
     }
@@ -147,42 +137,14 @@ where
     /// apply task orphaned.
     pub fn start<Sink: MessageSink<HighWaterCommand>>(&mut self, sink: Arc<Sink>) {
         debug_assert!(
-            self.apply_handle.lock().is_none(),
+            self.task.is_none(),
             "StandaloneHost::start called while already running",
         );
 
-        let omnipaxos = self.omnipaxos.clone();
-        let apply_notify = self.runner.apply_notify();
-        let apply_state = self.apply_state.clone();
-        let policy = self.policy.clone();
-        // Mint a fresh shutdown Notify for this apply task and publish it for
-        // stop(). A per-start Notify cannot carry a stale permit from an
-        // earlier stop() into this task's select! loop.
-        let shutdown = Arc::new(Notify::new());
-        *self.apply_shutdown.lock() = Some(shutdown.clone());
-
-        let handle = tokio::spawn(async move {
-            let mut cursor: u64 = 0;
-            loop {
-                tokio::select! {
-                    _ = apply_notify.notified() => {
-                        let decided_idx = drain_decided_into(&omnipaxos, &mut cursor, &apply_state);
-                        {
-                            let mut policy = policy.lock();
-                            maybe_snapshot(&omnipaxos, &mut policy, decided_idx);
-                        }
-                        tsoracle_yieldpoint::yieldpoint!(
-                            "standalone_host::apply_task::between_iterations"
-                        );
-                    }
-                    _ = shutdown.notified() => {
-                        break;
-                    }
-                }
-            }
-        });
-        *self.apply_handle.lock() = Some(handle);
-
+        self.task = Some(
+            self.engine
+                .spawn(self.runner.apply_notify(), self.omnipaxos.clone()),
+        );
         self.runner.start(sink);
     }
 
@@ -190,21 +152,11 @@ where
     /// apply task. Surfaces a `tracing::warn!` if the apply task
     /// terminated abnormally.
     pub async fn stop(&mut self) {
-        // Signal only the apply task that start() installed. notify_one (not
-        // notify_waiters) is required because the apply task may be mid-drain
-        // rather than parked on notified() when stop() fires; the stored
-        // permit is consumed on its next select! turn instead of being lost
-        // and livelocking against the runner's per-tick apply_notify. Taking
-        // the Option means a stop() with no running task signals nothing, so
-        // no permit can survive to poison a later start().
-        if let Some(shutdown) = self.apply_shutdown.lock().take() {
-            shutdown.notify_one();
-        }
-        let handle = self.apply_handle.lock().take();
-        if let Some(handle) = handle {
-            if let Err(err) = handle.await {
-                warn!(error = ?err, "paxos driver apply task terminated abnormally");
-            }
+        // Taking the Option means a stop() with no running task does nothing,
+        // so no shutdown permit can survive to poison a later start(). The
+        // notify_one / mid-drain reasoning lives on ApplyTask::stop.
+        if let Some(task) = self.task.take() {
+            task.stop().await;
         }
         self.runner.stop().await;
     }
@@ -212,7 +164,7 @@ where
     /// Current in-memory high-water value (no consensus round-trip).
     /// Used internally by `current_high_water` after a barrier decides.
     pub fn current_value(&self) -> u64 {
-        self.apply_state.high_water()
+        self.engine.high_water()
     }
 
     /// Synchronous single step for deterministic test stepping: tick the runner
@@ -239,9 +191,7 @@ where
     /// apply task; idempotent (max over advances and per-node barrier seqs).
     pub fn apply_once(&self) {
         let mut cursor = self.step_cursor.lock();
-        let decided_idx = drain_decided_into(&self.omnipaxos, &mut cursor, &self.apply_state);
-        let mut policy = self.policy.lock();
-        maybe_snapshot(&self.omnipaxos, &mut policy, decided_idx);
+        self.engine.apply_step(&self.omnipaxos, &mut cursor);
     }
 
     /// Deliver an inbound message synchronously (deterministic test stepping).
@@ -368,7 +318,7 @@ where
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
             })?;
-        let notifier = self.apply_state.apply_notifier();
+        let notifier = self.engine.apply_notifier();
         tsoracle_yieldpoint::yieldpoint!(
             "standalone_host::current_high_water::after_append_before_await"
         );
@@ -379,8 +329,8 @@ where
             let notified = notifier.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.apply_state.applied_barrier_seq(self.my_node_id) >= seq {
-                return Ok(self.apply_state.high_water());
+            if self.engine.applied_barrier_seq(self.my_node_id) >= seq {
+                return Ok(self.engine.high_water());
             }
             notified.await;
         }
@@ -422,7 +372,7 @@ where
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
             })?;
-        let notifier = self.apply_state.apply_notifier();
+        let notifier = self.engine.apply_notifier();
         tsoracle_yieldpoint::yieldpoint!(
             "standalone_host::submit_advance::after_append_before_await"
         );
@@ -433,10 +383,10 @@ where
             let notified = notifier.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.apply_state.applied_barrier_seq(self.my_node_id) >= seq
-                && self.apply_state.high_water() >= at_least
+            if self.engine.applied_barrier_seq(self.my_node_id) >= seq
+                && self.engine.high_water() >= at_least
             {
-                return Ok(self.apply_state.high_water());
+                return Ok(self.engine.high_water());
             }
             notified.await;
         }
