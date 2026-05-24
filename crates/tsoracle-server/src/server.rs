@@ -337,17 +337,8 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        let (routes, mut watch_handle) = self.into_router()?;
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-
-        // tonic stops when EITHER the user's shutdown fires OR we cancel
-        // because the watch task terminated.
-        let combined_shutdown = async move {
-            tokio::select! {
-                _ = shutdown => {}
-                _ = cancel_rx => {}
-            }
-        };
+        let (routes, watch_handle) = self.into_router()?;
+        let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
         let mut tonic = TonicServer::builder();
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -357,36 +348,8 @@ impl Server {
         let serve = tonic
             .add_routes(routes)
             .serve_with_shutdown(addr, combined_shutdown);
-        tokio::pin!(serve);
 
-        tokio::select! {
-            // Bias toward the watch arm: if both are ready in the same poll
-            // (rare but possible — graceful shutdown completed in the same
-            // tick the watch returned), we want to surface the watch error
-            // rather than report a clean shutdown.
-            biased;
-
-            watch_result = &mut watch_handle => {
-                // Watch terminated. State is already poisoned (see watch
-                // task body in into_router). Trigger tonic drain, wait for
-                // it to finish, then report the watch's outcome — preferring
-                // it over any drain error, which surfaces only if the watch
-                // itself ended cleanly.
-                let _ = cancel_tx.send(());
-                let drain_result = serve.await;
-                combine_watch_and_drain(watch_result, drain_result)
-            }
-            serve_result = &mut serve => {
-                // User shutdown fired (or our cancel — but watch arm has
-                // `biased` priority, so reaching here means user shutdown).
-                // The watch task may still be running; aborting it loses
-                // any error it was about to report, but the process is
-                // shutting down so that's acceptable.
-                watch_handle.abort();
-                serve_result?;
-                Ok(())
-            }
-        }
+        serve_inner(watch_handle, serve, cancel_tx).await
     }
 
     /// Run the gRPC server on a caller-provided `TcpListener` until either
@@ -419,15 +382,8 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        let (routes, mut watch_handle) = self.into_router()?;
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-
-        let combined_shutdown = async move {
-            tokio::select! {
-                _ = shutdown => {}
-                _ = cancel_rx => {}
-            }
-        };
+        let (routes, watch_handle) = self.into_router()?;
+        let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
         let incoming = tonic::transport::server::TcpIncoming::from(listener);
 
@@ -439,21 +395,82 @@ impl Server {
         let serve = tonic
             .add_routes(routes)
             .serve_with_incoming_shutdown(incoming, combined_shutdown);
-        tokio::pin!(serve);
 
+        serve_inner(watch_handle, serve, cancel_tx).await
+    }
+}
+
+/// Merge the caller's `shutdown` future with an internal cancellation signal.
+///
+/// Both [`Server::serve_with_shutdown`] and [`Server::serve_with_listener`]
+/// need tonic to stop when EITHER the caller's `shutdown` fires OR the
+/// leader-watch task terminates (signalled by firing the returned
+/// `oneshot::Sender`). This builds that merged shutdown future and hands back
+/// the sender so [`serve_inner`] can trip it from the watch arm.
+fn combined_shutdown_with_cancel(
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> (
+    impl Future<Output = ()> + Send + 'static,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let combined_shutdown = async move {
         tokio::select! {
-            biased;
+            _ = shutdown => {}
+            _ = cancel_rx => {}
+        }
+    };
+    (combined_shutdown, cancel_tx)
+}
 
-            watch_result = &mut watch_handle => {
-                let _ = cancel_tx.send(());
-                let drain_result = serve.await;
-                combine_watch_and_drain(watch_result, drain_result)
-            }
-            serve_result = &mut serve => {
-                watch_handle.abort();
-                serve_result?;
-                Ok(())
-            }
+/// Drive the gRPC `serve_future` against the leader-watch task, shared by
+/// [`Server::serve_with_shutdown`] and [`Server::serve_with_listener`].
+///
+/// The two public methods differ only in how `serve_future` is assembled
+/// (address-bound via `serve_with_shutdown` vs listener-bound via
+/// `serve_with_incoming_shutdown`); everything downstream — the biased select,
+/// the abort path, and the drain/translate logic — is identical and lives
+/// here so a future change need only be made once.
+///
+/// `cancel_tx` is the cancellation half paired with the `serve_future`'s
+/// shutdown signal (see [`combined_shutdown_with_cancel`]); firing it begins
+/// tonic's graceful drain when the watch task terminates first.
+async fn serve_inner<S>(
+    mut watch_handle: tokio::task::JoinHandle<Result<(), ServerError>>,
+    serve_future: S,
+    cancel_tx: tokio::sync::oneshot::Sender<()>,
+) -> Result<(), ServerError>
+where
+    S: Future<Output = Result<(), tonic::transport::Error>>,
+{
+    tokio::pin!(serve_future);
+
+    tokio::select! {
+        // Bias toward the watch arm: if both are ready in the same poll
+        // (rare but possible — graceful shutdown completed in the same
+        // tick the watch returned), we want to surface the watch error
+        // rather than report a clean shutdown.
+        biased;
+
+        watch_result = &mut watch_handle => {
+            // Watch terminated. State is already poisoned (see watch
+            // task body in into_router). Trigger tonic drain, wait for
+            // it to finish, then report the watch's outcome — preferring
+            // it over any drain error, which surfaces only if the watch
+            // itself ended cleanly.
+            let _ = cancel_tx.send(());
+            let drain_result = serve_future.await;
+            combine_watch_and_drain(watch_result, drain_result)
+        }
+        serve_result = &mut serve_future => {
+            // User shutdown fired (or our cancel — but watch arm has
+            // `biased` priority, so reaching here means user shutdown).
+            // The watch task may still be running; aborting it loses
+            // any error it was about to report, but the process is
+            // shutting down so that's acceptable.
+            watch_handle.abort();
+            serve_result?;
+            Ok(())
         }
     }
 }
