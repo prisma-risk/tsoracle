@@ -46,6 +46,14 @@
 //! jittered exponential backoff. FAILED_PRECONDITION-with-hint redirects
 //! do not back off — the next endpoint is known and the redirect is
 //! part of normal discovery.
+//!
+//! A transport-class RPC failure also evicts the endpoint's cached channel
+//! ([`ChannelPool::evict_if_current`]) so the next attempt re-dials and
+//! re-resolves rather than reusing a channel pinned to a now-dead address
+//! (issue #239: a static tonic `Endpoint` resolves once and never
+//! re-resolves, so a pod-replaced endpoint would otherwise keep the dead
+//! channel and its background reconnect task forever). Application errors
+//! such as `Internal` leave the channel cached — the connection is healthy.
 
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
@@ -56,7 +64,7 @@ use tsoracle_core::{Epoch, Timestamp};
 use crate::error::ClientError;
 use crate::leader_resolved::{ChannelPool, LeaderHintLookup, decode_leader_hint};
 use crate::response::decode_get_ts_response;
-use crate::retry_policy::{jittered_backoff, should_backoff};
+use crate::retry_policy::{is_transport_failure, jittered_backoff, should_backoff};
 
 pub(crate) async fn issue_rpc(
     pool: &ChannelPool,
@@ -211,41 +219,45 @@ async fn attempt(
     // budget — which would let one attempt run for up to `2 * budget` and
     // overrun `overall_deadline` before `max_attempts` is reached.
     let pair_deadline = Instant::now() + budget;
-    let mut client = match tokio::time::timeout(budget, pool.client(endpoint)).await {
-        Ok(Ok(client)) => client,
-        Ok(Err(err)) => {
-            #[cfg(feature = "metrics")]
-            metrics::counter!(
-                "tsoracle.client.retries.total",
-                "reason" => "connect_failure",
-            )
-            .increment(1);
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                endpoint = %endpoint,
-                error = %err,
-                "tsoracle-client: connect failed; advancing worklist",
-            );
-            return AttemptOutcome::Err(err);
-        }
-        Err(_) => {
-            #[cfg(feature = "metrics")]
-            metrics::counter!(
-                "tsoracle.client.retries.total",
-                "reason" => "deadline_exceeded",
-            )
-            .increment(1);
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                endpoint = %endpoint,
-                budget_ms = budget.as_millis() as u64,
-                "tsoracle-client: connect exceeded per_attempt_deadline",
-            );
-            return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
-                format!("connect exceeded per_attempt_deadline of {budget:?}"),
-            )));
-        }
-    };
+    // Keep the channel's cell handle for the whole RPC: a transport-class
+    // failure below hands this exact cell to `evict_if_current` so the dead
+    // channel is dropped without racing a concurrent re-dial (issue #239).
+    let (mut client, cell) =
+        match tokio::time::timeout(budget, pool.client_with_cell(endpoint)).await {
+            Ok(Ok(leased)) => leased,
+            Ok(Err(err)) => {
+                #[cfg(feature = "metrics")]
+                metrics::counter!(
+                    "tsoracle.client.retries.total",
+                    "reason" => "connect_failure",
+                )
+                .increment(1);
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    endpoint = %endpoint,
+                    error = %err,
+                    "tsoracle-client: connect failed; advancing worklist",
+                );
+                return AttemptOutcome::Err(err);
+            }
+            Err(_) => {
+                #[cfg(feature = "metrics")]
+                metrics::counter!(
+                    "tsoracle.client.retries.total",
+                    "reason" => "deadline_exceeded",
+                )
+                .increment(1);
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    endpoint = %endpoint,
+                    budget_ms = budget.as_millis() as u64,
+                    "tsoracle-client: connect exceeded per_attempt_deadline",
+                );
+                return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
+                    format!("connect exceeded per_attempt_deadline of {budget:?}"),
+                )));
+            }
+        };
     // Give `get_ts` only what the connect phase left of the pair's budget.
     // `saturating_duration_since` floors at zero, so a connect that consumed
     // the whole budget yields an immediate timeout rather than a fresh one.
@@ -278,7 +290,15 @@ async fn attempt(
                 code = ?status.code(),
                 "tsoracle-client: RPC failed; advancing worklist",
             );
-            return AttemptOutcome::Err(ClientError::Rpc(status));
+            let err = ClientError::Rpc(status);
+            // Drop the cached channel only on a transport-class failure: the
+            // connection itself looks dead (issue #239). A non-transport
+            // status (`Internal`, etc.) means the channel is healthy and the
+            // server simply returned an error, so the channel is kept.
+            if is_transport_failure(&err) {
+                pool.evict_if_current(endpoint, &cell);
+            }
+            return AttemptOutcome::Err(err);
         }
         Err(_) => {
             #[cfg(feature = "metrics")]
@@ -293,6 +313,10 @@ async fn attempt(
                 budget_ms = rpc_budget.as_millis() as u64,
                 "tsoracle-client: RPC exceeded its share of per_attempt_deadline",
             );
+            // A timed-out RPC is transport-class (`DeadlineExceeded`): the
+            // channel may be half-open and black-holing — evict so the next
+            // attempt re-dials and re-resolves the endpoint.
+            pool.evict_if_current(endpoint, &cell);
             return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
                 format!(
                     "rpc exceeded its share of per_attempt_deadline \
@@ -424,6 +448,8 @@ fn rejects_plaintext_hint(pool: &ChannelPool, hint: &str) -> bool {
 mod tests {
     use super::*;
     use crate::RetryPolicy;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Aggressive policy used by the unit tests to keep them fast.
     /// `per_attempt_deadline` is the dominant cost — the integration
@@ -1033,6 +1059,190 @@ mod tests {
             elapsed < Duration::from_millis(450),
             "connect + get_ts must share one per_attempt_deadline (~{budget:?}); \
              took {elapsed:?} — ~2x budget means each phase got the full deadline",
+        );
+    }
+
+    /// A connector that counts its invocations and yields the channel built by
+    /// `build`. The count is the observable proxy for "did `attempt` re-dial":
+    /// an evicted channel forces a fresh `client_with_cell` cache miss (and
+    /// thus a new connector call), while a retained channel is reused without
+    /// one. Keeps the eviction tests from reaching into the pool's private
+    /// channel map.
+    fn counting_connector<F>(
+        count: Arc<AtomicUsize>,
+        build: F,
+    ) -> Arc<crate::transport::ChannelConnector>
+    where
+        F: Fn() -> tonic::transport::Channel + Send + Sync + 'static,
+    {
+        Arc::new(move |_endpoint: &str| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let channel = build();
+            Box::pin(async move { Ok(channel) })
+        })
+    }
+
+    /// Issue #239: a transport-class RPC failure must evict the cached channel
+    /// so the next attempt re-dials (and re-resolves the endpoint) rather than
+    /// reusing a channel pinned to a dead address. Here a lazily-connected
+    /// channel to a closed port surfaces `Unavailable` on the first RPC; with
+    /// eviction the connector runs once per attempt (count == 2), without it
+    /// the second attempt would reuse the cached channel (count == 1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transport_failure_evicts_cached_channel() {
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connector = counting_connector(connect_count.clone(), || {
+            // connect_lazy returns immediately; the first RPC over it attempts
+            // the real connect to the closed port and fails with Unavailable.
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy()
+        });
+        let pool = ChannelPool::new(
+            vec!["dead:1".into()],
+            Some(connector),
+            false,
+            short_policy(),
+        );
+
+        let budget = Duration::from_millis(200);
+        let first = attempt(&pool, "dead:1", 1, budget).await;
+        assert!(
+            matches!(first, AttemptOutcome::Err(_)),
+            "a closed port must fail the RPC, got {first:?}",
+        );
+        let _second = attempt(&pool, "dead:1", 1, budget).await;
+
+        assert_eq!(
+            connect_count.load(Ordering::SeqCst),
+            2,
+            "a transport failure must evict the channel so the next attempt re-dials",
+        );
+    }
+
+    /// A non-transport application error (`Internal`) must NOT evict the
+    /// cached channel — the connection is healthy, the server merely returned
+    /// an error. The connector connects to a real server that always answers
+    /// `Internal`; the second attempt must reuse the cached channel, so the
+    /// connector runs exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn application_error_preserves_cached_channel() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct InternalServer;
+
+        #[tonic::async_trait]
+        impl TsoService for InternalServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("boom"))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(InternalServer))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connector = counting_connector(connect_count.clone(), move || {
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .expect("valid endpoint")
+                .connect_lazy()
+        });
+        let pool = ChannelPool::new(
+            vec!["server:1".into()],
+            Some(connector),
+            false,
+            short_policy(),
+        );
+
+        let budget = Duration::from_secs(2);
+        let first = attempt(&pool, "server:1", 1, budget).await;
+        assert!(
+            matches!(first, AttemptOutcome::Err(_)),
+            "Internal must surface as Err, got {first:?}",
+        );
+        let _second = attempt(&pool, "server:1", 1, budget).await;
+
+        assert_eq!(
+            connect_count.load(Ordering::SeqCst),
+            1,
+            "an application error must not evict the channel; it must be reused",
+        );
+    }
+
+    /// The user-selected policy evicts on timeout too: a hung RPC that exceeds
+    /// its share of the per-attempt budget surfaces `DeadlineExceeded`
+    /// (transport-class), so the channel is evicted and the next attempt
+    /// re-dials. A half-open connection to a replaced pod that black-holes
+    /// until timeout — rather than failing fast with `Unavailable` — is the
+    /// real-world case this covers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_timeout_evicts_cached_channel() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct HangingServer;
+
+        #[tonic::async_trait]
+        impl TsoService for HangingServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Err(tonic::Status::internal("unreachable: should be timed out"))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(HangingServer))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connector = counting_connector(connect_count.clone(), move || {
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .expect("valid endpoint")
+                .connect_lazy()
+        });
+        let pool = ChannelPool::new(
+            vec!["hang:1".into()],
+            Some(connector),
+            false,
+            short_policy(),
+        );
+
+        let budget = Duration::from_millis(200);
+        let first = attempt(&pool, "hang:1", 1, budget).await;
+        assert!(
+            matches!(first, AttemptOutcome::Err(_)),
+            "a hung RPC must surface as Err, got {first:?}",
+        );
+        let _second = attempt(&pool, "hang:1", 1, budget).await;
+
+        assert_eq!(
+            connect_count.load(Ordering::SeqCst),
+            2,
+            "an RPC timeout must evict the channel so the next attempt re-dials",
         );
     }
 }

@@ -104,14 +104,21 @@ impl Default for RetryPolicy {
     }
 }
 
-/// Decide whether to back off before the next attempt based on the
-/// last error. Returns `true` for `Unavailable` / `DeadlineExceeded`
-/// gRPC statuses, and for transport-layer errors (which are inherently
-/// "service unavailable" class — the connect itself never reached the
-/// peer). Other failures (e.g. `Internal`, `Unauthenticated`, or a
-/// user-supplied connector's own error) are treated as deterministic:
-/// the next endpoint is tried immediately without sleep.
-pub(crate) fn should_backoff(error: &crate::error::ClientError) -> bool {
+/// Classify an error as a transport-layer problem with the connection
+/// itself: the peer was unreachable (`Unavailable`), the attempt timed out
+/// (`DeadlineExceeded` — including a half-open connection that black-holes
+/// until the per-attempt deadline rather than failing fast), or the
+/// transport failed to establish (`Transport`). Deterministic failures
+/// (`Internal`, `Unauthenticated`, a user-supplied connector's own error,
+/// `DriverGone`, etc.) are not transport problems.
+///
+/// This single predicate drives two policies that happen to share the same
+/// trigger today — backing off before the next attempt
+/// ([`should_backoff`]) and evicting the cached channel after the RPC fails
+/// (`crate::retry::attempt`, issue #239). Keeping one definition means the
+/// two cannot silently drift apart; if they ever need to diverge, that must
+/// be a deliberate edit here.
+pub(crate) fn is_transport_failure(error: &crate::error::ClientError) -> bool {
     use crate::error::ClientError;
     match error {
         ClientError::Rpc(status) => matches!(
@@ -125,6 +132,16 @@ pub(crate) fn should_backoff(error: &crate::error::ClientError) -> bool {
         | ClientError::Connector(_)
         | ClientError::DriverGone => false,
     }
+}
+
+/// Decide whether to back off before the next attempt based on the last
+/// error. Backoff applies to exactly the transport-failure class (see
+/// [`is_transport_failure`]): those are the "service unavailable"-style
+/// failures where pausing before retrying de-correlates a thundering herd.
+/// Other failures are deterministic — the next endpoint is tried
+/// immediately without sleep.
+pub(crate) fn should_backoff(error: &crate::error::ClientError) -> bool {
+    is_transport_failure(error)
 }
 
 /// Jittered exponential backoff. The returned duration is uniformly

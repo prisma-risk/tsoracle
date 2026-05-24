@@ -206,7 +206,22 @@ impl ChannelPool {
         accept
     }
 
-    /// Returns a tonic client for `endpoint`, opening the channel on first use.
+    /// Test-only convenience wrapper over [`Self::client_with_cell`] for the
+    /// callers that only need the client and not the cell handle. Production
+    /// code goes through `client_with_cell` so it can evict the exact channel
+    /// on a transport-class failure.
+    #[cfg(test)]
+    pub(crate) async fn client(
+        &self,
+        endpoint: &str,
+    ) -> Result<TsoServiceClient<Channel>, ClientError> {
+        self.client_with_cell(endpoint)
+            .await
+            .map(|(client, _cell)| client)
+    }
+
+    /// Returns a tonic client for `endpoint` plus the shared `OnceCell`
+    /// backing its channel, opening the channel on first use.
     ///
     /// Look up (or insert) the endpoint's shared `OnceCell` under the
     /// synchronous map lock, release the lock, then drive the dial through
@@ -216,14 +231,22 @@ impl ChannelPool {
     /// already-initialized `Channel` (itself an `Arc`-backed cheap clone).
     ///
     /// A failed dial does not stay cached: the endpoint's entry is evicted on
-    /// the error path so a stream of distinct *failing* endpoints cannot grow
-    /// the map without bound. That matters because wire-supplied leader hints
-    /// (`LeaderHint.leader_endpoint`) reach this method as arbitrary endpoint
-    /// strings, so a contacted peer handing back a fresh unparseable hint per
-    /// request would otherwise leak one uninitialized cell each time. The next
-    /// caller for the same endpoint re-inserts a fresh cell and re-dials, so
-    /// the retry semantics are unchanged — only the dead slot is reclaimed.
-    pub async fn client(&self, endpoint: &str) -> Result<TsoServiceClient<Channel>, ClientError> {
+    /// the error path (via [`Self::evict_if_current`]) so a stream of distinct
+    /// *failing* endpoints cannot grow the map without bound. That matters
+    /// because wire-supplied leader hints (`LeaderHint.leader_endpoint`) reach
+    /// this method as arbitrary endpoint strings, so a contacted peer handing
+    /// back a fresh unparseable hint per request would otherwise leak one
+    /// uninitialized cell each time. The next caller for the same endpoint
+    /// re-inserts a fresh cell and re-dials, so the retry semantics are
+    /// unchanged — only the dead slot is reclaimed.
+    ///
+    /// The returned cell handle lets the retry loop evict the *same* channel
+    /// if a later RPC over it fails with a transport error (issue #239); see
+    /// [`Self::evict_if_current`] and `crate::retry::attempt`.
+    pub(crate) async fn client_with_cell(
+        &self,
+        endpoint: &str,
+    ) -> Result<(TsoServiceClient<Channel>, Arc<OnceCell<Channel>>), ClientError> {
         let cell = {
             let mut guard = self.channels.lock();
             guard
@@ -274,23 +297,39 @@ impl ChannelPool {
                 // `OnceCell` only stores a value on a successful init, and
                 // `get_or_try_init` runs the closure at most once across every
                 // caller sharing this cell, so no concurrent caller initialized
-                // it either. Reclaim the map slot. The identity check
-                // (`Arc::ptr_eq`) ensures we only drop the entry while it still
-                // holds *this* cell: if a concurrent caller has meanwhile
-                // re-inserted a fresh cell under the same key (and may already
-                // be dialing into it), that cell is left untouched.
-                let mut guard = self.channels.lock();
-                if guard
-                    .get(endpoint)
-                    .is_some_and(|current| Arc::ptr_eq(current, &cell))
-                {
-                    guard.remove(endpoint);
-                }
+                // it either. Reclaim the map slot (the identity guard inside
+                // `evict_if_current` skips it if a concurrent caller already
+                // replaced the cell).
+                self.evict_if_current(endpoint, &cell);
                 return Err(err);
             }
         };
 
-        Ok(TsoServiceClient::new(channel.clone()))
+        Ok((TsoServiceClient::new(channel.clone()), cell))
+    }
+
+    /// Remove `endpoint`'s cached channel cell, but only while the map still
+    /// holds *this* cell. Used on two paths: a failed dial (the cell is still
+    /// uninitialized) and a transport-class RPC failure against an
+    /// already-dialed channel (issue #239 — a pod-replaced endpoint whose
+    /// cached channel and its background tonic reconnect task would otherwise
+    /// be reused indefinitely, since a static `Endpoint` resolves its address
+    /// once and never re-resolves). Eviction forces the next caller to re-dial
+    /// and re-resolve.
+    ///
+    /// The `Arc::ptr_eq` identity check ensures we only drop the entry while
+    /// it still holds the cell we were handed: if a concurrent caller has
+    /// meanwhile re-inserted a fresh cell under the same key (and may already
+    /// be dialing into it), that cell is left untouched, so a stale failure
+    /// cannot evict a freshly-redialed good channel.
+    pub(crate) fn evict_if_current(&self, endpoint: &str, cell: &Arc<OnceCell<Channel>>) {
+        let mut guard = self.channels.lock();
+        if guard
+            .get(endpoint)
+            .is_some_and(|current| Arc::ptr_eq(current, cell))
+        {
+            guard.remove(endpoint);
+        }
     }
 
     pub fn iter_round_robin(&self) -> Vec<String> {
@@ -719,6 +758,67 @@ mod tests {
             guard.len(),
             0,
             "failed dials must not be retained in the channel cache"
+        );
+    }
+
+    /// `evict_if_current` clears the endpoint's cached cell when the map
+    /// still holds *that* cell. A successful dial seats a cell; evicting it
+    /// with the same handle removes the entry, so the next caller re-dials.
+    /// This is the primitive the retry loop uses to drop a channel whose RPC
+    /// failed with a transport error.
+    #[tokio::test]
+    async fn evict_if_current_removes_the_cached_cell() {
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async {
+                Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+            })
+        });
+        let pool = ChannelPool::new(Vec::new(), Some(connector), false, RetryPolicy::default());
+
+        let (_client, cell) = pool
+            .client_with_cell("a:1")
+            .await
+            .expect("dial against the success connector must succeed");
+        assert!(
+            pool.channels.lock().contains_key("a:1"),
+            "a successful dial must seat a cell"
+        );
+
+        pool.evict_if_current("a:1", &cell);
+        assert!(
+            !pool.channels.lock().contains_key("a:1"),
+            "evicting with the live cell must clear the entry"
+        );
+    }
+
+    /// The identity guard, mirroring the dial-failure eviction: if a
+    /// concurrent caller has replaced the endpoint's cell with a fresh one,
+    /// evicting with a *stale* handle must spare the live cell. Without it, a
+    /// transport failure observed on an old channel could evict a
+    /// freshly-redialed good channel, forcing a redundant re-dial.
+    #[tokio::test]
+    async fn evict_if_current_spares_a_replaced_cell() {
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async {
+                Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+            })
+        });
+        let pool = ChannelPool::new(Vec::new(), Some(connector), false, RetryPolicy::default());
+
+        let (_first, cell1) = pool.client_with_cell("a:1").await.expect("first dial");
+        // Evict and re-dial so the map holds a different cell than `cell1`.
+        pool.evict_if_current("a:1", &cell1);
+        let (_second, cell2) = pool.client_with_cell("a:1").await.expect("second dial");
+        assert!(
+            !Arc::ptr_eq(&cell1, &cell2),
+            "the re-dial must seat a fresh cell"
+        );
+
+        // A stale-handle eviction must leave the live cell in place.
+        pool.evict_if_current("a:1", &cell1);
+        assert!(
+            pool.channels.lock().contains_key("a:1"),
+            "stale-cell eviction must spare the live cell"
         );
     }
 
