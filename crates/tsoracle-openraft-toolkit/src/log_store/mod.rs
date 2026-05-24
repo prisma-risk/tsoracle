@@ -179,12 +179,26 @@ fn range_boundary<RB: RangeBounds<u64>>(range: RB) -> (u64, u64) {
     (start, end)
 }
 
-fn postcard_encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
-    postcard::to_stdvec(value).map_err(io::Error::other)
+/// Encode a log record as `[SCHEMA_VERSION | postcard(value)]`.
+fn encode_record<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
+    crate::codec::encode(crate::codec::SCHEMA_VERSION, value).map_err(codec_io_error)
 }
 
-fn postcard_decode<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
-    postcard::from_bytes(bytes).map_err(io::Error::other)
+/// Decode a record framed by [`encode_record`], rejecting a foreign version.
+fn decode_record<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
+    crate::codec::decode(crate::codec::SCHEMA_VERSION, bytes).map_err(codec_io_error)
+}
+
+/// Map a codec failure to `io::Error`, surfacing a version mismatch as
+/// `InvalidData` so a foreign-format record is a distinguishable, structured
+/// error rather than a generic decode failure.
+fn codec_io_error(err: crate::codec::CodecError) -> io::Error {
+    match err {
+        e @ crate::codec::CodecError::Version { .. } => {
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        }
+        other => io::Error::other(other),
+    }
 }
 
 impl<C, K> RocksdbLogStore<C, K>
@@ -216,7 +230,7 @@ where
         if &*k < lo.as_slice() {
             return Ok(None);
         }
-        let entry: C::Entry = postcard_decode(&v)?;
+        let entry: C::Entry = decode_record(&v)?;
         Ok(Some(entry.log_id()))
     }
 }
@@ -253,7 +267,7 @@ where
             if &*k >= end_key.as_slice() {
                 break;
             }
-            let entry: C::Entry = postcard_decode(&v)?;
+            let entry: C::Entry = decode_record(&v)?;
             out.push(entry);
         }
         Ok(out)
@@ -340,7 +354,7 @@ where
         for entry in entries {
             let (_leader, idx) = entry.log_id_parts();
             let key = self.keys.log_key(idx);
-            let value = postcard_encode(&entry)?;
+            let value = encode_record(&entry)?;
             batch.put_cf(&cf_log, &key, &value);
         }
 
@@ -492,5 +506,32 @@ mod range_boundary_tests {
     #[test]
     fn fully_unbounded_range_is_full_u64_space() {
         assert_eq!(range_boundary::<std::ops::RangeFull>(..), (0, u64::MAX));
+    }
+}
+
+#[cfg(test)]
+mod record_codec_tests {
+    use super::{decode_record, encode_record};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Rec {
+        v: u64,
+    }
+
+    #[test]
+    fn encode_record_stamps_schema_version_and_roundtrips() {
+        let bytes = encode_record(&Rec { v: 5 }).expect("encode");
+        assert_eq!(bytes[0], crate::codec::SCHEMA_VERSION);
+        let back: Rec = decode_record(&bytes).expect("decode");
+        assert_eq!(back, Rec { v: 5 });
+    }
+
+    #[test]
+    fn decode_record_rejects_foreign_version() {
+        // A 0xFF-framed record must surface as InvalidData rather than a
+        // successful-but-wrong decode.
+        let err = decode_record::<Rec>(&[0xFF, 5]).expect_err("must reject");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }
