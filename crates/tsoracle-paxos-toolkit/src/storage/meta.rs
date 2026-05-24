@@ -23,7 +23,7 @@
 use omnipaxos::ballot_leader_election::Ballot;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::codec::{CodecError, decode as codec_decode, encode as codec_encode};
+use crate::codec::{CodecError, SCHEMA_VERSION, decode as codec_decode, encode as codec_encode};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MetaError {
@@ -47,22 +47,22 @@ pub fn decode_u64(bytes: &[u8]) -> Result<u64, MetaError> {
 
 #[must_use = "encoded ballot bytes must be persisted or the encode call had no effect"]
 pub fn encode_ballot(ballot: &Ballot) -> Result<Vec<u8>, MetaError> {
-    Ok(codec_encode(ballot)?)
+    Ok(codec_encode(SCHEMA_VERSION, ballot)?)
 }
 
 #[must_use = "decoded ballot must be inspected; discarding it discards the read"]
 pub fn decode_ballot(bytes: &[u8]) -> Result<Ballot, MetaError> {
-    Ok(codec_decode(bytes)?)
+    Ok(codec_decode(SCHEMA_VERSION, bytes)?)
 }
 
 #[must_use = "encoded bytes must be persisted or the encode call had no effect"]
 pub fn encode_postcard<T: Serialize>(value: &T) -> Result<Vec<u8>, MetaError> {
-    Ok(codec_encode(value)?)
+    Ok(codec_encode(SCHEMA_VERSION, value)?)
 }
 
 #[must_use = "decoded value must be inspected; discarding it discards the read"]
 pub fn decode_postcard<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MetaError> {
-    Ok(codec_decode(bytes)?)
+    Ok(codec_decode(SCHEMA_VERSION, bytes)?)
 }
 
 #[cfg(test)]
@@ -99,5 +99,30 @@ mod tests {
     fn decode_u64_rejects_wrong_length() {
         assert!(decode_u64(&[0u8; 7]).is_err());
         assert!(decode_u64(&[0u8; 9]).is_err());
+    }
+
+    #[test]
+    fn ballot_pins_v1_layout() {
+        // Hand-built v1 frame: [SCHEMA_VERSION | postcard(ballot)]. Body
+        // [1,2,3,4] = config_id 1, n 2, priority 3, pid 4 (all small varints).
+        let ballot = Ballot {
+            config_id: 1,
+            n: 2,
+            priority: 3,
+            pid: 4,
+        };
+        assert_eq!(encode_ballot(&ballot).expect("encode"), vec![1, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn decode_ballot_rejects_foreign_version() {
+        let err = decode_ballot(&[0xFF, 1, 2, 3, 4]).expect_err("must reject");
+        assert!(matches!(
+            err,
+            MetaError::Codec(CodecError::Version {
+                expected: 1,
+                actual: 0xFF
+            })
+        ));
     }
 }

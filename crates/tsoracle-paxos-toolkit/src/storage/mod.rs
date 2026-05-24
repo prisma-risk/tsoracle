@@ -197,10 +197,10 @@ where
         idx: u64,
         entry: &T,
     ) -> Result<(), StorageError> {
-        use crate::codec::encode as codec_encode;
+        use crate::codec::{SCHEMA_VERSION, encode as codec_encode};
         use crate::storage::key_space::log_key;
         let key = log_key(idx);
-        let value = codec_encode(entry)?;
+        let value = codec_encode(SCHEMA_VERSION, entry)?;
         batch.put_cf(cf, key, value);
         Ok(())
     }
@@ -329,7 +329,7 @@ where
     }
 
     fn get_entries(&self, from: u64, to: u64) -> omnipaxos::storage::StorageResult<Vec<T>> {
-        use crate::codec::decode as codec_decode;
+        use crate::codec::{SCHEMA_VERSION, decode as codec_decode};
         use crate::storage::key_space::{LOG_PREFIX, log_key};
         use rocksdb::IteratorMode;
 
@@ -349,7 +349,7 @@ where
             if !key.starts_with(LOG_PREFIX) || key.as_ref() >= end.as_slice() {
                 break;
             }
-            let entry: T = codec_decode(&value).map_err(box_err)?;
+            let entry: T = codec_decode(SCHEMA_VERSION, &value).map_err(box_err)?;
             out.push(entry);
             if out.len() == expected {
                 break;
@@ -372,7 +372,7 @@ where
     }
 
     fn get_suffix(&self, from: u64) -> omnipaxos::storage::StorageResult<Vec<T>> {
-        use crate::codec::decode as codec_decode;
+        use crate::codec::{SCHEMA_VERSION, decode as codec_decode};
         use crate::storage::key_space::{LOG_PREFIX, log_key};
         use rocksdb::IteratorMode;
 
@@ -391,7 +391,7 @@ where
             if !key.starts_with(LOG_PREFIX) {
                 break;
             }
-            let entry: T = codec_decode(&value).map_err(box_err)?;
+            let entry: T = codec_decode(SCHEMA_VERSION, &value).map_err(box_err)?;
             out.push(entry);
         }
         Ok(out)
