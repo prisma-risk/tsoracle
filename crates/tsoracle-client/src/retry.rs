@@ -199,6 +199,12 @@ async fn attempt(
     count: u32,
     budget: Duration,
 ) -> AttemptOutcome {
+    // `budget` bounds the whole `(connect, get_ts)` pair, not each phase
+    // independently. Anchor one deadline up front so a slow connect eats into
+    // the time left for `get_ts` instead of each phase getting a fresh full
+    // budget — which would let one attempt run for up to `2 * budget` and
+    // overrun `overall_deadline` before `max_attempts` is reached.
+    let pair_deadline = Instant::now() + budget;
     let mut client = match tokio::time::timeout(budget, pool.client(endpoint)).await {
         Ok(Ok(client)) => client,
         Ok(Err(err)) => {
@@ -234,8 +240,12 @@ async fn attempt(
             )));
         }
     };
+    // Give `get_ts` only what the connect phase left of the pair's budget.
+    // `saturating_duration_since` floors at zero, so a connect that consumed
+    // the whole budget yields an immediate timeout rather than a fresh one.
+    let rpc_budget = pair_deadline.saturating_duration_since(Instant::now());
     let rpc = client.get_ts(tsoracle_proto::v1::GetTsRequest { count });
-    let response = match tokio::time::timeout(budget, rpc).await {
+    let response = match tokio::time::timeout(rpc_budget, rpc).await {
         Ok(Ok(resp)) => resp,
         Ok(Err(status)) if status.code() == tonic::Code::FailedPrecondition => {
             #[cfg(feature = "metrics")]
@@ -274,11 +284,14 @@ async fn attempt(
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 endpoint = %endpoint,
-                budget_ms = budget.as_millis() as u64,
-                "tsoracle-client: RPC exceeded per_attempt_deadline",
+                budget_ms = rpc_budget.as_millis() as u64,
+                "tsoracle-client: RPC exceeded its share of per_attempt_deadline",
             );
             return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
-                format!("rpc exceeded per_attempt_deadline of {budget:?}"),
+                format!(
+                    "rpc exceeded its share of per_attempt_deadline \
+                     ({rpc_budget:?} of {budget:?})"
+                ),
             )));
         }
     };
@@ -932,5 +945,91 @@ mod tests {
                  (NoReachableEndpoints means the StaleLeaderHint arm dropped last_err)"
             ),
         }
+    }
+
+    /// The per-attempt deadline bounds the whole `(connect, get_ts)` pair, not
+    /// each phase independently. A slow connect that consumes most of the
+    /// budget must leave only the remainder for `get_ts`, so a single
+    /// `attempt` never runs longer than ~`per_attempt_deadline`. Wrapping each
+    /// phase in the full budget would let a slow-connect/slow-RPC pair burn up
+    /// to 2x the deadline and overrun `overall_deadline` before `max_attempts`.
+    ///
+    /// Uses an injected connector that sleeps for most of the budget before
+    /// returning a live channel, then points it at a server whose `get_ts`
+    /// hangs — so the RPC phase would block for its full timeout if it were
+    /// given one. The assertion is the wall-clock bound on the whole pair.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connect_and_rpc_share_one_per_attempt_deadline() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct HangingServer;
+
+        #[tonic::async_trait]
+        impl TsoService for HangingServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                // Hang well past any per-attempt budget so the client's RPC
+                // timeout — not a server reply — decides when the phase ends.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Err(tonic::Status::internal(
+                    "unreachable: server should be timed out",
+                ))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(HangingServer))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let budget = Duration::from_millis(300);
+        // Burn most of the budget in the connect phase; the RPC must get only
+        // the ~50ms remainder, not a fresh full budget.
+        let connect_delay = Duration::from_millis(250);
+
+        let connector: std::sync::Arc<crate::transport::ChannelConnector> =
+            std::sync::Arc::new(move |_endpoint: &str| {
+                Box::pin(async move {
+                    tokio::time::sleep(connect_delay).await;
+                    let endpoint =
+                        tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                            .map_err(ClientError::from)?;
+                    endpoint.connect().await.map_err(ClientError::from)
+                })
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 1,
+            per_attempt_deadline: budget,
+            overall_deadline: Duration::from_secs(30),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["ignored:1".into()], Some(connector), false, policy);
+
+        let start = std::time::Instant::now();
+        let outcome = attempt(&pool, "ignored:1", 1, budget).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(outcome, AttemptOutcome::Err(_)),
+            "a hanging RPC must surface as Err, got {outcome:?}",
+        );
+        assert!(
+            elapsed < Duration::from_millis(450),
+            "connect + get_ts must share one per_attempt_deadline (~{budget:?}); \
+             took {elapsed:?} — ~2x budget means each phase got the full deadline",
+        );
     }
 }
