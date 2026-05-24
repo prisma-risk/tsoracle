@@ -4,6 +4,19 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.2.1...tsoracle-client-v0.2.2) - 2026-05-24
+
+### Fixed
+
+- *(client)* distinguish fanned-out transport failures from NoReachableEndpoints ([#241](https://github.com/prisma-risk/tsoracle/pull/241)) ([#300](https://github.com/prisma-risk/tsoracle/pull/300))
+- *(client)* evict cached channel on transport-class RPC failure ([#239](https://github.com/prisma-risk/tsoracle/pull/239)) ([#292](https://github.com/prisma-risk/tsoracle/pull/292))
+- *(client)* evict failed-dial ChannelPool entries to bound the cache ([#290](https://github.com/prisma-risk/tsoracle/pull/290))
+- *(client)* single-flight ChannelPool dials via per-endpoint OnceCell ([#286](https://github.com/prisma-risk/tsoracle/pull/286))
+
+### Other
+
+- lift the leader-hint trailer key and decoder into tsoracle-proto ([#91](https://github.com/prisma-risk/tsoracle/pull/91)) ([#295](https://github.com/prisma-risk/tsoracle/pull/295))
+
 ## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.2.0...tsoracle-client-v0.2.1) - 2026-05-24
 
 ### Added

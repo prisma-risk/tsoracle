@@ -4,6 +4,17 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.6...tsoracle-openraft-toolkit-v0.1.7) - 2026-05-24
+
+### Added
+
+- pin an on-disk schema version for snapshots, log entries, and meta records ([#291](https://github.com/prisma-risk/tsoracle/pull/291))
+
+### Other
+
+- *(openraft-toolkit)* collapse BootstrapMode::Join into a dedicated join() fn ([#298](https://github.com/prisma-risk/tsoracle/pull/298))
+- *(openraft-toolkit)* document the log-store fsync policy at every write site ([#285](https://github.com/prisma-risk/tsoracle/pull/285))
+
 ## [0.1.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.5...tsoracle-openraft-toolkit-v0.1.6) - 2026-05-24
 
 ### Fixed

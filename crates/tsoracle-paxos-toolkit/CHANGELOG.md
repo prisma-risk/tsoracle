@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.2.1...tsoracle-paxos-toolkit-v0.2.2) - 2026-05-24
+
+### Added
+
+- *(stress)* detect non-overlapping cross-client real-time monotonicity ([#135](https://github.com/prisma-risk/tsoracle/pull/135)) ([#297](https://github.com/prisma-risk/tsoracle/pull/297))
+- pin an on-disk schema version for snapshots, log entries, and meta records ([#291](https://github.com/prisma-risk/tsoracle/pull/291))
+
 ## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.2.0...tsoracle-paxos-toolkit-v0.2.1) - 2026-05-24
 
 ### Added
