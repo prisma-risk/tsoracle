@@ -101,6 +101,13 @@ pub(crate) async fn issue_rpc(
                 endpoint: hinted_endpoint,
                 epoch: hint_epoch,
             } => {
+                // The cache write already happened atomically inside
+                // `classify_not_leader_hint` (the same lock that ran the
+                // monotone-forward check); here we only steer the worklist
+                // to the hinted leader. `hint_epoch` survives solely as a
+                // log field, so silence the unused-variable warning when
+                // `tracing` is off.
+                let _ = hint_epoch;
                 #[cfg(feature = "metrics")]
                 metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
                 #[cfg(feature = "tracing")]
@@ -110,7 +117,6 @@ pub(crate) async fn issue_rpc(
                     hint_epoch = ?hint_epoch,
                     "tsoracle-client: pivoting to hinted leader",
                 );
-                pool.set_leader_with(hinted_endpoint.clone(), hint_epoch);
                 worklist.push_front(hinted_endpoint);
                 // No backoff: a leader hint is known progress, not a
                 // failure to throttle.
@@ -363,7 +369,12 @@ fn classify_not_leader_hint(
     let usable_endpoint = hinted_endpoint.filter(|hinted| !rejects_plaintext_hint(pool, hinted));
     match usable_endpoint {
         Some(hinted) => {
-            if pool.accept_hint(hint_epoch) {
+            // Seat the hint under the same lock that checks the
+            // monotone-forward rule. Doing the check and the write as one
+            // atomic step (rather than gating here and writing later in the
+            // dispatch loop) is what prevents a concurrent higher-epoch
+            // promotion from being clobbered by this lower-or-equal hint.
+            if pool.compare_and_set_leader(hinted.clone(), hint_epoch) {
                 AttemptOutcome::LeaderHint {
                     endpoint: hinted,
                     epoch: hint_epoch,
@@ -680,12 +691,11 @@ mod tests {
                 vec![fresh, stale]
             };
 
+            // `classify_not_leader_hint` seats the cache atomically as part
+            // of the monotone-forward check, so the loop need only drive
+            // each redirect through it — no separate write step.
             for status in ordered {
-                if let AttemptOutcome::LeaderHint { endpoint, epoch } =
-                    classify_not_leader_hint(&pool, "a:1", status)
-                {
-                    pool.set_leader_with(endpoint, epoch);
-                }
+                let _ = classify_not_leader_hint(&pool, "a:1", status);
             }
 
             assert_eq!(
