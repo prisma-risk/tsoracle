@@ -19,6 +19,13 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// On-disk/wire schema version stamped as the leading byte of every framed
+/// snapshot, log entry, and storage record produced by this toolkit. Bump
+/// when a persisted struct's postcard layout changes in a
+/// backward-incompatible way (field reorder/insert/remove); a stale reader
+/// then fails loudly with [`CodecError::Version`] instead of misdecoding.
+pub const SCHEMA_VERSION: u8 = 1;
+
 #[derive(Debug, Error)]
 pub enum CodecError {
     #[error("payload empty")]

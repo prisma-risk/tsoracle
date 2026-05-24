@@ -30,7 +30,7 @@ pub mod lifecycle;
 #[cfg(any(test, feature = "test-fakes"))]
 pub mod test_fakes;
 
-pub use codec::{CodecError, decode, encode};
+pub use codec::{CodecError, SCHEMA_VERSION, decode, encode};
 pub use lifecycle::{
     BootstrapError, BootstrapMode, LeadershipState, MembershipError, add_learner, bootstrap,
     change_membership, leadership_events,
