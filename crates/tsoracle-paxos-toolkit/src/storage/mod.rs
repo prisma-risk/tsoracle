@@ -213,7 +213,7 @@ where
     T::Snapshot: serde::Serialize + serde::de::DeserializeOwned + Clone,
 {
     fn append_entry(&mut self, entry: T) -> omnipaxos::storage::StorageResult<u64> {
-        crate::fail_point!("paxos_toolkit::storage::append_entry");
+        tsoracle_failpoint::failpoint!("paxos_toolkit::storage::append_entry");
         let next = self.next_log_idx().map_err(box_err)?;
         self.batch_sync(|cf, batch| self.store_log_entry(batch, &cf, next, &entry))
             .map_err(box_err)?;

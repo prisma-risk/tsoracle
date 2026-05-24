@@ -26,7 +26,7 @@ use tsoracle_driver_file::FileDriver;
 static FAILPOINT_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Regression guard for the AtomicU64 refactor: `load_high_water` must not
-/// park behind an in-flight `persist_high_water`. Uses `fail::cfg_callback`
+/// park behind an in-flight `persist_high_water`. Uses `tsoracle_failpoint::fail::cfg_callback`
 /// to install a callback that signals arrival and then blocks until released,
 /// preserving the deterministic handshake the original `SLOW_WRITE_HOOK`
 /// provided. Plain `pause` would block the writer but give the reader no
@@ -41,7 +41,7 @@ static FAILPOINT_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn load_is_not_blocked_by_in_flight_persist() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = tempfile::tempdir().unwrap();
     let driver = FileDriver::open_or_init(dir.path()).unwrap();
@@ -50,7 +50,7 @@ async fn load_is_not_blocked_by_in_flight_persist() {
     let (release_tx, release_rx) = sync_channel::<()>(1);
     let release_rx = std::sync::Mutex::new(release_rx);
 
-    fail::cfg_callback("file_driver::write_blocked", move || {
+    tsoracle_failpoint::fail::cfg_callback("file_driver::write_blocked", move || {
         entered_tx.send(()).unwrap();
         release_rx.lock().unwrap().recv().unwrap();
     })
@@ -95,20 +95,20 @@ async fn load_is_not_blocked_by_in_flight_persist() {
 #[tokio::test]
 async fn reopen_after_crash_before_write_returns_prior_high_water() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = tempfile::tempdir().unwrap();
     {
         let driver = FileDriver::open_or_init(dir.path()).unwrap();
         driver.persist_high_water(100, Epoch::ZERO).await.unwrap();
 
-        fail::cfg("file_driver::before_write", "return(io)").unwrap();
+        tsoracle_failpoint::fail::cfg("file_driver::before_write", "return(io)").unwrap();
         let result = driver.persist_high_water(200, Epoch::ZERO).await;
         assert!(
             matches!(result, Err(ConsensusError::PermanentDriver(_))),
             "expected PermanentDriver, got {result:?}"
         );
-        fail::cfg("file_driver::before_write", "off").unwrap();
+        tsoracle_failpoint::fail::cfg("file_driver::before_write", "off").unwrap();
     }
 
     let reopened = FileDriver::open_or_init(dir.path()).unwrap();
@@ -126,20 +126,21 @@ async fn reopen_after_crash_before_write_returns_prior_high_water() {
 #[tokio::test]
 async fn reopen_after_crash_between_tmp_fsync_and_rename_returns_prior_high_water() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = tempfile::tempdir().unwrap();
     {
         let driver = FileDriver::open_or_init(dir.path()).unwrap();
         driver.persist_high_water(100, Epoch::ZERO).await.unwrap();
 
-        fail::cfg("file_driver::after_tmp_fsync_before_rename", "return(io)").unwrap();
+        tsoracle_failpoint::fail::cfg("file_driver::after_tmp_fsync_before_rename", "return(io)")
+            .unwrap();
         let result = driver.persist_high_water(200, Epoch::ZERO).await;
         assert!(
             matches!(result, Err(ConsensusError::PermanentDriver(_))),
             "expected PermanentDriver, got {result:?}"
         );
-        fail::cfg("file_driver::after_tmp_fsync_before_rename", "off").unwrap();
+        tsoracle_failpoint::fail::cfg("file_driver::after_tmp_fsync_before_rename", "off").unwrap();
     }
 
     let reopened = FileDriver::open_or_init(dir.path()).unwrap();
@@ -158,20 +159,21 @@ async fn reopen_after_crash_between_tmp_fsync_and_rename_returns_prior_high_wate
 #[tokio::test]
 async fn reopen_after_crash_between_rename_and_dir_fsync_is_monotonic() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
-    let _scenario = fail::FailScenario::setup();
+    let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
     let dir = tempfile::tempdir().unwrap();
     {
         let driver = FileDriver::open_or_init(dir.path()).unwrap();
         driver.persist_high_water(100, Epoch::ZERO).await.unwrap();
 
-        fail::cfg("file_driver::after_rename_before_dir_fsync", "panic").unwrap();
+        tsoracle_failpoint::fail::cfg("file_driver::after_rename_before_dir_fsync", "panic")
+            .unwrap();
         let result = driver.persist_high_water(200, Epoch::ZERO).await;
         assert!(
             matches!(result, Err(ConsensusError::PermanentDriver(_))),
             "spawn_blocking panic should surface as PermanentDriver, got {result:?}"
         );
-        fail::cfg("file_driver::after_rename_before_dir_fsync", "off").unwrap();
+        tsoracle_failpoint::fail::cfg("file_driver::after_rename_before_dir_fsync", "off").unwrap();
     }
 
     let reopened = FileDriver::open_or_init(dir.path()).unwrap();

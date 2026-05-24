@@ -14,7 +14,7 @@ categories    = ["network-programming", "database"]
 
 [features]
 default    = ["tls-rustls", "tracing"]
-failpoints = ["dep:fail", "fail/failpoints"]
+failpoints = ["tsoracle-failpoint/failpoints"]
 yieldpoints = ["tsoracle-yieldpoint/yieldpoints"]
 metrics    = ["dep:metrics"]
 tls-rustls = ["tonic/tls-aws-lc"]
@@ -32,7 +32,6 @@ rustdoc-args   = ["--cfg", "docsrs"]
 
 [dependencies]
 async-trait        = { workspace = true }
-fail               = { workspace = true, optional = true }
 futures            = { workspace = true }
 metrics            = { workspace = true, optional = true }
 parking_lot        = { workspace = true }
@@ -53,6 +52,7 @@ tsoracle-core      = { path = "../tsoracle-core", version = "0.2.1" }
 tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.6" }
 tsoracle-proto     = { path = "../tsoracle-proto", version = "0.2.1" }
 tsoracle-yieldpoint = { workspace = true }
+tsoracle-failpoint = { workspace = true }
 
 [dev-dependencies]
 tokio        = { workspace = true, features = ["test-util"] }

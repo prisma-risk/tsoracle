@@ -175,7 +175,7 @@ fn acquire_exclusive_lock(lock_file: &fs::File, lock_path: &Path) -> Result<(), 
 }
 
 fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
-    crate::failpoint!(
+    tsoracle_failpoint::failpoint!(
         "file_driver::before_write",
         |arg: Option<String>| -> Result<(), FileDriverError> {
             let _ = arg; // currently only one action shape; future tags can match here
@@ -198,7 +198,7 @@ fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
     file.sync_all()?;
     drop(file);
 
-    crate::failpoint!(
+    tsoracle_failpoint::failpoint!(
         "file_driver::after_tmp_fsync_before_rename",
         |arg: Option<String>| -> Result<(), FileDriverError> {
             let _ = arg;
@@ -210,7 +210,7 @@ fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
 
     fs::rename(&tmp, &final_path)?;
 
-    crate::failpoint!("file_driver::after_rename_before_dir_fsync");
+    tsoracle_failpoint::failpoint!("file_driver::after_rename_before_dir_fsync");
 
     // Force the rename's metadata to durable media. The tmpfile `sync_all`
     // above keeps the *data* durable on both platforms; this block adds the
@@ -283,7 +283,7 @@ impl ConsensusDriver for FileDriver {
 
         let dir = self.dir.clone();
         tokio::task::spawn_blocking(move || {
-            crate::failpoint!("file_driver::write_blocked");
+            tsoracle_failpoint::failpoint!("file_driver::write_blocked");
             write_record(&dir, target)
         })
         .await

@@ -1,0 +1,28 @@
+[package]
+name         = "tsoracle-failpoint"
+description  = "Shared fail-rs failpoint macro: one `failpoint!` wrapper re-used across the tsoracle crates, zero-overhead when the feature is off"
+version      = "0.1.0"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+readme.workspace       = true
+authors.workspace      = true
+documentation = "https://docs.rs/tsoracle-failpoint"
+keywords      = ["testing", "failpoint", "fail", "fault-injection"]
+categories    = ["development-tools::testing"]
+
+[package.metadata.docs.rs]
+features     = ["failpoints"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default    = []
+# Enables the macro body + pulls in `fail`. Off by default so production
+# builds carry zero overhead and never link `fail`; `cargo test
+# --all-features` activates it in CI.
+failpoints = ["dep:fail", "fail/failpoints"]
+
+[dependencies]
+fail = { workspace = true, optional = true }

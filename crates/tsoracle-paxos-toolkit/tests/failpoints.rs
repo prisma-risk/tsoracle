@@ -27,12 +27,12 @@ fn append_entry_panics_when_failpoint_armed() {
     let mut storage: RocksdbStorage<TestCommand> =
         RocksdbStorage::open_in(database, TEST_CF).expect("open_in");
 
-    fail::cfg("paxos_toolkit::storage::append_entry", "panic").unwrap();
+    tsoracle_failpoint::fail::cfg("paxos_toolkit::storage::append_entry", "panic").unwrap();
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         storage.append_entry(TestCommand(1))
     }));
 
-    fail::remove("paxos_toolkit::storage::append_entry");
+    tsoracle_failpoint::fail::remove("paxos_toolkit::storage::append_entry");
     assert!(result.is_err(), "expected panic from failpoint");
 }

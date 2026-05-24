@@ -11,7 +11,7 @@ Add a yield point when:
 - the race window is small enough that a `tokio::time::sleep`-based test is non-deterministic *and*
 - the call site is in an async task that must not block its worker (anything ticking in a `tokio::select!`, anything sharing a runtime with timer-driven progress, anything inside a `tokio::spawn` body that other tasks need to make progress on).
 
-Don't add a yield point when a failpoint would already serve — sync injection points should keep using `crate::failpoint!(...)`. Don't add one to paper over a flaky test; the bug it's masking is usually a missed-notification race like the one yield points exist to surface.
+Don't add a yield point when a failpoint would already serve — sync injection points should keep using `tsoracle_failpoint::failpoint!(...)`. Don't add one to paper over a flaky test; the bug it's masking is usually a missed-notification race like the one yield points exist to surface.
 
 ## Feature gating
 
@@ -102,7 +102,7 @@ Renaming an existing site is a breaking change for any test that referenced it. 
 | Typed return injection | Yes (closure form) | No |
 | Crate | [`fail`](https://docs.rs/fail/0.5/) | first-party `tsoracle-yieldpoint` (shared workspace crate) |
 | Cargo feature name | `failpoints` | `yieldpoints` |
-| Source macro | `crate::failpoint!(...)` (per-crate wrapper) | `tsoracle_yieldpoint::yieldpoint!(...)` (called directly) |
+| Source macro | `tsoracle_failpoint::failpoint!(...)` (shared workspace crate, called directly) | `tsoracle_yieldpoint::yieldpoint!(...)` (called directly) |
 | Doc | [Failpoint Testing](failpoint-testing.md) | this file |
 
 Reach for failpoints first if the site is sync or needs to inject a typed return. Reach for yield points when the site is async and the test needs to pause production code without blocking a tokio worker.

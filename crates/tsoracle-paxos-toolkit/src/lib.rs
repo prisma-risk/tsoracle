@@ -14,9 +14,6 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
-#[macro_use]
-mod failpoint;
-
 pub mod codec;
 pub mod lifecycle;
 pub mod macros;

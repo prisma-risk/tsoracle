@@ -10,31 +10,31 @@ Add a failpoint when an invariant only manifests under a timing window or a part
 
 ## Feature gating
 
-Three crates currently opt in via a per-crate `failpoints` Cargo feature: `tsoracle-driver-file`, `tsoracle-server`, and `tsoracle-openraft-toolkit`. The feature is off by default. Run the failpoint suite with:
+Four crates currently opt in via a per-crate `failpoints` Cargo feature: `tsoracle-driver-file`, `tsoracle-server`, `tsoracle-openraft-toolkit`, and `tsoracle-paxos-toolkit`. Each per-crate feature forwards to `tsoracle-failpoint/failpoints` (`failpoints = ["tsoracle-failpoint/failpoints"]`), the single crate that owns the macro and the `fail` dependency. The feature is off by default. Run the failpoint suite with:
 
     make test-failpoints
 
 The Makefile target enables `tsoracle-driver-file/failpoints`, `tsoracle-server/failpoints`, `tsoracle-server/test-fakes` (needed for `InMemoryDriver`), `tsoracle-openraft-toolkit/failpoints`, and `tsoracle-openraft-toolkit/rocksdb-log-store`. The default CI test job runs `cargo test --workspace --all-features --locked`, which activates all of these features automatically, so the failpoint suite is part of the normal CI gate.
 
-Release builds of the `tsoracle` binary do not include the `failpoints` feature on any crate. The `fail` crate is an optional dependency at the per-crate level (`fail = { workspace = true, optional = true }`) and the per-crate `failpoints` feature is what pulls it into the build graph; without the feature, `fail` is not linked.
+Release builds of the `tsoracle` binary do not include the `failpoints` feature on any crate. `fail` is an optional dependency of `tsoracle-failpoint` alone (`fail = { workspace = true, optional = true }`); a consumer's `failpoints` feature pulls it into the build graph only transitively, through `tsoracle-failpoint/failpoints`. Without the feature, `fail` is not linked and the macro expands to `()`.
 
 ## The wrapper macro
 
-Each opting-in crate has a `failpoint` module with a small `failpoint!` macro. Source sites use the crate's macro via `crate::failpoint!(...)` and never reference `fail::` directly. The macro has two forms — the right form depends on whether the site needs to produce a typed return value:
+The `failpoint!` macro lives in the shared `tsoracle-failpoint` crate. Source sites invoke it as `tsoracle_failpoint::failpoint!(...)` and never reference `fail::` directly. The macro has two forms — the right form depends on whether the site needs to produce a typed return value:
 
 ```rust
 // Single-arg form. Supports `panic`, `pause`, `sleep(ms)`, `print`, `off`.
 // Configuring this site with `return` or `return(...)` panics at runtime
 // with "Return is not supported for the fail point" — the bare macro has
 // no way to know the enclosing function's return type and refuses to guess.
-crate::failpoint!("file_driver::write_blocked");
+tsoracle_failpoint::failpoint!("file_driver::write_blocked");
 
 // Closure form. The closure receives `Option<String>` (the action grammar's
 // `return` passes `None`; `return(string)` passes `Some(string)`), and the
 // closure must return the *exact* return type of the function the macro is
 // called in. The macro `return`s the closure's value from the enclosing
 // function. This is what makes failpoint returns type-safe.
-crate::failpoint!("file_driver::before_write", |arg: Option<String>| -> Result<(), FileDriverError> {
+tsoracle_failpoint::failpoint!("file_driver::before_write", |arg: Option<String>| -> Result<(), FileDriverError> {
     let _ = arg;  // multi-tag dispatch can match here in the future
     Err(FileDriverError::Io(std::io::Error::other("failpoint: file_driver::before_write")))
 });
@@ -55,7 +55,7 @@ With `feature = "failpoints"` off, both forms expand to `()` — zero code, no d
 | `file_driver::before_write` | Top of `write_record`, before tmpfile open. | `return(io)` via the closure form; `panic`. | `reopen_after_crash_before_write_returns_prior_high_water` |
 | `file_driver::after_tmp_fsync_before_rename` | After `file.sync_all()` on `state.tmp`, before `fs::rename`. | `panic`; `return(io)` via the closure form. | `reopen_after_crash_between_tmp_fsync_and_rename_returns_prior_high_water` |
 | `file_driver::after_rename_before_dir_fsync` | After `fs::rename`, before `libc::fsync(fd)` on the directory. | `panic`. | `reopen_after_crash_between_rename_and_dir_fsync_is_monotonic` |
-| `file_driver::write_blocked` | At the top of the `spawn_blocking` closure inside `persist_high_water`. | `pause` / `sleep(ms)` (this site is intended for timing tests, not error injection). | `load_is_not_blocked_by_in_flight_persist` — uses `fail::cfg_callback` for a deterministic entry signal. |
+| `file_driver::write_blocked` | At the top of the `spawn_blocking` closure inside `persist_high_water`. | `pause` / `sleep(ms)` (this site is intended for timing tests, not error injection). | `load_is_not_blocked_by_in_flight_persist` — uses `tsoracle_failpoint::fail::cfg_callback` for a deterministic entry signal. |
 
 ### `tsoracle-server` — 4 sites across `crates/tsoracle-server/src/{fence,service}.rs`
 
@@ -84,13 +84,15 @@ Tests live in `crates/<crate>/tests/failpoints.rs`. The file is `#![cfg(feature 
 Each test:
 
 1. Acquires a process-global `FAILPOINT_TEST_SERIAL: tokio::sync::Mutex<()>` to serialize test bodies inside the binary. The `fail` registry is process-global; without body-level serialization, configured actions interleave across tests.
-2. Sets up a `fail::FailScenario::setup()` RAII guard. The guard snapshots the registry on entry and restores it on drop — this is `fail`'s built-in protection against tests leaking configured actions into each other.
-3. Calls `fail::cfg("name", "action")` to configure the failpoint.
+2. Sets up a `tsoracle_failpoint::fail::FailScenario::setup()` RAII guard. The guard snapshots the registry on entry and restores it on drop — this is `fail`'s built-in protection against tests leaking configured actions into each other.
+3. Calls `tsoracle_failpoint::fail::cfg("name", "action")` to configure the failpoint.
 4. Exercises the code path.
-5. Calls `fail::cfg("name", "off")` to clear the action (the `FailScenario` drop would also clear it, but explicit teardown makes the test scope obvious).
+5. Calls `tsoracle_failpoint::fail::cfg("name", "off")` to clear the action (the `FailScenario` drop would also clear it, but explicit teardown makes the test scope obvious).
 6. Asserts the observable invariant.
 
-For deterministic entry signaling (when the test needs to know the failpoint fired *before* taking some other action), use `fail::cfg_callback` — see `tsoracle-driver-file/tests/failpoints.rs::load_is_not_blocked_by_in_flight_persist` for the canonical pattern with the `entered_tx` / `release_rx` handshake.
+Tests reach the `fail` registry through `tsoracle_failpoint::fail` (a `failpoints`-gated re-export) rather than depending on `fail` directly — `tsoracle-failpoint` is the only crate that names `fail`.
+
+For deterministic entry signaling (when the test needs to know the failpoint fired *before* taking some other action), use `tsoracle_failpoint::fail::cfg_callback` — see `tsoracle-driver-file/tests/failpoints.rs::load_is_not_blocked_by_in_flight_persist` for the canonical pattern with the `entered_tx` / `release_rx` handshake.
 
 Tests that need a real tonic listener and `tsoracle_client::Client` (the two `service::*` tests do) must wait deterministically for `ServingState::Serving` and for tonic's accept loop to be polled. `crates/tsoracle-server/tests/failpoints.rs` defines local `wait_until(state_rx, predicate)` and `wait_for_grpc_handshake(addr, budget)` helpers mirroring the pattern in `tests/e2e.rs`. Don't reach for `tokio::time::sleep(...)` as a warm-up — it is not deterministic across machine load.
 
@@ -109,7 +111,7 @@ For probabilistic (`50%return(...)`) and call-counted (`5*panic`) actions, see `
 
 1. Pick a name following `{crate_short}::{module}::{temporal_phrase}`.
 2. Decide single-arg vs. closure form. If the site needs to return a typed value, the closure form is required. If the action will only be `panic`, `pause`, `sleep`, or `print`, single-arg suffices.
-3. Insert `crate::failpoint!(...)` at the source position. The crate must already have the `failpoints` feature, the `failpoint` module, and the `#[macro_use]` mount in `lib.rs` — see `tsoracle-driver-file` as the canonical reference.
+3. Insert `tsoracle_failpoint::failpoint!(...)` at the source position. The crate must already depend on `tsoracle-failpoint` and forward the feature (`failpoints = ["tsoracle-failpoint/failpoints"]`) — see `tsoracle-driver-file` as the canonical reference.
 4. Add a test in `crates/<crate>/tests/failpoints.rs`. Follow the pattern in this doc.
 5. Run `make test-failpoints` locally and confirm everything still passes.
 6. Document the new site in this file's "Current sites" table.
