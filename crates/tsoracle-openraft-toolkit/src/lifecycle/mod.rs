@@ -16,6 +16,6 @@ pub mod bootstrap;
 pub mod leader;
 pub mod membership;
 
-pub use bootstrap::{BootstrapError, BootstrapMode, bootstrap};
+pub use bootstrap::{BootstrapError, BootstrapMode, bootstrap, join};
 pub use leader::{LeadershipState, leadership_events};
 pub use membership::{MembershipError, add_learner, change_membership};

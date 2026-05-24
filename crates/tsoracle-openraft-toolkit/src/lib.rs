@@ -33,7 +33,7 @@ pub mod test_fakes;
 pub use codec::{CodecError, SCHEMA_VERSION, decode, encode};
 pub use lifecycle::{
     BootstrapError, BootstrapMode, LeadershipState, MembershipError, add_learner, bootstrap,
-    change_membership, leadership_events,
+    change_membership, join, leadership_events,
 };
 
 #[cfg(feature = "rocksdb-log-store")]
