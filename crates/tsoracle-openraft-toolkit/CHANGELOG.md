@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.5...tsoracle-openraft-toolkit-v0.1.6) - 2026-05-24
+
+### Fixed
+
+- *(openraft-toolkit)* fsync truncate_after and purge writes ([#260](https://github.com/prisma-risk/tsoracle/pull/260)) ([#279](https://github.com/prisma-risk/tsoracle/pull/279))
+
 ## [0.1.5](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.4...tsoracle-openraft-toolkit-v0.1.5) - 2026-05-23
 
 ### Added

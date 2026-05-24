@@ -4,6 +4,20 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.2.0...tsoracle-client-v0.2.1) - 2026-05-24
+
+### Added
+
+- populate NOT_LEADER hints with leader endpoint and epoch (#88, #125) ([#234](https://github.com/prisma-risk/tsoracle/pull/234))
+
+### Fixed
+
+- *(client)* seat leader hints atomically under the monotone-forward check ([#240](https://github.com/prisma-risk/tsoracle/pull/240)) ([#274](https://github.com/prisma-risk/tsoracle/pull/274))
+- *(proto)* bundle LeaderHint epoch into a single nested EpochWire ([#252](https://github.com/prisma-risk/tsoracle/pull/252)) ([#273](https://github.com/prisma-risk/tsoracle/pull/273))
+- *(client)* bound the connect+RPC pair by one per-attempt deadline ([#238](https://github.com/prisma-risk/tsoracle/pull/238)) ([#271](https://github.com/prisma-risk/tsoracle/pull/271))
+- *(client)* preserve status on stale-epoch hint so it surfaces NOT_LEADER ([#237](https://github.com/prisma-risk/tsoracle/pull/237)) ([#270](https://github.com/prisma-risk/tsoracle/pull/270))
+- *(client)* stop clearing leader cache on unactionable NOT_LEADER ([#236](https://github.com/prisma-risk/tsoracle/pull/236)) ([#268](https://github.com/prisma-risk/tsoracle/pull/268))
+
 ## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.1.4...tsoracle-client-v0.2.0) - 2026-05-23
 
 ### Fixed

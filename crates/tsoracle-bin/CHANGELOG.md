@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v0.1.6...tsoracle-v0.1.7) - 2026-05-24
+
+### Fixed
+
+- *(bin)* handle SIGTERM as a graceful-shutdown trigger ([#245](https://github.com/prisma-risk/tsoracle/pull/245)) ([#269](https://github.com/prisma-risk/tsoracle/pull/269))
+
 ## [0.1.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v0.1.5...tsoracle-v0.1.6) - 2026-05-23
 
 ### Other

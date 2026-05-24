@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.2.0...tsoracle-paxos-toolkit-v0.2.1) - 2026-05-24
+
+### Added
+
+- populate NOT_LEADER hints with leader endpoint and epoch (#88, #125) ([#234](https://github.com/prisma-risk/tsoracle/pull/234))
+
+### Fixed
+
+- *(paxos-toolkit)* floor MemStorage append at compacted_idx after full trim ([#277](https://github.com/prisma-risk/tsoracle/pull/277))
+
+### Other
+
+- *(paxos-toolkit)* gate test-fakes integration tests behind required-features ([#231](https://github.com/prisma-risk/tsoracle/pull/231))
+
 ## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.1.4...tsoracle-paxos-toolkit-v0.2.0) - 2026-05-23
 
 ### Fixed

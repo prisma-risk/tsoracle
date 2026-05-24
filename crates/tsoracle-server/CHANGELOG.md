@@ -4,6 +4,23 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.1...tsoracle-server-v0.2.2) - 2026-05-24
+
+### Added
+
+- populate NOT_LEADER hints with leader endpoint and epoch (#88, #125) ([#234](https://github.com/prisma-risk/tsoracle/pull/234))
+
+### Fixed
+
+- *(server)* carry the fencing epoch into the NOT_LEADER hint on stepdown ([#275](https://github.com/prisma-risk/tsoracle/pull/275))
+- *(proto)* bundle LeaderHint epoch into a single nested EpochWire ([#252](https://github.com/prisma-risk/tsoracle/pull/252)) ([#273](https://github.com/prisma-risk/tsoracle/pull/273))
+- *(server)* retry fence transient errors while racing the leadership stream ([#229](https://github.com/prisma-risk/tsoracle/pull/229)) ([#235](https://github.com/prisma-risk/tsoracle/pull/235))
+- *(server)* require test-fakes for fence_yieldpoint integration test ([#230](https://github.com/prisma-risk/tsoracle/pull/230))
+
+### Other
+
+- *(server)* drive serve_shutdown tests through serve_with_listener ([#248](https://github.com/prisma-risk/tsoracle/pull/248)) ([#282](https://github.com/prisma-risk/tsoracle/pull/282))
+
 ## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.0...tsoracle-server-v0.2.1) - 2026-05-23
 
 ### Fixed
