@@ -109,11 +109,19 @@ impl TsoService for TsoServiceImpl {
         // counter bounds it to two iterations, and the second iteration's
         // WindowExhausted falls through the guard into the `core_status` arm
         // rather than continuing.
+        // Sample the wall clock once for the whole get_ts. The retry's
+        // try_grant and the extension's would_grant / try_prepare all observe
+        // this single instant, so the would_grant recheck predicts the retry
+        // try_grant exactly. Re-reading the clock per call let it advance
+        // between the recheck and the retry, exhausting a zero-slack (small
+        // window_ahead) window — a timing race that surfaced intermittently as
+        // `Internal "window exhausted"`.
+        let now_ms = self.server.clock.now_ms();
         let mut attempt = 0;
         loop {
             let outcome = {
                 let mut allocator = self.server.allocator.lock();
-                allocator.try_grant(self.server.clock.now_ms(), count)
+                allocator.try_grant(now_ms, count)
             };
             match outcome {
                 Ok(grant) => {
@@ -136,7 +144,7 @@ impl TsoService for TsoServiceImpl {
                     return Err(not_leader_status(leader_hint_from(&self.server)));
                 }
                 Err(CoreError::WindowExhausted) if attempt == 0 => {
-                    self.extend_window(count).await?;
+                    self.extend_window(now_ms, count).await?;
                     attempt += 1;
                     continue;
                 }
@@ -157,7 +165,12 @@ impl TsoServiceImpl {
     /// request count, used so the recheck mirrors the outer loop's next
     /// `try_grant` exactly (a coarser check could skip an extension that the
     /// outer retry still actually needs).
-    async fn extend_window(&self, count: u32) -> Result<(), Status> {
+    ///
+    /// `now_ms` is the single wall-clock sample taken by `get_ts` for the whole
+    /// operation. Both the recheck and the prepare use it (rather than re-reading
+    /// the clock) so the would_grant predicate matches the retry try_grant at the
+    /// same logical instant — see the sampling comment in `get_ts`.
+    async fn extend_window(&self, now_ms: u64, count: u32) -> Result<(), Status> {
         // Single-flight gate: serialize peer extenders so consensus is hit
         // once per stampede, not once per stampeder.
         let _extension_lock = self.server.extension_lock.lock().await;
@@ -165,14 +178,9 @@ impl TsoServiceImpl {
         // Recheck-after-acquire: a peer extender may have run prepare →
         // persist → commit while we waited for the lock. If the outer
         // try_grant retry would now succeed, skip the consensus round-trip.
-        // Reading now_ms fresh inside the lock keeps the predicate aligned
-        // with what the outer loop's next try_grant will observe.
-        if self
-            .server
-            .allocator
-            .lock()
-            .would_grant(self.server.clock.now_ms(), count)
-        {
+        // Using get_ts's single `now_ms` sample keeps the predicate aligned
+        // with what the outer loop's retry try_grant will observe.
+        if self.server.allocator.lock().would_grant(now_ms, count) {
             return Ok(());
         }
 
@@ -189,9 +197,8 @@ impl TsoServiceImpl {
                 // about), not a bare FAILED_PRECONDITION without metadata.
                 return Err(not_leader_status(leader_hint_from(&self.server)));
             };
-            let now = self.server.clock.now_ms();
             let target = allocator
-                .try_prepare_window_extension(now, self.server.window_ahead.as_millis() as u64)
+                .try_prepare_window_extension(now_ms, self.server.window_ahead.as_millis() as u64)
                 .map_err(core_status)?;
             (target, epoch)
         };
