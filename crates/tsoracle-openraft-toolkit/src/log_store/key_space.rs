@@ -13,21 +13,20 @@
 //! Strategies for laying out raft keys inside a RocksDB column family.
 //!
 //! `KeySpace` decides both how a log index becomes a column-family key and how
-//! the four pieces of openraft metadata (vote, committed, last-purged, last-
-//! applied membership) are namespaced. The two shipped strategies are [`Flat`]
+//! the three pieces of openraft metadata (vote, committed, last-purged) are
+//! namespaced. The two shipped strategies are [`Flat`]
 //! for a single-group deployment (one raft instance per process) and
 //! [`GroupPrefixed`] for a multi-group deployment that multiplexes N raft
 //! instances over the same column families.
 
 use std::fmt::Debug;
 
-/// Labels for the four pieces of openraft metadata that share the meta CF.
+/// Labels for the three pieces of openraft metadata that share the meta CF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MetaLabel {
     Vote,
     Committed,
     LastPurged,
-    LastMembership,
 }
 
 impl MetaLabel {
@@ -36,7 +35,6 @@ impl MetaLabel {
             MetaLabel::Vote => b"vote",
             MetaLabel::Committed => b"committed",
             MetaLabel::LastPurged => b"last_purged",
-            MetaLabel::LastMembership => b"last_membership",
         }
     }
 }
@@ -130,7 +128,6 @@ mod tests {
             Just(MetaLabel::Vote),
             Just(MetaLabel::Committed),
             Just(MetaLabel::LastPurged),
-            Just(MetaLabel::LastMembership),
         ]
     }
 
@@ -155,12 +152,7 @@ mod tests {
 
     #[test]
     fn flat_meta_labels_have_distinct_bytes() {
-        let labels = [
-            MetaLabel::Vote,
-            MetaLabel::Committed,
-            MetaLabel::LastPurged,
-            MetaLabel::LastMembership,
-        ];
+        let labels = [MetaLabel::Vote, MetaLabel::Committed, MetaLabel::LastPurged];
         let k = Flat;
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {
@@ -251,12 +243,7 @@ mod group_prefixed_tests {
     fn meta_key_does_not_collide_with_log_key() {
         let g = GroupPrefixed::new(3);
         // log keys end with the index bytes; meta keys have a `/` separator.
-        for label in [
-            MetaLabel::Vote,
-            MetaLabel::Committed,
-            MetaLabel::LastPurged,
-            MetaLabel::LastMembership,
-        ] {
+        for label in [MetaLabel::Vote, MetaLabel::Committed, MetaLabel::LastPurged] {
             let mk = g.meta_key(label);
             for idx in [0u64, 1, 100, u64::MAX] {
                 assert_ne!(mk, g.log_key(idx));
@@ -271,7 +258,6 @@ mod group_prefixed_tests {
             Just(MetaLabel::Vote),
             Just(MetaLabel::Committed),
             Just(MetaLabel::LastPurged),
-            Just(MetaLabel::LastMembership),
         ]
     }
 
