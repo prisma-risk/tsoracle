@@ -163,7 +163,7 @@ impl ServerBuilder {
             window_ahead: self.window_ahead,
             failover_advance: self.failover_advance,
             shutdown_grace: self.shutdown_grace,
-            core: ServingCore::new(),
+            core: Arc::new(ServingCore::new()),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: self.tls_config,
         })
@@ -180,7 +180,13 @@ pub struct Server {
     pub(crate) shutdown_grace: Duration,
     /// Owns the allocator, serving-state channel, and both extension locks, with
     /// the lock-ordering and step-down invariants private behind its methods.
-    pub(crate) core: ServingCore,
+    ///
+    /// Held behind an `Arc` so the leader-watch task, the gRPC service, and the
+    /// [`WatchGuard`] / [`serve_inner`] shutdown paths can all reach the same
+    /// core. The guard and the serve loop use their clone to close the serving
+    /// gate *synchronously* at shutdown, leaving the watch task's later
+    /// `step_down` a harmless idempotent repeat.
+    pub(crate) core: Arc<ServingCore>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub(crate) tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -251,6 +257,10 @@ impl Server {
         // the returned guard can bound its own shutdown wait identically to the
         // `serve_*` paths.
         let shutdown_grace = self.shutdown_grace;
+        // Clone the shared core before `into_router_parts` consumes `self`, so
+        // the guard can close the serving gate synchronously on drop / shutdown
+        // rather than relying on the watch task's later publish.
+        let core = self.core.clone();
         let (routes, cancel_tx, handle) = self.into_router_parts()?;
         Ok((
             routes,
@@ -258,6 +268,7 @@ impl Server {
                 cancel_tx: Some(cancel_tx),
                 handle: Some(handle),
                 shutdown_grace,
+                core,
             },
         ))
     }
@@ -366,8 +377,10 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        // Read the `Copy` grace before `into_router_parts` consumes `self`.
+        // Read the `Copy` grace and clone the shared core before
+        // `into_router_parts` consumes `self`.
         let shutdown_grace = self.shutdown_grace;
+        let core = self.core.clone();
         let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
@@ -386,6 +399,7 @@ impl Server {
             serve,
             cancel_tx,
             shutdown_grace,
+            core,
         )
         .await
     }
@@ -420,8 +434,10 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        // Read the `Copy` grace before `into_router_parts` consumes `self`.
+        // Read the `Copy` grace and clone the shared core before
+        // `into_router_parts` consumes `self`.
         let shutdown_grace = self.shutdown_grace;
+        let core = self.core.clone();
         let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
@@ -442,6 +458,7 @@ impl Server {
             serve,
             cancel_tx,
             shutdown_grace,
+            core,
         )
         .await
     }
@@ -468,6 +485,12 @@ pub struct WatchGuard {
     /// Bound on the cooperative-stop wait in [`Self::shutdown`] before a forced
     /// abort. Inherited from [`ServerBuilder::shutdown_grace`].
     shutdown_grace: Duration,
+    /// Shared serving core, cloned from the `Server`. Lets `Drop` (and the
+    /// consuming `shutdown` / `abort`, which trigger `Drop` on return) close the
+    /// serving gate synchronously at the drop site, instead of waiting for the
+    /// watch task to observe cancellation and publish `NotServing` on its own
+    /// timeline — a window during which the fast gate would still admit RPCs.
+    core: Arc<ServingCore>,
 }
 
 impl WatchGuard {
@@ -522,6 +545,17 @@ impl WatchGuard {
 
 impl Drop for WatchGuard {
     fn drop(&mut self) {
+        // Close the serving gate synchronously, here at the drop site. Dropping
+        // the cancel sender below only *requests* the watch task to stop; the
+        // task publishes `NotServing` later, on its own timeline. Between this
+        // drop and the task's next poll the fast gate would still read `Serving`
+        // (and the allocator would still grant), so an RPC could be admitted by a
+        // server that has already been told to stop serving. `step_down` clears
+        // the allocator and publishes `NotServing` now, before any await; the
+        // watch task's later `step_down(None, None)` on cooperative cancel (see
+        // `fence::run_leader_watch`) republishes the identical state, so the
+        // double-close is harmless and idempotent.
+        self.core.step_down(None, None);
         // Dropping the sender (if `shutdown` / `abort` did not already take it)
         // resolves the task's cancel future; the task then publishes
         // `NotServing` and returns. The `JoinHandle` is dropped here too,
@@ -613,13 +647,17 @@ async fn await_watch_within_grace(
 /// raw parts rather than a `WatchGuard` keeps this path free of the guard's
 /// `Option` fields — neither the watch handle nor the cancel sender is optional
 /// here. `shutdown_grace` bounds the user-shutdown arm's wait for the watch task
-/// (see [`await_watch_within_grace`]).
+/// (see [`await_watch_within_grace`]). `core` is the shared serving core (the
+/// same one the watch task and the gRPC service hold): the user-shutdown arm
+/// closes the gate on it synchronously so no RPC is admitted in the window
+/// before the watch task observes cancellation and publishes `NotServing`.
 async fn serve_inner<S>(
     watch_cancel_tx: tokio::sync::oneshot::Sender<()>,
     mut watch_handle: tokio::task::JoinHandle<Result<(), ServerError>>,
     serve_future: S,
     tonic_cancel_tx: tokio::sync::oneshot::Sender<()>,
     shutdown_grace: Duration,
+    core: Arc<ServingCore>,
 ) -> Result<(), ServerError>
 where
     S: Future<Output = Result<(), tonic::transport::Error>>,
@@ -659,6 +697,14 @@ where
             // task's own outcome (a clean `Ok(())` on cooperative stop, a
             // cancelled `JoinError` on abort) is discarded; the user-requested
             // shutdown result wins.
+            //
+            // Close the serving gate synchronously first: dropping the sender
+            // only *requests* the stop, and a task aborted on grace expiry (or
+            // simply not yet rescheduled) may never reach its own `step_down`. So
+            // a `GetTs` arriving during the drain would still be admitted unless
+            // we close the gate here. `step_down` is idempotent with the watch
+            // task's own cooperative-cancel publish.
+            core.step_down(None, None);
             drop(watch_cancel_tx);
             let _ = await_watch_within_grace(&mut watch_handle, shutdown_grace).await;
             serve_result?;
@@ -956,6 +1002,80 @@ mod tests {
             Err(ServerError::WatchPanic { payload, .. }) => assert_eq!(payload, "watch"),
             other => panic!("expected forwarded watch error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_watch_guard_closes_serving_gate_synchronously() {
+        // Regression: dropping the guard must close the serving gate at the
+        // drop site, not on the watch task's later timeline. Build a guard whose
+        // watch handle never touches the core (so the ONLY thing that can flip
+        // the state to NotServing is `Drop`), publish `Serving`, then drop the
+        // guard and read the state with NO await in between. On the current-thread
+        // test runtime no other task can run between the synchronous `drop` and
+        // the synchronous `serving_state` read, so observing `NotServing` proves
+        // `Drop` closed the gate synchronously rather than the watch task.
+        let core = Arc::new(ServingCore::new());
+        core.publish_serving();
+
+        let handle: tokio::task::JoinHandle<Result<(), ServerError>> =
+            tokio::spawn(async { Ok(()) });
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let guard = WatchGuard {
+            cancel_tx: Some(cancel_tx),
+            handle: Some(handle),
+            shutdown_grace: Duration::from_secs(10),
+            core: core.clone(),
+        };
+
+        drop(guard);
+
+        assert!(
+            matches!(core.serving_state(), ServingState::NotServing { .. }),
+            "dropping the WatchGuard must close the serving gate synchronously",
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_inner_closes_serving_gate_on_user_shutdown() {
+        // Regression for the serve path: when the caller's shutdown fires,
+        // `serve_inner` drops the watch cancel sender and waits out the grace,
+        // forcibly aborting the watch task if it overruns. A task parked upstream
+        // of any cancel-observing await (modelled here by a never-resolving
+        // future) is aborted before it can publish `NotServing`, so the gate
+        // would stay open unless `serve_inner` closes it itself. Seed `Serving`,
+        // run the user-shutdown arm with a zero grace (immediate abort), and
+        // assert the gate is closed on return.
+        let core = Arc::new(ServingCore::new());
+        core.publish_serving();
+
+        let watch_handle: tokio::task::JoinHandle<Result<(), ServerError>> =
+            tokio::spawn(async { futures::future::pending().await });
+        let (watch_cancel_tx, _watch_cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let (tonic_cancel_tx, _tonic_cancel_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // A serve future that is immediately ready models the user's shutdown
+        // having fired; with the biased select preferring the (pending) watch arm,
+        // control reaches the user-shutdown arm.
+        let serve_future = async { Ok::<(), tonic::transport::Error>(()) };
+
+        let result = serve_inner(
+            watch_cancel_tx,
+            watch_handle,
+            serve_future,
+            tonic_cancel_tx,
+            Duration::from_millis(0),
+            core.clone(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "user shutdown must return Ok, got {result:?}"
+        );
+        assert!(
+            matches!(core.serving_state(), ServingState::NotServing { .. }),
+            "serve_inner's user-shutdown arm must close the serving gate synchronously",
+        );
     }
 
     #[cfg(feature = "reflection")]
