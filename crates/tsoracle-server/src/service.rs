@@ -61,6 +61,12 @@ fn core_status(error: CoreError) -> Status {
         CoreError::PhysicalMsOutOfRange(physical_ms) => Status::out_of_range(format!(
             "physical_ms {physical_ms} exceeds 46-bit timestamp field"
         )),
+        CoreError::LogicalRangeOutOfRange {
+            logical_start,
+            count,
+        } => Status::out_of_range(format!(
+            "logical range [{logical_start}, +{count}) exceeds 18-bit timestamp field"
+        )),
         CoreError::InvalidLeadershipWindow {
             fence_floor,
             committed_ceiling,
@@ -129,13 +135,13 @@ impl TsoService for TsoServiceImpl {
                     {
                         metrics::counter!("tsoracle.get_ts.total").increment(1);
                         metrics::counter!("tsoracle.get_ts.timestamps_issued")
-                            .increment(u64::from(grant.count));
+                            .increment(u64::from(grant.count()));
                     }
-                    let (epoch_hi, epoch_lo) = grant.epoch.to_wire();
+                    let (epoch_hi, epoch_lo) = grant.epoch().to_wire();
                     return Ok(Response::new(GetTsResponse {
-                        physical_ms: grant.physical_ms,
-                        logical_start: grant.logical_start,
-                        count: grant.count,
+                        physical_ms: grant.physical_ms(),
+                        logical_start: grant.logical_start(),
+                        count: grant.count(),
                         epoch_hi,
                         epoch_lo,
                     }));
