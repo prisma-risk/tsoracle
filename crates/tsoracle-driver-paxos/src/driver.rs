@@ -102,6 +102,13 @@ where
     }
 
     async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
+        // Reject an out-of-range value before the Advance is appended: the
+        // apply path computes an unchecked `max(prev, at_least)`, so a decided
+        // poison value can never be served and cannot self-heal. This is
+        // value-intrinsic, so it precedes the epoch fence — an out-of-range
+        // request is permanently bad regardless of which epoch issued it.
+        tsoracle_consensus::reject_out_of_range_advance(at_least)?;
+
         // Fence: reject the call if the supplied epoch does not match
         // the host's current ballot-derived epoch. The check + append
         // are NOT atomic across the OmniPaxos handle, but a stale leader
@@ -199,6 +206,40 @@ mod tests {
             }
             other => panic!("expected Fenced, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn persist_rejects_out_of_range_before_append() {
+        use tsoracle_core::PHYSICAL_MS_MAX;
+
+        let host = StubHost::new();
+        let current_ballot = host.omnipaxos().lock().get_promise();
+        let current_epoch = encode_epoch(current_ballot);
+
+        let (_sender, stream) = leader_event_channel();
+        let driver = PaxosDriver::new(host, stream);
+
+        // The range guard must run before the Advance is appended to the log,
+        // so an out-of-range fence value is never durably committed. StubHost's
+        // submit_advance echoes Ok(at_least), so a returned Err proves the
+        // value was rejected before it reached the append path.
+        let err = driver
+            .persist_high_water(PHYSICAL_MS_MAX + 1, current_epoch)
+            .await
+            .expect_err("an out-of-range advance must be rejected, not appended");
+        assert!(
+            matches!(err, ConsensusError::PermanentDriver(_)),
+            "out-of-range advance must classify as PermanentDriver, got {err:?}"
+        );
+
+        // The boundary value is in range and still reaches the host.
+        assert_eq!(
+            driver
+                .persist_high_water(PHYSICAL_MS_MAX, current_epoch)
+                .await
+                .expect("the maximum in-range value must persist"),
+            PHYSICAL_MS_MAX
+        );
     }
 
     #[tokio::test]
