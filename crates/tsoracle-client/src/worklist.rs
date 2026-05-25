@@ -16,7 +16,7 @@
 //! push-front-on-hint steering so `crate::retry::issue_rpc` reads as a
 //! sequence of policy decisions rather than queue bookkeeping. The queue
 //! starts with the cached leader (if fresh) followed by the configured
-//! endpoints — see [`ChannelPool::iter_round_robin`](crate::leader_resolved::ChannelPool::iter_round_robin).
+//! endpoints — see [`ChannelPool::iter_round_robin`](crate::channel_pool::ChannelPool::iter_round_robin).
 //!
 //! A NOT_LEADER response carrying a usable [`LeaderHint`](tsoracle_proto::v1::LeaderHint)
 //! redirects the loop via [`Worklist::redirect_to`], which pushes the

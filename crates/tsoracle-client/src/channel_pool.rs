@@ -29,7 +29,7 @@ use crate::transport::apply_endpoint_config;
 // `decode_leader_hint` helper now live in `tsoracle-proto` as the single
 // source of truth for the wire contract (the server inserts the trailer; this
 // client decodes it). Re-exported here so the retry loop's existing
-// `crate::leader_resolved::{LeaderHintLookup, decode_leader_hint}` import path
+// `crate::channel_pool::{LeaderHintLookup, decode_leader_hint}` import path
 // is unchanged.
 pub use tsoracle_proto::v1::{LeaderHintLookup, decode_leader_hint};
 

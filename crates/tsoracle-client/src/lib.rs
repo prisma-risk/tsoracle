@@ -16,10 +16,10 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod budget;
+mod channel_pool;
 mod driver;
 mod driver_supervisor;
 mod error;
-mod leader_resolved;
 mod response;
 mod retry;
 mod retry_policy;
@@ -40,7 +40,7 @@ use tsoracle_core::{LOGICAL_MAX, Timestamp};
 /// slot and round-trip to learn the same thing from the server.
 pub(crate) const MAX_TIMESTAMPS_PER_RPC: u32 = LOGICAL_MAX + 1;
 
-use crate::leader_resolved::ChannelPool;
+use crate::channel_pool::ChannelPool;
 
 pub struct ClientBuilder {
     endpoints: Vec<String>,

@@ -78,8 +78,8 @@ use std::time::Duration;
 use tsoracle_core::Epoch;
 
 use crate::budget::{Budget, PairBudget};
+use crate::channel_pool::{ChannelPool, LeaderHintLookup, decode_leader_hint};
 use crate::error::ClientError;
-use crate::leader_resolved::{ChannelPool, LeaderHintLookup, decode_leader_hint};
 use crate::response::{TimestampRange, decode_get_ts_response};
 use crate::retry_policy::{is_transport_failure, jittered_backoff, should_backoff};
 use crate::worklist::Worklist;
