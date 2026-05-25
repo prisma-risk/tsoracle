@@ -35,4 +35,4 @@ pub use state_machine::{HighWaterStateMachine, HighWaterStateMachineSnapshot};
 /// wraps, so consumers can build commands without depending on `tsoracle-consensus`.
 pub use tsoracle_consensus::AdvancePayload;
 pub use tsoracle_core::TsoPeer;
-pub use type_config::{HighWaterApplied, OpenraftPeer, TypeConfig};
+pub use type_config::{HighWaterApplied, OpenraftEntry, OpenraftPeer, TypeConfig};
