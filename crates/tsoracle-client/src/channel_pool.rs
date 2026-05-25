@@ -342,7 +342,7 @@ impl ChannelPool {
     ///
     /// The returned cell handle lets the retry loop evict the *same* channel
     /// if a later RPC over it fails with a transport error (issue #239); see
-    /// [`Self::evict_if_current`] and `crate::retry::attempt`.
+    /// [`Self::evict_if_current`] and `crate::attempt::attempt`.
     pub(crate) async fn client_with_cell(
         &self,
         endpoint: &str,
@@ -689,7 +689,7 @@ mod tests {
     /// path uniform with `record_success`: the endpoint is the cached leader
     /// either way, so it keeps its slot (and its higher epoch) and the worklist
     /// still steers to it. The old `compare_and_set_leader` returned `false`
-    /// here (a `StaleLeaderHint`); the unified rule returns `true`.
+    /// here (a `HintUnusable { reason: StaleEpoch }`); the unified rule returns `true`.
     #[test]
     fn same_endpoint_lower_epoch_hint_is_accepted_and_holds_higher_epoch() {
         let pool = ChannelPool::new(

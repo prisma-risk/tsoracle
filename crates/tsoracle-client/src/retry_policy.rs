@@ -135,7 +135,7 @@ impl Default for RetryPolicy {
 /// This single predicate drives two policies that happen to share the same
 /// trigger today — backing off before the next attempt
 /// ([`should_backoff`]) and evicting the cached channel after the RPC fails
-/// (`crate::retry::attempt`, issue #239). Keeping one definition means the
+/// (`crate::attempt::attempt`, issue #239). Keeping one definition means the
 /// two cannot silently drift apart; if they ever need to diverge, that must
 /// be a deliberate edit here.
 pub(crate) fn is_transport_failure(error: &crate::error::ClientError) -> bool {
