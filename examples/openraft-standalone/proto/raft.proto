@@ -16,6 +16,7 @@ service RaftPeerService {
   rpc AppendEntries (RaftMessage) returns (RaftMessage);
   rpc Vote (RaftMessage) returns (RaftMessage);
   rpc Snapshot (stream SnapshotChunk) returns (RaftMessage);
+  rpc TransferLeader (RaftMessage) returns (RaftMessage);
 }
 
 message RaftMessage {
