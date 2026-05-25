@@ -4,27 +4,22 @@
 //  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀
 //
 //  tsoracle — Distributed Timestamp Oracle
+//  https://www.tsoracle.rs
 //
 //  Copyright (c) 2026 Prisma Risk
-//  Licensed under the Apache License, Version 2.0
-//  https://github.com/prisma-risk/tsoracle
 //
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
 //
-//! Regression: a process restart resets `StandaloneHost::barrier_seq` to 0, but
-//! the `applied_barriers` ledger is restored from durable state (decided-log
-//! replay + snapshot transfer). `current_high_water` returns once
-//! `applied_barrier_seq(self) >= minted_seq`. If the freshly minted seq is not
-//! lifted above the recovered ledger, a `(self, old_seq)` entry from a PRIOR
-//! lifetime satisfies the predicate immediately, so the read returns the stale
-//! `high_water()` before its own barrier is applied — the failover hazard the
-//! per-node nonce closes, reopened across a restart.
-//!
-//! Driven deterministically with the step-driver rather than yield-point
-//! parking and real-time sleeps. The reader's host is taken out of the cluster
-//! and driven by hand with its apply held "parked" so that its decided_idx
-//! advances via consensus while its high-water and barrier ledger do not fold;
-//! an explicit `apply_once` then releases it. This gives exact, instant control
-//! over the interleaving the original reproduced with `tokio::time::sleep`.
+//      https://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
+//
 
 #![cfg(feature = "rocksdb-storage")]
 

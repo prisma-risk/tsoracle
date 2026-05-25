@@ -4,42 +4,22 @@
 //  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀
 //
 //  tsoracle — Distributed Timestamp Oracle
+//  https://www.tsoracle.rs
 //
 //  Copyright (c) 2026 Prisma Risk
-//  Licensed under the Apache License, Version 2.0
-//  https://github.com/prisma-risk/tsoracle
 //
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
 //
-//! Regression: `current_high_water` must wait for its own appended
-//! Barrier to be applied, not merely for `decided_idx` to advance past
-//! the pre-append snapshot.
-//!
-//! The pre-fix predicate was `decided_idx > snapshot_decided`. That fires
-//! whenever any entry decides — including entries appended by a prior
-//! leader that the local node was lagging on. If the apply task has not
-//! yet folded the reader's Barrier into state, the reader can return a
-//! stale `high_water()` while the Barrier remains undecided. In failover
-//! this seeds the new leader's allocator below the prior leader's true
-//! ceiling and lets it issue timestamps the prior leader already served.
-//!
-//! These tests construct that interleaving with yield-point gating: park
-//! every node's apply task between iterations, decide an Advance beneath
-//! the reader's eventual Barrier, park the reader between its
-//! `append(Barrier)` and its wait, let the Barrier decide while apply
-//! stays paused, then release. With the pre-fix predicate the reader
-//! returns the stale `high_water` (0) the moment `decided_idx` advances;
-//! with the fix it waits until the apply task folds its own barrier and
-//! returns the correct post-fold value (500).
-//!
-//! Runs under tokio virtual time (`start_paused`). The interleaving this
-//! regression needs — apply tasks parked at their yield point while an
-//! `Advance` decides beneath an as-yet-unfolded `Barrier`, then a paced
-//! release — is built from `tokio::time::sleep` delays, which under a
-//! paused clock define a deterministic ordering instead of racing the
-//! wall clock. The apply tasks and the reader future remain real async
-//! tasks, so the yield-point gating still exercises the missed-fold path;
-//! only the timing nondeterminism is removed. `start_paused` implies the
-//! current-thread runtime.
+//      https://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
+//
 
 #![cfg(feature = "yieldpoints")]
 

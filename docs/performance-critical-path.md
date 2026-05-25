@@ -22,8 +22,9 @@ Two related rules are intentionally not enforced by this guard — they live in 
 
 [`scripts/check-critical-path.sh`](../scripts/check-critical-path.sh) runs in CI as the `critical-path` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). It:
 
-- Finds every `crates/**/*.rs` whose first 25 lines contain `#[PerformanceCriticalPath]` — wide enough to clear the 11-line canonical copyright header plus a separator, narrow enough that a marker buried under a long `//!` module doc still falls out of enforcement.
-- For each, greps for the banned patterns listed in the script (the `BANNED` array).
+- Finds every `*.rs` file in the repo carrying the `#[PerformanceCriticalPath]` marker. The scan reads the whole file (so a marker that has drifted down is never missed) and matches the marker only as a standalone comment line, so prose that mentions `` `#[PerformanceCriticalPath]` `` in passing is not treated as a marker.
+- Checks each marker is well-placed: it must sit within the first `SCAN_WINDOW` lines, derived as the canonical copyright header's line count (read from [`scripts/header.txt`](../scripts/header.txt), so it tracks the header automatically) plus a small allowance for the blank separator and the marker. A marker found below the window is reported as a misplaced-marker violation rather than silently dropped from enforcement.
+- For each marked file, greps for the banned patterns listed in the script (the `BANNED` array).
 - Prints violations with line numbers.
 
 **CI runs in strict mode** — the workflow exports `CRITICAL_PATH_STRICT=1`, so any violation fails the build. The script itself defaults to warn-only when `CRITICAL_PATH_STRICT` is unset, which is convenient for local iteration while preparing a new marker candidate. To mirror CI locally, run `CRITICAL_PATH_STRICT=1 ./scripts/check-critical-path.sh`.
@@ -34,7 +35,7 @@ To adjust the list of banned patterns or the strict-mode toggle, edit the script
 
 ## Marker placement
 
-Place the marker on the first non-blank line below the 11-line canonical copyright header — typically line 13, with one blank line separating header and marker — and above any module-level doc comment (`//!`), any inner attribute (`#![...]`), and any `use` statement. The guard scans the first 25 lines, so the marker must sit at the top — pushing it below a long module doc silently disables enforcement. The marker is a plain `//` line comment, not Rust syntax; it does not interfere with the file's `//!` module doc (which still attaches to the module) or with any `#![cfg_attr(...)]` inner attribute (such as the [panic-policy attribute](../CONTRIBUTING.md#panic-policy-unwrap-and-expect) in each library crate's `lib.rs`).
+Place the marker on the first non-blank line below the canonical copyright header (currently 22 lines) — typically line 24, with one blank line separating header and marker — and above any module-level doc comment (`//!`), any inner attribute (`#![...]`), and any `use` statement. The guard allows the marker within the first `SCAN_WINDOW` lines (the header's line count plus a small allowance), so it must sit at the top; pushing it below — e.g. under a long `//!` module doc — is reported as a misplaced-marker violation rather than silently disabling enforcement. The marker is a plain `//` line comment, not Rust syntax; it does not interfere with the file's `//!` module doc (which still attaches to the module) or with any `#![cfg_attr(...)]` inner attribute (such as the [panic-policy attribute](../CONTRIBUTING.md#panic-policy-unwrap-and-expect) in each library crate's `lib.rs`).
 
 The marker is per-file. If you split a marked module into child files, mark every child file that remains on the hot path — the guard does not inherit markers through `mod`.
 
