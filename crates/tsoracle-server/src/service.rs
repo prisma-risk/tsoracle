@@ -36,11 +36,11 @@ fn wire_epoch(epoch: Option<Epoch>) -> Option<EpochWire> {
     })
 }
 
-/// Snapshot the best-available leader hint from `state_rx`. Used wherever we
-/// need to surface a `FAILED_PRECONDITION` "not leader" response from a
-/// service-layer code path; matches what the fast NOT_LEADER gate emits.
+/// Snapshot the best-available leader hint from the serving-state channel. Used
+/// wherever we need to surface a `FAILED_PRECONDITION` "not leader" response
+/// from a service-layer code path; matches what the fast NOT_LEADER gate emits.
 fn leader_hint_from(server: &Server) -> LeaderHint {
-    let (leader_endpoint, leader_epoch) = match server.state_rx.borrow().clone() {
+    let (leader_endpoint, leader_epoch) = match server.state_tx.borrow().clone() {
         ServingState::NotServing {
             leader_endpoint,
             leader_epoch,
@@ -110,7 +110,7 @@ impl TsoService for TsoServiceImpl {
         if let ServingState::NotServing {
             leader_endpoint,
             leader_epoch,
-        } = self.server.state_rx.borrow().clone()
+        } = self.server.state_tx.borrow().clone()
         {
             return Err(not_leader_status(LeaderHint {
                 leader_endpoint,
@@ -216,8 +216,9 @@ impl TsoServiceImpl {
             let allocator = self.server.allocator.lock();
             let Some(epoch) = allocator.epoch() else {
                 // Lost leadership between the outer fast-gate check and here.
-                // Surface as a leader redirect (with the hint state_rx knows
-                // about), not a bare FAILED_PRECONDITION without metadata.
+                // Surface as a leader redirect (with the hint the serving-state
+                // channel knows about), not a bare FAILED_PRECONDITION without
+                // metadata.
                 return Err(not_leader_status(leader_hint_from(&self.server)));
             };
             let target = allocator
@@ -339,7 +340,7 @@ mod tests {
             .clock(std::sync::Arc::new(tsoracle_core::SystemClock))
             .build()
             .unwrap();
-        let _ = server.state_tx.send(ServingState::NotServing {
+        server.state_tx.send_replace(ServingState::NotServing {
             leader_endpoint: Some("http://other-node:9000".into()),
             leader_epoch: Some(Epoch(7)),
         });
@@ -352,7 +353,7 @@ mod tests {
         assert_eq!(hint.leader_epoch, Some(EpochWire { hi, lo }));
 
         // The Serving branch flips endpoint and epoch to None.
-        let _ = server.state_tx.send(ServingState::Serving);
+        server.state_tx.send_replace(ServingState::Serving);
         let hint = leader_hint_from(&server);
         assert!(hint.leader_endpoint.is_none());
         assert!(hint.leader_epoch.is_none());
