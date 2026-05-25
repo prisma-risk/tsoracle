@@ -251,6 +251,24 @@ impl Allocator {
         }
     }
 
+    /// Shared count guard for `try_grant` and `would_grant`, kept here so the
+    /// two entry points cannot drift. The server's extension single-flight
+    /// relies on `would_grant(now_ms, count) == true` implying the retry
+    /// `try_grant(now_ms, count)` succeeds (see `service::extend_window`), so
+    /// the set of rejected counts must be identical on both paths — splitting
+    /// this check across both methods would let a future edit to one degrade
+    /// the recheck into a spurious consensus round-trip (or worse).
+    ///
+    /// `count == 0` reuses the oversized case's `InvalidCount(count)`; since
+    /// `count` is `0` there, the surfaced value matches the prior explicit
+    /// `InvalidCount(0)`.
+    fn validate_count(count: u32) -> Result<(), CoreError> {
+        if count == 0 || count > LOGICAL_MAX + 1 {
+            return Err(CoreError::InvalidCount(count));
+        }
+        Ok(())
+    }
+
     /// Single source of truth for the window-advance simulation and its bounds
     /// checks, shared by `try_grant` and `would_grant`. Pure: it takes the
     /// relevant state fields by value and mutates nothing, so a failed
@@ -305,12 +323,7 @@ impl Allocator {
     /// State is written back only on success: a failed grant (out-of-range or
     /// exhausted window) leaves `next_physical_ms`/`next_logical` untouched.
     pub fn try_grant(&mut self, now_ms: u64, count: u32) -> Result<WindowGrant, CoreError> {
-        if count == 0 {
-            return Err(CoreError::InvalidCount(0));
-        }
-        if count > LOGICAL_MAX + 1 {
-            return Err(CoreError::InvalidCount(count));
-        }
+        Self::validate_count(count)?;
         let State::Leader {
             epoch,
             committed_high_water,
@@ -348,7 +361,7 @@ impl Allocator {
     /// coarser predicate would risk false positives (skip the extension, then
     /// fail the outer retry) for requests whose `count` straddles the window edge.
     pub fn would_grant(&self, now_ms: u64, count: u32) -> bool {
-        if count == 0 || count > LOGICAL_MAX + 1 {
+        if Self::validate_count(count).is_err() {
             return false;
         }
         let State::Leader {
