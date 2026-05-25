@@ -3358,6 +3358,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-openraft-toolkit",

@@ -106,15 +106,37 @@ struct StoredSnapshot {
     data: Vec<u8>,
 }
 
+/// Whether a snapshot at `incoming` may replace one currently published at
+/// `published` without regressing the applied log id.
+///
+/// Equal ids may replace (a fresh rebuild at the same `last_applied` carries
+/// the same state, only a new `snapshot_id`). `None` — no prior snapshot, or a
+/// pre-genesis snapshot — is the minimum, so a `None` incoming never displaces
+/// a `Some` published. This is the monotone guard that closes the
+/// `build_snapshot`/`install_snapshot` publish TOCTOU.
+fn supersedes_published(incoming: Option<LogId>, published: Option<LogId>) -> bool {
+    incoming >= published
+}
+
 /// `RaftStateMachine` for the high-water counter, with pluggable snapshot
 /// persistence.
 ///
-/// Clone-cheap: both the `Arc<Mutex<Core>>` and the `Arc<dyn SnapshotStore>`
-/// are shared by clone. Required by openraft's `get_snapshot_builder`
-/// contract which uses `SnapshotBuilder = Self`.
+/// Clone-cheap: the `Arc<Mutex<Core>>`, the `Arc<dyn SnapshotStore>`, and the
+/// `Arc<Mutex<()>>` persist lock are all shared by clone. Required by
+/// openraft's `get_snapshot_builder` contract which uses
+/// `SnapshotBuilder = Self`.
 pub struct HighWaterStateMachine {
     core: Arc<Mutex<Core>>,
     store: Arc<dyn SnapshotStore>,
+    /// Serializes the persist-then-publish sequence of `build_snapshot` and
+    /// `install_snapshot` across all clones. openraft drives `build_snapshot`
+    /// on a clone concurrently with `install_snapshot` on the main handle;
+    /// without this lock a slow build could write the store and publish
+    /// `current_snapshot` *after* a newer install, rolling both the durable
+    /// and in-memory snapshot back to a stale `last_log_id`. Distinct from
+    /// `core` precisely so the hot `apply` path never serializes against
+    /// snapshot I/O — `core` is never held across `store.save`.
+    persist: Arc<Mutex<()>>,
 }
 
 impl Clone for HighWaterStateMachine {
@@ -122,6 +144,7 @@ impl Clone for HighWaterStateMachine {
         Self {
             core: Arc::clone(&self.core),
             store: Arc::clone(&self.store),
+            persist: Arc::clone(&self.persist),
         }
     }
 }
@@ -185,6 +208,7 @@ impl HighWaterStateMachine {
         Ok(Self {
             core: Arc::new(Mutex::new(core)),
             store,
+            persist: Arc::new(Mutex::new(())),
         })
     }
 
@@ -201,6 +225,57 @@ impl HighWaterStateMachine {
     fn snapshot_id_for(last_applied: Option<&LogId>, idx: u64) -> String {
         let log_index = last_applied.map(|l| l.index).unwrap_or(0);
         format!("{log_index}-{idx}")
+    }
+
+    /// Durably persist `envelope`, then publish `(meta, data)` as the current
+    /// in-memory snapshot, running `on_adopt` against the core under the same
+    /// publish lock — but only if `meta.last_log_id` does not regress the
+    /// snapshot already published.
+    ///
+    /// The whole sequence is serialized across clones by `self.persist` so a
+    /// slow `build_snapshot` cannot interleave its store write or its publish
+    /// behind a newer `install_snapshot` (or vice-versa) and roll the durable
+    /// and in-memory snapshot back to a stale `last_log_id`. The published
+    /// `last_log_id` is re-read *inside* the lock, immediately before the
+    /// store write, so the decision can't be invalidated by a concurrent
+    /// commit. `self.core` is taken only in brief bursts and never held across
+    /// `store.save`, so `apply` never serializes against snapshot I/O.
+    ///
+    /// Returns `Ok(true)` if the snapshot was adopted, `Ok(false)` if it was
+    /// dropped as stale because a newer snapshot is already durable and
+    /// published.
+    fn commit_snapshot(
+        &self,
+        meta: SnapMeta,
+        data: Vec<u8>,
+        envelope: &[u8],
+        on_adopt: impl FnOnce(&mut Core),
+    ) -> io::Result<bool> {
+        let _persist = self.persist.lock();
+
+        let published = self
+            .core
+            .lock()
+            .current_snapshot
+            .as_ref()
+            .and_then(|s| s.meta.last_log_id);
+        if !supersedes_published(meta.last_log_id, published) {
+            tracing::warn!(
+                incoming.last_log_id = ?meta.last_log_id,
+                published.last_log_id = ?published,
+                snapshot_id = %meta.snapshot_id,
+                "discarding stale snapshot publish: a newer snapshot is \
+                 already durable and published",
+            );
+            return Ok(false);
+        }
+
+        self.store.save(envelope)?;
+
+        let mut core = self.core.lock();
+        on_adopt(&mut core);
+        core.current_snapshot = Some(StoredSnapshot { meta, data });
+        Ok(true)
     }
 }
 
@@ -235,17 +310,17 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
         };
         let envelope = encode(SCHEMA_VERSION, &persisted)
             .map_err(|e| codec_io_error("snapshot envelope serialize", e))?;
-        // Persist BEFORE publishing to `current_snapshot`. If the store write
-        // fails openraft sees a `build_snapshot` error and `current_snapshot`
-        // stays at the prior (already-persisted) value, so a follower
-        // streaming via `get_current_snapshot` will not observe a snapshot we
-        // could not durably write.
-        self.store.save(&envelope)?;
-
-        self.core.lock().current_snapshot = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data: snapshot_payload.clone(),
-        });
+        // Persist + publish through the monotone, serialized commit path. The
+        // store write happens BEFORE `current_snapshot` is updated, so a
+        // failed write leaves the prior (already-persisted) snapshot in place
+        // and a follower streaming via `get_current_snapshot` never observes a
+        // snapshot we could not durably write. A build whose `last_applied`
+        // was captured before a newer install bumped the published snapshot is
+        // dropped here rather than rolling the durable + in-memory snapshot
+        // back to its stale `last_log_id`. We still return the snapshot we
+        // built — openraft asked for one, and the bytes faithfully capture the
+        // state we observed.
+        self.commit_snapshot(meta.clone(), snapshot_payload.clone(), &envelope, |_| {})?;
 
         Ok(Snapshot {
             meta,
@@ -347,20 +422,20 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
         };
         let envelope = encode(SCHEMA_VERSION, &persisted)
             .map_err(|e| codec_io_error("snapshot envelope serialize", e))?;
-        // Persist BEFORE mutating in-memory state. If the store write fails
-        // openraft retries the install and the SM stays at its prior state —
-        // safer than advancing the apply progress past a snapshot we could
-        // not durably record.
-        self.store.save(&envelope)?;
-
-        let mut core = self.core.lock();
-        core.current_value = payload.current_value;
-        core.last_applied = payload.last_applied;
-        core.last_membership = payload.last_membership;
-        core.current_snapshot = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data: bytes,
-        });
+        // Persist, apply the snapshot's state, and publish atomically through
+        // the monotone, serialized commit path — the same one `build_snapshot`
+        // uses, so neither can clobber the other. The store write happens
+        // before the in-memory state is advanced, so a failed write leaves the
+        // SM at its prior state for openraft to retry. A stale install (a
+        // lower `last_log_id` than the already-published snapshot) is dropped
+        // as an accepted no-op: we already cover at least this snapshot, so
+        // adopting it would regress both the durable snapshot and the applied
+        // state.
+        self.commit_snapshot(meta.clone(), bytes, &envelope, |core| {
+            core.current_value = payload.current_value;
+            core.last_applied = payload.last_applied;
+            core.last_membership = payload.last_membership;
+        })?;
         Ok(())
     }
 
@@ -390,6 +465,17 @@ mod tests {
     use tsoracle_consensus::AdvancePayload;
 
     // --- Test helpers ---
+
+    /// Install a process-wide `WARN`-level subscriber so the `tracing::warn!`
+    /// on the stale-publish reject path actually evaluates its fields (without
+    /// an interested subscriber the macro short-circuits and the argument
+    /// expressions are never executed). Idempotent across tests via `try_init`.
+    fn enable_tracing() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_test_writer()
+            .try_init();
+    }
 
     /// Build a `LogId` for the toolkit's default leader-id layout
     /// (`LeaderId<u64, u64>`) with term=1, node_id=1, and the given index.
@@ -712,6 +798,184 @@ mod tests {
         assert_eq!(sm2.current_value().await, 700);
         let (last, _) = sm2.applied_state().await.unwrap();
         assert_eq!(last.map(|l| l.index), Some(10));
+    }
+
+    /// Encode a `(meta, framed-payload-bytes)` pair for an install at
+    /// `(value, last_applied)`, with `meta.last_log_id` matching the payload so
+    /// the meta/payload consistency check passes and the install reaches the
+    /// publish path.
+    fn install_payload(value: u64, last_applied: LogId) -> (SnapMeta, Vec<u8>) {
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: value,
+            last_applied: Some(last_applied),
+            last_membership: StoredMem::default(),
+        };
+        let bytes =
+            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
+                .expect("serialize payload");
+        let meta = SnapMeta {
+            last_log_id: payload.last_applied,
+            last_membership: payload.last_membership.clone(),
+            snapshot_id: format!("snap-{}", last_applied.index),
+        };
+        (meta, bytes)
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_does_not_regress_published_snapshot() {
+        // `build_snapshot` publishes both the durable store (:256) and the
+        // in-memory `current_snapshot` (:258) AFTER releasing the core lock,
+        // and openraft can drive a stale build on a clone concurrently with a
+        // newer install. The publish must therefore be monotone by
+        // `last_log_id`: a later-arriving, lower-indexed snapshot must not roll
+        // the durable + in-memory snapshot back to a stale state (which a
+        // subsequent restart would then recover, after openraft has already
+        // purged its log past the newer snapshot). We exercise that invariant
+        // through the install path here — install and build share the same
+        // monotone publish, so a regressing install stands in for a stale build
+        // that finishes its write last.
+        enable_tracing();
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let mut sm = HighWaterStateMachine::with_store(store.clone()).expect("with_store");
+
+        let (newer_meta, newer_bytes) = install_payload(80, log_id(8));
+        sm.install_snapshot(&newer_meta, Cursor::new(newer_bytes))
+            .await
+            .expect("install newer");
+
+        // A stale snapshot (lower last_log_id) arriving afterwards is a no-op:
+        // we are already at least this far, so it must neither error nor
+        // regress state.
+        let (older_meta, older_bytes) = install_payload(50, log_id(5));
+        sm.install_snapshot(&older_meta, Cursor::new(older_bytes))
+            .await
+            .expect("stale install must be an accepted no-op, not an error");
+
+        assert_eq!(
+            sm.current_value().await,
+            80,
+            "value must not regress to the stale snapshot"
+        );
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(
+            last.map(|l| l.index),
+            Some(8),
+            "last_applied must not regress"
+        );
+        let current = sm
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("snapshot present");
+        assert_eq!(
+            current.meta.last_log_id.map(|l| l.index),
+            Some(8),
+            "in-memory current_snapshot must not regress"
+        );
+
+        // The durable store must also still hold the newer snapshot — this is
+        // the recovery-critical half: reopening must not resurrect the stale
+        // state.
+        let mut reopened = HighWaterStateMachine::with_store(store).expect("reopen");
+        assert_eq!(
+            reopened.current_value().await,
+            80,
+            "durable store must not have been rolled back to the stale snapshot"
+        );
+        let (last, _) = reopened.applied_state().await.unwrap();
+        assert_eq!(last.map(|l| l.index), Some(8));
+    }
+
+    #[test]
+    fn supersedes_published_is_monotone_by_last_log_id() {
+        // The exact rule the publish gate enforces. Equal or greater
+        // last_log_id supersedes; a lower one — or `None` against a `Some` —
+        // does not. `None` is the minimum: a fresh/pre-genesis snapshot never
+        // displaces an established one, but anything fills an empty slot.
+        assert!(
+            supersedes_published(Some(log_id(5)), None),
+            "any Some fills an empty slot"
+        );
+        assert!(
+            supersedes_published(None, None),
+            "first publish into an empty slot is allowed"
+        );
+        assert!(
+            supersedes_published(Some(log_id(8)), Some(log_id(5))),
+            "higher index supersedes"
+        );
+        assert!(
+            supersedes_published(Some(log_id(5)), Some(log_id(5))),
+            "equal index may republish (same state, fresh snapshot_id)"
+        );
+        assert!(
+            !supersedes_published(Some(log_id(5)), Some(log_id(8))),
+            "lower index must not regress"
+        );
+        assert!(
+            !supersedes_published(None, Some(log_id(1))),
+            "None must not regress an established snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_snapshot_drops_a_stale_publish() {
+        // Exercise the build-side of the TOCTOU directly at the seam
+        // build_snapshot shares with install. Once a newer snapshot is durable
+        // and published, a commit carrying a lower last_log_id — a build whose
+        // state was captured before the newer install but whose write lands
+        // last — must be dropped: it reports `Ok(false)`, runs no adopt
+        // callback, and leaves both the store and current_snapshot byte-for-byte
+        // untouched. (The full build path can only reach this state under a
+        // real scheduling race, so we drive the shared commit seam directly.)
+        enable_tracing();
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let mut sm = HighWaterStateMachine::with_store(store.clone()).expect("with_store");
+
+        let (newer_meta, newer_bytes) = install_payload(80, log_id(8));
+        sm.install_snapshot(&newer_meta, Cursor::new(newer_bytes))
+            .await
+            .expect("install newer");
+        let durable_after_newer = store
+            .load()
+            .expect("load")
+            .expect("durable snapshot present");
+
+        let (stale_meta, stale_data) = install_payload(50, log_id(5));
+        let envelope = tsoracle_openraft_toolkit::encode(
+            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            &PersistedSnapshot {
+                meta: stale_meta.clone(),
+                data: stale_data.clone(),
+            },
+        )
+        .expect("encode envelope");
+
+        let adopt_ran = std::cell::Cell::new(false);
+        let adopted = sm
+            .commit_snapshot(stale_meta, stale_data, &envelope, |_| adopt_ran.set(true))
+            .expect("commit_snapshot");
+
+        assert!(!adopted, "stale commit must report it was not adopted");
+        assert!(
+            !adopt_ran.get(),
+            "adopt callback must not run for a dropped commit"
+        );
+        assert_eq!(
+            store.load().expect("load").as_deref(),
+            Some(durable_after_newer.as_slice()),
+            "durable snapshot must be unchanged — a stale commit must not write"
+        );
+        let current = sm
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("snapshot present");
+        assert_eq!(
+            current.meta.last_log_id.map(|l| l.index),
+            Some(8),
+            "in-memory current_snapshot must be unchanged"
+        );
     }
 
     #[tokio::test]
