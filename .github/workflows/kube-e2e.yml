@@ -27,7 +27,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
       - name: build cluster image
-        run: docker build -f e2e/kube/Dockerfile -t tsoracle-e2e:latest .
+        run: docker build -f deploy/Dockerfile -t tsoracle:e2e .
       - name: build driver image
         run: docker build -f e2e/kube/driver/Dockerfile -t tsoracle-e2e-driver:latest .
       - name: create kind cluster
@@ -37,12 +37,20 @@ jobs:
           config: e2e/kube/kind-config.yaml
       - name: load images into kind
         run: |
-          kind load docker-image tsoracle-e2e:latest --name tsoracle-e2e
+          kind load docker-image tsoracle:e2e --name tsoracle-e2e
           kind load docker-image tsoracle-e2e-driver:latest --name tsoracle-e2e
-      - name: apply manifests
-        run: kubectl apply -f e2e/kube/manifests/
+      - name: install helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.15.0-linux-amd64.tar.gz | tar xz
+      - name: deploy chart
+        run: |
+          ./linux-amd64/helm install tsoracle deploy/charts/tsoracle \
+            --set image.repository=tsoracle,image.tag=e2e \
+            --set driver=openraft,replicas=3 \
+            --set ports.client=5051,ports.peer=5100 \
+            --wait --timeout 5m
       - name: wait for cluster formation (TCP readiness)
-        run: kubectl rollout status statefulset/tsoracle --timeout=180s
+        run: kubectl rollout status statefulset/tsoracle --timeout=300s
       - name: run e2e assertions (cold-start + soak across rollout)
         run: ./e2e/kube/run-assertions.sh
       - name: dump diagnostics on failure

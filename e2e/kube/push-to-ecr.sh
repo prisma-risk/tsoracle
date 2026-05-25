@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the arm64 node + driver images and push them to ECR for the EKS e2e
-# lane (the Kubernetes manifests live in the infra repo under k8s/tsoracle-e2e).
+# lane (the Helm chart lives under deploy/charts/tsoracle; the cluster is
+# deployed via helm install pointing at the ECR image).
 # Run from the tsoracle repo root — both Dockerfiles compile Rust from this
 # build context.
 set -euo pipefail
@@ -33,10 +34,10 @@ build_push() {
     echo "pushed ${repo}:${TAG}"
 }
 
-build_push tsoracle-e2e        e2e/kube/Dockerfile
+build_push tsoracle            deploy/Dockerfile
 build_push tsoracle-e2e-driver e2e/kube/driver/Dockerfile
 
 echo
-echo "Pinned refs (for 'kustomize edit set image' / the driver sed in infra/k8s/tsoracle-e2e):"
-echo "  tsoracle-e2e=${REG}/prisma-risk/tsoracle-e2e:${TAG}"
+echo "Pinned refs (for 'helm upgrade --set image.tag=...' / the driver sed in infra/k8s/tsoracle-e2e):"
+echo "  tsoracle=${REG}/prisma-risk/tsoracle:${TAG}"
 echo "  tsoracle-e2e-driver=${REG}/prisma-risk/tsoracle-e2e-driver:${TAG}"

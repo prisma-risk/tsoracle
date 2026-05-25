@@ -2,8 +2,8 @@
 # Orchestrates the kind e2e assertions against the current kubectl context:
 #   1. cold-start: every ordinal serves or redirects (proves 3-node formation)
 #   2. soak: zero final client errors + monotonicity across a graceful rollout
-# Assumes the manifests under e2e/kube/manifests/ are already applied and the
-# StatefulSet has reached readiness.
+# Assumes the chart has been installed (helm install tsoracle deploy/charts/tsoracle)
+# and the StatefulSet has reached readiness.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

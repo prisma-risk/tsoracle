@@ -1,6 +1,6 @@
 # Kubernetes end-to-end testing (kind)
 
-> Status: design sketch / proposal. The manifests referenced here live under `e2e/kube/`. Nothing in this lane runs in CI yet; it is opt-in and nightly/manual by intent.
+> Status: wired to CI as a manual `workflow_dispatch` job. The cluster is deployed via the Helm chart at `deploy/charts/tsoracle`; assertion Jobs live under `e2e/kube/driver/`.
 
 ## Why a kind lane at all
 
@@ -63,33 +63,21 @@ These are the findings that justify the lane. Each is invisible to every current
                     └───────────────────────────────────────────────────────────────────┘
 ```
 
-### Binary
+### Image and chart
 
-The cluster runs the `openraft-standalone` example binary (package `example-openraft-standalone`, bin `openraft-standalone`), not `tsoracle serve` — the stock binary is single-node by design. The paxos variant (`paxos-standalone`) is a drop-in alternative with the same shape; the lane should parametrize on backend so both get coverage.
+The cluster is deployed from `deploy/charts/tsoracle` (Helm chart) using the image built from `deploy/Dockerfile`. The chart is parameterised for the kind lane with `--set driver=openraft,replicas=3,ports.client=5051,ports.peer=5100` so the pod DNS names (`tsoracle-{n}.tsoracle-peer`) and ports match what the assertion driver expects.
 
-Relevant flags (`examples/openraft-standalone/src/main.rs`):
-
-| Flag | Source in k8s |
-| --- | --- |
-| `--id <u64>` | StatefulSet ordinal + 1 |
-| `--raft-addr 0.0.0.0:5100` | fixed per pod (own netns) |
-| `--tso-addr 0.0.0.0:5051` | fixed per pod |
-| `--peers id=fqdn:5100,…` | built from replica count + headless DNS |
-| `--tso-peers id=fqdn:5051,…` | same, tso port |
-| `--raft-dir /data/raft` | PVC mount |
-| `--bootstrap` | ordinal 0 only (idempotent) |
-
-An entrypoint script derives the node ID and peer maps from `$HOSTNAME` (`tsoracle-${ORDINAL}`) and a `REPLICAS` env var, so the StatefulSet ships one spec for all pods. See `e2e/kube/entrypoint.sh`.
+The entrypoint (`deploy/entrypoint.sh`) derives the node ID and peer maps from `$HOSTNAME` (`tsoracle-${ORDINAL}`) and environment variables injected by the chart, so the StatefulSet ships one spec for all pods.
 
 ### Services
 
-- **`tsoracle-peer`** — headless (`clusterIP: None`), the `serviceName` of the StatefulSet. Publishes the stable per-pod DNS the raft transport dials.
-- **`tsoracle`** — ordinary ClusterIP, round-robins clients across all pods. Followers redirect to the leader via the `LeaderHint` trailer, so a dumb round-robin Service is correct and needs no leader-aware routing.
+- **`tsoracle-peer`** — headless (`clusterIP: None`), the `serviceName` of the StatefulSet. Publishes the stable per-pod DNS the peer transport dials. Created by the chart when `driver != file`.
+- **`tsoracle`** — ordinary ClusterIP, round-robins clients across all pods. Followers redirect to the leader via the `LeaderHint` trailer, so a dumb round-robin Service is correct and needs no leader-aware routing. Created by the chart's `service-client.yaml`.
 
 ### Probes
 
-- **Readiness:** `tcpSocket` on the tso port (5051). A follower is ready — it serves redirects. Do **not** use a `GetTs` exec probe; it would evict every non-leader.
-- **Liveness:** `tcpSocket` on the raft port (5100), proving the peer transport is up.
+- **Readiness:** `tcpSocket` on the tso port. A follower is ready — it serves redirects. Do **not** use a `GetTs` exec probe; it would evict every non-leader.
+- **Liveness:** `tcpSocket` on the tso port, proving the gRPC listener is up.
 
 True "is this node serving as leader" is observable in-process via `Server::subscribe()` → `ServingState`, but it is intentionally not a readiness signal here.
 
@@ -107,6 +95,6 @@ Recommendation: **do not** make it a stress topology. The stress harness's whole
 
 ## Prerequisites this lane surfaces
 
-1. **A Dockerfile.** None exists in the repo today. `e2e/kube/Dockerfile` is part of this sketch.
+1. **A Dockerfile and Helm chart.** Both live in `deploy/`: `deploy/Dockerfile` builds the multi-driver image and `deploy/charts/tsoracle` is the chart used by CI and production.
 2. **SIGTERM handling in the example binaries.** Done (#406): the standalone examples now feed `serve_with_shutdown` the shared `tsoracle_server::shutdown_signal()` future, which resolves on SIGTERM and SIGINT. The graceful rolling-restart assertion in the kube lane exercises this path.
 3. **Optional: `grpc.health.v1.Health`.** Adding the standard gRPC health service would let probes use `grpc_health_probe` and report leader/serving state precisely. Not required for the TCP-based contract above, but a clean follow-up.

@@ -1,0 +1,57 @@
+name: release-images
+on:
+  push:
+    tags: ['tsoracle-v*']     # the BINARY crate's release-plz tag ONLY (not per-crate library tags)
+  pull_request:
+    paths: ['deploy/**', 'crates/**', 'Cargo.*', '.github/workflows/release-images.yml']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then echo "v=${GITHUB_REF_NAME#tsoracle-v}" >> "$GITHUB_OUTPUT";
+          else echo "v=0.0.0-pr${{ github.event.number }}" >> "$GITHUB_OUTPUT"; fi
+      - name: Login to GHCR
+        if: github.ref_type == 'tag'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: PR build + smoke (no push)
+        if: github.ref_type != 'tag'
+        run: |
+          docker build -f deploy/Dockerfile -t tsoracle:pr .
+          docker run --rm --entrypoint tsoracle tsoracle:pr --help | head -1
+          docker build -f deploy/Dockerfile --build-arg FEATURES=paxos -t tsoracle-paxos:pr .
+          curl -fsSL https://get.helm.sh/helm-v3.15.0-linux-amd64.tar.gz | tar xz
+          ./linux-amd64/helm lint deploy/charts/tsoracle
+          PATH="$PWD/linux-amd64:$PATH" sh deploy/charts/tsoracle/tests/render.sh
+      - name: Push images (multi-arch)
+        if: github.ref_type == 'tag'
+        run: |
+          V=${{ steps.ver.outputs.v }}
+          for variant in "tsoracle:" "tsoracle-file:file" "tsoracle-openraft:openraft" "tsoracle-paxos:paxos"; do
+            name="${variant%%:*}"; feats="${variant#*:}"
+            docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Dockerfile \
+              ${feats:+--build-arg FEATURES=$feats} \
+              -t "ghcr.io/prisma-risk/${name}:${V}" -t "ghcr.io/prisma-risk/${name}:latest" --push .
+          done
+      - name: Push chart
+        if: github.ref_type == 'tag'
+        run: |
+          V=${{ steps.ver.outputs.v }}
+          curl -fsSL https://get.helm.sh/helm-v3.15.0-linux-amd64.tar.gz | tar xz
+          ./linux-amd64/helm package deploy/charts/tsoracle --version "$V" --app-version "$V"
+          echo "${{ secrets.GITHUB_TOKEN }}" | ./linux-amd64/helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          ./linux-amd64/helm push "tsoracle-${V}.tgz" oci://ghcr.io/prisma-risk/charts

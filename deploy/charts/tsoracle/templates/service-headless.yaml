@@ -1,0 +1,22 @@
+{{- if ne .Values.driver "file" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tsoracle.peerService" . }}
+  labels:
+    {{- include "tsoracle.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: peer
+      port: {{ .Values.ports.peer }}
+      targetPort: peer
+    - name: tso
+      port: {{ .Values.ports.client }}
+      targetPort: tso
+  selector:
+    app.kubernetes.io/name: tsoracle
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
