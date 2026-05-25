@@ -16,7 +16,6 @@
 
 pub mod codec;
 pub mod lifecycle;
-pub mod macros;
 pub mod storage;
 
 #[cfg(feature = "test-fakes")]
