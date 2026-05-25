@@ -59,17 +59,17 @@ use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use tokio::time::Instant;
-use tsoracle_core::{Epoch, Timestamp};
+use tsoracle_core::Epoch;
 
 use crate::error::ClientError;
 use crate::leader_resolved::{ChannelPool, LeaderHintLookup, decode_leader_hint};
-use crate::response::decode_get_ts_response;
+use crate::response::{TimestampRange, decode_get_ts_response};
 use crate::retry_policy::{is_transport_failure, jittered_backoff, should_backoff};
 
 pub(crate) async fn issue_rpc(
     pool: &ChannelPool,
     count: u32,
-) -> Result<Vec<Timestamp>, ClientError> {
+) -> Result<TimestampRange, ClientError> {
     let policy = pool.retry_policy().clone();
     let start = Instant::now();
     let deadline = start + policy.overall_deadline;
@@ -101,9 +101,9 @@ pub(crate) async fn issue_rpc(
         );
 
         match attempt(pool, &endpoint, count, attempt_budget).await {
-            AttemptOutcome::Ok { timestamps, epoch } => {
+            AttemptOutcome::Ok { range, epoch } => {
                 pool.record_success(&endpoint, epoch);
-                return Ok(timestamps);
+                return Ok(range);
             }
             AttemptOutcome::LeaderHint {
                 endpoint: hinted_endpoint,
@@ -187,7 +187,9 @@ pub(crate) async fn issue_rpc(
 #[cfg_attr(test, derive(Debug))]
 enum AttemptOutcome {
     Ok {
-        timestamps: Vec<Timestamp>,
+        /// Compact validated range decoded from `GetTsResponse`; expanded to
+        /// per-waiter `Vec<Timestamp>`s only in `driver::deliver`.
+        range: TimestampRange,
         /// Leader epoch carried in `GetTsResponse` (reassembled from the
         /// `epoch_hi`/`epoch_lo` halves). Plumbed to
         /// `ChannelPool::record_success` so the cache can compare it
@@ -331,7 +333,7 @@ async fn attempt(
     // epoch from the same response to gate future `LeaderHint` arrivals.
     let epoch = Epoch::from_wire(inner.epoch_hi, inner.epoch_lo).0;
     match decode_get_ts_response(inner, count) {
-        Ok(timestamps) => AttemptOutcome::Ok { timestamps, epoch },
+        Ok(range) => AttemptOutcome::Ok { range, epoch },
         Err(err) => {
             #[cfg(feature = "metrics")]
             metrics::counter!(

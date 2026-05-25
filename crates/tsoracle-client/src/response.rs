@@ -10,8 +10,8 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-//! Decode a `GetTsResponse` into `Vec<Timestamp>` with the protocol-level
-//! safety checks the retry loop used to perform inline.
+//! Decode a `GetTsResponse` into a validated [`TimestampRange`] with the
+//! protocol-level safety checks the retry loop used to perform inline.
 //!
 //! All checks (count match, range, physical range, logical overflow) are moved
 //! verbatim from `lib.rs::issue_rpc` and surface the same
@@ -25,10 +25,57 @@ use tsoracle_proto::v1::GetTsResponse;
 use crate::MAX_TIMESTAMPS_PER_RPC;
 use crate::error::ClientError;
 
+/// A compact, validated view of a `GetTsResponse`'s contiguous timestamp
+/// range: the three wire fields (`physical_ms`, `logical_start`, `count`)
+/// instead of an expanded `Vec<Timestamp>`. A maxed-out chunk stays ~16 bytes
+/// from decode through coalescing and delivery rather than ballooning into
+/// ~2 MB; the `Vec<Timestamp>` is materialized only per waiter, in
+/// `driver::deliver`, at the public-API boundary.
+///
+/// Valid-by-construction: the only non-test producer is
+/// [`decode_get_ts_response`], which validates `physical_ms` and the full
+/// logical span before constructing the range. That invariant is what lets
+/// [`TimestampRange::iter`] pack with the infallible [`Timestamp::pack`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TimestampRange {
+    physical_ms: u64,
+    logical_start: u32,
+    count: u32,
+}
+
+impl TimestampRange {
+    /// Construct a range from its wire fields. The caller must ensure the
+    /// fields are in range — `physical_ms <= PHYSICAL_MS_MAX` and
+    /// `logical_start + count - 1 <= LOGICAL_MAX`. `decode_get_ts_response`
+    /// validates this before calling; test stubs pass known-good values.
+    pub(crate) fn new(physical_ms: u64, logical_start: u32, count: u32) -> Self {
+        TimestampRange {
+            physical_ms,
+            logical_start,
+            count,
+        }
+    }
+
+    /// Number of timestamps in the range.
+    pub(crate) fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Iterate the `count` contiguous timestamps, packing each on demand.
+    /// Uses the infallible [`Timestamp::pack`]: the range is
+    /// valid-by-construction, so every `(physical_ms, logical_start + i)` is
+    /// in range and cannot panic.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Timestamp> {
+        let physical_ms = self.physical_ms;
+        let logical_start = self.logical_start;
+        (0..self.count).map(move |i| Timestamp::pack(physical_ms, logical_start + i))
+    }
+}
+
 pub(crate) fn decode_get_ts_response(
     resp: GetTsResponse,
     requested: u32,
-) -> Result<Vec<Timestamp>, ClientError> {
+) -> Result<TimestampRange, ClientError> {
     // Defense in depth: a buggy or malicious server could return fields that
     // do not fit the packed timestamp layout. Catch them before constructing
     // any Timestamp so invalid wire data cannot panic or truncate.
@@ -55,16 +102,22 @@ pub(crate) fn decode_get_ts_response(
             ))));
         }
     }
-    let mut out = Vec::with_capacity(resp.count as usize);
-    for i in 0..resp.count {
-        let ts = Timestamp::try_pack(resp.physical_ms, resp.logical_start + i).map_err(|e| {
-            ClientError::Rpc(tonic::Status::internal(format!(
-                "server returned invalid timestamp fields: {e}"
-            )))
-        })?;
-        out.push(ts);
-    }
-    Ok(out)
+    // Validate the packing invariants once, on the range's start endpoint.
+    // The logical-overflow check above already bounds
+    // `logical_start + count - 1 <= LOGICAL_MAX` (and `count >= 1`, so
+    // `logical_start <= LOGICAL_MAX`), so a single successful pack proves
+    // `physical_ms` fits the 46-bit field and the whole contiguous range
+    // packs — no per-element loop, no `count`-sized `Vec`.
+    Timestamp::try_pack(resp.physical_ms, resp.logical_start).map_err(|e| {
+        ClientError::Rpc(tonic::Status::internal(format!(
+            "server returned invalid timestamp fields: {e}"
+        )))
+    })?;
+    Ok(TimestampRange::new(
+        resp.physical_ms,
+        resp.logical_start,
+        resp.count,
+    ))
 }
 
 #[cfg(test)]
@@ -72,6 +125,21 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use tsoracle_core::PHYSICAL_MS_MAX;
+
+    #[test]
+    fn timestamp_range_iter_yields_contiguous_packed_timestamps() {
+        let range = TimestampRange::new(1_000, 5, 3);
+        assert_eq!(range.count(), 3);
+        let timestamps: Vec<Timestamp> = range.iter().collect();
+        assert_eq!(
+            timestamps,
+            vec![
+                Timestamp::pack(1_000, 5),
+                Timestamp::pack(1_000, 6),
+                Timestamp::pack(1_000, 7),
+            ],
+        );
+    }
 
     #[test]
     fn rejects_out_of_range_physical_ms() {
@@ -195,8 +263,10 @@ mod tests {
         #[test]
         fn well_formed_response_decodes_successfully(response in well_formed_response()) {
             let GetTsResponse { physical_ms, logical_start, count, .. } = response;
-            let timestamps = decode_get_ts_response(response, count).unwrap();
+            let range = decode_get_ts_response(response, count).unwrap();
 
+            prop_assert_eq!(range.count(), count);
+            let timestamps: Vec<Timestamp> = range.iter().collect();
             prop_assert_eq!(timestamps.len(), count as usize);
             for (index, timestamp) in timestamps.iter().enumerate() {
                 prop_assert_eq!(timestamp.physical_ms(), physical_ms);
