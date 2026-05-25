@@ -101,6 +101,51 @@ async fn evict<V>(pool: &Arc<Mutex<HashMap<(NodeId, String), V>>>, target: NodeI
     pool.lock().await.remove(&(target, addr.to_string()));
 }
 
+/// Drive a unary peer RPC under the caller's `RPCOption` hard-TTL deadline,
+/// returning the decoded response body.
+///
+/// Why this exists: openraft only enforces `RPCOption` itself for some call
+/// sites. `vote` and `transfer_leader` are wrapped in openraft's own
+/// `C::timeout` (see `raft_core::broadcast_*`), but the replication
+/// `append_entries` path is not — `stream_append_sequential` simply awaits
+/// `network.append_entries(req, option)` and relies on the *transport* to honor
+/// `option.hard_ttl()`. A transport that ignored the option left append on a
+/// silently black-holed connection (no RST — NAT/firewall drop) wedged until TCP
+/// keepalive eventually tripped (~2h by default), stalling replication to that
+/// follower. Applying the deadline here closes that gap and keeps all three
+/// unary RPCs uniformly bounded; for `vote`/`transfer_leader` it is harmless
+/// belt-and-suspenders that simply fires no earlier than openraft's own timeout.
+///
+/// On any failure the pooled client for `(target, addr)` is evicted so the next
+/// attempt reconnects fresh. A deadline elapse is surfaced as `Unreachable`
+/// (openraft backs off before retrying) rather than `Network` (retry at once),
+/// which is the right posture for a connection we just gave up on. Generic over
+/// the pool value and response types so it is unit-testable without a live
+/// `RaftPeerServiceClient`, mirroring [`evict`].
+async fn unary_call<ClientHandle, Body>(
+    pool: &Arc<Mutex<HashMap<(NodeId, String), ClientHandle>>>,
+    target: NodeId,
+    addr: &str,
+    deadline: Duration,
+    call: impl Future<Output = Result<tonic::Response<Body>, tonic::Status>>,
+) -> Result<Body, RPCError<TypeConfig>> {
+    match tokio::time::timeout(deadline, call).await {
+        Ok(Ok(resp)) => Ok(resp.into_inner()),
+        Ok(Err(status)) => {
+            evict(pool, target, addr).await;
+            Err(RPCError::Network(NetworkError::new(&status)))
+        }
+        Err(_elapsed) => {
+            evict(pool, target, addr).await;
+            let timed_out = std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("peer RPC exceeded {deadline:?} deadline"),
+            );
+            Err(RPCError::Unreachable(Unreachable::new(&timed_out)))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PeerFactory — constructs PeerNetwork instances for each target node.
 // ---------------------------------------------------------------------------
@@ -177,21 +222,21 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
         let mut c = self.client().await?;
         let payload =
             postcard::to_stdvec(&rpc).map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
-        let resp = match c.append_entries(RaftMessage { payload }).await {
-            Ok(resp) => resp,
-            Err(err) => {
-                evict(&self.pool, self.target, &self.addr).await;
-                return Err(RPCError::Network(NetworkError::new(&err)));
-            }
-        };
-        let body: AppendEntriesResponse<TypeConfig> =
-            postcard::from_bytes(&resp.into_inner().payload)
-                .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
+        let reply = unary_call(
+            &self.pool,
+            self.target,
+            &self.addr,
+            option.hard_ttl(),
+            c.append_entries(RaftMessage { payload }),
+        )
+        .await?;
+        let body: AppendEntriesResponse<TypeConfig> = postcard::from_bytes(&reply.payload)
+            .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
         Ok(body)
     }
 
@@ -203,34 +248,41 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
     async fn transfer_leader(
         &mut self,
         req: TransferLeaderRequest<TypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<(), RPCError<TypeConfig>> {
         let mut c = self.client().await?;
         let payload =
             postcard::to_stdvec(&req).map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
-        if let Err(err) = c.transfer_leader(RaftMessage { payload }).await {
-            evict(&self.pool, self.target, &self.addr).await;
-            return Err(RPCError::Network(NetworkError::new(&err)));
-        }
+        // The reply payload is empty by contract; we only care that the RPC
+        // landed within the deadline.
+        unary_call(
+            &self.pool,
+            self.target,
+            &self.addr,
+            option.hard_ttl(),
+            c.transfer_leader(RaftMessage { payload }),
+        )
+        .await?;
         Ok(())
     }
 
     async fn vote(
         &mut self,
         rpc: VoteRequest<TypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         let mut c = self.client().await?;
         let payload =
             postcard::to_stdvec(&rpc).map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
-        let resp = match c.vote(RaftMessage { payload }).await {
-            Ok(resp) => resp,
-            Err(err) => {
-                evict(&self.pool, self.target, &self.addr).await;
-                return Err(RPCError::Network(NetworkError::new(&err)));
-            }
-        };
-        let body: VoteResponse<TypeConfig> = postcard::from_bytes(&resp.into_inner().payload)
+        let reply = unary_call(
+            &self.pool,
+            self.target,
+            &self.addr,
+            option.hard_ttl(),
+            c.vote(RaftMessage { payload }),
+        )
+        .await?;
+        let body: VoteResponse<TypeConfig> = postcard::from_bytes(&reply.payload)
             .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
         Ok(body)
     }
@@ -729,6 +781,53 @@ mod tests {
         let guard = pool.lock().await;
         assert!(!guard.contains_key(&(1, "a:1".to_string())));
         assert!(guard.contains_key(&(2, "b:2".to_string())));
+    }
+
+    fn seeded_pool() -> Arc<Mutex<HashMap<(u64, String), u8>>> {
+        let pool = Arc::new(Mutex::new(HashMap::new()));
+        pool.try_lock().unwrap().insert((1, "a:1".to_string()), 0);
+        pool
+    }
+
+    // A call that never resolves must be cut at the hard-TTL deadline and
+    // surfaced as `Unreachable` (so openraft backs off), with the pooled client
+    // evicted so the next attempt reconnects. A never-resolving future against a
+    // short real deadline is deterministic: the timer is the only thing that can
+    // complete the call.
+    #[tokio::test]
+    async fn unary_call_deadline_elapse_evicts_and_reports_unreachable() {
+        let pool = seeded_pool();
+        let never = std::future::pending::<Result<tonic::Response<u8>, tonic::Status>>();
+        let err = unary_call(&pool, 1, "a:1", Duration::from_millis(10), never)
+            .await
+            .expect_err("a never-resolving call must hit the deadline");
+        assert!(matches!(err, RPCError::Unreachable(_)));
+        assert!(!pool.lock().await.contains_key(&(1, "a:1".to_string())));
+    }
+
+    // A transport error inside the deadline propagates as `Network` (retry at
+    // once) and also evicts the client.
+    #[tokio::test]
+    async fn unary_call_transport_error_evicts_and_reports_network() {
+        let pool = seeded_pool();
+        let failed = async { Err::<tonic::Response<u8>, _>(tonic::Status::unavailable("down")) };
+        let err = unary_call(&pool, 1, "a:1", Duration::from_secs(5), failed)
+            .await
+            .expect_err("a transport error must propagate");
+        assert!(matches!(err, RPCError::Network(_)));
+        assert!(!pool.lock().await.contains_key(&(1, "a:1".to_string())));
+    }
+
+    // A successful call returns the decoded body and must NOT evict the client.
+    #[tokio::test]
+    async fn unary_call_success_returns_body_and_keeps_client() {
+        let pool = seeded_pool();
+        let ok = async { Ok(tonic::Response::new(42u8)) };
+        let body = unary_call(&pool, 1, "a:1", Duration::from_secs(5), ok)
+            .await
+            .expect("a successful call returns its body");
+        assert_eq!(body, 42);
+        assert!(pool.lock().await.contains_key(&(1, "a:1".to_string())));
     }
 
     fn header_chunk() -> SnapshotChunk {
