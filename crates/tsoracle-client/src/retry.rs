@@ -53,10 +53,11 @@
 //!   offset and never reach the only reachable endpoint behind it; the
 //!   floor closes that gap. Leader-hint redirects are not charged against
 //!   `max_attempts` either — they are bounded instead by the worklist
-//!   visited-set, the overall deadline, and the absolute
-//!   [`MAX_LEADER_REDIRECTS`] backstop — so a legitimate failover redirect
-//!   chain can still reach the live leader (issue #340) while a
-//!   pathological one cannot churn connections for the whole deadline.
+//!   visited-set, the per-pass [`MAX_LEADER_REDIRECTS`] cap, and the
+//!   `overall_deadline` — so a legitimate failover redirect chain can still
+//!   reach the live leader (issue #340) while a pathological one is bounded by
+//!   the deadline: the client rides out the churn, then surfaces the redirect
+//!   status (see "Riding out a leader election" on [`issue_rpc`]).
 //!
 //! Between attempts whose last error is `Unavailable`,
 //! `DeadlineExceeded`, or a transport-layer failure, the loop sleeps a
@@ -83,22 +84,36 @@ use crate::response::{TimestampRange, decode_get_ts_response};
 use crate::retry_policy::{is_transport_failure, jittered_backoff, should_backoff};
 use crate::worklist::Worklist;
 
-/// Absolute ceiling on actionable leader-hint pivots in a single
-/// `issue_rpc` call, independent of `overall_deadline`.
+/// Ceiling on actionable leader-hint pivots within a single re-poll *pass* of
+/// `issue_rpc`.
 ///
 /// Issue #340 deliberately stopped charging leader-hint redirects against
 /// [`RetryPolicy::max_attempts`](crate::RetryPolicy::max_attempts) so a
-/// legitimate failover chain can outlast the failure budget, leaving the
-/// `overall_deadline` as the only bound on redirect count. This constant is
-/// the backstop that bound omitted: a malicious or persistently flapping peer
-/// that returns a fresh, never-visited hint on every dial would otherwise
-/// churn outbound connections for the whole deadline. The cap is far above any
-/// real failover — legitimate hints point at a finite cluster and dedup via
-/// the worklist visited-set, so a healthy redirect chain is bounded by the
-/// node count long before this bites — and only a pathological chain reaches
-/// it.
+/// legitimate failover chain can outlast the failure budget. This constant caps
+/// the per-pass redirect chain so a malicious or persistently flapping peer that
+/// returns a fresh, never-visited hint on every dial cannot churn connections
+/// unboundedly within one pass. Hitting the cap is treated as an in-progress
+/// leadership transfer: the pass ends and `issue_rpc` rides out the churn across
+/// further passes, bounded overall by `overall_deadline` — so the deadline, not
+/// this cap, is the whole-call ceiling on churn. The cap is far above any real
+/// failover, which dedups via the worklist visited-set and settles in a few hops.
 const MAX_LEADER_REDIRECTS: u32 = 16;
 
+/// Issue one `GetTs`, retrying across endpoints and following leader hints.
+///
+/// # Riding out a leader election
+///
+/// When a pass over the worklist ends without a timestamp, `issue_rpc` re-polls
+/// (backing off, bounded by `overall_deadline`) **only** if that pass saw a
+/// reachable server report an in-progress election: an absent-hint NOT_LEADER
+/// (`AttemptOutcome::NoLeaderYet`), a `StaleLeaderHint`, or the
+/// `MAX_LEADER_REDIRECTS` cap being hit (a churning leadership transfer). A pass
+/// that only hit transport failures or deterministic hint rejections
+/// (`HintRejected`) does not re-poll — a genuinely-unreachable pool still fails
+/// fast. `failed_attempts` and the last error persist across passes (so
+/// `max_attempts` keeps its whole-call meaning and the surfaced error is the
+/// real NOT_LEADER / transport status, never `NoReachableEndpoints`); the
+/// worklist and the per-pass redirect budget reset each pass.
 pub(crate) async fn issue_rpc(
     pool: &ChannelPool,
     count: u32,
