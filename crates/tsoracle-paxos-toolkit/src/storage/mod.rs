@@ -167,8 +167,18 @@ impl<T: Entry> RocksdbStorage<T> {
     }
 }
 
+/// Box a storage-side error for OmniPaxos's [`omnipaxos::storage::StorageResult`].
+///
+/// OmniPaxos fixes the error type at `Box<dyn Error>` (no `Send + Sync`), and
+/// every call site funnels straight into a `StorageResult` via `?`, so that is
+/// the return type here — `?` narrows through the `From<E>` conversion, never
+/// the unsize coercion a wider box would require. The `E: Send + Sync` bound on
+/// the *input* keeps this consistent with the project-wide
+/// `Box<dyn Error + Send + Sync>` convention and statically guarantees every
+/// error we box is thread-movable at the source, even though OmniPaxos's
+/// signature erases that capability at the trait boundary.
 #[cfg(feature = "rocksdb-storage")]
-fn box_err<E: std::error::Error + 'static>(err: E) -> Box<dyn std::error::Error> {
+fn box_err<E: std::error::Error + Send + Sync + 'static>(err: E) -> Box<dyn std::error::Error> {
     Box::new(err)
 }
 
