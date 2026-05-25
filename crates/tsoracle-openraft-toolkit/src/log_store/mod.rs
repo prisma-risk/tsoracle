@@ -402,20 +402,13 @@ where
         let truncate_at = last_log_id.next_index();
         let cf_log = self.log_cf_handle();
         let start_key = self.keys.log_key(truncate_at);
-        let (_lo, hi) = self.keys.log_range();
-        let it = self.db.iterator_cf(
-            &cf_log,
-            IteratorMode::From(&start_key, rocksdb::Direction::Forward),
-        );
+        // Exclusive end past `log_key(u64::MAX)`; a single range tombstone
+        // replaces the former per-key delete loop (matches the paxos `trim`
+        // strategy). For `GroupPrefixed` the bound stays below the next group.
+        let end_key = self.keys.log_end_bound();
 
         let mut batch = WriteBatch::default();
-        for item in it {
-            let (k, _v) = item.map_err(io::Error::other)?;
-            if &*k > hi.as_slice() {
-                break;
-            }
-            batch.delete_cf(&cf_log, &k);
-        }
+        batch.delete_range_cf(&cf_log, &start_key, &end_key);
         // fsync: a lost truncate would resurrect conflicting tail entries on
         // recovery, contradicting the durable vote/append that drove it (see
         // `write_sync_opts`).
