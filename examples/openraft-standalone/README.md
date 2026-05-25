@@ -62,6 +62,12 @@ This example shows the **minimum** wiring to take `ConsensusDriver` end-to-end w
 
 - **Leader-watch debounce.** The toolkit's `leadership_events_from_metrics` emits a new state whenever the projected leadership state changes (role, term, or leader identity). It does not coalesce bursts: if openraft flips Leader → Candidate → Leader within a single metrics tick the server will fence, un-fence, and fence again. Production wiring may want a short hold-off (50–100 ms) before propagating Unknown / Follower transitions.
 
+## Addressing and pod restarts
+
+Peer addresses live in replicated raft membership, not in per-process config. Each member carries two addresses: `addr`, the raft transport endpoint as a scheme-less `host:port`, and `service_endpoint`, the tsoracle gRPC URL clients redirect to (`http://host:port`). Configure both with stable DNS names — run the cluster as a StatefulSet behind a headless Service so each pod has a durable name like `tso-0.tso.ns.svc.cluster.local`, never a raw pod IP. A pod that reschedules with a new IP keeps its name; the transport re-resolves it on the next dial (the pool evicts a failed channel), so no membership change is needed for an IP change. Production placement-driver/consensus stacks (Spanner, CockroachDB, FoundationDB) use this same stable-name model.
+
+This example's peer RPCs are unframed postcard, and widening the membership node bumped the toolkit `SCHEMA_VERSION`, so this build requires a **fresh cluster**: a rolling/mixed-version upgrade across the change is unsupported.
+
 ## Cleaning up
 
     rm -rf examples/openraft-standalone/.data/
