@@ -106,6 +106,16 @@ impl TsoService for TsoServiceImpl {
             return Err(Status::invalid_argument("count must be >= 1"));
         }
 
+        // Offered load: count every well-formed request exactly once, here at
+        // entry before the NOT_LEADER gate and the allocator. `success.total`
+        // below bumps only on the Ok arm, so `requests.total - success.total`
+        // is the failure count — a node rejecting every request shows this
+        // total climbing while successes stay flat (vs. flat-at-zero, which is
+        // indistinguishable from no traffic). Outside the retry loop, so a
+        // single-extend-retry call still counts exactly once.
+        #[cfg(feature = "metrics")]
+        metrics::counter!("tsoracle.get_ts.requests.total").increment(1);
+
         // Fast NOT_LEADER gate.
         if let ServingState::NotServing {
             leader_endpoint,
@@ -150,7 +160,7 @@ impl TsoService for TsoServiceImpl {
                 Ok(grant) => {
                     #[cfg(feature = "metrics")]
                     {
-                        metrics::counter!("tsoracle.get_ts.total").increment(1);
+                        metrics::counter!("tsoracle.get_ts.success.total").increment(1);
                         metrics::counter!("tsoracle.get_ts.timestamps_issued")
                             .increment(u64::from(grant.count()));
                     }

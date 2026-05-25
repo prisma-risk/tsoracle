@@ -21,8 +21,10 @@ curl -s http://127.0.0.1:9552/metrics | grep ^tsoracle_
 After a few seconds the scrape body looks roughly like this (exact values move with load):
 
 ```
-# TYPE tsoracle_get_ts_total counter
-tsoracle_get_ts_total 47
+# TYPE tsoracle_get_ts_requests_total counter
+tsoracle_get_ts_requests_total 49
+# TYPE tsoracle_get_ts_success_total counter
+tsoracle_get_ts_success_total 47
 # TYPE tsoracle_get_ts_timestamps_issued counter
 tsoracle_get_ts_timestamps_issued 235
 # TYPE tsoracle_leader_transition_total counter
@@ -35,7 +37,7 @@ tsoracle_window_extension_latency_sum 0.00031
 tsoracle_window_extension_latency_count 1
 ```
 
-The `metrics` crate translates `.` to `_` in the exposition output, so the documented `tsoracle.get_ts.total` is scraped as `tsoracle_get_ts_total`. Counters whose names end in `.total` keep that suffix (Prometheus tooling expects it). The full signal catalog lives in [`docs/operations.md`](../../docs/operations.md#monitoring-hooks).
+The `metrics` crate translates `.` to `_` in the exposition output, so the documented `tsoracle.get_ts.requests.total` is scraped as `tsoracle_get_ts_requests_total`. Counters whose names end in `.total` keep that suffix (Prometheus tooling expects it). The gap between `requests_total` (offered load) and `success_total` (grants returned) is the failed-request count. The full signal catalog lives in [`docs/operations.md`](../../docs/operations.md#monitoring-hooks).
 
 ## What to look at in `src/main.rs`
 

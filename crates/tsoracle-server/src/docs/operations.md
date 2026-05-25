@@ -25,8 +25,9 @@ tsoracle serve --state-dir ./tsoracle-data
 
 The server emits the following signals through the [`metrics`](https://docs.rs/metrics) crate facade. Emission is gated behind the `metrics` Cargo feature on `tsoracle-server` (off by default so the dependency stays opt-in for embedders who do not want it):
 
-- `tsoracle.get_ts.total` — total GetTs RPCs handled (counter)
-- `tsoracle.get_ts.timestamps_issued` — sum of `count` across all GetTs responses (counter)
+- `tsoracle.get_ts.requests.total` — total well-formed GetTs RPCs offered, counted at entry before the NOT_LEADER gate; the honest offered load (counter)
+- `tsoracle.get_ts.success.total` — GetTs RPCs that returned a grant; `requests.total - success.total` is the failure count (counter)
+- `tsoracle.get_ts.timestamps_issued` — sum of `count` across all successful GetTs responses (counter)
 - `tsoracle.window.extensions.total` — number of persist_high_water calls (counter)
 - `tsoracle.window.extension_latency` — duration of persist_high_water (histogram, seconds)
 - `tsoracle.leader_transition.total` — leader-watch saw a state change (counter)
