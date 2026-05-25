@@ -3501,6 +3501,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsoracle-standalone"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "omnipaxos",
+ "openraft",
+ "parking_lot",
+ "postcard",
+ "prost",
+ "rocksdb",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "tsoracle-consensus",
+ "tsoracle-core",
+ "tsoracle-driver-file",
+ "tsoracle-driver-openraft",
+ "tsoracle-driver-paxos",
+ "tsoracle-openraft-toolkit",
+ "tsoracle-paxos-toolkit",
+ "tsoracle-server",
+]
+
+[[package]]
 name = "tsoracle-tests"
 version = "0.1.4"
 dependencies = [
