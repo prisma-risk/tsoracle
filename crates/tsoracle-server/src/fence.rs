@@ -28,6 +28,7 @@ use std::time::Duration;
 
 use tsoracle_consensus::{ConsensusError, LeaderState};
 
+use crate::persist_disposition::{PersistDisposition, classify};
 use crate::server::{Server, ServerError};
 
 // Fence retry tuning for the volatile post-election window. When a fence hits
@@ -234,61 +235,84 @@ pub(crate) async fn run_leader_watch(
                                 .record(fence_started_at.elapsed().as_secs_f64());
                             break;
                         }
-                        // Leadership moved under us. Already NotServing; await the
-                        // next leadership event rather than retrying a persist that
-                        // can only keep failing at this epoch.
-                        Err(ServerError::Consensus(
-                            ConsensusError::NotLeader { .. } | ConsensusError::Fenced { .. },
-                        )) => {
-                            server.core.publish_not_serving(None, None);
-                            break;
-                        }
-                        // Recoverable driver hiccup. Retry, but race the backoff
-                        // against the leadership stream so a genuine transition is
-                        // observed instead of spun past.
-                        Err(ServerError::Consensus(ConsensusError::TransientDriver(_source))) => {
-                            transient_retries += 1;
-                            #[cfg(feature = "metrics")]
-                            metrics::counter!(
-                                "tsoracle.leader_transition.fence_transient_retries.total"
-                            )
-                            .increment(1);
-                            #[cfg(feature = "tracing")]
-                            if warn_on_stuck_fence(transient_retries) {
-                                tracing::warn!(
-                                    error = %_source,
-                                    retries = transient_retries,
-                                    "fence still retrying a transient consensus error; serving is paused while this node remains leader"
-                                );
-                            }
-                            let backoff = core::cmp::min(
-                                FENCE_RETRY_BASE
-                                    .saturating_mul(1u32 << (transient_retries - 1).min(16)),
-                                FENCE_RETRY_CAP,
-                            );
-                            tokio::select! {
-                                // Bias toward cancel so a stop requested while
-                                // a fence is stuck retrying a transient error
-                                // is honored rather than spun past.
-                                biased;
-                                _ = &mut cancel => {
-                                    server.core.step_down(None, None);
-                                    return Ok(());
+                        // A consensus error (from load_high_water or
+                        // persist_high_water) routes through the shared
+                        // classifier; the fence then applies its *own* policy to
+                        // each disposition. The extend path
+                        // (`service::extend_window`) maps these same dispositions
+                        // differently — that deliberate divergence is now explicit
+                        // at the two call sites instead of duplicated as variant
+                        // matches.
+                        Err(ServerError::Consensus(consensus_error)) => {
+                            match classify(consensus_error) {
+                                // Leadership moved under us. Already NotServing via
+                                // enter_fencing; republish it (no hint — the fence
+                                // has no caller to redirect, it just awaits the next
+                                // leadership event) and stop retrying a persist that
+                                // can only keep failing at this epoch. `fenced_by` is
+                                // unused here for that reason.
+                                PersistDisposition::SteppedDown { .. } => {
+                                    server.core.publish_not_serving(None, None);
+                                    break;
                                 }
-                                _ = tokio::time::sleep(backoff) => {}
-                                next = stream.next() => {
-                                    match next {
-                                        Some(evt) => {
-                                            pending = Some(evt);
-                                            break;
+                                // Recoverable driver hiccup. Retry, but race the
+                                // backoff against the leadership stream so a genuine
+                                // transition is observed instead of spun past.
+                                PersistDisposition::Transient(_source) => {
+                                    transient_retries += 1;
+                                    #[cfg(feature = "metrics")]
+                                    metrics::counter!(
+                                        "tsoracle.leader_transition.fence_transient_retries.total"
+                                    )
+                                    .increment(1);
+                                    #[cfg(feature = "tracing")]
+                                    if warn_on_stuck_fence(transient_retries) {
+                                        tracing::warn!(
+                                            error = %_source,
+                                            retries = transient_retries,
+                                            "fence still retrying a transient consensus error; serving is paused while this node remains leader"
+                                        );
+                                    }
+                                    let backoff = core::cmp::min(
+                                        FENCE_RETRY_BASE.saturating_mul(
+                                            1u32 << (transient_retries - 1).min(16),
+                                        ),
+                                        FENCE_RETRY_CAP,
+                                    );
+                                    tokio::select! {
+                                        // Bias toward cancel so a stop requested
+                                        // while a fence is stuck retrying a transient
+                                        // error is honored rather than spun past.
+                                        biased;
+                                        _ = &mut cancel => {
+                                            server.core.step_down(None, None);
+                                            return Ok(());
                                         }
-                                        None => return Err(ServerError::WatchStreamClosed),
+                                        _ = tokio::time::sleep(backoff) => {}
+                                        next = stream.next() => {
+                                            match next {
+                                                Some(evt) => {
+                                                    pending = Some(evt);
+                                                    break;
+                                                }
+                                                None => return Err(ServerError::WatchStreamClosed),
+                                            }
+                                        }
                                     }
                                 }
+                                // Permanent fault: fail fast so into_router poisons
+                                // serving state and stops serving. Reconstitute the
+                                // original error as the propagated cause.
+                                PersistDisposition::Permanent(source) => {
+                                    return Err(ServerError::Consensus(
+                                        ConsensusError::PermanentDriver(source),
+                                    ));
+                                }
                             }
                         }
-                        // Permanent fault or allocator invariant: fail fast so
-                        // into_router poisons serving state and stops serving.
+                        // A non-consensus fault (e.g. a Core allocator invariant
+                        // from seed_on_leadership_gained): never recoverable here,
+                        // so fail fast and let into_router poison serving state.
                         Err(e) => return Err(e),
                     }
                 }

@@ -17,6 +17,7 @@
 
 mod fence;
 mod leader_hint;
+mod persist_disposition;
 mod server;
 mod service;
 mod serving_core;
