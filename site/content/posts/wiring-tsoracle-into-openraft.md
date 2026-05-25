@@ -10,23 +10,27 @@ A single-node timestamp oracle is a useful pedagogical artefact and an unaccepta
 
 ## The ConsensusDriver trait
 
-The interface between tsoracle's allocator and the replicated log is narrow by design. The `ConsensusDriver` trait has three concerns: propose an advance to the high-water mark, wait for it to commit, and ask who the current leader is. That is the whole contract on the consensus side. The allocator does not care what state machine the log feeds, how snapshots are taken, how membership changes work, or what wire protocol the replicas use to talk to each other. All of that is implementation detail of the driver.
+The interface between tsoracle's allocator and the replicated log is narrow by design. The `ConsensusDriver` trait has three concerns: durably advance the high-water mark, read it back, and stream the leadership transitions that tell the gRPC layer when this node is the leader. That is the whole contract on the consensus side. The allocator does not care what state machine the log feeds, how snapshots are taken, how membership changes work, or what wire protocol the replicas use to talk to each other. All of that is implementation detail of the driver.
 
 This narrowness is deliberate. A TSO that is tightly coupled to one consensus library is hard to operate inside a stack that already runs a different one. By keeping `ConsensusDriver` to a small trait, tsoracle ships an opinionated default (the openraft driver) without forcing you to adopt openraft if your stack already has raft-rs, etcd's raft, or a homegrown replicated log. You implement one trait, you wire it into the allocator, and the TSO works against your existing consensus story.
 
-The trait, slightly simplified:
+The trait, in full (doc comments elided):
 
 ```rust
+#[async_trait::async_trait]
 pub trait ConsensusDriver: Send + Sync + 'static {
-    type Error: std::error::Error + Send + Sync + 'static;
+    /// Stream of leadership transitions; the first item is the current state.
+    fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>>;
 
-    async fn propose_advance(&self, new_mark: u64) -> Result<(), Self::Error>;
-    async fn current_leader(&self) -> Result<LeaderHint, Self::Error>;
-    async fn await_commit(&self, mark: u64) -> Result<(), Self::Error>;
+    /// Read the durably-committed high-water mark.
+    async fn load_high_water(&self) -> Result<u64, ConsensusError>;
+
+    /// Advance the mark to *at least* `at_least`; returns the stored value.
+    async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError>;
 }
 ```
 
-`propose_advance` submits a new high-water mark to the log. `await_commit` blocks until the log has committed it on a quorum. `current_leader` lets the gRPC layer redirect non-leader requests to the right replica. The exact signatures in the codebase are slightly richer (with associated types for membership and snapshot data), but the conceptual surface is these three operations.
+`persist_high_water` proposes the advance and returns only once the log has committed it on a quorum — propose-and-await collapsed into one idempotent call that advances the mark to *at least* the requested value and returns whatever is now durably stored. `load_high_water` reads that committed mark back. `leadership_events` is a stream of leadership transitions the gRPC layer watches so it knows when to serve locally and when to redirect non-leader requests via `LeaderHint`. The `epoch` carries the leadership term the caller believed it held, so a stale leader's write is fenced rather than silently applied. That is the whole trait; the driver behind it — openraft here — is where the membership, snapshot, and wire-protocol machinery lives.
 
 ## Three deployment patterns
 
@@ -76,7 +80,7 @@ The semantics of leader change are the most subtle part. The invariant tsoracle 
 
 The mechanism is two-sided.
 
-On the leader-losing side, the old leader stops issuing new IDs the moment it discovers it has lost leadership (typically when its heartbeat fails or it sees a higher term). It may have IDs in flight from in-memory windows, but no further advances can be proposed — its `propose_advance` calls return errors. In practice, the open-but-in-memory window from the old leader is effectively abandoned; the gap between the last issued ID and the end of that window is left unused.
+On the leader-losing side, the old leader stops issuing new IDs the moment it discovers it has lost leadership (typically when its heartbeat fails or it sees a higher term). It may have IDs in flight from in-memory windows, but no further advances can be proposed — its `persist_high_water` calls return errors. In practice, the open-but-in-memory window from the old leader is effectively abandoned; the gap between the last issued ID and the end of that window is left unused.
 
 On the leader-gaining side, the new leader takes over with the raft-committed mark, which is always the durable upper bound across the cluster. Its first action is to read its own on-disk mark (which is `>=` the raft-committed mark in steady state, but may be stale if the new leader was a follower that lagged briefly), reconcile it with the committed log, and then start its first window flip from that mark. The first IDs issued by the new leader are strictly greater than every ID issued by every previous leader. The invariant holds.
 
