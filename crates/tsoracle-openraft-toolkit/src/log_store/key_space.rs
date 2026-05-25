@@ -52,6 +52,14 @@ impl MetaLabel {
 pub trait KeySpace: Clone + Debug + Send + Sync + 'static {
     fn log_key(&self, index: u64) -> Vec<u8>;
     fn log_range(&self) -> (Vec<u8>, Vec<u8>);
+    /// Exclusive upper bound for a `delete_range_cf` that must cover every log
+    /// key this instance can produce, including `log_key(u64::MAX)`.
+    ///
+    /// The returned key is strictly greater than `log_key(u64::MAX)` and, for
+    /// multi-group layouts, strictly less than any other group's `log_range`
+    /// lower bound — so a range tombstone bounded by it deletes the whole tail
+    /// of this instance's log without ever spanning into a neighbor's keys.
+    fn log_end_bound(&self) -> Vec<u8>;
     fn meta_key(&self, label: MetaLabel) -> Vec<u8>;
 }
 
@@ -67,6 +75,15 @@ impl KeySpace for Flat {
 
     fn log_range(&self) -> (Vec<u8>, Vec<u8>) {
         (vec![0u8; 8], vec![0xFFu8; 8])
+    }
+
+    fn log_end_bound(&self) -> Vec<u8> {
+        // A key that has `hi` as a strict prefix plus one more byte sorts
+        // immediately after `hi`; no fixed-width log key falls between them.
+        let (_lo, hi) = self.log_range();
+        let mut end = hi;
+        end.push(0);
+        end
     }
 
     fn meta_key(&self, label: MetaLabel) -> Vec<u8> {
@@ -106,6 +123,13 @@ impl KeySpace for GroupPrefixed {
         hi.extend_from_slice(&self.group_id.to_be_bytes());
         hi.extend_from_slice(&[0xFFu8; 8]);
         (lo, hi)
+    }
+
+    fn log_end_bound(&self) -> Vec<u8> {
+        let (_lo, hi) = self.log_range();
+        let mut end = hi;
+        end.push(0);
+        end
     }
 
     fn meta_key(&self, label: MetaLabel) -> Vec<u8> {
@@ -148,6 +172,12 @@ mod tests {
         let (lo, hi) = k.log_range();
         assert!(lo <= k.log_key(0));
         assert!(k.log_key(u64::MAX) <= hi);
+    }
+
+    #[test]
+    fn flat_log_end_bound_exceeds_max_index() {
+        let k = Flat;
+        assert!(k.log_key(u64::MAX) < k.log_end_bound());
     }
 
     #[test]
@@ -205,6 +235,15 @@ mod tests {
             let mut arr = [0u8; 8];
             arr.copy_from_slice(&bytes);
             prop_assert_eq!(u64::from_be_bytes(arr), i);
+        }
+
+        // log_end_bound is an exclusive upper bound strictly greater than every
+        // representable log key — the property `delete_range_cf` relies on to
+        // delete through `log_key(u64::MAX)`.
+        #[test]
+        fn flat_log_end_bound_exceeds_every_index(i in any::<u64>()) {
+            let k = Flat;
+            prop_assert!(k.log_key(i) < k.log_end_bound());
         }
     }
 }
@@ -337,6 +376,26 @@ mod group_prefixed_tests {
             let mk = GroupPrefixed::new(g_meta).meta_key(label);
             let lk = GroupPrefixed::new(g_log).log_key(i);
             prop_assert_ne!(mk, lk);
+        }
+
+        // Within a group, log_end_bound exceeds every index.
+        #[test]
+        fn group_log_end_bound_exceeds_every_index_in_group(
+            g_id in any::<u64>(),
+            i in any::<u64>(),
+        ) {
+            let g = GroupPrefixed::new(g_id);
+            prop_assert!(g.log_key(i) < g.log_end_bound());
+        }
+
+        // The load-bearing isolation property: a range delete bounded by group
+        // g's log_end_bound can never reach group (g+1)'s keys. (Guarded so g+1
+        // is a distinct, larger group.)
+        #[test]
+        fn group_log_end_bound_below_next_group(g_id in 0u64..u64::MAX) {
+            let g = GroupPrefixed::new(g_id);
+            let (next_lo, _next_hi) = GroupPrefixed::new(g_id + 1).log_range();
+            prop_assert!(g.log_end_bound() < next_lo);
         }
     }
 }
