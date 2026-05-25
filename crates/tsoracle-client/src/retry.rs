@@ -44,8 +44,15 @@
 //!   loop exits before starting any attempt that would push past it,
 //!   even when `max_attempts` and the worklist still have headroom.
 //! - `max_attempts`: caps the number of *failed* attempts (dialed
-//!   endpoints that returned an error). Leader-hint redirects are not
-//!   charged against it — they are bounded instead by the worklist
+//!   endpoints that returned an error), but never below the size of the
+//!   initial worklist — a single cold-cache sweep always dials every
+//!   endpoint it knows about at least once. Because `iter_round_robin`
+//!   starts the configured tail at a randomly seeded rotation offset, a
+//!   pool with more configured endpoints than `max_attempts` would
+//!   otherwise be able to exhaust the budget on the peers ahead of the
+//!   offset and never reach the only reachable endpoint behind it; the
+//!   floor closes that gap. Leader-hint redirects are not charged against
+//!   `max_attempts` either — they are bounded instead by the worklist
 //!   visited-set, the overall deadline, and the absolute
 //!   [`MAX_LEADER_REDIRECTS`] backstop — so a legitimate failover redirect
 //!   chain can still reach the live leader (issue #340) while a
@@ -98,11 +105,25 @@ pub(crate) async fn issue_rpc(
 ) -> Result<TimestampRange, ClientError> {
     let policy = pool.retry_policy().clone();
     let budget = Budget::start(&policy);
-    let mut worklist = Worklist::new(pool.iter_round_robin());
+    let initial_endpoints = pool.iter_round_robin();
+    // Floor the failed-attempt budget at the number of endpoints the worklist
+    // already knows about so a single cold-cache sweep always dials every one
+    // of them at least once. `iter_round_robin` starts the configured tail at a
+    // *randomly seeded* per-pool rotation offset; without this floor, a pool
+    // with more configured endpoints than `max_attempts` could exhaust the
+    // budget on the peers ahead of the offset and break before reaching the
+    // only reachable endpoint behind it — reporting a live cluster unreachable
+    // purely because of where the random offset landed. Leader-hint redirects
+    // grow the worklist *beyond* this initial length and stay uncharged against
+    // the budget (issue #340); the `overall_deadline` still bounds the worst
+    // case, so a pool full of dead peers cannot dial forever.
+    let attempt_cap = policy.max_attempts.max(initial_endpoints.len());
+    let mut worklist = Worklist::new(initial_endpoints);
     let mut last_err: Option<ClientError> = None;
-    // Counts only failed attempts (`AttemptOutcome::Err`). Leader-hint
-    // redirects are known progress, not throttled failures, so they neither
-    // consume the `max_attempts` budget nor inflate the backoff exponent
+    // Counts only failed attempts (`AttemptOutcome::Err`); compared against
+    // `attempt_cap` (the larger of `max_attempts` and the initial worklist
+    // size). Leader-hint redirects are known progress, not throttled failures,
+    // so they neither consume the budget nor inflate the backoff exponent
     // (issue #340); redirects stay bounded by the worklist visited-set and
     // the overall deadline.
     let mut failed_attempts: u32 = 0;
@@ -114,7 +135,7 @@ pub(crate) async fn issue_rpc(
     let mut redirects: u32 = 0;
 
     while let Some(endpoint) = worklist.next() {
-        if failed_attempts as usize >= policy.max_attempts {
+        if failed_attempts as usize >= attempt_cap {
             break;
         }
         let Some(attempt_budget) = budget.next_attempt() else {
@@ -645,12 +666,19 @@ mod tests {
         );
     }
 
-    /// `max_attempts` must cap the attempt count below the worklist size.
-    /// Configuring 4 unreachable endpoints with `max_attempts=2` and a
-    /// generous per-attempt budget proves the loop exits after two
-    /// attempts rather than burning through the whole worklist.
+    /// The failed-attempt budget is floored at the initial worklist size, so a
+    /// single cold-cache sweep dials *every* configured endpoint at least once
+    /// even when `max_attempts` is smaller than the endpoint count. This is the
+    /// contract that keeps the randomly seeded rotation offset in
+    /// `iter_round_robin` from stranding the only reachable endpoint behind
+    /// more failing peers than `max_attempts` allows.
+    ///
+    /// Four unreachable endpoints with `max_attempts = 2`: the loop must dial
+    /// all four (not stop at two), proven by the connector's invocation count.
+    /// Before the floor, the loop broke after two dials and left two endpoints
+    /// — possibly the only live one — untried.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn max_attempts_caps_iteration() {
+    async fn failed_attempt_budget_is_floored_to_a_full_sweep() {
         let policy = RetryPolicy {
             max_attempts: 2,
             per_attempt_deadline: Duration::from_millis(50),
@@ -658,26 +686,38 @@ mod tests {
             base_backoff: Duration::ZERO,
             leader_ttl: Duration::from_secs(30),
         };
+        // Every dial fails fast with a transport-class error and bumps the
+        // counter, so the count is exactly the number of endpoints the loop
+        // visited — the observable proxy for "did the sweep cover all four".
+        let dials = Arc::new(AtomicUsize::new(0));
+        let dials_for_connector = dials.clone();
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                dials_for_connector.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Err(ClientError::Rpc(tonic::Status::unavailable(
+                        "simulated dead endpoint",
+                    )))
+                })
+            });
         let pool = ChannelPool::new(
             vec![
-                "http://127.0.0.1:1".into(),
-                "http://127.0.0.1:2".into(),
-                "http://127.0.0.1:3".into(),
-                "http://127.0.0.1:4".into(),
+                "dead-1:1".into(),
+                "dead-2:1".into(),
+                "dead-3:1".into(),
+                "dead-4:1".into(),
             ],
-            None,
+            Some(connector),
             false,
             policy,
         );
-        let start = std::time::Instant::now();
         let result = issue_rpc(&pool, 1).await;
-        let elapsed = start.elapsed();
-        assert!(result.is_err());
-        // Two attempts at ~50ms each + scheduler slack. Capping at 1s is
-        // enough to detect "loop kept iterating past max_attempts".
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "max_attempts=2 must cap iteration; took {elapsed:?}"
+        assert!(result.is_err(), "expected Err from all-unreachable pool");
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            4,
+            "max_attempts=2 must not cut the cold sweep short: every configured \
+             endpoint must be dialed at least once (the floor)",
         );
     }
 
@@ -1623,6 +1663,123 @@ mod tests {
             calls.load(Ordering::SeqCst),
             MAX_LEADER_REDIRECTS as usize + 1,
             "the loop must dial through all MAX_LEADER_REDIRECTS redirects to the leader",
+        );
+    }
+
+    /// Regression test for the "randomized rotation can skip the only live
+    /// peer" finding. Six configured endpoints, the only reachable one at
+    /// index 0, five simulated-dead peers after it. The rotation cursor is
+    /// pinned to offset 1 so the cold-cache worklist is
+    /// `[dead-1, dead-2, dead-3, dead-4, dead-5, live]` — the live endpoint
+    /// sits behind exactly `max_attempts = 5` failing peers.
+    ///
+    /// Before the fix, the loop burned its whole `max_attempts` budget on the
+    /// five dead peers and broke before ever dialing `live`, so a reachable
+    /// leader was reported unreachable purely because of where the random
+    /// rotation offset landed. The fix floors the failed-attempt budget at the
+    /// initial worklist length, so a cold-cache sweep always dials every known
+    /// endpoint at least once: `live` must now be dialed and the request must
+    /// succeed even though `max_attempts` is smaller than the endpoint count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rotation_offset_cannot_strand_the_only_live_endpoint() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct LiveLeader;
+
+        #[tonic::async_trait]
+        impl TsoService for LiveLeader {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
+                    physical_ms: 1,
+                    logical_start: 0,
+                    count: 1,
+                    epoch_hi: 0,
+                    epoch_lo: 0,
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(LiveLeader))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        // A connector that only the single live endpoint can dial; every other
+        // configured endpoint fails fast with a transport-class error, exactly
+        // as an unreachable peer would. Records the dial order so the test can
+        // prove the live endpoint was reached.
+        let dialed: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dialed_for_connector = dialed.clone();
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(move |endpoint: &str| {
+            dialed_for_connector
+                .lock()
+                .unwrap()
+                .push(endpoint.to_string());
+            let is_live = endpoint.contains("live");
+            Box::pin(async move {
+                if is_live {
+                    tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                } else {
+                    Err(ClientError::Rpc(tonic::Status::unavailable(
+                        "simulated dead endpoint",
+                    )))
+                }
+            })
+        });
+
+        let endpoints = vec![
+            "live:1".to_string(),
+            "dead-1:1".to_string(),
+            "dead-2:1".to_string(),
+            "dead-3:1".to_string(),
+            "dead-4:1".to_string(),
+            "dead-5:1".to_string(),
+        ];
+
+        // max_attempts (5) is deliberately smaller than the endpoint count (6),
+        // and the rotation offset parks `live` last — the exact shape that used
+        // to strand it. base_backoff = 0 keeps the five dead dials instant; the
+        // deadlines are generous because the connector fails synchronously.
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(endpoints, Some(connector), false, policy);
+        pool.pin_rotation_for_test(1);
+
+        let range = issue_rpc(&pool, 1).await.expect(
+            "a reachable configured endpoint must be dialed even when it \
+                     sits past max_attempts in the rotated worklist",
+        );
+        assert_eq!(range.count(), 1, "the live leader returned one timestamp");
+        assert!(
+            dialed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|endpoint| endpoint.contains("live")),
+            "the live endpoint must be dialed; dialed = {:?}",
+            dialed.lock().unwrap(),
         );
     }
 }
