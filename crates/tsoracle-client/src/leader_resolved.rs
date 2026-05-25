@@ -172,18 +172,41 @@ impl ChannelPool {
     /// The check and the write share one lock acquisition, so a concurrent
     /// `record_success(higher_epoch)` cannot land between "the hint passed
     /// the gate" and "the hint was written" and then be clobbered by the
-    /// lower-epoch hint. The rule itself is unchanged from the former
-    /// `accept_hint` gate: reject only when the cache is fresh (within
-    /// `leader_ttl`), both epochs are known, and the hint's epoch is
-    /// strictly below the cached one. An absent or expired entry, or
-    /// either epoch being unknown, accepts the hint — covering the
-    /// bootstrap and old-server cases.
+    /// lower-epoch hint. The rule, evaluated only while the cache is fresh
+    /// (within `leader_ttl`):
+    ///
+    /// - **Both epochs known:** accept iff the hint's epoch is `>=` the
+    ///   cached one (the monotone-forward gate; rejects a strictly-stale
+    ///   hint).
+    /// - **Known cache, epoch-less hint:** there is no epoch to rank, so
+    ///   accept only when the hint names a *configured* endpoint — one we
+    ///   would dial in round-robin regardless, and that a later successful
+    ///   RPC could confirm. An off-list epoch-less hint cannot downgrade the
+    ///   confirmed leader (issue #357).
+    /// - **Unknown cached epoch:** no monotone floor to defend, so the hint
+    ///   is accepted — the bootstrap / old-server path.
+    ///
+    /// An absent or expired entry also accepts the hint (no floor).
     pub(crate) fn compare_and_set_leader(&self, endpoint: String, epoch: Option<u128>) -> bool {
         let mut guard = self.leader.lock();
         let accept = match &*guard {
             Some(cached) if cached.last_used.elapsed() < self.retry_policy.leader_ttl => {
                 match (cached.epoch, epoch) {
                     (Some(cached_epoch), Some(hint_epoch)) => hint_epoch >= cached_epoch,
+                    // No epoch to rank against a fresh, known-epoch leader
+                    // (issue #357): accept only when the hint names a
+                    // configured node — one we would dial in round-robin
+                    // anyway, and that a later successful RPC could confirm.
+                    // An off-list endpoint (a mixed-version peer's bad guess
+                    // or a misbehaving redirect source) cannot downgrade the
+                    // confirmed leader on an epoch-less claim.
+                    (Some(_), None) => self
+                        .configured
+                        .iter()
+                        .any(|configured| configured == &endpoint),
+                    // The cache itself holds no epoch (or is absent/expired):
+                    // no monotone floor to defend, so the bootstrap and
+                    // old-server paths still accept the hint.
                     _ => true,
                 }
             }
@@ -444,6 +467,94 @@ mod tests {
         // even once a known epoch has been observed.
         assert!(pool.compare_and_set_leader("a:1".into(), None));
         assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+    }
+
+    /// An epoch-less hint must not downgrade a *fresh, known-epoch* cached
+    /// leader when the hinted endpoint is **off the configured list** (issue
+    /// #357). A mixed-version peer or a misbehaving redirect source can emit a
+    /// NOT_LEADER hint carrying no epoch; without a rankable epoch, the only
+    /// trust signal left is "is this an endpoint we'd dial anyway?". An
+    /// off-list endpoint fails that test, so the confirmed leader stands.
+    #[test]
+    fn unknown_epoch_offlist_hint_rejected_when_cache_fresh_known() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        // Confirm `a:1` at a known epoch via a successful RPC.
+        pool.record_success("a:1", 9);
+        // An epoch-less hint to an endpoint that is NOT configured must be
+        // rejected — it cannot prove it outranks the confirmed leader.
+        assert!(!pool.compare_and_set_leader("attacker:1".into(), None));
+        assert_eq!(
+            pool.cached_leader().as_deref(),
+            Some("a:1"),
+            "an off-list epoch-less hint must not unseat a fresh known-epoch leader"
+        );
+    }
+
+    /// The flip side of the #357 carve-out: an epoch-less hint to a
+    /// *configured* endpoint is still accepted over a fresh, known-epoch
+    /// leader. A node we would dial in round-robin anyway is trustworthy
+    /// enough to redirect to immediately — preserving fast failover in a
+    /// mixed-version cluster where the new leader runs an old server that
+    /// emits no epoch.
+    #[test]
+    fn unknown_epoch_configured_hint_accepted_when_cache_fresh_known() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.record_success("a:1", 9);
+        // `b:1` is configured, so an epoch-less hint to it is honored.
+        assert!(pool.compare_and_set_leader("b:1".into(), None));
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
+    }
+
+    /// When the cache itself holds an *unknown* epoch there is no monotone
+    /// floor to defend, so the #357 carve-out does not apply: an epoch-less
+    /// hint — even to an off-list endpoint — still seats. This is the
+    /// bootstrap / old-server path the gate must keep open.
+    #[test]
+    fn unknown_epoch_hint_still_accepted_when_cache_unknown_epoch() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        // Seat an unknown-epoch entry (the cache holds `None`).
+        assert!(pool.compare_and_set_leader("a:1".into(), None));
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+        // With no known epoch cached, an off-list epoch-less hint still wins.
+        assert!(pool.compare_and_set_leader("attacker:1".into(), None));
+        assert_eq!(pool.cached_leader().as_deref(), Some("attacker:1"));
+    }
+
+    /// Once the known-epoch entry has aged past `leader_ttl`, it imposes no
+    /// floor, so even an off-list epoch-less hint seats — the #357 carve-out
+    /// only guards a *fresh* known-epoch leader. Re-checking freshness under
+    /// the write lock is what keeps this consistent.
+    #[tokio::test(start_paused = true)]
+    async fn unknown_epoch_offlist_hint_accepted_once_cache_expires() {
+        let policy = RetryPolicy {
+            leader_ttl: std::time::Duration::from_millis(50),
+            ..RetryPolicy::default()
+        };
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None, false, policy);
+        pool.record_success("a:1", 9);
+        // Fresh: the off-list epoch-less hint is rejected.
+        assert!(!pool.compare_and_set_leader("attacker:1".into(), None));
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+        // Advance past the TTL; the epoch-9 entry is now stale.
+        tokio::time::advance(std::time::Duration::from_millis(75)).await;
+        // No floor remains, so the same off-list epoch-less hint now seats.
+        assert!(pool.compare_and_set_leader("attacker:1".into(), None));
+        assert_eq!(pool.cached_leader().as_deref(), Some("attacker:1"));
     }
 
     /// A cache entry that has aged past `leader_ttl` is treated as absent,
