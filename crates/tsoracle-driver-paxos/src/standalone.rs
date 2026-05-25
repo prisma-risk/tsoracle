@@ -24,9 +24,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use omnipaxos::OmniPaxos;
 use omnipaxos::messages::Message;
 use omnipaxos::storage::Storage;
+use omnipaxos::{OmniPaxos, ProposeErr};
 use parking_lot::Mutex;
 use tsoracle_consensus::{AdvancePayload, ConsensusError};
 use tsoracle_paxos_toolkit::lifecycle::{LeaderEventSubscriber, MessageSink, PaxosRunner, TsoPeer};
@@ -436,9 +436,7 @@ where
                 node: self.my_node_id,
                 seq,
             })
-            .map_err(|err| {
-                ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
-            })?;
+            .map_err(|err| classify_append_error(err, ProposedCommand::Barrier))?;
         tsoracle_yieldpoint::yieldpoint!(
             "standalone_host::current_high_water::after_append_before_await"
         );
@@ -470,9 +468,7 @@ where
         self.omnipaxos
             .lock()
             .append(HighWaterCommand::Advance(AdvancePayload { at_least }))
-            .map_err(|err| {
-                ConsensusError::TransientDriver(Box::new(AdvanceAppendError(format!("{err:?}"))))
-            })?;
+            .map_err(|err| classify_append_error(err, ProposedCommand::Advance))?;
         let seq = self.barrier_seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.omnipaxos
             .lock()
@@ -480,9 +476,7 @@ where
                 node: self.my_node_id,
                 seq,
             })
-            .map_err(|err| {
-                ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
-            })?;
+            .map_err(|err| classify_append_error(err, ProposedCommand::Barrier))?;
         tsoracle_yieldpoint::yieldpoint!(
             "standalone_host::submit_advance::after_append_before_await"
         );
@@ -494,9 +488,69 @@ where
     }
 }
 
+/// Which high-water command's append was rejected. Preserved in the classified
+/// error for diagnosis — the structural context the former per-site
+/// `BarrierAppendError` / `AdvanceAppendError` string wrappers carried in their
+/// message text.
+#[derive(Debug, Clone, Copy)]
+enum ProposedCommand {
+    Advance,
+    Barrier,
+}
+
+impl std::fmt::Display for ProposedCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProposedCommand::Advance => f.write_str("advance"),
+            ProposedCommand::Barrier => f.write_str("barrier"),
+        }
+    }
+}
+
+/// An `OmniPaxos::append` of a high-water command was rejected.
+///
+/// Replaces the former `format!("{err:?}")` laundering: it preserves the
+/// originating [`ProposeErr`] variant — the structure the caller's retry policy
+/// reasons over — instead of flattening it to an opaque string.
 #[derive(Debug, thiserror::Error)]
-#[error("barrier append failed: {0}")]
-struct BarrierAppendError(String);
+enum AppendRejected {
+    /// `ProposeErr::PendingReconfigEntry`: a reconfiguration stopsign is set,
+    /// so this configuration is permanently stopped — no further entry will
+    /// ever be accepted on it. Terminal, hence non-retryable.
+    #[error("{command} append rejected: configuration stopped by a pending reconfiguration")]
+    ConfigurationStopped { command: ProposedCommand },
+    /// `ProposeErr::PendingReconfigConfig` / `ProposeErr::ConfigError`: a
+    /// reconfiguration-*proposal* failure. Unreachable via `append` (these
+    /// arise only from `reconfigure`, which this driver never calls); matched
+    /// defensively and treated as an equally terminal invariant breach.
+    #[error("{command} append rejected: unexpected reconfiguration-proposal error")]
+    UnexpectedReconfiguration { command: ProposedCommand },
+}
+
+/// Classify an `OmniPaxos::append` rejection into a [`ConsensusError`],
+/// preserving the originating variant.
+///
+/// `append` of a [`HighWaterCommand`] (only ever `Advance` / `Barrier`, never a
+/// reconfiguration) does not surface lost leadership here: OmniPaxos forwards a
+/// non-leader proposal to the current leader and returns `Ok`, leaving the
+/// epoch fence and the barrier-wait timeout to surface a leadership change. So
+/// every rejection it *can* return is terminal for this configuration, and all
+/// map to the non-retryable [`ConsensusError::PermanentDriver`] (`INTERNAL`) —
+/// not the retryable [`ConsensusError::TransientDriver`] (`UNAVAILABLE`) the
+/// laundered string produced, which would have told the caller to retry an
+/// append that can never succeed.
+fn classify_append_error(
+    err: ProposeErr<HighWaterCommand>,
+    command: ProposedCommand,
+) -> ConsensusError {
+    let rejected = match err {
+        ProposeErr::PendingReconfigEntry(_) => AppendRejected::ConfigurationStopped { command },
+        ProposeErr::PendingReconfigConfig(..) | ProposeErr::ConfigError(..) => {
+            AppendRejected::UnexpectedReconfiguration { command }
+        }
+    };
+    ConsensusError::PermanentDriver(Box::new(rejected))
+}
 
 /// The barrier did not fold within `barrier_timeout`. Retryable: the most
 /// likely cause is transient (quorum loss, a leadership change in flight), and
@@ -511,10 +565,6 @@ struct BarrierWaitTimeout(Duration);
 #[derive(Debug, thiserror::Error)]
 #[error("apply task is gone; barrier can never be folded")]
 struct ApplyTaskGone;
-
-#[derive(Debug, thiserror::Error)]
-#[error("advance append failed: {0}")]
-struct AdvanceAppendError(String);
 
 #[cfg(test)]
 mod tests {
@@ -656,6 +706,67 @@ mod tests {
             *host.apply_cursor.lock(),
             recovered_decided,
             "apply cursor must be seeded at the recovered decided index, not re-drained from 0",
+        );
+    }
+
+    #[test]
+    fn pending_reconfig_entry_classifies_as_permanent_driver() {
+        // The only `ProposeErr` an `append` of a `HighWaterCommand` can return:
+        // a reconfiguration stopsign is set, which stops this configuration
+        // permanently. Retrying the same append can never succeed, so it must
+        // be the non-retryable `PermanentDriver` (INTERNAL), not the retryable
+        // `TransientDriver` (UNAVAILABLE) the laundered string used to produce.
+        let err = omnipaxos::ProposeErr::PendingReconfigEntry(HighWaterCommand::Barrier {
+            node: 1,
+            seq: 1,
+        });
+        assert!(
+            matches!(
+                classify_append_error(err, ProposedCommand::Barrier),
+                ConsensusError::PermanentDriver(_)
+            ),
+            "pending-reconfiguration append rejection must be PermanentDriver",
+        );
+    }
+
+    #[test]
+    fn reconfiguration_proposal_errors_classify_as_permanent_driver() {
+        use omnipaxos::ClusterConfig;
+        // `append` never produces these (they originate only from
+        // `reconfigure`, which this driver never calls), but the match is
+        // exhaustive over `ProposeErr`, so the defensive arm must also be
+        // non-retryable rather than silently falling back to retryable.
+        let config = ClusterConfig {
+            configuration_id: 1,
+            nodes: vec![1, 2, 3],
+            flexible_quorum: None,
+        };
+        let err = omnipaxos::ProposeErr::PendingReconfigConfig(config, None);
+        assert!(
+            matches!(
+                classify_append_error(err, ProposedCommand::Advance),
+                ConsensusError::PermanentDriver(_)
+            ),
+            "unexpected reconfiguration-proposal rejection must be PermanentDriver",
+        );
+    }
+
+    #[test]
+    fn classified_append_error_preserves_command_and_reason() {
+        // The structured error must name which command's append was rejected
+        // and why, instead of the old opaque `{err:?}` blob.
+        let err = omnipaxos::ProposeErr::PendingReconfigEntry(HighWaterCommand::Advance(
+            AdvancePayload { at_least: 7 },
+        ));
+        let classified = classify_append_error(err, ProposedCommand::Advance);
+        let message = classified.to_string();
+        assert!(
+            message.contains("advance"),
+            "message must name the rejected command, got: {message}",
+        );
+        assert!(
+            message.contains("reconfigur"),
+            "message must name the rejection reason, got: {message}",
         );
     }
 
