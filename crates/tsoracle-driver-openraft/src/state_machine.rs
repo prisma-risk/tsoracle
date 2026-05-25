@@ -51,7 +51,6 @@ use tsoracle_openraft_toolkit::{SCHEMA_VERSION, decode, encode};
 use crate::log_entry::HighWaterCommand;
 use crate::snapshot_store::{InMemorySnapshotStore, SnapshotStore};
 use crate::type_config::{HighWaterApplied, TypeConfig};
-use tsoracle_consensus::AdvancePayload;
 
 type LogId = LogIdOf<TypeConfig>;
 type SnapMeta = SnapshotMetaOf<TypeConfig>;
@@ -295,11 +294,9 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                     }
                 }
                 EntryPayload::Normal(cmd) => {
-                    let HighWaterCommand::Advance(AdvancePayload { at_least }) = cmd;
+                    let HighWaterCommand::Advance(advance) = cmd;
                     let mut core = self.core.lock();
-                    if *at_least > core.current_value {
-                        core.current_value = *at_least;
-                    }
+                    core.current_value = advance.merge(core.current_value);
                     core.last_applied = Some(log_id);
                     HighWaterApplied {
                         value: core.current_value,

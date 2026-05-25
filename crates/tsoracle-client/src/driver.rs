@@ -27,6 +27,7 @@ use tsoracle_core::Timestamp;
 
 use crate::MAX_TIMESTAMPS_PER_RPC;
 use crate::error::ClientError;
+use crate::response::TimestampRange;
 
 /// Bound on the total number of waiters that can exist inside the driver
 /// at any moment. A slow server combined with a fast caller must not grow
@@ -58,7 +59,7 @@ pub(crate) struct Driver {
 }
 
 type RpcFn = Arc<
-    dyn Fn(u32) -> futures::future::BoxFuture<'static, Result<Vec<Timestamp>, ClientError>>
+    dyn Fn(u32) -> futures::future::BoxFuture<'static, Result<TimestampRange, ClientError>>
         + Send
         + Sync,
 >;
@@ -73,7 +74,7 @@ type BatchHandle = tokio::task::JoinHandle<()>;
 impl Driver {
     pub fn spawn<F>(rpc: F, flush_interval: Duration) -> Self
     where
-        F: Fn(u32) -> futures::future::BoxFuture<'static, Result<Vec<Timestamp>, ClientError>>
+        F: Fn(u32) -> futures::future::BoxFuture<'static, Result<TimestampRange, ClientError>>
             + Send
             + Sync
             + 'static,
@@ -303,16 +304,16 @@ fn set_in_flight_gauge(state: u8) {
 /// timestamps.
 fn deliver(
     waiters: &mut VecDeque<Waiter>,
-    result: Result<Vec<Timestamp>, ClientError>,
+    result: Result<TimestampRange, ClientError>,
     expected: u32,
 ) {
     match result {
-        Ok(all) => {
-            if all.len() != expected as usize {
+        Ok(range) => {
+            if range.count() != expected {
                 let msg = format!(
                     "tsoracle protocol violation: requested {} timestamps, server returned {}",
                     expected,
-                    all.len(),
+                    range.count(),
                 );
                 while let Some(w) = waiters.pop_front() {
                     let _ = w
@@ -321,7 +322,7 @@ fn deliver(
                 }
                 return;
             }
-            let mut iter = all.into_iter();
+            let mut iter = range.iter();
             while let Some(w) = waiters.pop_front() {
                 let slice: Vec<Timestamp> = iter.by_ref().take(w.count as usize).collect();
                 debug_assert_eq!(
@@ -382,7 +383,7 @@ mod tests {
     /// exactly that many timestamps. Used to assert chunking shape.
     fn recording_ok_rpc(
         calls: Arc<Mutex<Vec<u32>>>,
-    ) -> impl Fn(u32) -> futures::future::BoxFuture<'static, Result<Vec<Timestamp>, ClientError>>
+    ) -> impl Fn(u32) -> futures::future::BoxFuture<'static, Result<TimestampRange, ClientError>>
     + Send
     + Sync
     + 'static {
@@ -390,10 +391,7 @@ mod tests {
             let calls = calls.clone();
             Box::pin(async move {
                 calls.lock().push(count);
-                let timestamps: Vec<Timestamp> = (0..count)
-                    .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
-                    .collect();
-                Ok(timestamps)
+                Ok(TimestampRange::new(1_000, 0, count))
             })
         }
     }
@@ -516,14 +514,11 @@ mod tests {
     async fn short_response_errors_waiters_in_chunk() {
         let rpc = |count: u32| -> futures::future::BoxFuture<
             'static,
-            Result<Vec<Timestamp>, ClientError>,
+            Result<TimestampRange, ClientError>,
         > {
             Box::pin(async move {
                 let short = count.saturating_sub(1);
-                let timestamps: Vec<Timestamp> = (0..short)
-                    .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
-                    .collect();
-                Ok(timestamps)
+                Ok(TimestampRange::new(1_000, 0, short))
             })
         };
         let driver = Driver::spawn(rpc, Duration::ZERO);
@@ -540,14 +535,11 @@ mod tests {
     async fn long_response_errors_waiters_in_chunk() {
         let rpc = |count: u32| -> futures::future::BoxFuture<
             'static,
-            Result<Vec<Timestamp>, ClientError>,
+            Result<TimestampRange, ClientError>,
         > {
             Box::pin(async move {
                 let long = count.saturating_add(3);
-                let timestamps: Vec<Timestamp> = (0..long)
-                    .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
-                    .collect();
-                Ok(timestamps)
+                Ok(TimestampRange::new(1_000, 0, long))
             })
         };
         let driver = Driver::spawn(rpc, Duration::ZERO);
@@ -691,7 +683,7 @@ mod tests {
         let calls_for_rpc = rpc_calls.clone();
         let rpc = move |_count: u32| -> futures::future::BoxFuture<
             'static,
-            Result<Vec<Timestamp>, ClientError>,
+            Result<TimestampRange, ClientError>,
         > {
             calls_for_rpc.fetch_add(1, Ordering::Relaxed);
             Box::pin(async {
@@ -752,7 +744,7 @@ mod tests {
         let released_rx_for_rpc = released_rx.clone();
         let rpc = move |count: u32| -> futures::future::BoxFuture<
             'static,
-            Result<Vec<Timestamp>, ClientError>,
+            Result<TimestampRange, ClientError>,
         > {
             let is_first = rpc_invocations_for_rpc.fetch_add(1, Ordering::SeqCst) == 0;
             let mut released = released_rx_for_rpc.clone();
@@ -767,10 +759,7 @@ mod tests {
                     }
                 }
                 calls.lock().push(count);
-                let timestamps: Vec<Timestamp> = (0..count)
-                    .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
-                    .collect();
-                Ok(timestamps)
+                Ok(TimestampRange::new(1_000, 0, count))
             })
         };
 
@@ -828,7 +817,7 @@ mod tests {
         let release_second_for_rpc = release_second.clone();
         let rpc = move |count: u32| -> futures::future::BoxFuture<
             'static,
-            Result<Vec<Timestamp>, ClientError>,
+            Result<TimestampRange, ClientError>,
         > {
             let invocation = rpc_invocations_for_rpc.fetch_add(1, Ordering::SeqCst);
             let release = release_second_for_rpc.clone();
@@ -838,10 +827,7 @@ mod tests {
                 if invocation >= 1 {
                     release.notified().await;
                 }
-                let timestamps: Vec<Timestamp> = (0..count)
-                    .map(|i| Timestamp::pack(1_000, i % (LOGICAL_MAX + 1)))
-                    .collect();
-                Ok(timestamps)
+                Ok(TimestampRange::new(1_000, 0, count))
             })
         };
 
@@ -891,7 +877,7 @@ mod tests {
     async fn rpc_closure_panic_surfaces_as_driver_gone() {
         let rpc = |_count: u32| -> futures::future::BoxFuture<
             'static,
-            Result<Vec<Timestamp>, ClientError>,
+            Result<TimestampRange, ClientError>,
         > {
             Box::pin(async {
                 panic!("synthetic panic exercising driver supervision");

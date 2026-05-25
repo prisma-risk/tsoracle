@@ -65,19 +65,19 @@
 
 use std::time::Duration;
 
-use tsoracle_core::{Epoch, Timestamp};
+use tsoracle_core::Epoch;
 
 use crate::budget::{Budget, PairBudget};
 use crate::error::ClientError;
 use crate::leader_resolved::{ChannelPool, LeaderHintLookup, decode_leader_hint};
-use crate::response::decode_get_ts_response;
+use crate::response::{TimestampRange, decode_get_ts_response};
 use crate::retry_policy::{is_transport_failure, jittered_backoff, should_backoff};
 use crate::worklist::Worklist;
 
 pub(crate) async fn issue_rpc(
     pool: &ChannelPool,
     count: u32,
-) -> Result<Vec<Timestamp>, ClientError> {
+) -> Result<TimestampRange, ClientError> {
     let policy = pool.retry_policy().clone();
     let budget = Budget::start(&policy);
     let mut worklist = Worklist::new(pool.iter_round_robin());
@@ -108,9 +108,9 @@ pub(crate) async fn issue_rpc(
         );
 
         match attempt(pool, &endpoint, count, attempt_budget).await {
-            AttemptOutcome::Ok { timestamps, epoch } => {
+            AttemptOutcome::Ok { range, epoch } => {
                 pool.record_success(&endpoint, epoch);
-                return Ok(timestamps);
+                return Ok(range);
             }
             AttemptOutcome::LeaderHint {
                 endpoint: hinted_endpoint,
@@ -192,7 +192,9 @@ pub(crate) async fn issue_rpc(
 #[cfg_attr(test, derive(Debug))]
 enum AttemptOutcome {
     Ok {
-        timestamps: Vec<Timestamp>,
+        /// Compact validated range decoded from `GetTsResponse`; expanded to
+        /// per-waiter `Vec<Timestamp>`s only in `driver::deliver`.
+        range: TimestampRange,
         /// Leader epoch carried in `GetTsResponse` (reassembled from the
         /// `epoch_hi`/`epoch_lo` halves). Plumbed to
         /// `ChannelPool::record_success` so the cache can compare it
@@ -286,7 +288,7 @@ async fn attempt(
             // arrivals.
             let epoch = Epoch::from_wire(inner.epoch_hi, inner.epoch_lo).0;
             return match decode_get_ts_response(inner, count) {
-                Ok(timestamps) => AttemptOutcome::Ok { timestamps, epoch },
+                Ok(range) => AttemptOutcome::Ok { range, epoch },
                 Err(err) => {
                     #[cfg(feature = "metrics")]
                     metrics::counter!(
@@ -1364,11 +1366,11 @@ mod tests {
         };
         let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
 
-        let timestamps = issue_rpc(&pool, 1)
+        let range = issue_rpc(&pool, 1)
             .await
             .expect("a redirect chain that ends at a live leader must yield a timestamp");
         assert_eq!(
-            timestamps.len(),
+            range.count(),
             1,
             "the leader returned exactly one timestamp"
         );

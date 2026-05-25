@@ -18,7 +18,7 @@ failpoints = ["tsoracle-server/failpoints", "tsoracle-failpoint/failpoints"]
 # Opt-in mirror of `tsoracle-client`'s `metrics` feature so `client_metrics`
 # can drive the recorder-fake test that asserts the documented client signals.
 metrics = ["tsoracle-client/metrics", "dep:metrics", "dep:metrics-util", "dep:tokio-stream"]
-dst = ["dep:turmoil", "tsoracle-server/dst"]
+dst = ["dep:turmoil", "dep:tsoracle-server-testkit", "dep:tsoracle-consensus", "dep:async-trait", "tsoracle-core/test-clock"]
 
 [dependencies]
 futures         = { workspace = true }
@@ -34,6 +34,9 @@ tsoracle-core   = { path = "../tsoracle-core" }
 tsoracle-failpoint = { path = "../tsoracle-failpoint" }
 tsoracle-proto  = { path = "../tsoracle-proto" }
 tsoracle-server = { path = "../tsoracle-server", features = ["test-support"] }
+tsoracle-server-testkit = { path = "../tsoracle-server-testkit", optional = true }
+tsoracle-consensus      = { path = "../tsoracle-consensus", optional = true }
+async-trait             = { workspace = true, optional = true }
 
 [[test]]
 name = "client_backpressure"
@@ -65,4 +68,12 @@ required-features = ["dst"]
 
 [[test]]
 name              = "client_freshness_dst"
+required-features = ["dst"]
+
+[[test]]
+name              = "extension_stampede_dst"
+required-features = ["dst"]
+
+[[test]]
+name              = "leadership_churn_dst"
 required-features = ["dst"]

@@ -19,13 +19,13 @@
 //! `tokio::time::sleep` backoff advances *simulated* time, so the same coverage
 //! runs deterministically and instantly from a fixed seed — no wall-clock waits,
 //! no flakiness. The shared transport glue lives in
-//! `tsoracle_server::test_support::dst`.
+//! `tsoracle_server_testkit`.
 //!
 //! The four `extend_window_maps_*` error-mapping tests stay in
 //! `leadership_churn.rs`: they use `MockClock` and assert error *codes*, so
 //! they are not timing-fragile and gain nothing from simulation.
 //!
-//! Opt in: `cargo test -p tsoracle-server --features dst --test leadership_churn_dst`.
+//! Opt in: `cargo test -p tsoracle-tests --features dst --test leadership_churn_dst`.
 
 use core::pin::Pin;
 use std::sync::Arc;
@@ -37,9 +37,9 @@ use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::{Epoch, testing::MockClock};
 use tsoracle_proto::v1::GetTsRequest;
 use tsoracle_server::test_fakes::{FaultKind, FaultyDriver, InMemoryDriver};
-use tsoracle_server::test_support::dst::{client, into_sim_parts, serve};
 use tsoracle_server::test_support::{wait_until, wait_until_not_serving, wait_until_serving};
 use tsoracle_server::{Server, ServingState};
+use tsoracle_server_testkit::{client, into_sim_parts, serve};
 
 const PORT: u16 = 9_999;
 
