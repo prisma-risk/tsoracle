@@ -91,10 +91,32 @@ use crate::worklist::Worklist;
 /// returns a fresh, never-visited hint on every dial cannot churn connections
 /// unboundedly within one pass. Hitting the cap is treated as an in-progress
 /// leadership transfer: the pass ends and `issue_rpc` rides out the churn across
-/// further passes, bounded overall by `overall_deadline` — so the deadline, not
-/// this cap, is the whole-call ceiling on churn. The cap is far above any real
+/// further passes, bounded overall by `overall_deadline` and the absolute
+/// [`MAX_TOTAL_LEADER_REDIRECTS`] backstop. The cap is far above any real
 /// failover, which dedups via the worklist visited-set and settles in a few hops.
 const MAX_LEADER_REDIRECTS: u32 = 16;
+
+/// Absolute ceiling on actionable leader-hint pivots across *all* re-poll passes
+/// of a single `issue_rpc` call.
+///
+/// The per-pass [`MAX_LEADER_REDIRECTS`] cap resets each pass and a cap hit rides
+/// out across further passes (it is treated as a churning leadership transfer),
+/// so the per-pass cap alone leaves `overall_deadline` as the only whole-call
+/// bound on attacker-directed dials. A malicious or persistently flapping peer
+/// that returns a fresh, reachable hint on every dial could then churn outbound
+/// connections for the entire deadline — and under a long operator-chosen
+/// `overall_deadline` that window is large. This absolute cap is the
+/// deadline-independent backstop: once a single call has followed this many
+/// leader-hint pivots in total it stops following hints and surfaces the
+/// redirect `FAILED_PRECONDITION`, *without* riding out further passes.
+///
+/// Set far above any legitimate failover. A genuine leadership transfer settles
+/// in a few hops; a genuinely-electing cluster with no leader to point at signals
+/// via [`AttemptOutcome::NoLeaderYet`], which consumes no redirect budget and so
+/// still rides out for the full `overall_deadline`. Only a peer that keeps
+/// emitting fresh, actionable hints — the redirect-churn attack — reaches this
+/// cap, so `MAX_LEADER_REDIRECTS * 4` is generous headroom for any real cluster.
+const MAX_TOTAL_LEADER_REDIRECTS: u32 = MAX_LEADER_REDIRECTS * 4;
 
 /// Issue one `GetTs`, retrying across endpoints and following leader hints.
 ///
@@ -111,6 +133,14 @@ const MAX_LEADER_REDIRECTS: u32 = 16;
 /// `max_attempts` keeps its whole-call meaning and the surfaced error is the
 /// real NOT_LEADER / transport status, never `NoReachableEndpoints`); the
 /// worklist and the per-pass redirect budget reset each pass.
+///
+/// Leader-hint redirects are bounded twice over: the per-pass
+/// [`MAX_LEADER_REDIRECTS`] cap (which rides out a churning transfer) and the
+/// absolute [`MAX_TOTAL_LEADER_REDIRECTS`] cap that persists across passes. The
+/// absolute cap is a deadline-independent backstop: a peer that returns a fresh,
+/// reachable hint on every dial cannot churn outbound connections for the whole
+/// `overall_deadline` — once total pivots reach the absolute cap the call stops
+/// following hints and fails fast rather than riding out further passes.
 ///
 /// The election signal is recorded separately and is *sticky*: if a reachable
 /// server ever reported an in-progress election, that NOT_LEADER status is
@@ -135,6 +165,11 @@ pub(crate) async fn issue_rpc(
     // own "no leader yet" diagnosis. See `surface_error` for the precedence.
     let mut election_signal: Option<tonic::Status> = None;
     let mut failed_attempts: u32 = 0;
+    // Absolute, whole-call leader-hint pivot count (persists across passes,
+    // unlike the per-pass `redirects` below). Once it reaches
+    // `MAX_TOTAL_LEADER_REDIRECTS` the call stops following hints and fails fast,
+    // so a peer churning fresh hints cannot redirect us for the whole deadline.
+    let mut total_redirects: u32 = 0;
     // The failed-attempt cap is floored at the initial worklist size so one
     // cold sweep always dials every configured endpoint at least once even when
     // `max_attempts` is smaller (issue #404). Computed once from the first
@@ -142,7 +177,7 @@ pub(crate) async fn issue_rpc(
     let mut attempt_cap: usize = 0;
     let mut pass: u32 = 0;
 
-    loop {
+    'passes: loop {
         // Reset per pass: a fresh worklist (fresh visited-set), the redirect
         // budget (so a settled cluster can be reached after an earlier pass hit
         // the cap — see the design spec), and the election signal.
@@ -183,6 +218,35 @@ pub(crate) async fn issue_rpc(
                     epoch: hint_epoch,
                 } => {
                     let _ = hint_epoch;
+                    // Absolute, deadline-independent backstop. Unlike the
+                    // per-pass cap below (which rides out a churning transfer),
+                    // exhausting the whole-call pivot budget is terminal: a peer
+                    // that keeps emitting fresh, actionable hints is treated as
+                    // adversarial or permanently flapping, so we surface the
+                    // redirect rejection and stop — never dialling its hints for
+                    // the whole `overall_deadline`. A real cluster settles far
+                    // below this, and a leaderless cluster signals via
+                    // `NoLeaderYet` (no redirect charge), so this never bites a
+                    // legitimate failover or election ride-out.
+                    if total_redirects >= MAX_TOTAL_LEADER_REDIRECTS {
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("tsoracle.client.leader_redirect_total_cap.total")
+                            .increment(1);
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            from = %endpoint,
+                            to = %hinted_endpoint,
+                            max_total_redirects = MAX_TOTAL_LEADER_REDIRECTS,
+                            "tsoracle-client: absolute leader-hint redirect cap reached; failing fast",
+                        );
+                        last_err = Some(ClientError::Rpc(tonic::Status::failed_precondition(
+                            format!(
+                                "absolute leader-hint redirect cap ({MAX_TOTAL_LEADER_REDIRECTS}) \
+                                 reached across passes before finding the live leader"
+                            ),
+                        )));
+                        break 'passes;
+                    }
                     if redirects >= MAX_LEADER_REDIRECTS {
                         #[cfg(feature = "metrics")]
                         metrics::counter!("tsoracle.client.leader_redirect_cap.total").increment(1);
@@ -208,6 +272,7 @@ pub(crate) async fn issue_rpc(
                         break;
                     }
                     redirects += 1;
+                    total_redirects = total_redirects.saturating_add(1);
                     #[cfg(feature = "metrics")]
                     metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
                     #[cfg(feature = "tracing")]
@@ -895,15 +960,19 @@ mod tests {
 
     /// Security/availability hardening: a peer that answers every dial with a
     /// fresh, never-visited leader hint never lets the client reach a leader.
-    /// With the redirect cap treated as an election signal (so a genuine
-    /// leadership *transfer* is ridden out), such a peer is bounded by the
-    /// client's own `overall_deadline` — it rides out, then surfaces the
-    /// redirect `FAILED_PRECONDITION`, never a misleading `NoReachableEndpoints`
-    /// and never an unbounded loop. (Before the ride-out change this stopped at
-    /// exactly `MAX_LEADER_REDIRECTS + 1` dials; the cap is now per-pass and the
-    /// deadline is the whole-call ceiling (issue #340).)
+    /// The per-pass cap is treated as an election signal (so a genuine
+    /// leadership *transfer* is ridden out across passes), which would otherwise
+    /// leave `overall_deadline` as the only whole-call bound on attacker-directed
+    /// dials. The absolute [`MAX_TOTAL_LEADER_REDIRECTS`] cap is the
+    /// deadline-independent backstop: under a deliberately *long* deadline this
+    /// churn must still terminate after ~`MAX_TOTAL_LEADER_REDIRECTS` dials with
+    /// the absolute-cap `FAILED_PRECONDITION` — bounded by the cap, not the
+    /// deadline, and never a misleading `NoReachableEndpoints` or an unbounded
+    /// loop. (Before the ride-out change this stopped at exactly
+    /// `MAX_LEADER_REDIRECTS + 1` dials; the per-pass cap is now per-pass and the
+    /// absolute cap is the whole-call ceiling on churn (issues #340, #440).)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn endless_redirect_chain_is_bounded_by_overall_deadline() {
+    async fn endless_redirect_chain_is_bounded_by_absolute_cap() {
         use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
 
         struct AlwaysRedirecting {
@@ -954,10 +1023,14 @@ mod tests {
                 })
             });
 
+        // A deliberately *long* deadline: if the absolute cap were absent, the
+        // churn would dial for the full 10s. The fix must terminate it far
+        // sooner, after ~MAX_TOTAL_LEADER_REDIRECTS pivots — proving the cap, not
+        // the deadline, is the whole-call ceiling.
         let policy = RetryPolicy {
             max_attempts: 2,
-            per_attempt_deadline: Duration::from_millis(200),
-            overall_deadline: Duration::from_millis(400),
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
             base_backoff: Duration::from_millis(2),
             leader_ttl: Duration::from_secs(30),
         };
@@ -968,30 +1041,50 @@ mod tests {
             .await
             .expect_err("an endless redirect chain must surface an error, not a timestamp");
         let elapsed = start.elapsed();
-        // Whether the per-pass redirect cap or the overall deadline trips first
-        // is a runner-speed race (each churn redirect is a fresh connect), so
-        // the surfaced status is either the cap's synthesized FAILED_PRECONDITION
-        // or the deadline edge's DEADLINE_EXCEEDED. Both are bounded, meaningful,
-        // and reachable-but-churning — the security property is that it is NOT
-        // the misleading `NoReachableEndpoints` fallback and NOT a timestamp.
+        let dials = calls.load(Ordering::SeqCst);
+
+        // The absolute cap must be what stops the churn: a non-transport
+        // FAILED_PRECONDITION naming the absolute cap, never the misleading
+        // `NoReachableEndpoints` fallback, a DEADLINE_EXCEEDED edge, or a
+        // timestamp.
         match err {
-            ClientError::Rpc(status) => assert!(
-                matches!(
+            ClientError::Rpc(status) => {
+                assert_eq!(
                     status.code(),
-                    tonic::Code::FailedPrecondition | tonic::Code::DeadlineExceeded
-                ),
-                "a churning chain must surface a bounded retryable status \
-                 (cap -> FailedPrecondition or deadline -> DeadlineExceeded), got {:?}",
-                status.code(),
-            ),
+                    tonic::Code::FailedPrecondition,
+                    "the absolute cap must surface FailedPrecondition, got {:?}",
+                    status.code(),
+                );
+                assert!(
+                    status
+                        .message()
+                        .contains("absolute leader-hint redirect cap"),
+                    "the surfaced status must be the absolute-cap rejection, got {:?}",
+                    status.message(),
+                );
+            }
             other => panic!(
                 "expected a bounded ClientError::Rpc, not {other:?} \
                  (e.g. the misleading NoReachableEndpoints)"
             ),
         }
+
+        // Dials are bounded by the absolute cap, independent of the 10s deadline.
+        // Each pass follows MAX_LEADER_REDIRECTS pivots then a per-pass-cap call,
+        // so the whole call lands a little above MAX_TOTAL_LEADER_REDIRECTS; the
+        // headroom covers those per-pass-cap dials without ever approaching the
+        // hundreds a 10s deadline would otherwise permit.
         assert!(
-            elapsed < Duration::from_secs(3),
-            "the loop must be bounded by overall_deadline (~400ms), not spin; took {elapsed:?}",
+            dials >= MAX_TOTAL_LEADER_REDIRECTS as usize,
+            "the chain must churn up to the absolute cap; only {dials} dials",
+        );
+        assert!(
+            dials <= (MAX_TOTAL_LEADER_REDIRECTS + 2 * MAX_LEADER_REDIRECTS) as usize,
+            "dials must be bounded by the absolute cap, not the deadline; got {dials}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the cap (not the 10s deadline) must terminate the churn; took {elapsed:?}",
         );
     }
 
