@@ -9,3 +9,6 @@ pub use config::{
 
 mod error;
 pub use error::StandaloneError;
+
+mod transport;
+pub use transport::TransportHandle;
