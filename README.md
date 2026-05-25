@@ -5,7 +5,7 @@
     </picture>
     <br /><br />
 
-[![Crates.io](https://img.shields.io/crates/v/tsoracle-server.svg)](https://crates.io/crates/tsoracle-server)
+[![Crates.io](https://img.shields.io/crates/v/tsoracle.svg)](https://crates.io/crates/tsoracle)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-tsoracle-blue.svg)](https://deepwiki.com/prisma-risk/tsoracle)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Crates.io](https://img.shields.io/crates/d/tsoracle-core.svg)
