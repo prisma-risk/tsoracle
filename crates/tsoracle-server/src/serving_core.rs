@@ -21,9 +21,12 @@
 //!    method on the guard returned by [`ServingCore::extension_slot`], which
 //!    already holds `extension_lock`. There is no other way to reach the read
 //!    lock, so the order cannot be inverted.
-//! 2. [`ServingCore::step_down`] clears the allocator *before* publishing
-//!    `NotServing`, so a racing `try_grant` never sees `Serving` together with a
-//!    still-leader allocator at a stale epoch.
+//! 2. Clearing the allocator and publishing `NotServing` happen together, clear
+//!    *before* publish, so a racing `try_grant` never sees `Serving` together
+//!    with a still-leader allocator at a stale epoch. Enforced by construction:
+//!    [`ServingCore::step_down`] and [`ServingCore::enter_fencing`] are the only
+//!    ways to clear the allocator (there is no standalone clear primitive), and
+//!    both bake in the order, so no call site can invert it.
 //! 3. [`ServingCore::step_down`] does **not** take `extension_gate.write()`.
 //!    Doing so would deadlock against in-flight extensions holding the read
 //!    lock and awaiting `persist_high_water`.
@@ -110,12 +113,22 @@ impl ServingCore {
         });
     }
 
-    pub(crate) fn try_grant(&self, now_ms: u64, count: u32) -> Result<WindowGrant, CoreError> {
-        self.allocator.lock().try_grant(now_ms, count)
+    /// Enter the fencing window at the start of a leadership transition: clear
+    /// the allocator and publish `NotServing` (with no leader hint) so a racing
+    /// `try_grant` returns NOT_LEADER until the fence republishes `Serving`.
+    ///
+    /// Shares [`step_down`](Self::step_down)'s clear-before-publish body
+    /// (invariant 2); it is named for the leadership-*gain* path, where
+    /// `step_down` would read backwards at the call site. Together with
+    /// `step_down` these are the *only* ways to clear the allocator: there is no
+    /// standalone clear primitive, so a clear can never be published out of
+    /// order with `NotServing`.
+    pub(crate) fn enter_fencing(&self) {
+        self.step_down(None, None);
     }
 
-    pub(crate) fn clear_allocator(&self) {
-        self.allocator.lock().on_leadership_lost();
+    pub(crate) fn try_grant(&self, now_ms: u64, count: u32) -> Result<WindowGrant, CoreError> {
+        self.allocator.lock().try_grant(now_ms, count)
     }
 
     pub(crate) fn seed_on_leadership_gained(
@@ -302,5 +315,35 @@ mod tests {
             .expect("seed must succeed (ceiling >= floor)");
         let grant = core.try_grant(1_000, 1).expect("grant must succeed");
         assert_eq!(grant.epoch(), Epoch(3));
+    }
+
+    #[test]
+    fn enter_fencing_clears_allocator_then_publishes_not_serving() {
+        // The leadership-gain path enters the fence through this single method,
+        // so the clear-before-publish order (invariant 2) cannot be inverted at
+        // the call site. Seed a serveable window first so the clear is
+        // observable, then assert both effects: NotServing with no leader hint,
+        // and a now-cleared allocator (try_grant -> NotLeader).
+        let core = ServingCore::new();
+        core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
+            .expect("seed must succeed (ceiling >= floor)");
+        assert!(core.try_grant(1_000, 1).is_ok(), "seeded core must grant");
+
+        core.enter_fencing();
+
+        assert!(
+            matches!(
+                core.serving_state(),
+                ServingState::NotServing {
+                    leader_endpoint: None,
+                    leader_epoch: None,
+                }
+            ),
+            "enter_fencing must publish NotServing with no leader hint"
+        );
+        assert!(
+            matches!(core.try_grant(1_000, 1), Err(CoreError::NotLeader)),
+            "enter_fencing must clear the allocator"
+        );
     }
 }
