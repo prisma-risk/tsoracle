@@ -139,6 +139,21 @@ mod tests {
     }
 
     #[test]
+    fn openraft_peer_pins_field_layout() {
+        // Pins the postcard field order (addr, then service_endpoint) that
+        // membership log entries embed. A reorder or inserted field changes
+        // these bytes and trips this test, guarding the membership record
+        // layout the SCHEMA_VERSION frame versions. postcard encodes each
+        // String as a varint length prefix followed by its UTF-8 bytes.
+        let peer = OpenraftPeer {
+            addr: "a:1".into(),
+            service_endpoint: "b:2".into(),
+        };
+        let bytes = postcard::to_stdvec(&peer).expect("serialize");
+        assert_eq!(bytes, vec![3, b'a', b':', b'1', 3, b'b', b':', b'2']);
+    }
+
+    #[test]
     fn high_water_applied_round_trips() {
         let applied = HighWaterApplied { value: 12_345 };
         let bytes = postcard::to_stdvec(&applied).expect("serialize");
