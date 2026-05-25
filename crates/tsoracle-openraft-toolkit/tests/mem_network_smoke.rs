@@ -389,3 +389,108 @@ async fn transfer_leader_moves_leadership_to_target() {
     .await
     .unwrap_or_else(|_| panic!("leadership did not transfer to target {target} within 10s"));
 }
+
+/// Build a single-node `Raft` backed by a fresh RocksDB store and register it on
+/// `net` under `id`. Returns the handle plus the `TempDir`, which the caller
+/// must keep alive so the on-disk store outlives the raft.
+async fn build_and_register_node(
+    net: &Arc<MemNetwork<SmokeConfig>>,
+    id: u64,
+) -> (Raft<SmokeConfig, SmokeStateMachine>, tempfile::TempDir) {
+    use rocksdb::{ColumnFamilyDescriptor, DB, Options};
+    use tempfile::TempDir;
+    use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
+
+    let dir = TempDir::new().unwrap();
+    let mut opts = Options::default();
+    opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
+    let cfs = vec![
+        ColumnFamilyDescriptor::new("raft_log", Options::default()),
+        ColumnFamilyDescriptor::new("raft_meta", Options::default()),
+    ];
+    let db = Arc::new(DB::open_cf_descriptors(&opts, dir.path(), cfs).unwrap());
+    let log: RocksdbLogStore<SmokeConfig, Flat> =
+        RocksdbLogStore::open(db, "raft_log", "raft_meta", Flat).unwrap();
+    let sm = SmokeStateMachine::new();
+    let cfg = Arc::new(Config::default().validate().unwrap());
+    let raft = Raft::new(id, cfg, net.factory_for(id), log, sm)
+        .await
+        .expect("Raft::new");
+    net.register(id, raft.clone());
+    (raft, dir)
+}
+
+/// A registered target whose `Raft` core has been shut down returns
+/// `Fatal::Stopped` from every RPC. `MemNetworkPeer` must wrap each such
+/// receiver-side failure in its `*::Network` error and never panic. This drives
+/// the remote-error `map_err` arm of all four RPCs — and, for the snapshot path,
+/// the dispatch plus the receiver-side `RaftAdapter::install_full_snapshot`
+/// shim — which the happy-path election / replication / leader-transfer tests
+/// reach only on success.
+#[tokio::test]
+async fn rpcs_to_a_stopped_target_surface_remote_network_errors() {
+    use openraft::Vote;
+    use openraft::error::{RPCError, ReplicationClosed, StreamingError};
+    use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
+    use openraft::raft::{AppendEntriesRequest, TransferLeaderRequest, VoteRequest};
+    use openraft::storage::{Snapshot, SnapshotMeta};
+
+    let net = MemNetwork::<SmokeConfig>::new();
+    let (target, _dir) = build_and_register_node(&net, 2).await;
+    // Stop the target's core. The registry entry stays in place, so each RPC
+    // still reaches the adapter; the underlying `Raft` then returns
+    // `Fatal::Stopped`, exercising the peer's remote-error wrapping.
+    target.shutdown().await.expect("shutdown the target raft");
+
+    let mut factory = net.factory_for(1);
+    let mut peer = factory.new_client(2, &SmokeNode).await;
+    let opt = RPCOption::new(Duration::from_secs(1));
+    let vote = Vote::new(1, 1);
+
+    let append = AppendEntriesRequest::<SmokeConfig> {
+        vote,
+        prev_log_id: None,
+        entries: Vec::new(),
+        leader_commit: None,
+    };
+    assert!(
+        matches!(
+            peer.append_entries(append, opt.clone()).await,
+            Err(RPCError::Network(_))
+        ),
+        "append_entries to a stopped target must surface RPCError::Network",
+    );
+
+    let vote_req = VoteRequest::<SmokeConfig>::new(vote, None);
+    assert!(
+        matches!(
+            peer.vote(vote_req, opt.clone()).await,
+            Err(RPCError::Network(_))
+        ),
+        "vote to a stopped target must surface RPCError::Network",
+    );
+
+    let snapshot = Snapshot {
+        meta: SnapshotMeta::default(),
+        snapshot: std::io::Cursor::new(Vec::new()),
+    };
+    let cancel = futures::future::pending::<ReplicationClosed>();
+    assert!(
+        matches!(
+            peer.full_snapshot(vote, snapshot, cancel, opt.clone())
+                .await,
+            Err(StreamingError::Network(_))
+        ),
+        "full_snapshot to a stopped target must surface StreamingError::Network",
+    );
+
+    let transfer = TransferLeaderRequest::<SmokeConfig>::new(vote, 2, None);
+    assert!(
+        matches!(
+            peer.transfer_leader(transfer, opt).await,
+            Err(RPCError::Network(_))
+        ),
+        "transfer_leader to a stopped target must surface RPCError::Network",
+    );
+}

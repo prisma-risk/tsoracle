@@ -205,6 +205,76 @@ async fn read_vote_rejects_foreign_version_meta() {
     );
 }
 
+// A meta record carrying the CURRENT schema version but an undecodable body
+// must surface as a generic `io::Error` — the non-`Version` arm of
+// `codec_io_error` — distinct from the `InvalidData` a version *mismatch*
+// yields. The foreign-version test above pins the `Version` arm; this pins its
+// sibling, so a future edit that collapses the two error kinds is caught.
+#[tokio::test]
+async fn read_vote_surfaces_corrupt_body_as_generic_io_error() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+
+    // Correct leading version byte, but no decodable `Vote` body behind it, so
+    // the codec fails at `take_from_bytes` rather than the version check.
+    let key = Flat.meta_key(MetaLabel::Vote);
+    let cf = db.cf_handle(META_CF).unwrap();
+    db.put_cf(&cf, &key, [tsoracle_openraft_toolkit::SCHEMA_VERSION])
+        .unwrap();
+
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
+
+    let err = store
+        .read_vote()
+        .await
+        .expect_err("a same-version corrupt body must fail to decode");
+    assert_ne!(
+        err.kind(),
+        std::io::ErrorKind::InvalidData,
+        "a corrupt body at the current version is a generic decode failure, \
+         not the InvalidData reserved for a version mismatch",
+    );
+}
+
+// purge at index `u64::MAX` exercises the `checked_add(1)` overflow arm, where
+// the exclusive range end falls back to `log_end_bound()` because there is no
+// next index. A normal purge takes the `Some(next)` arm (see
+// `purge_removes_inclusive_prefix`); this pins the boundary.
+#[tokio::test]
+async fn purge_at_max_index_uses_log_end_bound() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+
+    store
+        .append((0..=3).map(blank_entry_at), IOFlushed::noop())
+        .await
+        .unwrap();
+
+    let purge_all = LogId::new(
+        TestLeaderId {
+            term: 1,
+            node_id: 1,
+        },
+        u64::MAX,
+    );
+    store.purge(purge_all).await.unwrap();
+
+    let surviving = store.try_get_log_entries(0..=3).await.unwrap();
+    assert!(
+        surviving.is_empty(),
+        "purge at u64::MAX must remove every entry via the log_end_bound fallback",
+    );
+    let state = store.get_log_state().await.unwrap();
+    assert_eq!(
+        state.last_purged_log_id.map(|id| id.index),
+        Some(u64::MAX),
+        "purge must record LastPurged at the purged index",
+    );
+}
+
 // Regression test for a cross-group keyspace leak in `last_log_id_in_cf`.
 //
 // When two `GroupPrefixed` keyspaces share a single log column family — the
