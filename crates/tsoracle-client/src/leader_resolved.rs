@@ -124,18 +124,37 @@ impl ChannelPool {
         }
     }
 
-    /// Record a successful RPC against `endpoint` that observed the
-    /// leader at `epoch`. Touches `last_used` (resetting the TTL clock)
-    /// when the cache already points at `endpoint`, and installs a
-    /// fresh entry otherwise. Also upgrades a previously-unknown epoch
-    /// to the observed one without disturbing TTL semantics.
+    /// Record a successful RPC against `endpoint` that observed the leader at
+    /// `epoch`. Like [`Self::compare_and_set_leader`], the cached epoch only
+    /// ever moves forward: this method is the *other* writer to the same
+    /// `epoch` field, and a monotone-forward gate is only as strong as its
+    /// weakest writer (issue #333). A late-completing RPC against a
+    /// since-deposed leader — a normal failover artifact, or out-of-order
+    /// completion of two coalesced retries — carries a stale epoch that must
+    /// not lower the cache, or the CAS gate would then accept a
+    /// genuinely-stale hint it was designed to reject.
+    ///
+    /// - Same endpoint: refresh `last_used` (the endpoint just proved it is
+    ///   alive and serving, so it keeps its worklist slot regardless of the
+    ///   observed epoch) and `max` the epoch, which also upgrades a
+    ///   previously-unknown epoch to the observed one.
+    /// - Different endpoint: replace the entry unless the cache is *fresh*,
+    ///   both epochs are known, and the new epoch is *strictly below* the
+    ///   cached one — the same rule `compare_and_set_leader` applies, so an
+    ///   expired entry or an unknown cached epoch still imposes no floor.
     pub(crate) fn record_success(&self, endpoint: &str, epoch: u128) {
         let mut guard = self.leader.lock();
         match &mut *guard {
             Some(cached) if cached.endpoint == endpoint => {
-                cached.epoch = Some(epoch);
+                cached.epoch = Some(cached.epoch.map_or(epoch, |current| current.max(epoch)));
                 cached.last_used = Instant::now();
             }
+            // A fresh cache at a known, strictly-higher epoch wins: a late
+            // success against a now-deposed leader must not install a
+            // lower-epoch entry and re-open the CAS gate to stale hints.
+            Some(cached)
+                if cached.last_used.elapsed() < self.retry_policy.leader_ttl
+                    && cached.epoch.is_some_and(|current| epoch < current) => {}
             _ => {
                 *guard = Some(CachedLeader {
                     endpoint: endpoint.to_string(),
@@ -504,6 +523,116 @@ mod tests {
         // past TTL — but the touch reset the clock 60ms ago, so the
         // cache must still report `b:1` as fresh.
         assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
+    }
+
+    /// A late-completing RPC against the *cached* leader endpoint must not
+    /// lower the cached epoch (issue #333). Out-of-order completion of two
+    /// coalesced retries, or a slow response from a since-superseded term,
+    /// can arrive carrying an older epoch; `record_success` must `max` it,
+    /// never overwrite downward. If it overwrote, the monotone-forward CAS
+    /// gate would then accept a genuinely-stale hint it was built to reject.
+    #[test]
+    fn record_success_same_endpoint_does_not_lower_epoch() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.record_success("a:1", 9);
+        // A late, lower-epoch success against the same endpoint.
+        pool.record_success("a:1", 4);
+        assert_eq!(
+            pool.fresh_leader().expect("cache seated").epoch,
+            Some(9),
+            "a stale same-endpoint success must not lower the cached epoch"
+        );
+        // The CAS gate must still reject an epoch-5 hint (5 < 9). Were the
+        // epoch lowered to 4, this hint would be wrongly accepted.
+        assert!(!pool.compare_and_set_leader("b:1".into(), Some(5)));
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+    }
+
+    /// A late success against a *different*, now-deposed leader must not
+    /// replace a fresh, higher-epoch cache entry (issue #333). The
+    /// cross-endpoint replacement mirrors the CAS rule: reject only when the
+    /// cache is fresh, both epochs are known, and the new epoch is strictly
+    /// below the cached one.
+    #[test]
+    fn record_success_different_endpoint_lower_epoch_is_rejected() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.record_success("a:1", 9);
+        // A late success against a peer that led at an earlier epoch.
+        pool.record_success("b:1", 4);
+        assert_eq!(
+            pool.cached_leader().as_deref(),
+            Some("a:1"),
+            "a stale cross-endpoint success must not unseat the higher-epoch leader"
+        );
+        assert_eq!(pool.fresh_leader().expect("cache seated").epoch, Some(9));
+    }
+
+    /// A genuine failover — a success against a different endpoint at a
+    /// strictly higher epoch — must advance the cache forward.
+    #[test]
+    fn record_success_different_endpoint_higher_epoch_advances() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.record_success("a:1", 5);
+        pool.record_success("b:1", 7);
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
+        assert_eq!(pool.fresh_leader().expect("cache seated").epoch, Some(7));
+    }
+
+    /// An expired cache imposes no monotone-forward floor: once the entry has
+    /// aged past `leader_ttl`, a lower-epoch success against a different
+    /// endpoint seats freely, mirroring `compare_and_set_leader`'s handling
+    /// of a stale entry. Re-checking freshness under the write lock is what
+    /// keeps this consistent.
+    #[tokio::test(start_paused = true)]
+    async fn record_success_different_endpoint_lower_epoch_seats_once_expired() {
+        let policy = RetryPolicy {
+            leader_ttl: std::time::Duration::from_millis(50),
+            ..RetryPolicy::default()
+        };
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None, false, policy);
+        pool.record_success("a:1", 9);
+        tokio::time::advance(std::time::Duration::from_millis(75)).await;
+        // The epoch-9 entry is now stale, so a lower-epoch success seats.
+        pool.record_success("b:1", 4);
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
+        assert_eq!(pool.fresh_leader().expect("cache seated").epoch, Some(4));
+    }
+
+    /// A same-endpoint success refreshes the TTL even when its epoch is lower
+    /// than the cached one: the endpoint just proved it is alive and serving,
+    /// so it should keep its place in the worklist. The epoch is held at the
+    /// higher value, but `last_used` is reset.
+    #[tokio::test(start_paused = true)]
+    async fn record_success_same_endpoint_lower_epoch_still_refreshes_ttl() {
+        let policy = RetryPolicy {
+            leader_ttl: std::time::Duration::from_millis(100),
+            ..RetryPolicy::default()
+        };
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None, false, policy);
+        pool.record_success("a:1", 9);
+        tokio::time::advance(std::time::Duration::from_millis(60)).await;
+        // 60ms in: still fresh. A late, lower-epoch success touches the cache.
+        pool.record_success("a:1", 4);
+        tokio::time::advance(std::time::Duration::from_millis(60)).await;
+        // 120ms since the first success but only 60ms since the touch, so the
+        // entry must still be fresh — and the epoch must not have dropped.
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+        assert_eq!(pool.fresh_leader().expect("cache seated").epoch, Some(9));
     }
 
     #[tokio::test]
