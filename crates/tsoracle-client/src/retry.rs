@@ -114,6 +114,12 @@ const MAX_LEADER_REDIRECTS: u32 = 16;
 /// `max_attempts` keeps its whole-call meaning and the surfaced error is the
 /// real NOT_LEADER / transport status, never `NoReachableEndpoints`); the
 /// worklist and the per-pass redirect budget reset each pass.
+///
+/// The election signal is recorded separately and is *sticky*: if a reachable
+/// server ever reported an in-progress election, that NOT_LEADER status is
+/// surfaced in preference to a later transport-class straggler (e.g. a
+/// `DeadlineExceeded` on the final attempt whose budget the overall deadline
+/// squeezed to near zero). See [`surface_error`] for the full precedence.
 pub(crate) async fn issue_rpc(
     pool: &ChannelPool,
     count: u32,
@@ -124,6 +130,13 @@ pub(crate) async fn issue_rpc(
     // surfaced, and the failed-attempt budget (so `RetryPolicy::max_attempts`
     // keeps its documented whole-call meaning — see the field's rustdoc).
     let mut last_err: Option<ClientError> = None;
+    // The most recent in-progress-election signal — an absent-hint NOT_LEADER,
+    // a stale leader hint, or the redirect cap being hit. Tracked separately
+    // from `last_err` because it is *sticky*: a later transport-class straggler
+    // (typically a `DeadlineExceeded` on the final attempt, whose budget the
+    // overall deadline has squeezed to near zero) must not bury the cluster's
+    // own "no leader yet" diagnosis. See `surface_error` for the precedence.
+    let mut election_signal: Option<tonic::Status> = None;
     let mut failed_attempts: u32 = 0;
     // The failed-attempt cap is floored at the initial worklist size so one
     // cold sweep always dials every configured endpoint at least once even when
@@ -183,12 +196,12 @@ pub(crate) async fn issue_rpc(
                             max_redirects = MAX_LEADER_REDIRECTS,
                             "tsoracle-client: leader-hint redirect cap reached this pass",
                         );
-                        last_err = Some(ClientError::Rpc(tonic::Status::failed_precondition(
-                            format!(
-                                "leader-hint redirect cap ({MAX_LEADER_REDIRECTS}) reached \
-                                 before finding the live leader"
-                            ),
-                        )));
+                        let status = tonic::Status::failed_precondition(format!(
+                            "leader-hint redirect cap ({MAX_LEADER_REDIRECTS}) reached \
+                             before finding the live leader"
+                        ));
+                        election_signal = Some(status.clone());
+                        last_err = Some(ClientError::Rpc(status));
                         // A cluster that keeps hinting a not-yet-ready leader is
                         // churning (CockroachDB-style transfer). Signal an
                         // election so the worklist-empty handler backs off and
@@ -216,6 +229,7 @@ pub(crate) async fn issue_rpc(
                     // handler rides out the election. Known progress, not a
                     // throttled failure — no budget charge, no in-pass backoff.
                     saw_election_signal = true;
+                    election_signal = Some(status.clone());
                     last_err = Some(ClientError::Rpc(status));
                     continue;
                 }
@@ -226,6 +240,7 @@ pub(crate) async fn issue_rpc(
                     // cluster flux. Treat as an election signal; do not charge
                     // the budget (issue #340).
                     saw_election_signal = true;
+                    election_signal = Some(status.clone());
                     last_err = Some(ClientError::Rpc(status));
                     continue;
                 }
@@ -268,7 +283,40 @@ pub(crate) async fn issue_rpc(
         }
         break;
     }
-    Err(last_err.unwrap_or(ClientError::NoReachableEndpoints))
+    Err(surface_error(election_signal, last_err))
+}
+
+/// Choose the error `issue_rpc` surfaces when a call ends without a timestamp.
+///
+/// Precedence, highest first:
+/// 1. A *non-transport* `last_err` — a deterministic server rejection
+///    (a malformed-hint `HintRejected`, a genuine `Internal`, …). The server
+///    spoke definitively about this request, so report it verbatim.
+/// 2. The sticky `election_signal`, if one was ever recorded. A reachable
+///    server told us "no leader yet" / pointed at a stale leader; that is the
+///    most actionable diagnosis a caller can get, and it outranks a
+///    transport-class straggler. The motivating case: earlier passes record
+///    the election, then the overall deadline squeezes the final attempt's
+///    budget to near zero so it times out with `DeadlineExceeded` — surfacing
+///    that timeout would bury the real, actionable cluster state under an
+///    artifact of our own budget.
+/// 3. The transport-class `last_err` (every attempt failed at the wire and no
+///    server ever reported an election).
+/// 4. `NoReachableEndpoints` — the worklist emptied without a single attempt.
+fn surface_error(
+    election_signal: Option<tonic::Status>,
+    last_err: Option<ClientError>,
+) -> ClientError {
+    match last_err {
+        // A definitive, non-transport server status wins outright.
+        Some(err) if !is_transport_failure(&err) => err,
+        // Otherwise prefer the cluster's own election diagnosis, falling back
+        // to the transport error, then to "nothing was reachable".
+        last_err => election_signal
+            .map(ClientError::Rpc)
+            .or(last_err)
+            .unwrap_or(ClientError::NoReachableEndpoints),
+    }
 }
 
 /// Per-attempt outcome. Surfaces FAILED_PRECONDITION redirects as
@@ -604,6 +652,69 @@ mod tests {
             base_backoff: Duration::from_millis(1),
             leader_ttl: Duration::from_secs(30),
         }
+    }
+
+    /// The bug behind the flaky `exhausted_ride_out_surfaces_not_leader`
+    /// integration test, pinned deterministically at the decision point with
+    /// no sockets or timing involved. A ride-out records the cluster's
+    /// "no leader yet" `FAILED_PRECONDITION`, then the final attempt — its
+    /// budget squeezed to near zero by the overall deadline — times out with
+    /// `DeadlineExceeded`. The sticky election signal must win: surfacing the
+    /// transport timeout would bury the actionable NOT_LEADER state under an
+    /// artifact of our own budget.
+    #[test]
+    fn sticky_election_signal_outranks_a_transport_straggler() {
+        let election = tonic::Status::failed_precondition("no leader yet");
+        let timeout = ClientError::Rpc(tonic::Status::deadline_exceeded("rpc budget exhausted"));
+
+        let surfaced = surface_error(Some(election), Some(timeout));
+        match surfaced {
+            ClientError::Rpc(status) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "election signal must outrank the transport timeout"
+            ),
+            other => panic!("expected the election FAILED_PRECONDITION, got {other:?}"),
+        }
+    }
+
+    /// Symmetric guard: a *deterministic* (non-transport) server rejection is
+    /// definitive about this request and must be surfaced verbatim, even when
+    /// an election was seen earlier. Stickiness is scoped to transport-class
+    /// stragglers, not to a `HintRejected` / `Internal` the server returned.
+    #[test]
+    fn deterministic_rejection_outranks_a_stale_election_signal() {
+        let election = tonic::Status::failed_precondition("no leader yet");
+        let rejection = ClientError::Rpc(tonic::Status::internal("malformed leader hint"));
+
+        let surfaced = surface_error(Some(election), Some(rejection));
+        match surfaced {
+            ClientError::Rpc(status) => assert_eq!(
+                status.code(),
+                tonic::Code::Internal,
+                "a non-transport rejection must win over the election signal"
+            ),
+            other => panic!("expected the Internal rejection, got {other:?}"),
+        }
+    }
+
+    /// With no election ever recorded, a transport-class `last_err` is the
+    /// surface (the all-unreachable path), and an empty worklist with nothing
+    /// recorded falls back to `NoReachableEndpoints`.
+    #[test]
+    fn no_election_signal_falls_back_to_last_err_then_no_reachable_endpoints() {
+        let timeout = ClientError::Rpc(tonic::Status::deadline_exceeded("budget exhausted"));
+        match surface_error(None, Some(timeout)) {
+            ClientError::Rpc(status) => {
+                assert_eq!(status.code(), tonic::Code::DeadlineExceeded)
+            }
+            other => panic!("expected the transport timeout, got {other:?}"),
+        }
+
+        assert!(
+            matches!(surface_error(None, None), ClientError::NoReachableEndpoints),
+            "no signal and no attempt must fall back to NoReachableEndpoints"
+        );
     }
 
     /// A pool seeded with duplicate endpoints must visit each once; the
@@ -2019,7 +2130,12 @@ mod tests {
     }
 
     /// A ride-out that exhausts the deadline must surface the real NOT_LEADER
-    /// status, never `NoReachableEndpoints` — `last_err` persists across passes.
+    /// status, never `NoReachableEndpoints` — and never a transport
+    /// `DeadlineExceeded` from the final budget-squeezed attempt. The election
+    /// signal recorded by earlier passes is sticky (see `surface_error`); the
+    /// warm-up below guarantees at least one pass reaches the peer and records
+    /// it, so this end-to-end assertion is deterministic rather than racing the
+    /// overall deadline against a cold dial on a slow runner.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exhausted_ride_out_surfaces_not_leader() {
         use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
@@ -2069,6 +2185,29 @@ mod tests {
             leader_ttl: Duration::from_secs(30),
         };
         let pool = ChannelPool::new(vec!["follower:1".into()], Some(connector), false, policy);
+
+        // Warm the cached channel and confirm the peer is replying
+        // FAILED_PRECONDITION before timing the ride-out, so `issue_rpc`'s first
+        // attempt reaches the RPC layer (records the election signal) instead of
+        // racing the dial on a slow runner.
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(mut client) = pool.client("follower:1").await {
+                let replied_not_leader = client
+                    .get_ts(tsoracle_proto::v1::GetTsRequest { count: 1 })
+                    .await
+                    .err()
+                    .is_some_and(|status| status.code() == tonic::Code::FailedPrecondition);
+                if replied_not_leader {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "fake AlwaysElecting peer never became ready"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         let err = issue_rpc(&pool, 1)
             .await
