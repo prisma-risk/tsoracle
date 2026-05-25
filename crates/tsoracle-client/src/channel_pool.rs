@@ -342,7 +342,7 @@ impl ChannelPool {
     ///
     /// The returned cell handle lets the retry loop evict the *same* channel
     /// if a later RPC over it fails with a transport error (issue #239); see
-    /// [`Self::evict_if_current`] and `crate::retry::attempt`.
+    /// [`Self::evict_if_current`] and `crate::attempt::attempt`.
     pub(crate) async fn client_with_cell(
         &self,
         endpoint: &str,

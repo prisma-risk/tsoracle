@@ -15,6 +15,7 @@
 // for the lib's own unit tests; integration tests are separate compilation units.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+mod attempt;
 mod budget;
 mod channel_pool;
 mod driver;
