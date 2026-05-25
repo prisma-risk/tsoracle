@@ -50,7 +50,7 @@ pub enum ServerError {
     /// the life of the server, so its end is anomalous (driver shutdown, lost
     /// session, etc.) — distinct from a `Consensus` error returned mid-fence.
     /// The watch task publishes `ServingState::NotServing` before returning
-    /// this variant so embedders who never observe the `JoinHandle` still get
+    /// this variant so embedders who never observe the [`WatchGuard`] still get
     /// the documented fail-safe behavior.
     #[error("consensus driver leadership stream closed")]
     WatchStreamClosed,
@@ -178,6 +178,17 @@ pub struct Server {
     pub(crate) tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
 
+/// Raw parts produced by [`Server::into_router_parts`]: the gRPC `Routes`, the
+/// leader-watch task's cooperative-cancel sender (dropping it stops the task),
+/// and the task's join handle. [`Server::into_router`] wraps these into a
+/// [`WatchGuard`]; the `serve_*` methods consume them directly via
+/// [`serve_inner`].
+type RouterParts = (
+    Routes,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), ServerError>>,
+);
+
 impl Server {
     pub fn builder() -> ServerBuilder {
         ServerBuilder::default()
@@ -238,18 +249,24 @@ impl Server {
 
 impl Server {
     /// Return the configured `TsoServiceServer<TsoServiceImpl>` as a tonic
-    /// `Routes` value plus a `JoinHandle` for the spawned leader-watch task,
+    /// `Routes` value plus a [`WatchGuard`] for the spawned leader-watch task,
     /// so callers can mount tsoracle's service alongside their own services
     /// on a shared tonic listener instead of binding a dedicated port.
     ///
-    /// The `JoinHandle` payload is `Result<(), ServerError>` so embedders
-    /// can observe leader-watch termination. The task never returns
-    /// `Ok(())`: every termination — driver error, panic, or clean EOF on
-    /// the leadership stream (surfaced as `ServerError::WatchStreamClosed`)
-    /// — publishes `ServingState::NotServing { leader_endpoint: None }`
-    /// before returning, so all subsequent RPCs fail fast with
-    /// `FAILED_PRECONDITION`. Embedders who never inspect the handle still
-    /// get fail-safe behavior.
+    /// The returned [`WatchGuard`] owns the leader-watch task. **Keep it alive
+    /// for as long as the mounted `Routes` should serve**: the watch task holds
+    /// an `Arc<Server>` (and the consensus driver) and maintains serving state
+    /// across leadership transitions. Dropping the guard — or calling
+    /// [`WatchGuard::shutdown`] — cooperatively stops the task at the embedder's
+    /// own shutdown. Without the guard the task would keep `Arc<Server>` alive
+    /// until the leadership stream happened to close.
+    ///
+    /// Every termination of the task — cooperative cancellation, driver error,
+    /// panic, or clean EOF on the leadership stream (surfaced as
+    /// `ServerError::WatchStreamClosed`) — publishes
+    /// `ServingState::NotServing { leader_endpoint: None }` before returning, so
+    /// all subsequent RPCs fail fast with `FAILED_PRECONDITION`. Embedders who
+    /// drop the guard without awaiting still get fail-safe behavior.
     ///
     /// The `Server::serve()` method is a thin wrapper over this — it calls
     /// `into_router`, builds a tonic `Server`, and binds a listener.
@@ -258,9 +275,24 @@ impl Server {
     /// `reflection` feature) if the embedded descriptor set fails to decode.
     /// That decode happens before the leader-watch task is spawned, so a failure
     /// leaves nothing running to clean up.
-    pub fn into_router(
-        self,
-    ) -> Result<(Routes, tokio::task::JoinHandle<Result<(), ServerError>>), ServerError> {
+    pub fn into_router(self) -> Result<(Routes, WatchGuard), ServerError> {
+        let (routes, cancel_tx, handle) = self.into_router_parts()?;
+        Ok((
+            routes,
+            WatchGuard {
+                cancel_tx: Some(cancel_tx),
+                handle: Some(handle),
+            },
+        ))
+    }
+
+    /// Spawn the leader-watch task and assemble the gRPC `Routes`, returning
+    /// the raw parts: the routes, the task's cooperative-cancel sender, and its
+    /// `JoinHandle`. [`Self::into_router`] wraps these into a [`WatchGuard`] for
+    /// embedders; the `serve_*` methods drive the parts directly via
+    /// [`serve_inner`], so neither path needs to unwrap the guard's `Option`
+    /// fields.
+    fn into_router_parts(self) -> Result<RouterParts, ServerError> {
         // Build the reflection service first: a descriptor-decode failure must
         // surface before we spawn the leader-watch task below, so an error path
         // never leaks a running task.
@@ -269,26 +301,37 @@ impl Server {
 
         let server = Arc::new(self);
 
+        // Cooperative cancellation channel. The `WatchGuard` holds the sender;
+        // the task's `cancel` future resolves on either an explicit send or a
+        // sender drop, so dropping the guard is sufficient to stop the task.
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+
         let watch_server = server.clone();
         let watch_handle = tokio::spawn(async move {
             use futures::FutureExt;
+            // Resolves when the WatchGuard signals cancellation or is dropped.
+            let cancel = async move {
+                let _ = cancel_rx.await;
+            };
             // catch_unwind so a panic in run_leader_watch still routes through
             // the poisoning path. Without this, embedders who mount into_router
-            // directly and never observe the JoinHandle would see
+            // directly and never observe the guard would see
             // ServingState::Serving remain published while the watch task is
             // dead — the inverse of the fail-safe guarantee documented above.
             // The panic is re-raised after poisoning so serve / serve_with_*
             // continue to translate it into ServerError::WatchPanic via
             // join_to_server_result.
-            let outcome =
-                std::panic::AssertUnwindSafe(crate::fence::run_leader_watch(watch_server.clone()))
-                    .catch_unwind()
-                    .await;
+            let outcome = std::panic::AssertUnwindSafe(crate::fence::run_leader_watch(
+                watch_server.clone(),
+                cancel,
+            ))
+            .catch_unwind()
+            .await;
             match outcome {
                 Ok(result) => {
                     if let Err(ref _e) = result {
                         // Poison BEFORE returning so embedders who do not observe
-                        // the JoinHandle still get fail-safe behavior.
+                        // the guard still get fail-safe behavior.
                         watch_server.step_down_due_to_consensus_rejection(None, None);
                         #[cfg(feature = "tracing")]
                         tracing::error!(error = %_e, "leader-watch terminated; serving disabled");
@@ -297,7 +340,7 @@ impl Server {
                 }
                 Err(panic_payload) => {
                     // Mirror the Err branch: poison BEFORE re-raising so
-                    // handle-dropping embedders still observe NotServing.
+                    // guard-dropping embedders still observe NotServing.
                     watch_server.step_down_due_to_consensus_rejection(None, None);
                     #[cfg(feature = "tracing")]
                     tracing::error!("leader-watch panicked; serving disabled");
@@ -313,7 +356,7 @@ impl Server {
         {
             routes = routes.add_service(reflection);
         }
-        Ok((routes, watch_handle))
+        Ok((routes, cancel_tx, watch_handle))
     }
 
     pub async fn serve(self, addr: SocketAddr) -> Result<(), ServerError> {
@@ -345,7 +388,7 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        let (routes, watch_handle) = self.into_router()?;
+        let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
         let mut tonic = TonicServer::builder();
@@ -357,7 +400,7 @@ impl Server {
             .add_routes(routes)
             .serve_with_shutdown(addr, combined_shutdown);
 
-        serve_inner(watch_handle, serve, cancel_tx).await
+        serve_inner(watch_cancel_tx, watch_handle, serve, cancel_tx).await
     }
 
     /// Run the gRPC server on a caller-provided `TcpListener` until either
@@ -390,7 +433,7 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        let (routes, watch_handle) = self.into_router()?;
+        let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
         let incoming = tonic::transport::server::TcpIncoming::from(listener);
@@ -404,7 +447,79 @@ impl Server {
             .add_routes(routes)
             .serve_with_incoming_shutdown(incoming, combined_shutdown);
 
-        serve_inner(watch_handle, serve, cancel_tx).await
+        serve_inner(watch_cancel_tx, watch_handle, serve, cancel_tx).await
+    }
+}
+
+/// RAII handle to the leader-watch task spawned by [`Server::into_router`].
+///
+/// The watch task holds an `Arc<Server>` (and thus the consensus driver) and
+/// maintains serving state across leadership transitions. This guard ties the
+/// task's lifetime to the guard's: dropping it cooperatively cancels the task,
+/// and the task publishes [`ServingState::NotServing`] before it stops, so any
+/// `Routes` an embedder still has mounted fails subsequent RPCs fast.
+///
+/// Cancellation is cooperative — the task stops at its next await boundary and
+/// never mid-fence, so it is never torn down while holding internal locks, in
+/// contrast to a raw [`tokio::task::JoinHandle::abort`].
+pub struct WatchGuard {
+    // `Option` so `Drop` and the consuming `shutdown` / `abort` methods can
+    // each take a field without a partial-move conflict against the `Drop`
+    // impl. Dropping the sender (rather than sending) is itself the cancel
+    // signal: the task's `cancel` future resolves on sender-drop too.
+    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: Option<tokio::task::JoinHandle<Result<(), ServerError>>>,
+}
+
+impl WatchGuard {
+    /// Signal the leader-watch task to stop, wait for it to drain, and report
+    /// its outcome.
+    ///
+    /// A cooperatively cancelled task returns `Ok(())` — the stop was
+    /// requested, so it is not an error. If the task had already terminated on
+    /// its own (driver error, stream EOF, or panic) the original outcome is
+    /// surfaced verbatim: `Err(e)` or [`ServerError::WatchPanic`]. Either way
+    /// serving state is `NotServing` once this returns.
+    pub async fn shutdown(mut self) -> Result<(), ServerError> {
+        // Dropping the sender fires the task's cancel future.
+        self.cancel_tx.take();
+        match self.handle.take() {
+            Some(handle) => join_to_server_result(handle.await),
+            None => Ok(()),
+        }
+    }
+
+    /// Hard-abort the leader-watch task without waiting for a cooperative stop.
+    ///
+    /// Prefer [`Self::shutdown`] or simply dropping the guard; both let the
+    /// task stop at a safe point. This is an escape hatch for callers that
+    /// cannot await and accept that the task may be torn down mid-fence.
+    pub fn abort(mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+
+    /// Whether the leader-watch task has finished — terminated for any reason
+    /// (cooperative cancel, driver error, stream EOF, or panic).
+    ///
+    /// A read-only liveness probe that neither consumes the guard nor disturbs
+    /// its cancel-on-drop behavior, so an embedder can poll task health while
+    /// keeping the guard alive.
+    pub fn is_finished(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_none_or(|handle| handle.is_finished())
+    }
+}
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        // Dropping the sender (if `shutdown` / `abort` did not already take it)
+        // resolves the task's cancel future; the task then publishes
+        // `NotServing` and returns. The `JoinHandle` is dropped here too,
+        // detaching the task to finish its cooperative shutdown on its own.
+        self.cancel_tx.take();
     }
 }
 
@@ -437,16 +552,22 @@ fn combined_shutdown_with_cancel(
 /// The two public methods differ only in how `serve_future` is assembled
 /// (address-bound via `serve_with_shutdown` vs listener-bound via
 /// `serve_with_incoming_shutdown`); everything downstream — the biased select,
-/// the abort path, and the drain/translate logic — is identical and lives
-/// here so a future change need only be made once.
+/// the cooperative-cancel path, and the drain/translate logic — is identical
+/// and lives here so a future change need only be made once.
 ///
-/// `cancel_tx` is the cancellation half paired with the `serve_future`'s
+/// `tonic_cancel_tx` is the cancellation half paired with the `serve_future`'s
 /// shutdown signal (see [`combined_shutdown_with_cancel`]); firing it begins
-/// tonic's graceful drain when the watch task terminates first.
+/// tonic's graceful drain when the watch task terminates first. `watch_cancel_tx`
+/// is the leader-watch task's own cooperative-cancel sender (the same one a
+/// [`WatchGuard`] holds for embedders); dropping it stops the task. Taking the
+/// raw parts rather than a `WatchGuard` keeps this path free of the guard's
+/// `Option` fields — neither the watch handle nor the cancel sender is optional
+/// here.
 async fn serve_inner<S>(
+    watch_cancel_tx: tokio::sync::oneshot::Sender<()>,
     mut watch_handle: tokio::task::JoinHandle<Result<(), ServerError>>,
     serve_future: S,
-    cancel_tx: tokio::sync::oneshot::Sender<()>,
+    tonic_cancel_tx: tokio::sync::oneshot::Sender<()>,
 ) -> Result<(), ServerError>
 where
     S: Future<Output = Result<(), tonic::transport::Error>>,
@@ -466,17 +587,23 @@ where
             // it to finish, then report the watch's outcome — preferring
             // it over any drain error, which surfaces only if the watch
             // itself ended cleanly.
-            let _ = cancel_tx.send(());
+            let _ = tonic_cancel_tx.send(());
             let drain_result = serve_future.await;
             combine_watch_and_drain(watch_result, drain_result)
         }
         serve_result = &mut serve_future => {
             // User shutdown fired (or our cancel — but watch arm has
             // `biased` priority, so reaching here means user shutdown).
-            // The watch task may still be running; aborting it loses
-            // any error it was about to report, but the process is
-            // shutting down so that's acceptable.
-            watch_handle.abort();
+            // Stop the watch task cooperatively rather than with a hard
+            // abort: dropping its cancel sender resolves the task's cancel
+            // future, and we await the task so it never gets torn down
+            // mid-fence while holding `extension_gate.write()`. The wait is
+            // bounded — the cancel arms in `run_leader_watch` fire even when
+            // a fence is stuck retrying a transient error. The task's own
+            // outcome is a clean `Ok(())` (we asked it to stop) and is not
+            // surfaced; the user-requested shutdown result wins.
+            drop(watch_cancel_tx);
+            let _ = (&mut watch_handle).await;
             serve_result?;
             Ok(())
         }
@@ -485,14 +612,15 @@ where
 
 /// Convert a `JoinHandle` result into a `ServerError`-typed result.
 ///
-/// - `Ok(Ok(()))` — unreachable in production: `run_leader_watch` only
-///   returns from its loop via the `WatchStreamClosed` branch. Forwarded
-///   verbatim so the conversion remains total for test helpers that spawn
-///   no-op join futures.
+/// - `Ok(Ok(()))` — cooperative cancellation: `run_leader_watch` observed its
+///   cancel signal (the `WatchGuard` was dropped, `WatchGuard::shutdown` was
+///   called, or `serve_inner` cancelled it on user shutdown), published
+///   `NotServing`, and returned cleanly. Forwarded verbatim as `Ok(())`.
 /// - `Ok(Err(e))` — task returned an error (including `WatchStreamClosed`
 ///   from a clean EOF). Forward verbatim.
-/// - `Err(JoinError)` — task was cancelled or panicked. Cancellation maps to
-///   Ok (we asked for it); panic maps to `WatchPanic` with payload.
+/// - `Err(JoinError)` — task was aborted or panicked. An abort
+///   (`WatchGuard::abort` or `JoinHandle::abort`) maps to Ok (we asked for it);
+///   a panic maps to `WatchPanic` with payload.
 fn join_to_server_result(
     join_result: Result<Result<(), ServerError>, tokio::task::JoinError>,
 ) -> Result<(), ServerError> {
@@ -574,7 +702,9 @@ impl Server {
     /// tests via the `test-fakes` feature; not part of the stable public API.
     #[doc(hidden)]
     pub async fn run_leader_watch_for_tests(self: Arc<Self>) -> Result<(), ServerError> {
-        crate::fence::run_leader_watch(self).await
+        // A never-resolving cancel future: these tests drive termination via
+        // leadership events or `JoinHandle::abort`, not cooperative cancel.
+        crate::fence::run_leader_watch(self, futures::future::pending()).await
     }
 
     /// Test-only allocator probe. Issues a window grant against the current

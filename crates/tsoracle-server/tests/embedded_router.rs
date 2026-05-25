@@ -63,7 +63,7 @@ async fn embedded_router_serves_via_caller_owned_listener() {
 
 /// Regression for #72: a clean EOF on the consensus driver's leadership
 /// stream must trigger the same fail-safe poisoning as an error return,
-/// even when the embedder has dropped the watch `JoinHandle`.
+/// even when the embedder never observes the watch task's outcome directly.
 ///
 /// Embedders who mount `into_router` directly rely on the documented
 /// out-of-band guarantee that "any termination of the watch task publishes
@@ -71,6 +71,11 @@ async fn embedded_router_serves_via_caller_owned_listener() {
 /// `run_leader_watch` returned `Ok(())`, the conditional poisoning in
 /// `into_router` was skipped, and `Serving` remained published — leaving
 /// the allocator able to issue timestamps from a stale epoch.
+///
+/// The `WatchGuard` is held alive for the whole test: dropping it now
+/// cooperatively cancels the task (see
+/// `dropping_watch_guard_cancels_leader_watch_and_poisons`), which would
+/// pre-empt the stream-EOF path this test pins.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedded_router_poisons_when_leadership_stream_closes() {
     // EOF is held back by `eof_gate` so the test can deterministically
@@ -86,13 +91,13 @@ async fn embedded_router_poisons_when_leadership_stream_closes() {
     let tsoracle = Server::builder().consensus_driver(driver).build().unwrap();
 
     let mut state_rx = tsoracle.subscribe();
-    let (router, leader_watch) = tsoracle
+    let (router, _leader_watch) = tsoracle
         .into_router()
         .expect("into_router is infallible without the reflection feature");
 
-    // Drop the JoinHandle so the test exercises the embedder shape that
-    // never observes watch-task termination directly.
-    drop(leader_watch);
+    // Keep `_leader_watch` alive: this test exercises the stream-EOF
+    // poisoning path, not the drop-cancels path, and the embedder shape
+    // under test never inspects the guard's outcome.
 
     let booted = boot_router(router).await;
 
@@ -129,6 +134,104 @@ async fn embedded_router_poisons_when_leadership_stream_closes() {
     );
 
     booted.shutdown().await.unwrap();
+}
+
+/// #334: dropping the `WatchGuard` must cooperatively stop the leader-watch
+/// task even when its leadership stream stays open forever, and the stop must
+/// poison serving state so a still-mounted `Routes` fails fast.
+///
+/// `InMemoryDriver`'s leadership stream never EOFs while the driver is alive,
+/// so before the fix the task would stay `Serving` indefinitely after the
+/// guard was dropped — keeping `Arc<Server>` (and the driver) alive with no
+/// way to stop it. The guard's cancel-on-drop is the only thing that ends the
+/// task here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_watch_guard_cancels_leader_watch_and_poisons() {
+    let driver = Arc::new(InMemoryDriver::new());
+
+    let tsoracle = Server::builder()
+        .consensus_driver(driver.clone())
+        .build()
+        .unwrap();
+
+    let mut state_rx = tsoracle.subscribe();
+    let (router, leader_watch) = tsoracle
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
+
+    let booted = boot_router(router).await;
+
+    driver.become_leader(Epoch(1));
+    wait_until_serving(&mut state_rx).await;
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
+
+    // Drop the guard. The leadership stream is still open, so only the
+    // guard's cancel-on-drop can stop the task.
+    drop(leader_watch);
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_until_not_serving(&mut state_rx),
+    )
+    .await
+    .expect("dropping the WatchGuard did not stop the leader-watch task");
+
+    let mut client = TsoServiceClient::connect(format!("http://{}", booted.addr))
+        .await
+        .unwrap();
+    let status = client
+        .get_ts(GetTsRequest { count: 1 })
+        .await
+        .expect_err("GetTs must fail fast once the watch task has been cancelled");
+    assert_eq!(
+        status.code(),
+        tonic::Code::FailedPrecondition,
+        "post-cancel GetTs must surface FAILED_PRECONDITION; got {status:?}",
+    );
+
+    booted.shutdown().await.unwrap();
+}
+
+/// #334: `WatchGuard::shutdown().await` cooperatively stops the task and
+/// reports its outcome. A cancelled task returns `Ok(())` (we asked for it),
+/// and serving state is poisoned to `NotServing` before the future resolves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_guard_shutdown_returns_ok_and_poisons() {
+    let driver = Arc::new(InMemoryDriver::new());
+
+    let tsoracle = Server::builder()
+        .consensus_driver(driver.clone())
+        .build()
+        .unwrap();
+
+    let mut state_rx = tsoracle.subscribe();
+    let (router, leader_watch) = tsoracle
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
+
+    let _booted = boot_router(router).await;
+
+    driver.become_leader(Epoch(1));
+    wait_until_serving(&mut state_rx).await;
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), leader_watch.shutdown())
+        .await
+        .expect("WatchGuard::shutdown did not complete");
+    assert!(
+        outcome.is_ok(),
+        "cooperative shutdown of a healthy watch task must return Ok(()); got {outcome:?}",
+    );
+
+    // shutdown() awaited the task to completion, which poisons serving state.
+    assert!(
+        matches!(
+            &*state_rx.borrow(),
+            tsoracle_server::ServingState::NotServing { .. }
+        ),
+        "shutdown() must leave serving state NotServing",
+    );
 }
 
 /// Driver whose `leadership_events()` stream yields one `Leader` event and

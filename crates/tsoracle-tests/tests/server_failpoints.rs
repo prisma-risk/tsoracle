@@ -19,7 +19,7 @@ use tsoracle_server::test_fakes::InMemoryDriver;
 use tsoracle_server::test_support::{
     boot_router, wait_for_grpc_handshake, wait_until, wait_until_serving,
 };
-use tsoracle_server::{Server, ServingState};
+use tsoracle_server::{Server, ServerError, ServingState};
 
 static FAILPOINT_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -91,7 +91,7 @@ async fn fence_panic_after_persist_advances_durable_but_not_serving() {
         .consensus_driver(driver.clone())
         .build()
         .unwrap();
-    let (_routes, watch_handle) = server
+    let (_routes, watch_guard) = server
         .into_router()
         .expect("into_router is infallible without the reflection feature");
 
@@ -99,20 +99,34 @@ async fn fence_panic_after_persist_advances_durable_but_not_serving() {
 
     driver.become_leader(Epoch(1));
 
+    // Wait for the panic to terminate the task on its own before observing it.
+    // `shutdown` fires the cooperative cancel before awaiting, and a cancel
+    // that won the fence's first `select!` would step the task down to `Ok(())`
+    // and pre-empt the panic this test pins — so we let `is_finished` confirm
+    // the task already died (the failpoint fires once it commits to the fence,
+    // regardless of cancel) and only then observe its outcome.
+    let start = Instant::now();
+    while !watch_guard.is_finished() {
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "watch task did not terminate within 2s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
     // The wrapper in into_router catches the panic, calls step_down to poison
     // serving state, then resumes_unwind — so the panic still propagates out
-    // of the spawned task and JoinHandle resolves Err(JoinError::is_panic()).
-    // Handle observers (serve_with_shutdown / serve_with_listener) translate
-    // that into ServerError::WatchPanic via join_to_server_result; raw
-    // observers see the JoinError directly, as we do here. The poisoning
-    // guarantee for handle droppers is covered separately by
-    // panic_after_serving_published_poisons_state_when_handle_dropped.
-    let result = tokio::time::timeout(Duration::from_secs(2), watch_handle)
-        .await
-        .expect("watch task did not terminate within 2s");
+    // of the spawned task as a JoinError(is_panic). Observing the now-finished
+    // guard via `WatchGuard::shutdown` routes that through
+    // `join_to_server_result`, which translates it into
+    // `ServerError::WatchPanic` (the same path serve_with_shutdown /
+    // serve_with_listener take). The poisoning guarantee for embedders who
+    // never observe the guard is covered separately by
+    // panic_after_serving_published_poisons_state_when_guard_unobserved.
+    let result = watch_guard.shutdown().await;
     assert!(
-        result.is_err(),
-        "expected the panic to surface as a JoinError, got {result:?}"
+        matches!(result, Err(ServerError::WatchPanic { .. })),
+        "expected the panic to surface as ServerError::WatchPanic, got {result:?}"
     );
 
     // The persist happened before the panic, so the driver's stored
@@ -129,13 +143,14 @@ async fn fence_panic_after_persist_advances_durable_but_not_serving() {
 /// `Server::into_router`: when the leader-watch task panics from a `Serving`
 /// state, the `catch_unwind` wrapper in `into_router` calls
 /// `step_down_due_to_consensus_rejection` before resuming the unwind, so
-/// embedders who mount `into_router` directly and drop the `JoinHandle`
-/// still see serving state transition to `NotServing` and subsequent RPCs
-/// fail fast with `FAILED_PRECONDITION`. Without the wrapper, state would
-/// remain published as `Serving` and `GetTs` would succeed against the
-/// allocator seeded just before the panic — the regression this test pins.
+/// embedders who mount `into_router` directly and never observe the
+/// `WatchGuard`'s outcome still see serving state transition to `NotServing`
+/// and subsequent RPCs fail fast with `FAILED_PRECONDITION`. Without the
+/// wrapper, state would remain published as `Serving` and `GetTs` would
+/// succeed against the allocator seeded just before the panic — the
+/// regression this test pins.
 #[tokio::test]
-async fn panic_after_serving_published_poisons_state_when_handle_dropped() {
+async fn panic_after_serving_published_poisons_state_when_guard_unobserved() {
     let _serial = FAILPOINT_TEST_SERIAL.lock().await;
     let _scenario = tsoracle_failpoint::fail::FailScenario::setup();
 
@@ -144,13 +159,14 @@ async fn panic_after_serving_published_poisons_state_when_handle_dropped() {
         .consensus_driver(driver.clone())
         .build()
         .unwrap();
-    let (routes, watch_handle) = server
+    let (routes, _watch_guard) = server
         .into_router()
         .expect("into_router is infallible without the reflection feature");
 
-    // Drop (detach) the JoinHandle: the embedder shape #27 names. Drop, not
-    // abort — aborting would cancel the task before it ever runs.
-    drop(watch_handle);
+    // Hold the guard alive but never inspect its outcome — the embedder shape
+    // #27 names. (Dropping the guard now cooperatively cancels the task before
+    // it processes the Leader event, which would pre-empt the panic this test
+    // pins; the poison-on-drop path is covered by the embedded_router tests.)
 
     let booted = boot_router(routes).await;
 

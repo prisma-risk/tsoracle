@@ -112,7 +112,10 @@ To mount tsoracle inside an existing tonic server (sharing a listener with your 
 let server = Server::builder()
     .consensus_driver(driver)
     .build()?;
-let (tsoracle_routes, _watch_handle) = server.into_router()?;
+// Keep `watch_guard` alive for as long as the routes should serve; drop it
+// (or call `watch_guard.shutdown().await`) at your own shutdown to stop the
+// leader-watch task.
+let (tsoracle_routes, watch_guard) = server.into_router()?;
 
 tonic::transport::Server::builder()
     .add_routes(tsoracle_routes)
@@ -121,7 +124,7 @@ tonic::transport::Server::builder()
     .await?;
 ```
 
-`into_router` returns a `Result` wrapping the tonic `Routes` plus a `JoinHandle<Result<(), ServerError>>` for the spawned leader-watch task; with the `reflection` feature enabled it returns `Err(ServerError::ReflectionInit)` if the embedded descriptor set fails to decode, so propagate it (`?`) rather than unwrapping. Keep and observe the handle: if leadership watch fails, the task poisons serving state and returns the error so embedders can shut down or restart intentionally. For HA setups, swap `FileDriver` for a `ConsensusDriver` implementation backed by your replicated log — see [Consensus Integration](consensus-integration.md).
+`into_router` returns a `Result` wrapping the tonic `Routes` plus a `WatchGuard` owning the spawned leader-watch task; with the `reflection` feature enabled it returns `Err(ServerError::ReflectionInit)` if the embedded descriptor set fails to decode, so propagate it (`?`) rather than unwrapping. Keep the guard alive for as long as the mounted routes should serve: it ties the watch task's lifetime to the guard's, so dropping the guard — or calling `watch_guard.shutdown().await` — cooperatively stops the task at your own shutdown. If the leadership watch fails on its own, the task poisons serving state to `NotServing` so subsequent RPCs fail fast; `watch_guard.shutdown().await` then surfaces the error so embedders can restart intentionally. For HA setups, swap `FileDriver` for a `ConsensusDriver` implementation backed by your replicated log — see [Consensus Integration](consensus-integration.md).
 
 ## Migrating from an existing timestamp source
 

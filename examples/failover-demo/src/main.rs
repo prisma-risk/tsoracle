@@ -60,7 +60,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Capture state_rx BEFORE consuming server via into_router.
     let mut state_rx = server.subscribe();
-    let (router, _watch_handle) = server.into_router()?;
+    // Hold the WatchGuard for the lifetime of the served router: dropping it
+    // would cooperatively stop the leader-watch task.
+    let (router, _watch_guard) = server.into_router()?;
 
     let addr = bind_unused().await;
     let (sd_tx, sd_rx) = oneshot::channel::<()>();

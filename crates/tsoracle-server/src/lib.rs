@@ -22,7 +22,7 @@ mod service;
 
 pub mod docs;
 
-pub use server::{BuildError, Server, ServerBuilder, ServerError, ServingState};
+pub use server::{BuildError, Server, ServerBuilder, ServerError, ServingState, WatchGuard};
 
 #[cfg(any(test, feature = "test-fakes"))]
 pub mod test_fakes;
