@@ -121,4 +121,12 @@ mod tests {
         let map = parse_peer_map("1=a:1,,2=b:2,").unwrap();
         assert_eq!(map.len(), 2);
     }
+
+    #[test]
+    fn raft_tuning_defaults_match_the_example_values() {
+        let tuning = RaftTuning::default();
+        assert_eq!(tuning.heartbeat_ms, 250);
+        assert_eq!(tuning.election_min_ms, 1_000);
+        assert_eq!(tuning.election_max_ms, 2_000);
+    }
 }

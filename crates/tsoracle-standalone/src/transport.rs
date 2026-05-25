@@ -51,3 +51,43 @@ impl TransportHandle {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `shutdown` fires the cancel trigger, the task observes it and returns,
+    /// and the join completes. A second `shutdown` is a no-op.
+    #[tokio::test]
+    async fn shutdown_signals_the_task_and_joins() {
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        let join = tokio::spawn(async move {
+            // Stand in for the peer server's `serve_with_incoming_shutdown`:
+            // park until the cancel trigger fires.
+            let _ = cancel_rx.await;
+        });
+        let mut handle = TransportHandle::new(cancel_tx, join);
+        handle.shutdown().await;
+        // Idempotent: cancel and join slots are already taken.
+        handle.shutdown().await;
+    }
+
+    /// The file driver's no-op handle has nothing to signal or join.
+    #[tokio::test]
+    async fn noop_shutdown_is_harmless() {
+        let mut handle = TransportHandle::noop();
+        handle.shutdown().await;
+    }
+
+    /// If the spawned task has already finished, sending the (now-ignored)
+    /// cancel and awaiting the completed join is still clean.
+    #[tokio::test]
+    async fn shutdown_after_task_already_returned() {
+        let (cancel_tx, _cancel_rx) = oneshot::channel::<()>();
+        let join = tokio::spawn(async {});
+        // Let the empty task finish before we shut down.
+        tokio::task::yield_now().await;
+        let mut handle = TransportHandle::new(cancel_tx, join);
+        handle.shutdown().await;
+    }
+}
