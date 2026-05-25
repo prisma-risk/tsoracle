@@ -91,12 +91,16 @@ pub type OpenraftEntry = openraft::type_config::alias::EntryOf<TypeConfig>;
 /// The concrete `Vote` and `LogId` types the log store reads back from the meta
 /// column family on recovery.
 ///
-/// Unlike the log and snapshot records, the meta singletons are persisted with
-/// *bare* postcard (no version frame) — see `log_store::meta::read`, which
-/// decodes `VoteOf<C>` (label `Vote`) and `LogIdOf<C>` (labels `Committed` and
-/// `LastPurged`). Exposed only so the fuzz harness can decode that bare-postcard
-/// path directly; hidden from the public API because nothing else should depend
-/// on the meta representation.
+/// Like the log and snapshot records, the meta singletons are persisted under
+/// the `[SCHEMA_VERSION | postcard]` frame (the meta column was brought under it
+/// in `SCHEMA_VERSION` v2) — see `log_store::meta::read`, which routes
+/// `VoteOf<C>` (label `Vote`) and `LogIdOf<C>` (labels `Committed` and
+/// `LastPurged`) through `log_store::decode_record`, so a foreign version
+/// loud-rejects instead of silently misdecoding the recovery-critical vote.
+/// Exposed only so the fuzz harness can reconstruct that framed decode
+/// (`tsoracle_openraft_toolkit::decode::<_>(SCHEMA_VERSION, ..)`) against the
+/// concrete meta types; hidden from the public API because nothing else should
+/// depend on the meta representation.
 #[doc(hidden)]
 pub type OpenraftVote = openraft::type_config::alias::VoteOf<TypeConfig>;
 
