@@ -24,6 +24,9 @@
 //! Driver-agnostic membership-admin surface. The openraft impl lives in
 //! `admin::openraft`; paxos and file use [`UnsupportedAdmin`].
 
+#[cfg(feature = "openraft")]
+pub(crate) mod openraft;
+
 use async_trait::async_trait;
 
 /// A node's role in the current membership.

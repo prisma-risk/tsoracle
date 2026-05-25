@@ -200,6 +200,7 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
     }
 
     let raft_for_drain = raft.clone();
+    let raft_for_admin = raft.clone();
     let my_id = cfg.id;
 
     let host = StandaloneHost::new(raft, state_machine_for_host);
@@ -212,11 +213,8 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         drain: Some(Box::pin(async move {
             handoff::graceful_leader_handoff(&raft_for_drain, my_id).await
         })),
-        admin: std::sync::Arc::new(crate::admin::UnsupportedAdmin::new(
-            crate::admin::MembershipView {
-                members: Vec::new(),
-                leader: None,
-            },
+        admin: std::sync::Arc::new(crate::admin::openraft::OpenraftMembershipAdmin::new(
+            raft_for_admin,
         )),
         admin_transport: crate::TransportHandle::noop(),
     })
