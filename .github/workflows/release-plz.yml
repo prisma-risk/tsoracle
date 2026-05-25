@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # Publishes (tags + cargo publish + GitHub Release) whenever the release PR
   # has been merged into main. No-op on every other push.
