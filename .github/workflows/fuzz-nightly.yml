@@ -40,6 +40,7 @@ jobs:
           - snapshot_payload_decode
           - toolkit_codec_decode
           - openraft_entry_decode
+          - openraft_meta_decode
           - paxos_log_entry_decode
           - paxos_snapshot_decode
           - paxos_meta_ballot_decode
