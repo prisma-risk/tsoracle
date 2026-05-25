@@ -91,6 +91,14 @@ impl ApplyEngine {
     /// storage. Recovery deliberately skips compaction — a node that just
     /// recovered should not immediately re-snapshot — which is why this is
     /// distinct from [`Self::apply_step`].
+    ///
+    /// Recovery also rebases the snapshot policy's baseline to the recovered
+    /// decided index. The baseline starts at 0, so without this a node
+    /// reopening its log at a decided index past the snapshot interval would
+    /// snapshot spuriously on its first post-recovery [`Self::apply_step`]
+    /// (`decided_idx >= 0 + every_n`). Rebasing makes the next snapshot fire
+    /// `every_n` entries past the restart point — extending the "skip
+    /// compaction at recovery" intent to the first decision after recovery.
     pub(crate) fn recover<S>(
         &self,
         omnipaxos: &Arc<Mutex<OmniPaxos<HighWaterCommand, S>>>,
@@ -99,6 +107,7 @@ impl ApplyEngine {
         S: Storage<HighWaterCommand> + Send + 'static,
     {
         drain_decided_into(omnipaxos, cursor, &self.apply_state);
+        self.policy.lock().rebase(*cursor);
     }
 
     /// Drain newly-decided entries from `*cursor` into the apply state, then

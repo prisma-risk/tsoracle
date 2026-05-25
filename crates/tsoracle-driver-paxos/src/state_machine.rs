@@ -713,6 +713,62 @@ mod drain_tests {
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn recovery_does_not_snapshot_on_first_post_restart_apply() {
+            use crate::apply::ApplyEngine;
+
+            // Decide several entries so the recovered decided index sits past
+            // the snapshot interval. This is the post-restart state described
+            // in the issue: a node reopens its log at decided_idx >> N.
+            let mut cluster = build_cluster(3);
+            drive_to_leader_election(&mut cluster).await;
+            {
+                let leader = leader_handle(&cluster);
+                let mut handle = leader.lock();
+                for value in 1..=3 {
+                    handle
+                        .append(HighWaterCommand::Advance(AdvancePayload {
+                            at_least: value,
+                        }))
+                        .expect("append");
+                }
+            }
+            drive_until(
+                &mut cluster,
+                |state| {
+                    state
+                        .nodes
+                        .iter()
+                        .all(|node| node.omnipaxos.lock().get_decided_idx() >= 3)
+                },
+                500,
+            )
+            .await;
+
+            let handle = leader_handle(&cluster);
+            // `every(1)` fires for any decided_idx >= 1, so a baseline of 0
+            // would snapshot on the very first post-recovery apply.
+            let engine = ApplyEngine::new(SnapshotPolicy::every(1));
+            let mut cursor = 0u64;
+            engine.recover(&handle, &mut cursor);
+            assert!(cursor >= 3, "recovery folds the decided suffix");
+
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            metrics::with_local_recorder(&recorder, || {
+                let mut apply_cursor = cursor;
+                engine.apply_step(&handle, &mut apply_cursor);
+            });
+
+            let snapshot = snapshotter.snapshot().into_vec();
+            assert_eq!(
+                counter(&snapshot, "tsoracle.paxos.snapshot.total"),
+                0,
+                "recovery must rebase the snapshot baseline so the first \
+                 post-restart apply does not snapshot spuriously",
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn failed_snapshot_increments_failure_counter() {
             let mut cluster = build_cluster(3);
             drive_to_leader_election(&mut cluster).await;
