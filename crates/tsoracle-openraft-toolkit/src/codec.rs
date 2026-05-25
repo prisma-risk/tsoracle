@@ -25,6 +25,12 @@ pub use tsoracle_codec::{CodecError, decode, encode};
 /// On-disk/wire schema version stamped as the leading byte of every framed
 /// snapshot, log entry, and storage record produced by this toolkit. Bump
 /// when a persisted struct's postcard layout changes in a
-/// backward-incompatible way (field reorder/insert/remove); a stale reader
-/// then fails loudly with [`CodecError::Version`] instead of misdecoding.
-pub const SCHEMA_VERSION: u8 = 1;
+/// backward-incompatible way (field reorder/insert/remove), or when the set of
+/// framed records changes; a stale reader then fails loudly with
+/// [`CodecError::Version`] instead of misdecoding.
+///
+/// v2 brought the log-store meta column (Vote/Committed/LastPurged) under this
+/// same frame — it was previously persisted as bare, unversioned postcard, so a
+/// v1 store's meta records read against this version loud-reject rather than
+/// risk a silent misdecode of the recovery-critical vote.
+pub const SCHEMA_VERSION: u8 = 2;

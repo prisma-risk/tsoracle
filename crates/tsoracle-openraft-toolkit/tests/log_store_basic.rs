@@ -83,6 +83,39 @@ async fn save_and_read_vote_roundtrips() {
     assert_eq!(got, Some(vote));
 }
 
+// The meta column holds recovery-critical fields (Vote/Committed/LastPurged),
+// yet historically persisted them as bare `postcard` with no version frame —
+// unlike every other persisted blob in the store. After a layout-changing
+// upgrade an unframed `Vote` would misdecode silently instead of loud-rejecting.
+// This pins the on-disk meta record to the same `[SCHEMA_VERSION | postcard]`
+// frame the log column uses: a save_vote must persist a version-prefixed record
+// that decodes back through the toolkit's public codec.
+#[tokio::test]
+async fn save_vote_persists_version_framed_meta() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
+
+    let vote: Vote<TestLeaderId> = Vote::new_committed(7, 3);
+    store.save_vote(&vote).await.unwrap();
+
+    // Read the raw persisted bytes back out from under the Vote key.
+    let key = Flat.meta_key(MetaLabel::Vote);
+    let cf = db.cf_handle(META_CF).unwrap();
+    let raw = db.get_cf(&cf, &key).unwrap().expect("vote bytes present");
+
+    assert_eq!(
+        raw[0],
+        tsoracle_openraft_toolkit::SCHEMA_VERSION,
+        "meta record must be framed with the leading schema-version byte",
+    );
+    let decoded: Vote<TestLeaderId> =
+        tsoracle_openraft_toolkit::decode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &raw)
+            .expect("framed vote must decode through the toolkit codec");
+    assert_eq!(decoded, vote);
+}
+
 #[tokio::test]
 async fn empty_store_log_state_is_empty() {
     let dir = TempDir::new().unwrap();
@@ -140,21 +173,23 @@ async fn save_committed_with_none_clears_existing_record() {
     assert!(store.read_committed().await.unwrap().is_none());
 }
 
-// Corrupt the bytes stored at the Vote key, then verify `read_vote` surfaces
-// the decode error rather than silently returning `None` or panicking. Drives
-// the `postcard::from_bytes` error arm in `meta::read` which is unreachable
-// from any legitimate API call sequence.
+// A meta record written under a foreign schema version must loud-reject on
+// read rather than misdecode silently against the current struct layout. This
+// is the core safety property the version frame buys: an upgrade that changed
+// the `Vote` layout would otherwise risk corrupting term/leader-election
+// safety. The injected record carries a `0xFF` version byte (never our
+// `SCHEMA_VERSION`), so `read_vote` must surface `InvalidData`.
 #[tokio::test]
-async fn read_vote_surfaces_decode_error_on_corrupted_meta() {
+async fn read_vote_rejects_foreign_version_meta() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
 
-    // Inject garbage bytes under the `Flat` keyspace's Vote key directly via the
-    // shared `Arc<DB>` — the public store API has no "write raw bytes" door.
+    // Inject a foreign-version record under the `Flat` keyspace's Vote key
+    // directly via the shared `Arc<DB>` — the public store API has no "write
+    // raw bytes" door. Byte 0xFF stands in for any non-current schema version.
     let key = Flat.meta_key(MetaLabel::Vote);
     let cf = db.cf_handle(META_CF).unwrap();
-    db.put_cf(&cf, &key, b"not a valid postcard-encoded vote")
-        .unwrap();
+    db.put_cf(&cf, &key, [0xFF, 7, 3, 1]).unwrap();
 
     let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
         RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();
@@ -162,10 +197,12 @@ async fn read_vote_surfaces_decode_error_on_corrupted_meta() {
     let err = store
         .read_vote()
         .await
-        .expect_err("read_vote should propagate the decode failure");
-    // The exact message comes from postcard; we just want to confirm an error
-    // path actually fires rather than asserting a brittle substring.
-    let _ = err.to_string();
+        .expect_err("read_vote must reject a foreign-version meta record");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::InvalidData,
+        "a foreign schema version must surface as InvalidData, not a generic decode error",
+    );
 }
 
 // Regression test for a cross-group keyspace leak in `last_log_id_in_cf`.

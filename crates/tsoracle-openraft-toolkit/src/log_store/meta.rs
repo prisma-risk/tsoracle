@@ -15,25 +15,29 @@
 //! The meta CF holds four small openraft values: current vote, last-committed
 //! log id, last-purged log id, last-applied membership. Each is keyed by a
 //! [`MetaLabel`](super::MetaLabel) via the active [`KeySpace`](super::KeySpace).
-//! These helpers serialize values with `postcard` and translate rocksdb errors
-//! into [`RocksdbLogStoreError`](super::RocksdbLogStoreError).
+//! These helpers frame values with the same `[SCHEMA_VERSION | postcard]` codec
+//! the log column uses ([`super::encode_record`] / [`super::decode_record`]), so
+//! a recovery-critical meta record (Vote/Committed/LastPurged) loud-rejects on a
+//! version mismatch instead of misdecoding silently. rocksdb errors are mapped
+//! to [`io::Error`] to match the storage trait surface.
 
 use rocksdb::{BoundColumnFamily, DB, WriteBatch};
 use serde::{Serialize, de::DeserializeOwned};
+use std::io;
 use std::sync::Arc;
 
-use super::RocksdbLogStoreError;
 use super::key_space::{KeySpace, MetaLabel};
+use super::{decode_record, encode_record};
 
 pub(super) fn read<T: DeserializeOwned, K: KeySpace>(
     db: &DB,
     cf: &Arc<BoundColumnFamily<'_>>,
     keys: &K,
     label: MetaLabel,
-) -> Result<Option<T>, RocksdbLogStoreError> {
+) -> io::Result<Option<T>> {
     let key = keys.meta_key(label);
-    match db.get_pinned_cf(cf, &key)? {
-        Some(bytes) => Ok(Some(postcard::from_bytes(&bytes)?)),
+    match db.get_pinned_cf(cf, &key).map_err(io::Error::other)? {
+        Some(bytes) => Ok(Some(decode_record(&bytes)?)),
         None => Ok(None),
     }
 }
@@ -44,9 +48,9 @@ pub(super) fn put<T: Serialize, K: KeySpace>(
     keys: &K,
     label: MetaLabel,
     value: &T,
-) -> Result<(), RocksdbLogStoreError> {
+) -> io::Result<()> {
     let key = keys.meta_key(label);
-    let bytes = postcard::to_stdvec(value)?;
+    let bytes = encode_record(value)?;
     batch.put_cf(cf, &key, &bytes);
     Ok(())
 }
