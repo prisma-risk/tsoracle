@@ -126,6 +126,7 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
     Ok(Standalone {
         driver: driver as Arc<dyn ConsensusDriver>,
         transport: TransportHandle::new(cancel_tx, join),
+        drain: None,
     })
 }
 

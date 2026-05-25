@@ -1,3 +1,4 @@
+mod handoff;
 mod network;
 
 use std::collections::BTreeMap;
@@ -156,6 +157,9 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         }
     }
 
+    let raft_for_drain = raft.clone();
+    let my_id = cfg.id;
+
     let host = StandaloneHost::new(raft, state_machine_for_host);
     // OpenraftDriver::new returns Arc<Self> — do NOT wrap again.
     let driver = OpenraftDriver::new(host);
@@ -163,5 +167,8 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
     Ok(Standalone {
         driver: driver as Arc<dyn ConsensusDriver>,
         transport: TransportHandle::new(cancel_tx, join),
+        drain: Some(Box::pin(async move {
+            handoff::graceful_leader_handoff(&raft_for_drain, my_id).await
+        })),
     })
 }

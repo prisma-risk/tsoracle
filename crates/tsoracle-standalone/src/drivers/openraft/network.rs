@@ -38,7 +38,8 @@ use openraft::error::{NetworkError, RPCError, StreamingError, Unreachable};
 use openraft::errors::ReplicationClosed;
 use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
+    VoteRequest, VoteResponse,
 };
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use tokio::sync::Mutex;
@@ -185,6 +186,26 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
         Ok(body)
     }
 
+    /// Forward a leadership-transfer request to the target peer. openraft calls
+    /// this on the outgoing leader when `trigger().transfer_leader` fires; the
+    /// receiver hands the request to `Raft::handle_transfer_leader`. Without
+    /// this override the default no-op drops the request and leadership only
+    /// moves on the next election timeout.
+    async fn transfer_leader(
+        &mut self,
+        req: TransferLeaderRequest<TypeConfig>,
+        _option: RPCOption,
+    ) -> Result<(), RPCError<TypeConfig>> {
+        let mut c = self.client().await?;
+        let payload =
+            postcard::to_stdvec(&req).map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
+        if let Err(err) = c.transfer_leader(RaftMessage { payload }).await {
+            evict(&self.pool, self.target, &self.addr).await;
+            return Err(RPCError::Network(NetworkError::new(&err)));
+        }
+        Ok(())
+    }
+
     async fn vote(
         &mut self,
         rpc: VoteRequest<TypeConfig>,
@@ -323,6 +344,22 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
         let payload =
             postcard::to_stdvec(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
         Ok(tonic::Response::new(RaftMessage { payload }))
+    }
+
+    async fn transfer_leader(
+        &self,
+        request: tonic::Request<RaftMessage>,
+    ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
+        let body: TransferLeaderRequest<TypeConfig> =
+            postcard::from_bytes(&request.into_inner().payload)
+                .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        self.raft
+            .handle_transfer_leader(body)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        Ok(tonic::Response::new(RaftMessage {
+            payload: Vec::new(),
+        }))
     }
 
     /// Reassemble a streamed snapshot and hand it to `install_full_snapshot`.

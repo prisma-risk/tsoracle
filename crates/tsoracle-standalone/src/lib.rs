@@ -2,6 +2,8 @@
 //! tsoracle node. See `build`.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tsoracle_consensus::ConsensusDriver;
@@ -29,9 +31,21 @@ pub use transport::TransportHandle;
 pub struct Standalone {
     pub driver: Arc<dyn ConsensusDriver>,
     transport: TransportHandle,
+    /// Driver-specific action run when the shutdown signal fires, BEFORE the
+    /// client server stops accepting (openraft: graceful leadership handoff;
+    /// file/paxos: none). Lazy — it reads live state when awaited at shutdown.
+    drain: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
 impl Standalone {
+    /// Take the pre-shutdown drain action, if the driver has one. Await the
+    /// returned future when the shutdown signal fires (before stopping the
+    /// client gRPC server), then call [`Standalone::shutdown`] for the peer
+    /// transport. `None` for drivers without a drain step (file, paxos).
+    pub fn take_drain(&mut self) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
+        self.drain.take()
+    }
+
     /// Cooperatively stop the peer transport. Call off the same shutdown
     /// signal that stops the client gRPC server.
     pub async fn shutdown(mut self) {

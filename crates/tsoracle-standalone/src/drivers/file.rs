@@ -27,6 +27,7 @@ pub(crate) fn build_file(cfg: FileConfig) -> Result<Standalone, StandaloneError>
     Ok(Standalone {
         driver: driver as Arc<dyn ConsensusDriver>,
         transport: TransportHandle::noop(),
+        drain: None,
     })
 }
 
