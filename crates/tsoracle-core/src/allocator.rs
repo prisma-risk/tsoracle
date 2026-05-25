@@ -335,8 +335,25 @@ impl Allocator {
         // than panicking should that invariant ever be violated, and keeps this
         // path free of the unwrap/expect the crate's panic policy bans.
         let grant = WindowGrant::try_new(physical_ms, logical_start, count, *epoch)?;
-        *next_physical_ms = physical_ms;
-        *next_logical = logical_start + count;
+        // Normalize the write-back so the stored cursor is always a packable
+        // (physical_ms, logical) pair. `project_grant` admits a grant that fills
+        // the millisecond exactly, so `logical_start + count` can reach
+        // LOGICAL_MAX + 1 — a logical the packed layout cannot hold. Rather than
+        // store that sentinel and rely on the next `project_grant` call to wrap
+        // it, roll to the next millisecond at logical 0 here. This is precisely
+        // the position the next call would compute, so behavior is unchanged;
+        // the stored state just no longer depends on the implicit
+        // "next call always wraps or resets" invariant. (`next_physical_ms` may
+        // become PHYSICAL_MS_MAX + 1, which is never packed directly and is
+        // rejected as out-of-range by the next grant's `project_grant`.)
+        let next_logical_after = logical_start + count;
+        if next_logical_after > LOGICAL_MAX {
+            *next_physical_ms = physical_ms + 1;
+            *next_logical = 0;
+        } else {
+            *next_physical_ms = physical_ms;
+            *next_logical = next_logical_after;
+        }
         Ok(grant)
     }
 
@@ -877,6 +894,38 @@ mod tests {
         let second = allocator.try_grant(1, 1).unwrap();
         assert_eq!(second.physical_ms, 2);
         assert_eq!(second.logical_start, 0);
+    }
+
+    #[test]
+    fn exact_fill_grant_normalizes_stored_state_to_packable() {
+        // A grant that consumes a millisecond's entire logical range
+        // (logical_start + count == LOGICAL_MAX + 1) must not leave the
+        // LOGICAL_MAX+1 sentinel in next_logical: that value cannot be packed
+        // (Timestamp::pack asserts logical <= LOGICAL_MAX), so the stored state
+        // would only be safe by the implicit "next call always wraps" invariant.
+        // The write-back normalizes it to the already-rolled position
+        // (physical_ms + 1, 0), so stored state is always directly packable.
+        let mut allocator = Allocator::new();
+        allocator.try_on_leadership_gained(0, 0, Epoch(1)).unwrap();
+        allocator.try_commit_window_extension(10, Epoch(1)).unwrap();
+        // Fill physical_ms=1 exactly: logical [0, LOGICAL_MAX].
+        let grant = allocator.try_grant(1, LOGICAL_MAX + 1).unwrap();
+        assert_eq!(grant.physical_ms, 1);
+        assert_eq!(grant.logical_start, 0);
+
+        let State::Leader {
+            next_physical_ms,
+            next_logical,
+            ..
+        } = allocator.state
+        else {
+            panic!("expected leader state after a successful grant");
+        };
+        // The stored cursor rolled to the next millisecond at logical 0 …
+        assert_eq!(next_physical_ms, 2);
+        assert_eq!(next_logical, 0);
+        // … and is, by construction, a packable timestamp.
+        assert!(Timestamp::try_pack(next_physical_ms, next_logical).is_ok());
     }
 
     #[test]
