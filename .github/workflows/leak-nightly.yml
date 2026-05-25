@@ -18,6 +18,22 @@ jobs:
     permissions:
       contents: read
     steps:
+      # -Zbuild-std rebuilds libstd with the leak-sanitizer runtime on top of a
+      # full `--workspace --all-features` test build, making this the heaviest
+      # build in the repo. Reclaim ~30 GB before cargo starts so the final link
+      # does not ENOSPC; tool-cache: false leaves ~/.cargo and the rust-cache
+      # restore untouched.
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+
       - uses: actions/checkout@v6
 
       - name: Install pinned nightly toolchain
