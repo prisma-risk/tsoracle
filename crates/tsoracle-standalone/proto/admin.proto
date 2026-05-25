@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package tsoracle.admin.v1;
+
+service MembershipAdmin {
+  rpc ListMembers(ListMembersRequest) returns (MembershipView);
+  rpc AddLearner(AddLearnerRequest) returns (ChangeResponse);
+  rpc Promote(PromoteRequest) returns (ChangeResponse);
+  rpc RemoveNode(RemoveNodeRequest) returns (ChangeResponse);
+}
+
+enum MemberRole {
+  MEMBER_ROLE_UNSPECIFIED = 0;
+  MEMBER_ROLE_VOTER = 1;
+  MEMBER_ROLE_LEARNER = 2;
+}
+
+message MemberEntry {
+  uint64 id = 1;
+  MemberRole role = 2;
+  string raft_addr = 3;
+  string service_endpoint = 4;
+  string admin_endpoint = 5;
+}
+
+message ListMembersRequest {}
+
+message MembershipView {
+  repeated MemberEntry members = 1;
+  bool has_leader = 2;
+  uint64 leader = 3;
+}
+
+message AddLearnerRequest {
+  uint64 id = 1;
+  string raft_addr = 2;
+  string service_endpoint = 3;
+  string admin_endpoint = 4;
+}
+
+message PromoteRequest { uint64 id = 1; }
+message RemoveNodeRequest { uint64 id = 1; }
+
+enum AdminErrorKind {
+  ADMIN_ERROR_KIND_UNSPECIFIED = 0; // proto3 default / unset; `ok` is the authoritative success flag
+  ADMIN_ERROR_KIND_NOT_LEADER = 1;
+  ADMIN_ERROR_KIND_UNSUPPORTED = 2;
+  ADMIN_ERROR_KIND_NOT_MEMBER = 3;
+  ADMIN_ERROR_KIND_NOT_CAUGHT_UP = 4;
+  ADMIN_ERROR_KIND_WOULD_LOSE_QUORUM = 5;
+  ADMIN_ERROR_KIND_TIMEOUT = 6;
+  ADMIN_ERROR_KIND_DRIVER = 7;
+}
+
+message ChangeResponse {
+  bool ok = 1;
+  AdminErrorKind error = 2;
+  // Set when error == NOT_LEADER and a leader admin endpoint is known.
+  string leader_admin_endpoint = 3;
+  // Human-readable detail (e.g. the driver error string).
+  string message = 4;
+}

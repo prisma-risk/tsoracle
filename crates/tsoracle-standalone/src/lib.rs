@@ -51,6 +51,13 @@ pub use admin::{
     UnsupportedAdmin,
 };
 
+/// Generated `tsoracle.admin.v1` gRPC types (client + server). Public so the
+/// `tsoracle admin` CLI can use the client stub.
+#[cfg(feature = "openraft")]
+pub mod admin_proto {
+    tonic::include_proto!("tsoracle.admin.v1");
+}
+
 mod transport;
 pub use transport::TransportHandle;
 

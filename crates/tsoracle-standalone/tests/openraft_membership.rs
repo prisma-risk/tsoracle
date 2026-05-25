@@ -22,6 +22,13 @@ use tsoracle_standalone::{
     DriverConfig, MemberAddr, MemberRole, NewMember, OpenraftConfig, RaftTuning, build,
 };
 
+#[test]
+fn admin_proto_types_exist() {
+    // Compiles only if the generated module is present and named as expected.
+    let _ = tsoracle_standalone::admin_proto::ChangeResponse::default();
+    let _ = tsoracle_standalone::admin_proto::MemberRole::Voter;
+}
+
 /// Bind an ephemeral port, read its address, then release it so the node can
 /// rebind it on boot. TOCTOU-tolerant in practice (same trick the build and
 /// smoke tests use): the window is tiny and the test owns the loopback range.
