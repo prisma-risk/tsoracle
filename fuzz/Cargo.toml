@@ -113,6 +113,14 @@ bench             = false
 doctest           = false
 
 [[bin]]
+name              = "openraft_meta_decode"
+path              = "fuzz_targets/openraft_meta_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
 name              = "paxos_log_entry_decode"
 path              = "fuzz_targets/paxos_log_entry_decode.rs"
 test              = false
