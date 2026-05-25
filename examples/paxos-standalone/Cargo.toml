@@ -17,25 +17,10 @@ default    = []
 reflection = ["tsoracle-server/reflection"]
 
 [dependencies]
-tsoracle-core          = { path = "../../crates/tsoracle-core", version = "0.2.2" }
-tsoracle-consensus     = { path = "../../crates/tsoracle-consensus", version = "0.1.7" }
-tsoracle-server        = { path = "../../crates/tsoracle-server", version = "0.2.5" }
-tsoracle-driver-paxos  = { path = "../../crates/tsoracle-driver-paxos", version = "0.2.3" }
-tsoracle-paxos-toolkit = { path = "../../crates/tsoracle-paxos-toolkit", version = "0.2.3", features = ["rocksdb-storage"] }
-
-omnipaxos          = { workspace = true, features = ["serde"] }
-rocksdb            = { workspace = true }
-tonic              = { workspace = true }
-tonic-prost        = { workspace = true }
-prost              = { workspace = true }
-tokio              = { workspace = true, features = ["signal"] }
-async-trait        = { workspace = true }
-clap               = { workspace = true }
-tracing            = { workspace = true }
-tracing-subscriber = { workspace = true }
-postcard           = { workspace = true }
-parking_lot        = { workspace = true }
-anyhow             = { workspace = true }
-
-[build-dependencies]
-tonic-prost-build = { workspace = true }
+tsoracle-server     = { path = "../../crates/tsoracle-server", version = "0.2.5" }
+tsoracle-standalone = { path = "../../crates/tsoracle-standalone", version = "0.1.0", default-features = false, features = ["paxos"] }
+tokio               = { workspace = true, features = ["signal", "macros", "rt-multi-thread"] }
+clap                = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+anyhow              = { workspace = true }
