@@ -1,0 +1,55 @@
+name: kube-e2e
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kube-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+      - name: build cluster image
+        run: docker build -f e2e/kube/Dockerfile -t tsoracle-e2e:latest .
+      - name: build driver image
+        run: docker build -f e2e/kube/driver/Dockerfile -t tsoracle-e2e-driver:latest .
+      - name: create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+        with:
+          cluster_name: tsoracle-e2e
+          config: e2e/kube/kind-config.yaml
+      - name: load images into kind
+        run: |
+          kind load docker-image tsoracle-e2e:latest --name tsoracle-e2e
+          kind load docker-image tsoracle-e2e-driver:latest --name tsoracle-e2e
+      - name: apply manifests
+        run: kubectl apply -f e2e/kube/manifests/
+      - name: wait for cluster formation (TCP readiness)
+        run: kubectl rollout status statefulset/tsoracle --timeout=180s
+      - name: run e2e assertions (cold-start + soak across rollout)
+        run: ./e2e/kube/run-assertions.sh
+      - name: dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -o wide || true
+          kubectl describe statefulset/tsoracle || true
+          kubectl logs job/tsoracle-e2e-cold-start || true
+          kubectl logs job/tsoracle-e2e-soak || true
+          kubectl get events --sort-by=.lastTimestamp || true
