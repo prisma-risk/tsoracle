@@ -18,8 +18,9 @@ Default is 1 second. On leadership gain, the new leader first computes `serving_
 
 **Server signals**
 
-- `tsoracle.get_ts.total` — total GetTs RPCs handled (counter)
-- `tsoracle.get_ts.timestamps_issued` — sum of `count` across all GetTs responses (counter)
+- `tsoracle.get_ts.requests.total` — total well-formed GetTs RPCs offered, counted at entry before the NOT_LEADER gate; the honest offered load (counter)
+- `tsoracle.get_ts.success.total` — GetTs RPCs that returned a grant; `requests.total - success.total` is the failure count (counter)
+- `tsoracle.get_ts.timestamps_issued` — sum of `count` across all successful GetTs responses (counter)
 - `tsoracle.window.extensions.total` — number of persist_high_water calls (counter)
 - `tsoracle.window.extension_latency` — duration of persist_high_water (histogram, seconds)
 - `tsoracle.window.extensions.ignored.not_leader.total` — a persisted window extension was dropped because this node was no longer leader; sustained non-zero rates indicate epoch churn (counter)

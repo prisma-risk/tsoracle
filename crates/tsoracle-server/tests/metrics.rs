@@ -102,7 +102,8 @@ async fn emits_documented_signals_end_to_end() {
         .unwrap();
 
     // First call lands inside the post-fence window: drives
-    // get_ts.total (+1) and get_ts.timestamps_issued (+5).
+    // get_ts.requests.total (+1), get_ts.success.total (+1), and
+    // get_ts.timestamps_issued (+5).
     let resp = client
         .get_ts(GetTsRequest { count: 5 })
         .await
@@ -146,9 +147,24 @@ async fn emits_documented_signals_end_to_end() {
     // Every documented signal must have fired at least once. Inequalities
     // (not strict equalities) keep the test robust against the initial
     // LeaderState::Unknown the watch channel may surface ahead of Leader.
+    // success.total counts only the two successful grants; the trailing
+    // NOT_LEADER call returns before the Ok arm and must not bump it.
     assert!(
-        counter_value(&snapshot, "tsoracle.get_ts.total") >= 2,
-        "tsoracle.get_ts.total did not increment for both GetTs calls"
+        counter_value(&snapshot, "tsoracle.get_ts.success.total") >= 2,
+        "tsoracle.get_ts.success.total did not increment for both successful GetTs calls"
+    );
+    // requests.total is the honest offered load: both successes plus the
+    // NOT_LEADER rejection, counted at entry before the leader gate.
+    let requests_total = counter_value(&snapshot, "tsoracle.get_ts.requests.total");
+    assert!(
+        requests_total >= 3,
+        "tsoracle.get_ts.requests.total did not count all three GetTs RPCs (2 ok + 1 NOT_LEADER), got {requests_total}"
+    );
+    // The regression this guards: a node failing requests must show offered
+    // load climbing above successes, not flat at the success count.
+    assert!(
+        requests_total > counter_value(&snapshot, "tsoracle.get_ts.success.total"),
+        "tsoracle.get_ts.requests.total must exceed success.total when a request is rejected (NOT_LEADER)"
     );
     assert!(
         counter_value(&snapshot, "tsoracle.get_ts.timestamps_issued") >= 8,
