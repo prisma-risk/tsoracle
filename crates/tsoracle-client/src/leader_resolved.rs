@@ -15,6 +15,7 @@
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 use tonic::transport::{Channel, Endpoint};
@@ -97,6 +98,15 @@ pub struct ChannelPool {
     /// reads the same policy via [`Self::retry_policy`] to drive its
     /// per-attempt and overall deadlines.
     retry_policy: RetryPolicy,
+    /// Per-pool round-robin cursor for `iter_round_robin`. Seeded *randomly*
+    /// at construction so that different client instances start their
+    /// cold-cache probes at different configured endpoints — a fleet cold
+    /// start therefore spreads across nodes instead of every pool opening on
+    /// `configured[0]`. Advanced with a `Relaxed` `fetch_add` per worklist;
+    /// it carries no cross-thread invariant, so `Relaxed` is sufficient. A
+    /// hash of the configured endpoints would *not* distribute load — every
+    /// client ships the same endpoint list — so the seed must be random.
+    rotation: AtomicUsize,
 }
 
 impl ChannelPool {
@@ -113,6 +123,7 @@ impl ChannelPool {
             connector,
             tls_required,
             retry_policy,
+            rotation: AtomicUsize::new(rand::random_range(0..=usize::MAX)),
         }
     }
 
@@ -247,6 +258,13 @@ impl ChannelPool {
             });
         }
         accept
+    }
+
+    /// Pin the round-robin cursor to a known value so the order-asserting
+    /// tests are deterministic despite the random production seed. Test-only.
+    #[cfg(test)]
+    pub(crate) fn pin_rotation_for_test(&self, seed: usize) {
+        self.rotation.store(seed, Ordering::Relaxed);
     }
 
     /// Test-only convenience wrapper over [`Self::client_with_cell`] for the
@@ -435,13 +453,33 @@ impl ChannelPool {
         }
     }
 
+    /// The retry loop's dial order: the fresh cached leader first (if any),
+    /// then the configured endpoints in genuine round-robin order.
+    ///
+    /// Each call advances a per-pool cursor and starts the configured tail at
+    /// `cursor % configured.len()`, so successive cold-cache worklists from
+    /// one pool rotate across nodes rather than always opening on
+    /// `configured[0]`. The cursor is seeded randomly per pool (see the
+    /// `rotation` field), which is what spreads a *fleet* cold start — every
+    /// client otherwise starts at the same offset. The cached leader, when
+    /// fresh, is still dialed first and is removed from the rotated tail so it
+    /// is not dialed twice.
     pub fn iter_round_robin(&self) -> Vec<String> {
         let leader = self.cached_leader();
-        let mut endpoints = Vec::with_capacity(self.configured.len());
+        let mut endpoints = Vec::with_capacity(self.configured.len() + 1);
         if let Some(leader_endpoint) = &leader {
             endpoints.push(leader_endpoint.clone());
         }
-        for endpoint in &self.configured {
+        // Guard the modulo: an empty configured list has nothing to rotate
+        // (the hint-only path already pushed the leader above).
+        if self.configured.is_empty() {
+            return endpoints;
+        }
+        let offset = self.rotation.fetch_add(1, Ordering::Relaxed) % self.configured.len();
+        for endpoint in self.configured[offset..]
+            .iter()
+            .chain(&self.configured[..offset])
+        {
             if Some(endpoint) != leader.as_ref() {
                 endpoints.push(endpoint.clone());
             }
@@ -469,21 +507,67 @@ mod tests {
             false,
             RetryPolicy::default(),
         );
+        pool.pin_rotation_for_test(0);
         pool.record_success("b:1", 1);
         let order = pool.iter_round_robin();
         assert_eq!(order, vec!["b:1", "a:1", "c:1"]);
     }
 
     #[test]
-    fn iter_without_cache_is_configured_order() {
+    fn iter_without_cache_rotates_configured() {
         let pool = ChannelPool::new(
             vec!["a:1".into(), "b:1".into(), "c:1".into()],
             None,
             false,
             RetryPolicy::default(),
         );
-        let order = pool.iter_round_robin();
-        assert_eq!(order, vec!["a:1", "b:1", "c:1"]);
+        pool.pin_rotation_for_test(0);
+        // Successive cold-cache worklists rotate the configured order; the
+        // offset wraps at `configured.len()`.
+        assert_eq!(pool.iter_round_robin(), vec!["a:1", "b:1", "c:1"]); // offset 0
+        assert_eq!(pool.iter_round_robin(), vec!["b:1", "c:1", "a:1"]); // offset 1
+        assert_eq!(pool.iter_round_robin(), vec!["c:1", "a:1", "b:1"]); // offset 2
+        assert_eq!(pool.iter_round_robin(), vec!["a:1", "b:1", "c:1"]); // offset 3 % 3
+    }
+
+    /// The starting offset comes from the (seeded) cursor, not a hardcoded
+    /// zero — this is the mechanism behind fleet cold-start distribution. The
+    /// randomness of the production seed is trusted and intentionally not
+    /// asserted (a "different pools differ" test would be a CI-flake risk).
+    #[test]
+    fn iter_round_robin_honors_seeded_offset() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into(), "c:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.pin_rotation_for_test(1);
+        assert_eq!(pool.iter_round_robin(), vec!["b:1", "c:1", "a:1"]);
+    }
+
+    /// An empty configured list must not panic on the `% configured.len()`
+    /// rotation (modulo-by-zero) and yields an empty worklist; a cached
+    /// hint-only leader is still surfaced.
+    #[test]
+    fn iter_round_robin_empty_configured_does_not_panic() {
+        let pool = ChannelPool::new(Vec::new(), None, false, RetryPolicy::default());
+        assert!(pool.iter_round_robin().is_empty());
+        pool.record_success("hint:1", 1);
+        assert_eq!(pool.iter_round_robin(), vec!["hint:1"]);
+    }
+
+    /// A single configured endpoint is the degenerate rotation case (offset is
+    /// always `0 % 1 == 0`): every worklist is just that endpoint, and a
+    /// cached leader equal to it is emitted once, never duplicated.
+    #[test]
+    fn iter_round_robin_single_configured_endpoint() {
+        let pool = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
+        pool.pin_rotation_for_test(0);
+        assert_eq!(pool.iter_round_robin(), vec!["a:1"]);
+        assert_eq!(pool.iter_round_robin(), vec!["a:1"]);
+        pool.record_success("a:1", 1);
+        assert_eq!(pool.iter_round_robin(), vec!["a:1"]);
     }
 
     /// A higher-epoch hint must win regardless of arrival order — the
@@ -687,17 +771,16 @@ mod tests {
             false,
             policy,
         );
-        // Fresh cache prepends the leader.
-        pool.record_success("b:1", 1);
-        assert_eq!(pool.iter_round_robin(), vec!["b:1", "a:1", "c:1"]);
-        // Advance virtual time past the TTL. `start_paused = true`
-        // makes this deterministic — no real wall-clock sleep, no
-        // flake on slow CI runners.
+        pool.pin_rotation_for_test(0);
+        // Fresh cache prepends leader c; the offset-0 tail is [a, b].
+        pool.record_success("c:1", 1);
+        assert_eq!(pool.iter_round_robin(), vec!["c:1", "a:1", "b:1"]);
+        // Advance virtual time past the TTL; the entry now reads as absent.
         tokio::time::advance(std::time::Duration::from_millis(75)).await;
-        // TTL-expired cache reads as absent and falls back to the
-        // configured order.
+        // No prepend now: the worklist is the pure offset-1 rotation, in which
+        // c sits mid-list rather than being forced to the front.
         assert!(pool.cached_leader().is_none());
-        assert_eq!(pool.iter_round_robin(), vec!["a:1", "b:1", "c:1"]);
+        assert_eq!(pool.iter_round_robin(), vec!["b:1", "c:1", "a:1"]);
     }
 
     /// A successful RPC against the cached leader refreshes the TTL
