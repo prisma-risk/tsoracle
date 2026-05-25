@@ -24,8 +24,9 @@
 //! size so a single cold-cache sweep always dials every known endpoint at
 //! least once; it does not charge leader-hint redirects (issue #340).
 //! Pathological leader-hint redirect chains are bounded separately — by the
-//! worklist visited-set, the `overall_deadline`, and the absolute
-//! `MAX_LEADER_REDIRECTS` backstop in `crate::retry`.
+//! worklist visited-set, the `overall_deadline`, the per-pass
+//! `MAX_LEADER_REDIRECTS` cap, and the absolute, cross-pass
+//! `MAX_TOTAL_LEADER_REDIRECTS` backstop in `crate::retry`.
 //! `base_backoff` is
 //! the unit for the jittered exponential backoff applied between
 //! attempts when the previous attempt returned `Unavailable` or
@@ -62,10 +63,10 @@ pub struct RetryPolicy {
     ///
     /// Leader-hint redirects are not charged against this budget (they are
     /// known discovery progress, bounded instead by the per-endpoint
-    /// visited-set, the `overall_deadline`, and the absolute
-    /// `MAX_LEADER_REDIRECTS` backstop in `crate::retry`), so a legitimate
-    /// failover redirect chain can be longer than `max_attempts` and still
-    /// reach the live leader (issue #340).
+    /// visited-set, the `overall_deadline`, the per-pass `MAX_LEADER_REDIRECTS`
+    /// cap, and the absolute, cross-pass `MAX_TOTAL_LEADER_REDIRECTS` backstop in
+    /// `crate::retry`), so a legitimate failover redirect chain can be longer
+    /// than `max_attempts` and still reach the live leader (issue #340).
     pub max_attempts: usize,
     /// Wall-clock deadline applied to each `(connect, get_ts)` pair.
     /// Pushed down to `Endpoint::connect_timeout` / `Endpoint::timeout`
