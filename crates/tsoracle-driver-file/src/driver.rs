@@ -265,11 +265,9 @@ impl ConsensusDriver for FileDriver {
         at_least: u64,
         _epoch: Epoch,
     ) -> Result<u64, ConsensusError> {
-        if at_least > PHYSICAL_MS_MAX {
-            return Err(ConsensusError::PermanentDriver(Box::new(
-                FileDriverError::PhysicalMsOutOfRange(at_least),
-            )));
-        }
+        // Shared with the consensus backends so every driver rejects an
+        // out-of-range advance at the same bound before persisting it.
+        tsoracle_consensus::reject_out_of_range_advance(at_least)?;
 
         // `write_lock` serializes writers — no two `persist_high_water` calls
         // can race the disk write or the publish step below.

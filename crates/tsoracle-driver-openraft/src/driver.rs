@@ -132,6 +132,10 @@ impl<H: OpenraftHighWaterHost> ConsensusDriver for OpenraftDriver<H> {
         at_least: u64,
         _epoch: Epoch,
     ) -> Result<u64, ConsensusError> {
+        // Reject an out-of-range value before it enters the replicated log:
+        // the apply path computes an unchecked `max(prev, at_least)`, so a
+        // committed poison value can never be served and cannot self-heal.
+        tsoracle_consensus::reject_out_of_range_advance(at_least)?;
         self.host.submit_advance(at_least).await
     }
 }
@@ -394,5 +398,80 @@ mod tests {
         let peers = HashMap::new();
         let s = map_leader_state::<TypeConfig>(LeadershipState::Shutdown, &peers);
         assert_eq!(s, LeaderState::Unknown);
+    }
+
+    /// A host whose `submit_advance` echoes the requested value back as the
+    /// persisted high-water. It owns only a metrics watch (the piggy-back
+    /// shape), so it boots without a raft cluster. The echo lets a
+    /// `persist_high_water` test distinguish "the range guard rejected the
+    /// value before submission" from "the value was submitted and persisted":
+    /// an out-of-range value that reaches `submit_advance` comes back as
+    /// `Ok(at_least)`, so an `Err` proves the guard fired first.
+    struct EchoHost {
+        rx: openraft::type_config::alias::WatchReceiverOf<
+            TypeConfig,
+            openraft::RaftMetrics<TypeConfig>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::host::OpenraftHighWaterHost for EchoHost {
+        type Config = TypeConfig;
+
+        fn metrics(
+            &self,
+        ) -> openraft::type_config::alias::WatchReceiverOf<
+            Self::Config,
+            openraft::RaftMetrics<Self::Config>,
+        > {
+            self.rx.clone()
+        }
+
+        async fn current_high_water(&self) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Ok(0)
+        }
+
+        async fn submit_advance(
+            &self,
+            at_least: u64,
+        ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Ok(at_least)
+        }
+    }
+
+    fn echo_driver() -> std::sync::Arc<super::OpenraftDriver<EchoHost>> {
+        use openraft::type_config::TypeConfigExt;
+        let metrics = openraft::RaftMetrics::<TypeConfig>::new_initial(1u64);
+        let (_tx, rx) = <TypeConfig as TypeConfigExt>::watch_channel(metrics);
+        super::OpenraftDriver::new(EchoHost { rx })
+    }
+
+    #[tokio::test]
+    async fn persist_high_water_rejects_out_of_range_before_submit() {
+        use tsoracle_consensus::ConsensusDriver;
+        use tsoracle_core::PHYSICAL_MS_MAX;
+
+        let driver = echo_driver();
+
+        // Out-of-range: the guard must reject *before* the value reaches the
+        // host's log, so the poison is never durably committed.
+        let err = driver
+            .persist_high_water(PHYSICAL_MS_MAX + 1, Epoch::ZERO)
+            .await
+            .expect_err("an out-of-range advance must be rejected, not persisted");
+        assert!(
+            matches!(err, tsoracle_consensus::ConsensusError::PermanentDriver(_)),
+            "out-of-range advance must classify as PermanentDriver, got {err:?}"
+        );
+
+        // The boundary value is in range and still delegates to the host,
+        // which echoes it back — the guard rejects only what exceeds the cap.
+        assert_eq!(
+            driver
+                .persist_high_water(PHYSICAL_MS_MAX, Epoch::ZERO)
+                .await
+                .expect("the maximum in-range value must persist"),
+            PHYSICAL_MS_MAX
+        );
     }
 }
