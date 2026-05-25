@@ -20,6 +20,4 @@ pub enum StandaloneError {
     Bootstrap(Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid configuration: {0}")]
     Config(String),
-    #[error("peer-transport TLS is configured but not yet supported (sub-project 2)")]
-    TlsUnsupported,
 }

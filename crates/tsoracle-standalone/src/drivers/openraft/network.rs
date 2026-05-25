@@ -23,9 +23,9 @@
 //!     byte `data` chunks until end-of-stream. The receiver reassembles the
 //!     data buffer and calls `Raft::install_full_snapshot`.
 //!
-//! The chunked snapshot path is what makes this example safe to use with a
+//! The chunked snapshot path is what makes this transport safe to use with a
 //! state machine that grows past the default gRPC unary frame limit (4 MiB).
-//! See `proto/raft.proto` for the framing rules.
+//! See `proto/raft_peer.proto` for the framing rules.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -68,9 +68,9 @@ pub const SNAPSHOT_CHUNK_SIZE: usize = 1024 * 1024;
 /// single client-streaming RPC. The handler refuses (with `ResourceExhausted`)
 /// any stream whose cumulative `data` chunks would cross this line, so a peer
 /// that can reach the raft port cannot drive the receiver to OOM by sending an
-/// endless run of chunks. Sized generously for the example's small high-water
-/// state machine; real deployments should size this against the largest
-/// realistic state-machine snapshot.
+/// endless run of chunks. Sized generously for the small high-water state
+/// machine; real deployments should size this against the largest realistic
+/// state-machine snapshot.
 pub const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Per-message decode/encode cap applied to the peer server. It must stay
@@ -369,7 +369,7 @@ struct AssembledSnapshot {
 /// Parse the leading header chunk, then concatenate trailing `data` chunks into
 /// a single buffer, bounding the total at `max_bytes`.
 ///
-/// Framing contract (mirrors `proto/raft.proto`):
+/// Framing contract (mirrors `proto/raft_peer.proto`):
 ///   - exactly one `header` chunk at the start;
 ///   - zero or more `data` chunks afterwards;
 ///   - any other ordering is rejected as `InvalidArgument`.

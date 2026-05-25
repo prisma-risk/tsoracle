@@ -128,3 +128,29 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
         transport: TransportHandle::new(cancel_tx, join),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn build_paxos_rejects_node_absent_from_peers() {
+        let mut peers = BTreeMap::new();
+        peers.insert(2u64, "127.0.0.1:1".to_string());
+        let cfg = PaxosConfig {
+            node_id: 1,
+            peer_listen: "127.0.0.1:0".parse().unwrap(),
+            peers,
+            tso_peers: BTreeMap::new(),
+            data_dir: std::path::PathBuf::from("/this/path/must/not/be/touched"),
+            tick_interval: Duration::from_millis(20),
+        };
+        match build_paxos(cfg).await {
+            Err(StandaloneError::Config(_)) => {}
+            Err(other) => panic!("expected Config error, got {other:?}"),
+            Ok(_) => panic!("expected Config error, got Ok"),
+        }
+    }
+}
