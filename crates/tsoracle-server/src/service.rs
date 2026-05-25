@@ -75,6 +75,13 @@ fn core_status(error: CoreError) -> Status {
         } => Status::internal(format!(
             "invalid leadership window: fence_floor {fence_floor} exceeds committed_ceiling {committed_ceiling}"
         )),
+        CoreError::WindowExtensionOverflow {
+            floor,
+            now_ms,
+            ahead_ms,
+        } => Status::internal(format!(
+            "window extension overflow: max(floor {floor}, now_ms {now_ms}) + ahead_ms {ahead_ms} exceeds u64::MAX"
+        )),
     }
 }
 
