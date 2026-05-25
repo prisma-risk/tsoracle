@@ -344,6 +344,10 @@ fn deliver(
 /// `ClientError` contains `tonic::Status` and `tonic::transport::Error`,
 /// neither of which is `Clone`. To fan one RPC error out across every
 /// waiter in a failed chunk we have to reconstruct an equivalent error.
+/// `Rpc` rebuilds the `Status` from its code + message and copies the
+/// trailers, so the leader-hint trailer (`tsoracle-leader-hint-bin`) and
+/// any other metadata survive for a sibling waiter's tracing/alerting —
+/// `Status::new` alone would start with an empty metadata map.
 /// `Transport` maps to [`ClientError::TransportFanout`], carrying the
 /// original error's `Display` text: the value itself cannot be duplicated,
 /// but the failure is still a single-endpoint transport failure and must
@@ -352,7 +356,9 @@ fn deliver(
 fn clone_client_error(error: &ClientError) -> ClientError {
     match error {
         ClientError::Rpc(status) => {
-            ClientError::Rpc(tonic::Status::new(status.code(), status.message()))
+            let mut cloned = tonic::Status::new(status.code(), status.message());
+            *cloned.metadata_mut() = status.metadata().clone();
+            ClientError::Rpc(cloned)
         }
         ClientError::Transport(transport_error) => {
             ClientError::TransportFanout(transport_error.to_string())
@@ -560,6 +566,51 @@ mod tests {
             ClientError::Rpc(status) => {
                 assert_eq!(status.code(), tonic::Code::FailedPrecondition);
                 assert_eq!(status.message(), "nope");
+            }
+            other => panic!("expected Rpc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_client_error_preserves_rpc_metadata_trailers() {
+        // A failed chunk fans its error out to every sibling waiter via
+        // `clone_client_error`. The reconstructed `Rpc` status must carry the
+        // original trailers — including the `tsoracle-leader-hint-bin` trailer
+        // an operator would inspect on a sibling — not just code + message.
+        use tonic::metadata::{BinaryMetadataKey, MetadataValue};
+        use tsoracle_proto::v1::LEADER_HINT_TRAILER_KEY;
+
+        let hint_key = BinaryMetadataKey::from_bytes(LEADER_HINT_TRAILER_KEY.as_bytes())
+            .expect("LEADER_HINT_TRAILER_KEY must be a valid binary metadata key");
+        let hint_payload: &[u8] = &[1, 2, 3, 4];
+
+        let mut status = tonic::Status::failed_precondition("not leader");
+        status
+            .metadata_mut()
+            .insert_bin(hint_key.clone(), MetadataValue::from_bytes(hint_payload));
+        status
+            .metadata_mut()
+            .insert("x-trace-id", "abc-123".parse().expect("valid ascii value"));
+
+        match clone_client_error(&ClientError::Rpc(status)) {
+            ClientError::Rpc(cloned) => {
+                assert_eq!(cloned.code(), tonic::Code::FailedPrecondition);
+                assert_eq!(cloned.message(), "not leader");
+                let trailer = cloned
+                    .metadata()
+                    .get_bin(hint_key)
+                    .expect("leader-hint trailer must survive the clone");
+                assert_eq!(
+                    trailer.to_bytes().expect("base64-decodable").as_ref(),
+                    hint_payload,
+                );
+                assert_eq!(
+                    cloned
+                        .metadata()
+                        .get("x-trace-id")
+                        .expect("ascii header must survive the clone"),
+                    "abc-123",
+                );
             }
             other => panic!("expected Rpc, got {other:?}"),
         }
