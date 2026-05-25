@@ -33,7 +33,6 @@ rocksdb          = { workspace = true, optional = true, features = ["multi-threa
 serde            = { workspace = true }
 thiserror        = { workspace = true }
 tokio            = { workspace = true }
-tokio-stream     = { workspace = true }
 tracing          = { workspace = true }
 tsoracle-codec     = { workspace = true }
 tsoracle-failpoint = { workspace = true }

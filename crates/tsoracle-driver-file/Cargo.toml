@@ -27,7 +27,6 @@ crc32c             = { workspace = true }
 fs2                = "0.4"
 futures            = { workspace = true }
 libc               = "0.2"
-parking_lot        = { workspace = true }
 thiserror          = { workspace = true }
 tokio              = { workspace = true }
 tokio-stream       = { workspace = true }
