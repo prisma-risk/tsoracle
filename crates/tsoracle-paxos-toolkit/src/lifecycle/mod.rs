@@ -157,21 +157,23 @@ where
 
     /// Spawn the tick task with `sink` as the outbound transport.
     ///
-    /// # Preconditions
+    /// # Errors
     ///
-    /// Must not be called while the runner is already running. Call
-    /// [`Self::stop`] first to restart. Debug builds assert this; release
-    /// builds would leave the previous task orphaned (it exits cleanly
-    /// once its shutdown channel is dropped, but two tick tasks briefly
-    /// race during the overlap).
-    pub fn start<Sink: MessageSink<T>>(&mut self, sink: Arc<Sink>)
+    /// Returns [`AlreadyRunning`] if the runner is already running (a `start`
+    /// with no intervening [`Self::stop`]). The guard runs before either the
+    /// tick task or its outbound sender task is spawned, so a rejected call
+    /// spawns nothing and leaves the live tick task untouched — it never
+    /// overwrites the handle and orphans the prior task, which would briefly
+    /// run two tick loops on one `OmniPaxos` (double BLE ticks, double outbound
+    /// drain). `stop` `take()`s the task handle, so the runner is startable
+    /// again afterwards.
+    pub fn start<Sink: MessageSink<T>>(&mut self, sink: Arc<Sink>) -> Result<(), AlreadyRunning>
     where
         <T as Entry>::Snapshot: Send,
     {
-        debug_assert!(
-            self.handle.is_none(),
-            "PaxosRunner::start called while already running; call stop() first",
-        );
+        if self.handle.is_some() {
+            return Err(AlreadyRunning);
+        }
 
         let omnipaxos = self.omnipaxos.clone();
         let my_node_id = self.my_node_id;
@@ -278,6 +280,7 @@ where
             }
         });
         self.handle = Some(handle);
+        Ok(())
     }
 
     /// Synchronous single tick for deterministic test stepping.
@@ -362,6 +365,14 @@ where
         }
     }
 }
+
+/// [`PaxosRunner::start`] was called while the runner was already running.
+/// The call is rejected before either the tick task or its outbound sender
+/// task is spawned, so nothing is orphaned; call [`PaxosRunner::stop`] before
+/// starting again.
+#[derive(Debug, thiserror::Error)]
+#[error("PaxosRunner::start called while already running")]
+pub struct AlreadyRunning;
 
 #[cfg(test)]
 mod tests {
@@ -574,6 +585,47 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn double_start_is_rejected_and_stop_restores_startability() {
+        // Regression (H3): the double-start guard must hold in *every* build
+        // profile. The original guard was a `debug_assert!` that compiled away
+        // in release, so a second `start` there silently overwrote `self.handle`
+        // and orphaned the prior tick task — briefly running two tick loops on
+        // one `OmniPaxos` (double BLE ticks, double outbound drain). The guard
+        // now returns `Err(AlreadyRunning)` before spawning anything.
+        let mut runner = build_runner(1);
+        runner
+            .start(Arc::new(NoopSink))
+            .expect("first start on a fresh runner succeeds");
+
+        // The first tick task is parked in its loop, not finished.
+        assert!(
+            !runner
+                .handle
+                .as_ref()
+                .map(JoinHandle::is_finished)
+                .unwrap_or(true),
+            "the first tick task should still be running",
+        );
+
+        // Already running: the second start spawns nothing and reports the misuse,
+        // leaving the live tick task untouched rather than overwriting its handle.
+        assert!(
+            matches!(runner.start(Arc::new(NoopSink)), Err(AlreadyRunning)),
+            "start while already running must return Err(AlreadyRunning)",
+        );
+
+        runner.stop().await;
+
+        // stop() took the task handle, so the guard clears and a fresh start
+        // is accepted again.
+        runner
+            .start(Arc::new(NoopSink))
+            .expect("start after stop succeeds (guard cleared)");
+
+        runner.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runner_ticks_emit_unknown_state_under_dead_network() {
         // Boot a runner with a no-op MessageSink. Without inbound messages
         // from the (imaginary) peer nodes, no consensus is reached and
@@ -587,7 +639,7 @@ mod tests {
             .expect("subscriber")
             .subscribe()
             .into_pin();
-        runner.start(Arc::new(NoopSink));
+        runner.start(Arc::new(NoopSink)).expect("runner starts");
 
         // First yielded value is the initial Unknown.
         assert_eq!(stream.next().await, Some(LeaderState::Unknown));
@@ -611,7 +663,7 @@ mod tests {
         // call site in the tick task body.
         let mut runner = build_runner(1);
         let notify = runner.apply_notify();
-        runner.start(Arc::new(NoopSink));
+        runner.start(Arc::new(NoopSink)).expect("runner starts");
 
         let woke = tokio::time::timeout(Duration::from_millis(50), notify.notified()).await;
         assert!(
@@ -632,7 +684,7 @@ mod tests {
         let sink = Arc::new(BlockingSink::default());
         let entered = sink.entered.clone();
         let notify = runner.apply_notify();
-        runner.start(sink);
+        runner.start(sink).expect("runner starts");
 
         // Confirm the hang path is actually exercised (BLE emits heartbeats
         // to peers 2 and 3 every tick, so a send is attempted promptly).
@@ -662,7 +714,7 @@ mod tests {
         let mut runner = build_runner(1);
         let sink = Arc::new(BlockingSink::default());
         let entered = sink.entered.clone();
-        runner.start(sink);
+        runner.start(sink).expect("runner starts");
 
         assert!(
             wait_until(Duration::from_millis(200), || entered
@@ -694,7 +746,7 @@ mod tests {
         let mut runner = build_runner(1);
         let subscriber = runner.take_leader_subscriber().expect("subscriber");
         drop(subscriber);
-        runner.start(Arc::new(NoopSink));
+        runner.start(Arc::new(NoopSink)).expect("runner starts");
 
         let exited = wait_until(Duration::from_secs(1), || {
             runner

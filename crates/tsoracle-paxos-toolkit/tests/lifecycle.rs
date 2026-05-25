@@ -72,7 +72,7 @@ async fn runners_emit_leader_or_follower_event_after_election() {
             .expect("subscriber")
             .subscribe()
             .into_pin();
-        runner.start(sink.clone());
+        runner.start(sink.clone()).expect("runner starts");
         runners.push(runner);
         streams.push(stream);
     }

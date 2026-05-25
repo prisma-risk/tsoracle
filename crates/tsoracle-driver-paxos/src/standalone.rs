@@ -178,6 +178,17 @@ where
             return Err(AlreadyRunning);
         }
 
+        // Start the runner's tick task first. The runner enforces the same
+        // not-already-running invariant; mapping its rejection onto this
+        // host's `AlreadyRunning` keeps the guards in lockstep, and starting
+        // it before spawning the apply task means a rejection cannot orphan a
+        // freshly-spawned apply task. The host guard above makes this branch
+        // unreachable in practice (task and tick handle move together), so the
+        // map is belt-and-suspenders.
+        self.runner
+            .start(sink)
+            .map_err(|_runner_already_running| AlreadyRunning)?;
+
         // Hand the apply task the shared cursor (seeded in `new` past the
         // recovered suffix) so it resumes there instead of re-draining the
         // decided log from 0 on its first wake.
@@ -186,7 +197,6 @@ where
             self.omnipaxos.clone(),
             self.apply_cursor.clone(),
         ));
-        self.runner.start(sink);
         Ok(())
     }
 
