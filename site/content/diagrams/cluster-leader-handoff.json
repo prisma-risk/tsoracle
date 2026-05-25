@@ -38,7 +38,7 @@
     ],
     "annotations": [
         {"t": 0,    "text": "Term 5. N1 is leader, all nodes agree hwm=50. The window allocator on N1 issues IDs above 50."},
-        {"t": 1800, "text": "N1 fails. Its window allocator stops issuing the moment its propose_advance calls error."},
+        {"t": 1800, "text": "N1 fails. Its window allocator stops issuing the moment its persist_high_water calls error."},
         {"t": 2100, "text": "N2 and N3 start randomized election timeouts."},
         {"t": 3400, "text": "N2's timeout fires first. Term 6. Votes for itself, asks N3."},
         {"t": 4600, "text": "N3 grants the vote. N2's log is at least as up-to-date as N3's (both hwm=50)."},
