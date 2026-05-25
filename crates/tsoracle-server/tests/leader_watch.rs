@@ -174,8 +174,8 @@ async fn first_grant_strictly_above_prior_high_water_when_prior_exceeds_now() {
         grant.first() > prior_leader_max_ts,
         "first grant = (physical_ms={}, logical={}); prior leader could have issued up to \
          (physical_ms={}, logical={}). New leader's first timestamp must be strictly greater.",
-        grant.physical_ms,
-        grant.logical_start,
+        grant.physical_ms(),
+        grant.logical_start(),
         prior_max,
         LOGICAL_MAX,
     );

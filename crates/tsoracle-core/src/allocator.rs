@@ -15,18 +15,91 @@
 
 use crate::{Epoch, LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp};
 
+/// A contiguous block of `count` timestamps starting at
+/// `(physical_ms, logical_start)`, all sharing one leadership `epoch`.
+///
+/// Fields are private and the only public constructor is
+/// [`try_new`](Self::try_new), which validates that every timestamp the grant
+/// covers fits the packed 46-bit physical / 18-bit logical layout. A value of
+/// this type is therefore proof that [`first`](Self::first) and
+/// [`last`](Self::last) can pack without panicking — the in-range invariant is
+/// guaranteed by the type, not by the one constructor that happens to build it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WindowGrant {
-    pub physical_ms: u64,
-    pub logical_start: u32,
-    pub count: u32,
-    pub epoch: Epoch,
+    physical_ms: u64,
+    logical_start: u32,
+    count: u32,
+    epoch: Epoch,
 }
 
 impl WindowGrant {
+    /// Construct a grant, checking that every timestamp it covers packs
+    /// cleanly. This is the only way to build a `WindowGrant` outside this
+    /// module, so a constructed value witnesses that `first`/`last` are
+    /// infallible.
+    ///
+    /// Rejects `count == 0` (a grant covers at least one timestamp, and
+    /// `last`'s `logical_start + count - 1` would underflow). The range check
+    /// defers to [`Timestamp::try_pack`] on the *last* logical the grant emits:
+    /// it is the single source of truth for the bit layout, and since
+    /// `logical_start <= last_logical <= LOGICAL_MAX` validating the last
+    /// boundary validates the first by implication.
+    pub fn try_new(
+        physical_ms: u64,
+        logical_start: u32,
+        count: u32,
+        epoch: Epoch,
+    ) -> Result<Self, CoreError> {
+        if count == 0 {
+            return Err(CoreError::InvalidCount(0));
+        }
+        let last_logical =
+            logical_start
+                .checked_add(count - 1)
+                .ok_or(CoreError::LogicalRangeOutOfRange {
+                    logical_start,
+                    count,
+                })?;
+        Timestamp::try_pack(physical_ms, last_logical).map_err(|err| match err {
+            crate::TimestampError::PhysicalMsOutOfRange { physical_ms, .. } => {
+                CoreError::PhysicalMsOutOfRange(physical_ms)
+            }
+            crate::TimestampError::LogicalOutOfRange { .. } => CoreError::LogicalRangeOutOfRange {
+                logical_start,
+                count,
+            },
+        })?;
+        Ok(WindowGrant {
+            physical_ms,
+            logical_start,
+            count,
+            epoch,
+        })
+    }
+
+    pub fn physical_ms(&self) -> u64 {
+        self.physical_ms
+    }
+    pub fn logical_start(&self) -> u32 {
+        self.logical_start
+    }
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+    pub fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    /// The first timestamp in the grant. Infallible: [`try_new`](Self::try_new)
+    /// validated `(physical_ms, logical_start)` is in range, so `pack` cannot
+    /// trip its `assert!`.
     pub fn first(&self) -> Timestamp {
         Timestamp::pack(self.physical_ms, self.logical_start)
     }
+    /// The last timestamp in the grant. Infallible: [`try_new`](Self::try_new)
+    /// validated `(physical_ms, logical_start + count - 1)` is in range (and
+    /// `count >= 1`, so the subtraction cannot underflow), so `pack` cannot
+    /// trip its `assert!`.
     pub fn last(&self) -> Timestamp {
         Timestamp::pack(self.physical_ms, self.logical_start + self.count - 1)
     }
@@ -42,6 +115,8 @@ pub enum CoreError {
     InvalidCount(u32),
     #[error("physical_ms {0} exceeds 46-bit maximum")]
     PhysicalMsOutOfRange(u64),
+    #[error("logical range [{logical_start}, +{count}) exceeds the 18-bit logical field")]
+    LogicalRangeOutOfRange { logical_start: u32, count: u32 },
     #[error(
         "invalid leadership window: fence_floor {fence_floor} exceeds committed_ceiling {committed_ceiling}"
     )]
@@ -210,12 +285,12 @@ impl Allocator {
             count,
         )?;
 
-        let grant = WindowGrant {
-            physical_ms,
-            logical_start,
-            count,
-            epoch: *epoch,
-        };
+        // project_grant already guarantees physical_ms and the logical range
+        // are in bounds, so this construction never fails in practice — but
+        // routing through the checked constructor propagates a CoreError rather
+        // than panicking should that invariant ever be violated, and keeps this
+        // path free of the unwrap/expect the crate's panic policy bans.
+        let grant = WindowGrant::try_new(physical_ms, logical_start, count, *epoch)?;
         *next_physical_ms = physical_ms;
         *next_logical = logical_start + count;
         Ok(grant)
@@ -684,5 +759,67 @@ mod tests {
         let second = allocator.try_grant(1, 1).unwrap();
         assert_eq!(second.physical_ms, 2);
         assert_eq!(second.logical_start, 0);
+    }
+
+    #[test]
+    fn try_new_accepts_valid_grant_and_packs_boundaries() {
+        // A checked grant exposes its fields through accessors and its
+        // boundary timestamps pack without panicking — first() at
+        // logical_start, last() at logical_start + count - 1.
+        let grant = WindowGrant::try_new(1_000, 5, 3, Epoch(7)).unwrap();
+        assert_eq!(grant.physical_ms(), 1_000);
+        assert_eq!(grant.logical_start(), 5);
+        assert_eq!(grant.count(), 3);
+        assert_eq!(grant.epoch(), Epoch(7));
+        assert_eq!(grant.first(), Timestamp::pack(1_000, 5));
+        assert_eq!(grant.last(), Timestamp::pack(1_000, 7));
+    }
+
+    #[test]
+    fn try_new_accepts_max_logical_boundary() {
+        // logical_start + count - 1 == LOGICAL_MAX is the widest in-range grant.
+        let grant = WindowGrant::try_new(1_000, 0, LOGICAL_MAX + 1, Epoch(1)).unwrap();
+        assert_eq!(grant.last(), Timestamp::pack(1_000, LOGICAL_MAX));
+    }
+
+    #[test]
+    fn try_new_rejects_zero_count() {
+        // count == 0 would underflow logical_start + count - 1 in last().
+        assert_eq!(
+            WindowGrant::try_new(1_000, 0, 0, Epoch(1)),
+            Err(CoreError::InvalidCount(0))
+        );
+    }
+
+    #[test]
+    fn try_new_rejects_out_of_range_physical_ms() {
+        assert_eq!(
+            WindowGrant::try_new(PHYSICAL_MS_MAX + 1, 0, 1, Epoch(1)),
+            Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
+        );
+    }
+
+    #[test]
+    fn try_new_rejects_logical_range_overflow() {
+        // last logical (logical_start + count - 1) exceeds the 18-bit field.
+        assert_eq!(
+            WindowGrant::try_new(1_000, LOGICAL_MAX, 2, Epoch(1)),
+            Err(CoreError::LogicalRangeOutOfRange {
+                logical_start: LOGICAL_MAX,
+                count: 2
+            })
+        );
+    }
+
+    #[test]
+    fn try_new_rejects_logical_count_u32_overflow() {
+        // logical_start + (count - 1) overflows u32 before any range check.
+        assert_eq!(
+            WindowGrant::try_new(1_000, u32::MAX, 2, Epoch(1)),
+            Err(CoreError::LogicalRangeOutOfRange {
+                logical_start: u32::MAX,
+                count: 2
+            })
+        );
     }
 }
