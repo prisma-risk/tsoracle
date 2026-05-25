@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,33 +37,11 @@ EXCLUDED_DIR_NAMES = frozenset({"target", ".git", ".venv", "node_modules"})
 # Path prefixes (posix-style, relative to repo root) excluded from the scan.
 EXCLUDED_PATH_PREFIXES: tuple[str, ...] = (".claude/worktrees",)
 
-# Body content of each header line, without comment marker. An empty entry
-# renders as a bare `//` (used for the visual top/bottom borders and the
-# blank rows between sections).
-_HEADER_BODY_LINES: tuple[str, ...] = (
-    "",
-    "  ░▀█▀░█▀▀░█▀█░█▀▄░█▀█░█▀▀░█░░░█▀▀",
-    "  ░░█░░▀▀█░█░█░█▀▄░█▀█░█░░░█░░░█▀▀",
-    "  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀",
-    "",
-    "  tsoracle — Distributed Timestamp Oracle",
-    "  https://www.tsoracle.rs",
-    "",
-    "  Copyright (c) 2026 Prisma Risk",
-    "",
-    '  Licensed under the Apache License, Version 2.0 (the "License");',
-    "  you may not use this file except in compliance with the License.",
-    "  You may obtain a copy of the License at",
-    "",
-    "      https://www.apache.org/licenses/LICENSE-2.0",
-    "",
-    "  Unless required by applicable law or agreed to in writing, software",
-    '  distributed under the License is distributed on an "AS IS" BASIS,',
-    "  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.",
-    "  See the License for the specific language governing permissions and",
-    "  limitations under the License.",
-    "",
-)
+# The canonical header text lives in a sibling file so that non-Python tooling
+# can share the exact same source of truth. In particular
+# scripts/check-critical-path.sh reads it to size its marker scan window from
+# the header's line count, keeping the two scripts in lockstep automatically.
+HEADER_PATH = Path(__file__).resolve().parent / "header.txt"
 
 # Substring used to recognize an *existing* (possibly stale) tsoracle header
 # in the leading comment block so --fix can replace it cleanly instead of
@@ -71,13 +50,21 @@ _HEADER_BODY_LINES: tuple[str, ...] = (
 EXISTING_HEADER_SIGNATURE = "Prisma Risk"
 
 
+@lru_cache(maxsize=1)
 def render_header() -> str:
-    """Produce the canonical header text."""
-    lines = [
+    """Render the canonical header by prefixing each body line from
+    scripts/header.txt with the comment marker.
+
+    The file stores the header *body* without any comment marker so it stays
+    language-agnostic and shareable with non-Rust tooling (notably
+    scripts/check-critical-path.sh, which reads it to size its marker scan
+    window). An empty body line renders as a bare `//`."""
+    body_lines = HEADER_PATH.read_text().splitlines()
+    rendered = [
         f"{COMMENT_PREFIX}{body}" if body else COMMENT_PREFIX
-        for body in _HEADER_BODY_LINES
+        for body in body_lines
     ]
-    return "\n".join(lines) + "\n"
+    return "\n".join(rendered) + "\n"
 
 
 def display_path(path: Path) -> str:

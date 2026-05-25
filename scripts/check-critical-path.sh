@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Enforces the rules in docs/performance-critical-path.md against every file
-# whose first 10 lines contain the `#[PerformanceCriticalPath]` marker.
+# that carries the `#[PerformanceCriticalPath]` marker (found by a full-file
+# scan), and additionally checks that each marker sits near the top of its file.
 #
 # Modes (controlled by env var CRITICAL_PATH_STRICT):
 #   - unset or "0": warn-only. Prints violations, exits 0.
@@ -41,32 +42,55 @@ declare -a BANNED=(
   'println!'
 )
 
-# The scan window for the marker. Files where the marker sits below this many
-# lines silently fall out of enforcement — see docs/performance-critical-path.md
-# for the placement rule.
-#
-# Sized to accommodate the 11-line canonical copyright header (enforced by
-# scripts/check-ts-header.py) plus a blank separator line plus the marker
-# itself, with slack for a short `#![cfg_attr(...)]` inner attribute. Bumping
-# this too high would let the marker hide under a long `//!` module doc; the
-# whole point is that the marker must sit *above* the module's own contents.
-SCAN_WINDOW=25
-
 # Locate repo root so the guard works from CI and from subdirectories.
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$REPO_ROOT"
 
-# Find candidate files. We only scan under `crates/` since production code lives
-# there. `mapfile` is not available on macOS bash 3.2, so we use a
-# newline-terminated while-read loop — no path in this repo contains whitespace
-# or newlines.
+# The placement window for the marker: how many lines from the top the marker
+# is allowed to sit. A marker found below this line is reported as misplaced
+# (not silently ignored) — see docs/performance-critical-path.md for the rule.
+#
+# Derived from the canonical copyright header (scripts/header.txt — the single
+# source of truth shared with scripts/check-ts-header.py) so the window tracks
+# the header automatically: when the header grows or shrinks, this follows. The
+# marker sits just below the header (a blank separator line, then the marker),
+# so the allowance is only a couple of lines past the header's end — enough for
+# that separator plus a little slack. Keeping it tight is the point: the marker
+# must sit *above* the module's own contents, not hidden under a long `//!`
+# module doc or a stack of inner attributes.
+HEADER_FILE="scripts/header.txt"
+POST_HEADER_ALLOWANCE=3
+if [[ ! -f "$HEADER_FILE" ]]; then
+  echo "error: $HEADER_FILE not found (needed to size the marker scan window)" >&2
+  exit 1
+fi
+HEADER_LINES=$(awk 'END { print NR }' "$HEADER_FILE")
+SCAN_WINDOW=$((HEADER_LINES + POST_HEADER_ALLOWANCE))
+
+# Matches the marker *as a marker*: a line whose only content is the marker
+# comment. Anchoring to the whole line means prose that merely mentions the
+# marker — e.g. a doc comment containing `#[PerformanceCriticalPath]` in
+# backticks — is not mistaken for an actual marker. Used by `grep -E`.
+MARKER_LINE_RE='^[[:space:]]*//[[:space:]]*#\[PerformanceCriticalPath\][[:space:]]*$'
+
+# Find every file carrying the marker, scanning the *whole* file rather than
+# just the top: a marker that has drifted below the placement window must still
+# be found (and flagged as misplaced) instead of silently escaping the guard.
+# The marker is an opt-in signal, so we honor it wherever it lands across the
+# repo rather than trusting directory layout. `mapfile` is not available on
+# macOS bash 3.2, so we use a newline-terminated while-read loop — no path in
+# this repo contains whitespace or newlines.
 MARKED=()
 while IFS= read -r f; do
   [[ -n "$f" ]] && MARKED+=("$f")
 done < <(
-  find crates -name '*.rs' -print \
+  find . -name '*.rs' \
+       -not -path './target/*' \
+       -not -path './.git/*' \
+       -not -path '*/node_modules/*' \
+       -not -path '*/.claude/worktrees/*' -print \
     | while IFS= read -r candidate; do
-        if head -n "$SCAN_WINDOW" "$candidate" | grep -q '#\[PerformanceCriticalPath\]'; then
+        if grep -Eq "$MARKER_LINE_RE" "$candidate"; then
           printf '%s\n' "$candidate"
         fi
       done
@@ -79,6 +103,17 @@ fi
 
 FAIL=0
 for file in "${MARKED[@]}"; do
+  # Placement check: the marker must sit near the top, above the module's own
+  # contents. Flag (rather than ignore) a marker that sits below the window.
+  marker_line=$(grep -nE "$MARKER_LINE_RE" "$file" | head -1 | cut -d: -f1)
+  if (( marker_line > SCAN_WINDOW )); then
+    echo "MISPLACED MARKER: $file has #[PerformanceCriticalPath] on line $marker_line"
+    echo "    (must sit within the first $SCAN_WINDOW lines, directly below the copyright header)"
+    FAIL=1
+  fi
+
+  # Banned-pattern enforcement. Applies to every marked file regardless of where
+  # the marker sits — logging discipline is independent of marker placement.
   for pat in "${BANNED[@]}"; do
     if grep -nE "$pat" "$file" >/dev/null 2>&1; then
       echo "VIOLATION: $file contains banned pattern '$pat'"
