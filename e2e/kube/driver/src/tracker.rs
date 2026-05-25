@@ -110,4 +110,24 @@ mod tests {
         let t = Tracker::<u64>::new();
         assert!(!t.passed());
     }
+
+    /// `report` prints a one-line summary and returns the same verdict as
+    /// `passed`. Driving it through both a clean run and a failing run exercises
+    /// both arms of the PASS/FAIL formatting. Also reaches the `Default` impl,
+    /// which production constructs the tracker through.
+    #[test]
+    fn report_mirrors_passed_for_clean_and_failing_runs() {
+        let mut clean = Tracker::<u64>::default();
+        clean.record_ok(1);
+        clean.record_ok(2);
+        assert!(
+            clean.report("clean"),
+            "a strictly-increasing run reports PASS"
+        );
+
+        let mut dirty = Tracker::<u64>::default();
+        dirty.record_ok(1);
+        dirty.record_err();
+        assert!(!dirty.report("dirty"), "a run with an error reports FAIL");
+    }
 }

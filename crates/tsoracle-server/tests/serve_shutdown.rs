@@ -102,6 +102,42 @@ async fn serve_with_listener_resolves_when_watch_task_terminates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_binds_addr_and_resolves_when_watch_task_terminates() {
+    // `Server::serve(addr)` is the addr-binding convenience over
+    // `serve_with_shutdown(addr, pending())`: it owns the bind and wires a
+    // never-resolving shutdown future, so the watch task is its only exit path.
+    // A leadership stream that closes immediately drives that exit
+    // deterministically, proving `serve` forwards the watch outcome verbatim
+    // like the listener variant above.
+    //
+    // Reserve a loopback port and release it so `serve` can bind it itself; the
+    // watch stream closes regardless of the bind, so the race window is benign.
+    let addr = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+
+    let driver: Arc<dyn ConsensusDriver> = Arc::new(ClosedStreamDriver);
+
+    let server = Server::builder()
+        .consensus_driver(driver)
+        .clock(Arc::new(SystemClock))
+        .build()
+        .unwrap();
+
+    let serve_task = tokio::spawn(async move { server.serve(addr).await });
+    let outcome = tokio::time::timeout(Duration::from_secs(5), serve_task)
+        .await
+        .expect("serve must return after the watch stream closes")
+        .expect("spawned task panicked");
+    match outcome {
+        Err(ServerError::WatchStreamClosed) => {}
+        other => panic!("expected WatchStreamClosed, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_with_listener_translates_watch_panic_to_server_error() {
     // A driver whose `leadership_events()` panics on first poll triggers
     // `catch_unwind` in `into_router`, which republishes NotServing and

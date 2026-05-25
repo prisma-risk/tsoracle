@@ -144,7 +144,14 @@ COV_IGNORE_BENCHMARKS := benchmarks/.*
 # legitimate "rare race" retry paths that local CI never trips.
 COV_IGNORE_TEST_SUPPORT := crates/tsoracle-server/src/test_support
 
-COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_BENCHMARKS)|$(COV_IGNORE_TEST_SUPPORT))\.rs
+# The kind-based e2e driver's binary entrypoint (`main`, `run_soak`,
+# `run_cold_start`, the `clap` CLI): it dials a live multi-node cluster and is
+# exercised only in the opt-in Kubernetes e2e lane, never under `cargo test`.
+# Its pure verdict logic lives in `tracker.rs`, which stays measured and carries
+# its own unit tests; only the unreachable I/O entrypoint is dropped here.
+COV_IGNORE_KUBE_E2E_MAIN := e2e/kube/driver/src/main
+
+COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_BENCHMARKS)|$(COV_IGNORE_TEST_SUPPORT)|$(COV_IGNORE_KUBE_E2E_MAIN))\.rs
 
 # Shared exclude flags so `coverage` (lcov for CI) and `coverage-html` (local
 # browsable report) cannot drift apart on which crates participate.
