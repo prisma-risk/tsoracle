@@ -135,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
         let sink = Arc::new(MeshSink {
             network: network.clone(),
         });
-        host.start(sink);
+        host.start(sink).context("host not already running")?;
 
         // ---- Driver + tsoracle server ----
         let driver = Arc::new(PaxosDriver::new(host, leader_stream));

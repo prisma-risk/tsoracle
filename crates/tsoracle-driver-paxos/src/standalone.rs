@@ -160,16 +160,20 @@ where
     /// awaits the runner's `apply_notify` and drains decided entries
     /// into the in-memory high-water on each wake.
     ///
-    /// # Preconditions
+    /// # Errors
     ///
-    /// Must not be called while the host is already running. Debug
-    /// builds assert this; release builds would leave the previous
-    /// apply task orphaned.
-    pub fn start<Sink: MessageSink<HighWaterCommand>>(&mut self, sink: Arc<Sink>) {
-        debug_assert!(
-            self.task.is_none(),
-            "StandaloneHost::start called while already running",
-        );
+    /// Returns [`AlreadyRunning`] if the host is already running (a
+    /// `start` with no intervening [`Self::stop`]). The guard runs before
+    /// either task is spawned, so a rejected call spawns nothing and leaves
+    /// the live apply/tick tasks untouched — it never orphans them. `stop`
+    /// `take()`s the task handle, so the host is startable again afterwards.
+    pub fn start<Sink: MessageSink<HighWaterCommand>>(
+        &mut self,
+        sink: Arc<Sink>,
+    ) -> Result<(), AlreadyRunning> {
+        if self.task.is_some() {
+            return Err(AlreadyRunning);
+        }
 
         // Hand the apply task the shared cursor (seeded in `new` past the
         // recovered suffix) so it resumes there instead of re-draining the
@@ -180,6 +184,7 @@ where
             self.apply_cursor.clone(),
         ));
         self.runner.start(sink);
+        Ok(())
     }
 
     /// Signal shutdown and await both the runner tick task and the
@@ -384,6 +389,14 @@ pub enum BuilderError {
     #[error("my_node_id is required")]
     MissingNodeId,
 }
+
+/// [`StandaloneHost::start`] was called while the host was already running.
+/// The call is rejected before either the apply task or the runner tick task
+/// is spawned, so nothing is orphaned; call [`StandaloneHost::stop`] before
+/// starting again.
+#[derive(Debug, thiserror::Error)]
+#[error("StandaloneHost::start called while already running")]
+pub struct AlreadyRunning;
 
 #[async_trait]
 impl<S> PaxosHighWaterHost for StandaloneHost<S>

@@ -191,7 +191,7 @@ where
             "node {node_id} is already running",
         );
         let host = slot.host.as_mut().expect("host present");
-        host.start(sink);
+        host.start(sink).expect("host not already running");
         let inbox = slot.inbox.take().expect("inbox present");
         let (stop_tx, stop_rx) = oneshot::channel();
         slot.pump_stop = Some(stop_tx);

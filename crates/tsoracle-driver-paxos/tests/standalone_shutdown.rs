@@ -90,7 +90,8 @@ async fn stop_delivers_shutdown_when_apply_task_is_mid_iteration() {
     let gate = yieldpoint::cfg(APPLY_TASK_YIELD);
 
     let mut host = build_host();
-    host.start(Arc::new(NoopSink));
+    host.start(Arc::new(NoopSink))
+        .expect("fresh host is not already running");
 
     // The runner's first tick (~2 ms in) fires apply_notify; the apply
     // task wakes, runs drain+maybe_snapshot, then parks at the yield
