@@ -21,7 +21,7 @@
 //! `crate::retry::issue_rpc` loop applies a tighter rule to *wire-supplied*
 //! `tsoracle-leader-hint-bin` trailers under `tls_config`: explicit
 //! `http://...` hints are dropped so a contacted peer cannot downgrade the
-//! transport. See `crate::retry::rejects_plaintext_hint`.
+//! transport. See `crate::leader_hint::rejects_plaintext_hint`.
 
 use std::future::Future;
 use std::pin::Pin;

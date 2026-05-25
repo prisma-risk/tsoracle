@@ -19,10 +19,10 @@ use std::time::Duration;
 use tsoracle_core::Epoch;
 
 use crate::budget::PairBudget;
-use crate::error::ClientError;
 use crate::channel_pool::ChannelPool;
+use crate::error::ClientError;
+use crate::leader_hint::classify_not_leader_hint;
 use crate::response::{TimestampRange, decode_get_ts_response};
-use crate::retry::classify_not_leader_hint;
 use crate::retry_policy::is_transport_failure;
 
 /// Per-attempt outcome the retry loop dispatches on.

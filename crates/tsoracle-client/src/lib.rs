@@ -21,6 +21,7 @@ mod channel_pool;
 mod driver;
 mod driver_supervisor;
 mod error;
+mod leader_hint;
 mod response;
 mod retry;
 mod retry_policy;
