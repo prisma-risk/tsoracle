@@ -142,7 +142,7 @@ async fn fence_panic_after_persist_advances_durable_but_not_serving() {
 /// drain guard. A `panic` action verifies the fail-safe documented on
 /// `Server::into_router`: when the leader-watch task panics from a `Serving`
 /// state, the `catch_unwind` wrapper in `into_router` calls
-/// `step_down_due_to_consensus_rejection` before resuming the unwind, so
+/// `ServingCore::step_down` before resuming the unwind, so
 /// embedders who mount `into_router` directly and never observe the
 /// `WatchGuard`'s outcome still see serving state transition to `NotServing`
 /// and subsequent RPCs fail fast with `FAILED_PRECONDITION`. Without the

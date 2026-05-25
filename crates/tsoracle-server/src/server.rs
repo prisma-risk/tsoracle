@@ -11,7 +11,6 @@
 //
 
 use core::time::Duration;
-use parking_lot::Mutex;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,12 +18,13 @@ use tokio::sync::watch;
 use tonic::service::Routes;
 use tonic::transport::Server as TonicServer;
 use tsoracle_consensus::ConsensusDriver;
-use tsoracle_core::{Allocator, Bt, Clock, Epoch, SystemClock};
+use tsoracle_core::{Bt, Clock, Epoch, SystemClock};
 #[cfg(any(test, feature = "test-fakes"))]
 use tsoracle_core::{CoreError, WindowGrant};
 use tsoracle_proto::v1::tso_service_server::TsoServiceServer;
 
 use crate::service::TsoServiceImpl;
+use crate::serving_core::ServingCore;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
@@ -127,25 +127,12 @@ impl ServerBuilder {
     pub fn build(self) -> Result<Server, BuildError> {
         let consensus = self.consensus.ok_or(BuildError::MissingConsensusDriver)?;
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
-        // Discard the receiver minted by `watch::channel`: `state_tx` is the
-        // single source of truth. It mints fresh receivers on demand via
-        // `subscribe()` and reads its current value via `borrow()`, so no parked
-        // receiver needs to live on the server. Publish sites use `send_replace`
-        // (not `send`) so a transition still mutates and notifies even when no
-        // embedder has subscribed and `receiver_count` is zero.
-        let (state_tx, _) = watch::channel(ServingState::NotServing {
-            leader_endpoint: None,
-            leader_epoch: None,
-        });
         Ok(Server {
             consensus,
             clock,
             window_ahead: self.window_ahead,
             failover_advance: self.failover_advance,
-            allocator: Arc::new(Mutex::new(Allocator::new())),
-            state_tx,
-            extension_lock: Arc::new(tokio::sync::Mutex::new(())),
-            extension_gate: Arc::new(tokio::sync::RwLock::new(())),
+            core: ServingCore::new(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: self.tls_config,
         })
@@ -157,23 +144,9 @@ pub struct Server {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) window_ahead: Duration,
     pub(crate) failover_advance: Duration,
-    pub(crate) allocator: Arc<Mutex<Allocator>>,
-    /// Source of truth for serving state. Mints receivers for [`Server::subscribe`]
-    /// and is read synchronously via `borrow()` by the service layer; publish
-    /// sites use `send_replace` so transitions land even with zero receivers.
-    pub(crate) state_tx: watch::Sender<ServingState>,
-    /// Serializes window extensions so a stampeding burst of `WindowExhausted`
-    /// requests resolves to a single `persist_high_water` round-trip. Acquired
-    /// before `extension_gate`; combined with a recheck-after-acquire inside
-    /// `extend_window`, latecomers find the window already extended and
-    /// return without contacting consensus.
-    pub(crate) extension_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Read-locked by window-extension calls for the duration of their
-    /// prepare → persist → commit dance. The leader-watch task takes a
-    /// write lock between clearing serving and calling load_high_water,
-    /// which drains all in-flight extensions started under the prior epoch
-    /// before the fence proceeds.
-    pub(crate) extension_gate: Arc<tokio::sync::RwLock<()>>,
+    /// Owns the allocator, serving-state channel, and both extension locks, with
+    /// the lock-ordering and step-down invariants private behind its methods.
+    pub(crate) core: ServingCore,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub(crate) tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -207,43 +180,7 @@ impl Server {
     /// future newtype around `ServingState`) without breaking embedders that
     /// go through it.
     pub fn subscribe(&self) -> watch::Receiver<ServingState> {
-        self.state_tx.subscribe()
-    }
-
-    /// Single transition API used in response to evidence that the current
-    /// epoch is no longer valid: consensus rejection (NotLeader/Fenced
-    /// during persist), leader-watch task termination, or other authoritative
-    /// signals of leadership loss.
-    ///
-    /// Clears the allocator BEFORE publishing `NotServing` so a racing
-    /// `try_grant` either (a) observes `CoreError::NotLeader` rather than
-    /// handing out a stale-epoch grant, or (b) succeeds against a still-valid
-    /// epoch and the *next* call observes `NotServing`. Either ordering is
-    /// safe; what is not safe is the inverse (publish first, clear later)
-    /// because a request between those two steps would see `Serving` AND a
-    /// still-leader allocator.
-    ///
-    /// Does NOT take `extension_gate.write()`. That would deadlock against
-    /// in-flight extensions currently holding the read lock and awaiting
-    /// `persist_high_water`. Those in-flights will either complete cleanly
-    /// (the next `try_grant` then sees `NotServing`) or fail with
-    /// NotLeader/Fenced (and reach this helper themselves — it is idempotent).
-    ///
-    /// `leader_epoch` carries the authoritative new-leader epoch when the
-    /// rejection reveals it — e.g. `ConsensusError::Fenced { current, .. }`
-    /// names the epoch that fenced us. Publishing it lets the resulting
-    /// `NotServing` hint redirect clients with an epoch to validate against;
-    /// callers with no epoch to offer (stream closure, panic) pass `None`.
-    pub(crate) fn step_down_due_to_consensus_rejection(
-        &self,
-        leader_endpoint: Option<String>,
-        leader_epoch: Option<Epoch>,
-    ) {
-        self.allocator.lock().on_leadership_lost();
-        self.state_tx.send_replace(ServingState::NotServing {
-            leader_endpoint,
-            leader_epoch,
-        });
+        self.core.subscribe()
     }
 }
 
@@ -332,7 +269,7 @@ impl Server {
                     if let Err(ref _e) = result {
                         // Poison BEFORE returning so embedders who do not observe
                         // the guard still get fail-safe behavior.
-                        watch_server.step_down_due_to_consensus_rejection(None, None);
+                        watch_server.core.step_down(None, None);
                         #[cfg(feature = "tracing")]
                         tracing::error!(error = %_e, "leader-watch terminated; serving disabled");
                     }
@@ -341,7 +278,7 @@ impl Server {
                 Err(panic_payload) => {
                     // Mirror the Err branch: poison BEFORE re-raising so
                     // guard-dropping embedders still observe NotServing.
-                    watch_server.step_down_due_to_consensus_rejection(None, None);
+                    watch_server.core.step_down(None, None);
                     #[cfg(feature = "tracing")]
                     tracing::error!("leader-watch panicked; serving disabled");
                     std::panic::resume_unwind(panic_payload);
@@ -713,7 +650,7 @@ impl Server {
     /// timestamp at or below the prior leader's high-water) directly.
     #[doc(hidden)]
     pub fn try_grant_for_tests(&self, count: u32) -> Result<WindowGrant, CoreError> {
-        self.allocator.lock().try_grant(self.clock.now_ms(), count)
+        self.core.try_grant(self.clock.now_ms(), count)
     }
 }
 
@@ -749,36 +686,27 @@ mod tests {
     }
 
     #[test]
-    fn serving_transitions_publish_without_an_external_subscriber() {
-        // Regression guard for #346. With the parked `state_rx` field gone, the
-        // plain `serve(addr)` path holds zero receivers unless an embedder calls
-        // `subscribe()`. `watch::Sender::send` is a no-op that leaves the value
-        // untouched when `receiver_count == 0`, so the publish sites use
-        // `send_replace` (which mutates and notifies unconditionally) and reads
-        // go through `state_tx.borrow()`. Were a publish site to use `send`,
-        // this transition would be silently dropped and a leaderless-then-leader
-        // server could stay NotServing forever.
-        //
-        // Built without `subscribe()`, so `receiver_count` is zero when the
-        // production publish site below fires.
+    fn serving_transitions_publish_through_core() {
+        // The Server delegates serving-state transitions to its ServingCore; a
+        // step_down on a freshly built Server lands as NotServing with the hint.
+        // (The #346 send_replace-with-zero-receivers regression is pinned by the
+        // ServingCore unit tests, which can observe `receiver_count` directly.)
         let server = Server::builder()
             .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
             .build()
             .expect("build must succeed");
-        assert_eq!(server.state_tx.receiver_count(), 0);
 
-        server.step_down_due_to_consensus_rejection(
-            Some("http://new-leader:9000".into()),
-            Some(Epoch(7)),
-        );
+        server
+            .core
+            .step_down(Some("http://new-leader:9000".into()), Some(Epoch(7)));
 
-        match &*server.state_tx.borrow() {
+        match server.core.serving_state() {
             ServingState::NotServing {
                 leader_endpoint,
                 leader_epoch,
             } => {
                 assert_eq!(leader_endpoint.as_deref(), Some("http://new-leader:9000"));
-                assert_eq!(*leader_epoch, Some(Epoch(7)));
+                assert_eq!(leader_epoch, Some(Epoch(7)));
             }
             ServingState::Serving => panic!("expected NotServing after step_down"),
         }
