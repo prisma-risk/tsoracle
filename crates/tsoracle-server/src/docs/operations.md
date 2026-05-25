@@ -71,3 +71,5 @@ The consensus driver owns the mapping from consensus leader identity to tsoracle
 **HA via your own consensus:** N nodes (typically 3 or 5), each running `tsoracle serve` embedded in a binary that supplies a custom `ConsensusDriver` over your consensus library. Clients configure all N endpoints. Leader handles GetTs; followers redirect.
 
 **Sharded TSO domains:** for systems wanting separate monotonic sequences per keyspace, run one tsoracle cluster per shard. The library has no opinion on sharding.
+
+[`Server`]: crate::Server
