@@ -1475,6 +1475,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kube-e2e-driver"
+version = "0.1.4"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tokio",
+ "tsoracle-client",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

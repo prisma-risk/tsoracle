@@ -25,9 +25,9 @@ spec:
                 matchLabels:
                   app.kubernetes.io/name: tsoracle
               topologyKey: kubernetes.io/hostname
-      # The standalone example only handles SIGINT today; until SIGTERM is
-      # wired into serve_with_shutdown, drains hit this grace window and then
-      # SIGKILL. Keep it generous so the known gap does not flap the lane.
+      # The standalone example handles SIGTERM (via shutdown_signal(), #406), so
+      # a drain cooperatively drains in-flight RPCs within this window rather
+      # than riding it out to SIGKILL. Kept generous as headroom for the drain.
       terminationGracePeriodSeconds: 30
       containers:
         - name: tsoracle

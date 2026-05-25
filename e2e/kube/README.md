@@ -17,20 +17,23 @@ This is opt-in tooling, not a CI gate. It runs the example binary, not `tsoracle
 # From the repo root.
 kind create cluster --config e2e/kube/kind-config.yaml
 
-# Build the node image and load it into the kind nodes (no registry needed).
-docker build -f e2e/kube/Dockerfile -t tsoracle-e2e:latest .
-kind load docker-image tsoracle-e2e:latest --name tsoracle-e2e
+# Build the node + driver images and load them into kind (no registry needed).
+docker build -f e2e/kube/Dockerfile        -t tsoracle-e2e:latest .
+docker build -f e2e/kube/driver/Dockerfile -t tsoracle-e2e-driver:latest .
+kind load docker-image tsoracle-e2e:latest        --name tsoracle-e2e
+kind load docker-image tsoracle-e2e-driver:latest --name tsoracle-e2e
 
 kubectl apply -f e2e/kube/manifests/
-kubectl rollout status statefulset/tsoracle --timeout=120s
+kubectl rollout status statefulset/tsoracle --timeout=180s
 
-# Smoke a GetTs through the client Service.
-kubectl port-forward svc/tsoracle 5051:5051 &
-# ... drive a tsoracle-client against 127.0.0.1:5051 ...
+# Assertions run as in-cluster Jobs (so leader-hint redirects to pod DNS
+# resolve): cold-start probes each ordinal; soak checks zero failed calls +
+# monotonicity across a graceful rolling restart.
+./e2e/kube/run-assertions.sh
 
 kind delete cluster --name tsoracle-e2e
 ```
 
-## Known gap
+## Scope
 
-The `openraft-standalone` example handles only SIGINT, not SIGTERM, so pod drains currently ride out `terminationGracePeriodSeconds` and end in SIGKILL — the cooperative-shutdown path does not run. (The stock `tsoracle serve` binary already handles SIGTERM via its `shutdown_signal()` helper, added in #245; the example simply never got the same treatment.) `terminationGracePeriodSeconds` is set generously so this does not flap the lane. Wiring SIGTERM into the example's shutdown future is the first follow-up.
+This lane currently covers cold-start formation and graceful rolling-restart (rollout steps 2–3). Network partition + PVC reattach (step 4) and a nightly schedule (step 5) are follow-ups. The `openraft-standalone` example now handles SIGTERM (via `tsoracle_server::shutdown_signal()`, #406), so the graceful-rollout assertion exercises the real cooperative-shutdown path.
