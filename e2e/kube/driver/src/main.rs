@@ -10,6 +10,9 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
+#[allow(dead_code)]
+mod tracker;
+
 fn main() {
     println!("kube-e2e-driver");
 }
