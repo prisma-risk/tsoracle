@@ -123,6 +123,7 @@ pub async fn spawn_into(
     };
     let mut cmd = Command::new(&handle.binary);
     cmd.arg("serve")
+        .arg("file")
         .arg("--listen")
         .arg(&listen)
         .arg("--state-dir")
