@@ -214,20 +214,26 @@ async fn emits_documented_client_signals_end_to_end() {
         .await
         .expect("scenario 1 must succeed via hint");
 
-    // ── Scenario 2: connect failure → retried against live endpoint ─────
+    // ── Scenario 2: connect failure emits its connect signals ──────────
     //
-    // The dead endpoint is listed first so the round-robin queue tries it,
-    // hits ECONNREFUSED, increments connect.failures + retries{connect_failure},
-    // and falls through to B which serves the timestamp.
+    // A single unreachable endpoint is dialed, hits ECONNREFUSED, and
+    // increments connect.failures + retries{connect_failure} before the
+    // worklist empties and the request errors out. The sole endpoint keeps
+    // this deterministic: iter_round_robin now starts the configured tail at
+    // a *random* rotation offset (issue #342), so a two-endpoint
+    // [dead, live] list would dial the live peer first roughly half the time
+    // and never touch the dead one. The "fall through to a live peer and
+    // recover" path is covered by the retry-loop unit tests; here we only
+    // need the connect-failure signals, which fire regardless of any
+    // follow-up endpoint.
     let dead_endpoint = closed_port_endpoint().await;
-    let client_dead_first =
-        Client::connect(vec![dead_endpoint, format!("http://{}", booted_b.addr)])
-            .await
-            .expect("dead-then-live client connect");
-    client_dead_first
+    let client_unreachable = Client::connect(vec![dead_endpoint])
+        .await
+        .expect("unreachable-endpoint client connect");
+    client_unreachable
         .get_ts()
         .await
-        .expect("scenario 2 must succeed via second endpoint");
+        .expect_err("scenario 2 must surface an error when the only endpoint is unreachable");
 
     // ── Scenario 3: FAILED_PRECONDITION carrying a malformed hint trailer
     //
