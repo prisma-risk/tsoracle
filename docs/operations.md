@@ -50,7 +50,7 @@ Default is 1 second. On leadership gain, the new leader first computes `serving_
 - `tsoracle.client.driver.queue_depth` — waiter-queue size inside the coalescing driver task (gauge). Updated after every enqueue and after each dispatch drain.
 - `tsoracle.client.driver.in_flight` — 0 or 1 indicating whether the driver currently has an outgoing batch in flight (gauge)
 
-Both libraries are exporter-agnostic: embedders install whichever recorder they want (`metrics-exporter-prometheus`, `metrics-exporter-influx`, a custom sink) before constructing the [`Server`] or [`Client`]. The example below wires Prometheus over an HTTP listener for a process that hosts either side:
+Both libraries are exporter-agnostic: embedders install whichever recorder they want (`metrics-exporter-prometheus`, `metrics-exporter-influx`, a custom sink) before constructing the `Server` or `Client`. The example below wires Prometheus over an HTTP listener for a process that hosts either side:
 
 ```toml
 [dependencies]
