@@ -95,7 +95,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
 
                 // Clear serving so new GetTs requests return NOT_LEADER until the
                 // fence republishes Serving below.
-                let _ = server.state_tx.send(ServingState::NotServing {
+                server.state_tx.send_replace(ServingState::NotServing {
                     leader_endpoint: None,
                     leader_epoch: None,
                 });
@@ -201,7 +201,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                         )?;
 
                         // Publish serving, then release the drain guard.
-                        let _ = server.state_tx.send(ServingState::Serving);
+                        server.state_tx.send_replace(ServingState::Serving);
                         drop(drain_guard);
 
                         tsoracle_failpoint::failpoint!("server::fence::after_serving_published");
@@ -222,7 +222,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                         Err(ServerError::Consensus(
                             ConsensusError::NotLeader { .. } | ConsensusError::Fenced { .. },
                         )) => {
-                            let _ = server.state_tx.send(ServingState::NotServing {
+                            server.state_tx.send_replace(ServingState::NotServing {
                                 leader_endpoint: None,
                                 leader_epoch: None,
                             });
@@ -275,7 +275,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                 leader_epoch,
             } => {
                 server.allocator.lock().on_leadership_lost();
-                let _ = server.state_tx.send(ServingState::NotServing {
+                server.state_tx.send_replace(ServingState::NotServing {
                     leader_endpoint,
                     leader_epoch,
                 });
@@ -286,7 +286,7 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
             }
             LeaderState::Unknown => {
                 server.allocator.lock().on_leadership_lost();
-                let _ = server.state_tx.send(ServingState::NotServing {
+                server.state_tx.send_replace(ServingState::NotServing {
                     leader_endpoint: None,
                     leader_epoch: None,
                 });

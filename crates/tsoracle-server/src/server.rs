@@ -127,7 +127,13 @@ impl ServerBuilder {
     pub fn build(self) -> Result<Server, BuildError> {
         let consensus = self.consensus.ok_or(BuildError::MissingConsensusDriver)?;
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
-        let (state_tx, state_rx) = watch::channel(ServingState::NotServing {
+        // Discard the receiver minted by `watch::channel`: `state_tx` is the
+        // single source of truth. It mints fresh receivers on demand via
+        // `subscribe()` and reads its current value via `borrow()`, so no parked
+        // receiver needs to live on the server. Publish sites use `send_replace`
+        // (not `send`) so a transition still mutates and notifies even when no
+        // embedder has subscribed and `receiver_count` is zero.
+        let (state_tx, _) = watch::channel(ServingState::NotServing {
             leader_endpoint: None,
             leader_epoch: None,
         });
@@ -138,7 +144,6 @@ impl ServerBuilder {
             failover_advance: self.failover_advance,
             allocator: Arc::new(Mutex::new(Allocator::new())),
             state_tx,
-            state_rx,
             extension_lock: Arc::new(tokio::sync::Mutex::new(())),
             extension_gate: Arc::new(tokio::sync::RwLock::new(())),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -153,8 +158,10 @@ pub struct Server {
     pub(crate) window_ahead: Duration,
     pub(crate) failover_advance: Duration,
     pub(crate) allocator: Arc<Mutex<Allocator>>,
+    /// Source of truth for serving state. Mints receivers for [`Server::subscribe`]
+    /// and is read synchronously via `borrow()` by the service layer; publish
+    /// sites use `send_replace` so transitions land even with zero receivers.
     pub(crate) state_tx: watch::Sender<ServingState>,
-    pub(crate) state_rx: watch::Receiver<ServingState>,
     /// Serializes window extensions so a stampeding burst of `WindowExhausted`
     /// requests resolves to a single `persist_high_water` round-trip. Acquired
     /// before `extension_gate`; combined with a recheck-after-acquire inside
@@ -184,11 +191,12 @@ impl Server {
     /// `embedded_router` and piggyback examples). Because `into_router`
     /// consumes the `Server`, capture the receiver before mounting.
     ///
-    /// This method is the stable observation API: the underlying field is
-    /// `pub(crate)`, so the receiver's type can evolve (e.g. a future newtype
-    /// around `ServingState`) without breaking embedders that go through it.
+    /// This method is the stable observation API: the receiver is minted from
+    /// the server's `watch::Sender`, so the receiver's type can evolve (e.g. a
+    /// future newtype around `ServingState`) without breaking embedders that
+    /// go through it.
     pub fn subscribe(&self) -> watch::Receiver<ServingState> {
-        self.state_rx.clone()
+        self.state_tx.subscribe()
     }
 
     /// Single transition API used in response to evidence that the current
@@ -221,7 +229,7 @@ impl Server {
         leader_epoch: Option<Epoch>,
     ) {
         self.allocator.lock().on_leadership_lost();
-        let _ = self.state_tx.send(ServingState::NotServing {
+        self.state_tx.send_replace(ServingState::NotServing {
             leader_endpoint,
             leader_epoch,
         });
@@ -608,6 +616,42 @@ mod tests {
             panic_payload_to_string(payload),
             "watch task panicked with non-string payload",
         );
+    }
+
+    #[test]
+    fn serving_transitions_publish_without_an_external_subscriber() {
+        // Regression guard for #346. With the parked `state_rx` field gone, the
+        // plain `serve(addr)` path holds zero receivers unless an embedder calls
+        // `subscribe()`. `watch::Sender::send` is a no-op that leaves the value
+        // untouched when `receiver_count == 0`, so the publish sites use
+        // `send_replace` (which mutates and notifies unconditionally) and reads
+        // go through `state_tx.borrow()`. Were a publish site to use `send`,
+        // this transition would be silently dropped and a leaderless-then-leader
+        // server could stay NotServing forever.
+        //
+        // Built without `subscribe()`, so `receiver_count` is zero when the
+        // production publish site below fires.
+        let server = Server::builder()
+            .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .build()
+            .expect("build must succeed");
+        assert_eq!(server.state_tx.receiver_count(), 0);
+
+        server.step_down_due_to_consensus_rejection(
+            Some("http://new-leader:9000".into()),
+            Some(Epoch(7)),
+        );
+
+        match &*server.state_tx.borrow() {
+            ServingState::NotServing {
+                leader_endpoint,
+                leader_epoch,
+            } => {
+                assert_eq!(leader_endpoint.as_deref(), Some("http://new-leader:9000"));
+                assert_eq!(*leader_epoch, Some(Epoch(7)));
+            }
+            ServingState::Serving => panic!("expected NotServing after step_down"),
+        }
     }
 
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
