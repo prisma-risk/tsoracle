@@ -63,6 +63,23 @@ declare_raft_types_ext! {
 #[doc(hidden)]
 pub type OpenraftEntry = openraft::type_config::alias::EntryOf<TypeConfig>;
 
+/// The concrete `Vote` and `LogId` types the log store reads back from the meta
+/// column family on recovery.
+///
+/// Unlike the log and snapshot records, the meta singletons are persisted with
+/// *bare* postcard (no version frame) — see `log_store::meta::read`, which
+/// decodes `VoteOf<C>` (label `Vote`) and `LogIdOf<C>` (labels `Committed` and
+/// `LastPurged`). Exposed only so the fuzz harness can decode that bare-postcard
+/// path directly; hidden from the public API because nothing else should depend
+/// on the meta representation.
+#[doc(hidden)]
+pub type OpenraftVote = openraft::type_config::alias::VoteOf<TypeConfig>;
+
+/// See [`OpenraftVote`]. The `LogId` read back for the `Committed` and
+/// `LastPurged` meta labels.
+#[doc(hidden)]
+pub type OpenraftLogId = openraft::type_config::alias::LogIdOf<TypeConfig>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

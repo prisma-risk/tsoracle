@@ -224,3 +224,154 @@ async fn get_log_state_isolates_groups_in_shared_column_family() {
         "group 4 should still observe its own entry",
     );
 }
+
+fn blank_entry_at(index: u64) -> Entry<TestLeaderId, common::TestAppData, u64, common::TestPeer> {
+    Entry::new_blank(LogId::new(
+        TestLeaderId {
+            term: 1,
+            node_id: 1,
+        },
+        index,
+    ))
+}
+
+// truncate_after(Some(k)) must keep [0..=k] and remove the tail (k+1..=N)
+// exactly — no over-delete at the boundary, no surviving tail entry.
+#[tokio::test]
+async fn truncate_after_removes_exact_tail() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+
+    store
+        .append((0..=5).map(blank_entry_at), IOFlushed::noop())
+        .await
+        .unwrap();
+
+    let keep_through = LogId::new(
+        TestLeaderId {
+            term: 1,
+            node_id: 1,
+        },
+        3,
+    );
+    store.truncate_after(Some(keep_through)).await.unwrap();
+
+    let surviving = store.try_get_log_entries(0..=5).await.unwrap();
+    let indices: Vec<u64> = surviving.iter().map(|e| e.log_id().index).collect();
+    assert_eq!(
+        indices,
+        vec![0, 1, 2, 3],
+        "tail [4,5] must be gone, [0..=3] kept"
+    );
+}
+
+// truncate_after(None) empties the log entirely.
+#[tokio::test]
+async fn truncate_after_none_empties_log() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+
+    store
+        .append((0..=3).map(blank_entry_at), IOFlushed::noop())
+        .await
+        .unwrap();
+
+    store.truncate_after(None).await.unwrap();
+
+    let surviving = store.try_get_log_entries(0..=3).await.unwrap();
+    assert!(
+        surviving.is_empty(),
+        "truncate_after(None) must remove all entries"
+    );
+    let state = store.get_log_state().await.unwrap();
+    assert!(state.last_log_id.is_none());
+}
+
+// purge(log_id@index=k) removes [0..=k] inclusive and keeps [k+1..=N]. Pins
+// the inclusive-of-index semantics that the `index+1` exclusive end encodes,
+// and that LastPurged reads back as the purged log_id.
+#[tokio::test]
+async fn purge_removes_inclusive_prefix() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
+        RocksdbLogStore::open(db, LOG_CF, META_CF, Flat).unwrap();
+
+    store
+        .append((0..=5).map(blank_entry_at), IOFlushed::noop())
+        .await
+        .unwrap();
+
+    let purge_through = LogId::new(
+        TestLeaderId {
+            term: 1,
+            node_id: 1,
+        },
+        2,
+    );
+    store.purge(purge_through).await.unwrap();
+
+    let surviving = store.try_get_log_entries(0..=5).await.unwrap();
+    let indices: Vec<u64> = surviving.iter().map(|e| e.log_id().index).collect();
+    assert_eq!(
+        indices,
+        vec![3, 4, 5],
+        "[0..=2] inclusive must be purged, [3..=5] kept"
+    );
+
+    let state = store.get_log_state().await.unwrap();
+    assert_eq!(
+        state.last_purged_log_id.map(|id| id.index),
+        Some(2),
+        "purge must record LastPurged at the purged index",
+    );
+}
+
+// A range delete on group g must never reach group (g+1)'s entries sharing the
+// same column family — the GroupPrefixed isolation guarantee at the storage
+// layer (mirrors the key_space proptest, but end-to-end through RocksDB).
+#[tokio::test]
+async fn truncate_on_one_group_leaves_neighbor_intact() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+
+    let mut store_g4: RocksdbLogStore<TestTypeConfig, GroupPrefixed> =
+        RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, GroupPrefixed::new(4)).unwrap();
+    let mut store_g5: RocksdbLogStore<TestTypeConfig, GroupPrefixed> =
+        RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, GroupPrefixed::new(5)).unwrap();
+
+    store_g4
+        .append((0..=3).map(blank_entry_at), IOFlushed::noop())
+        .await
+        .unwrap();
+    store_g5
+        .append((0..=3).map(blank_entry_at), IOFlushed::noop())
+        .await
+        .unwrap();
+
+    // Wipe all of group 4's tail; group 5 must be untouched.
+    store_g4.truncate_after(None).await.unwrap();
+
+    let g4 = store_g4.try_get_log_entries(0..=3).await.unwrap();
+    assert!(
+        g4.is_empty(),
+        "group 4 should be empty after truncate_after(None)"
+    );
+
+    let g5: Vec<u64> = store_g5
+        .try_get_log_entries(0..=3)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.log_id().index)
+        .collect();
+    assert_eq!(
+        g5,
+        vec![0, 1, 2, 3],
+        "group 5's entries must survive group 4's range delete"
+    );
+}
