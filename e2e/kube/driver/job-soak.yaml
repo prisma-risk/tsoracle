@@ -1,0 +1,22 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tsoracle-e2e-soak
+  labels:
+    app.kubernetes.io/name: tsoracle-e2e-driver
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsoracle-e2e-driver
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: tsoracle-e2e-driver:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --mode=soak
+            - --endpoints=tsoracle:5051
+            - --duration-secs=120
