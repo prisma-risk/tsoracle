@@ -40,6 +40,7 @@ use tracing::trace;
 
 use crate::log_entry::HighWaterCommand;
 use crate::snapshot_policy::SnapshotPolicy;
+#[cfg(test)]
 use tsoracle_consensus::AdvancePayload;
 
 /// Shared apply-task state.
@@ -126,11 +127,12 @@ where
     if let Some(entries) = entries {
         for entry in &entries {
             match entry {
-                LogEntry::Decided(HighWaterCommand::Advance(AdvancePayload { at_least })) => {
+                LogEntry::Decided(HighWaterCommand::Advance(advance)) => {
                     let prev = state.high_water.load(Ordering::SeqCst);
-                    if *at_least > prev {
-                        state.high_water.store(*at_least, Ordering::SeqCst);
-                        trace!(prev, new = at_least, "high-water advanced");
+                    let new = advance.merge(prev);
+                    if new > prev {
+                        state.high_water.store(new, Ordering::SeqCst);
+                        trace!(prev, new, "high-water advanced");
                     }
                 }
                 LogEntry::Decided(HighWaterCommand::Barrier { node, seq }) => {

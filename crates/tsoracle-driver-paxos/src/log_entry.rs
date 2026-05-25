@@ -60,10 +60,8 @@ impl omnipaxos::storage::Snapshot<HighWaterCommand> for HighWaterSnapshot {
         let mut applied_barriers: HashMap<u64, u64> = HashMap::new();
         for command in entries {
             match command {
-                HighWaterCommand::Advance(AdvancePayload { at_least }) => {
-                    if *at_least > value {
-                        value = *at_least;
-                    }
+                HighWaterCommand::Advance(advance) => {
+                    value = advance.merge(value);
                 }
                 HighWaterCommand::Barrier { node, seq } => {
                     let slot = applied_barriers.entry(*node).or_insert(0);

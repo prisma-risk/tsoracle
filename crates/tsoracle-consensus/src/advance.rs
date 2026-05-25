@@ -34,6 +34,21 @@ pub struct AdvancePayload {
     pub at_least: u64,
 }
 
+impl AdvancePayload {
+    /// Apply this advance to a `current` high-water, returning the new value.
+    ///
+    /// This is the single home for the monotonic apply rule — `max(current,
+    /// at_least)` — that every backend's state machine runs when it applies a
+    /// decided `Advance`. Folding the rule into one named method (rather than
+    /// re-spelling the `if at_least > current` comparison at each apply site)
+    /// gives the "advance only ratchets up" invariant one test and one place to
+    /// reason about its idempotence and reorder-independence.
+    #[must_use]
+    pub fn merge(self, current: u64) -> u64 {
+        current.max(self.at_least)
+    }
+}
+
 /// The error carried by a rejected out-of-range high-water advance. See
 /// [`reject_out_of_range_advance`].
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +112,40 @@ mod tests {
             let back: AdvancePayload = postcard::from_bytes(&bytes).expect("deserialize");
             assert_eq!(back, payload);
         }
+    }
+
+    #[test]
+    fn merge_is_monotone_under_reordering_and_retries() {
+        // The single home for the high-water apply rule: `current = max(current,
+        // at_least)`. A higher advance ratchets the value up; a stale or
+        // duplicate advance (at or below `current`) is absorbed without moving
+        // it, which is exactly what makes the command idempotent and
+        // order-independent across every backend's apply path.
+        assert_eq!(
+            AdvancePayload { at_least: 7 }.merge(3),
+            7,
+            "higher advance ratchets up"
+        );
+        assert_eq!(
+            AdvancePayload { at_least: 3 }.merge(7),
+            7,
+            "stale advance is absorbed"
+        );
+        assert_eq!(
+            AdvancePayload { at_least: 5 }.merge(5),
+            5,
+            "equal advance is idempotent"
+        );
+        assert_eq!(
+            AdvancePayload { at_least: 0 }.merge(0),
+            0,
+            "zero from a fresh state stays zero"
+        );
+        assert_eq!(
+            AdvancePayload { at_least: u64::MAX }.merge(0),
+            u64::MAX,
+            "the extreme advance ratchets to the maximum",
+        );
     }
 
     #[test]
