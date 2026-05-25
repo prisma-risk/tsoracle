@@ -17,8 +17,8 @@
 //! transport is configured; explicit schemes are always preserved.
 //!
 //! "Explicit beats configured" governs *operator-supplied* endpoint
-//! strings — those passed to `ClientBuilder::endpoints`. The
-//! `crate::retry::issue_rpc` loop applies a tighter rule to *wire-supplied*
+//! strings — those passed to `ClientBuilder::endpoints`. The client applies
+//! a tighter rule (in `crate::leader_hint`) to *wire-supplied*
 //! `tsoracle-leader-hint-bin` trailers under `tls_config`: explicit
 //! `http://...` hints are dropped so a contacted peer cannot downgrade the
 //! transport. See `crate::leader_hint::rejects_plaintext_hint`.

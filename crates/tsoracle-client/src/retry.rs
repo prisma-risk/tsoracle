@@ -20,21 +20,18 @@
 //! the end of the round-robin pass, which would leave the current
 //! call to fail if the hinted endpoint wasn't otherwise in the queue.
 //!
-//! A LeaderHint that carries a leader epoch is honored only when the
-//! cache permits it: a strictly lower-epoch hint is dropped silently
-//! (counted, traced) so a delayed NOT_LEADER from an old epoch cannot
-//! flap the cache backward. Hints with no epoch (a paxos backend, or an
-//! older openraft server from before the epoch was populated) and hints
-//! arriving when the cache has no epoch yet are accepted unconditionally
-//! so a transition-state deployment is not left without leader discovery.
+//! Classifying a NOT_LEADER reply — leader-hint decoding, the epoch-monotone
+//! gate that drops a stale-epoch hint, and the plaintext-downgrade guard —
+//! lives in [`crate::leader_hint`], co-located with the cache write it gates.
 //!
 //! Queue bookkeeping (the worklist, the visited-set dedup, and
-//! push-front-on-hint steering) lives in [`crate::worklist::Worklist`];
-//! the deadline arithmetic lives in [`crate::budget`]. This module owns
-//! only the policy decisions.
+//! push-front-on-hint steering) lives in [`crate::worklist::Worklist`]; the
+//! deadline arithmetic lives in [`crate::budget`]; one `(connect, get_ts)`
+//! attempt and its channel eviction live in [`crate::attempt`]. This module
+//! owns only the loop and its policy decisions.
 //!
 //! Three deadlines bound the loop, governed by [`crate::RetryPolicy`] and
-//! enforced by [`Budget`] / [`PairBudget`]:
+//! enforced by [`Budget`] / [`crate::budget::PairBudget`]:
 //!
 //! - `per_attempt_deadline`: each `(pool.client, client.get_ts)` pair is
 //!   wrapped in `tokio::time::timeout`. Same value is pushed to the
@@ -65,9 +62,10 @@
 //! do not back off — the next endpoint is known and the redirect is
 //! part of normal discovery.
 //!
-//! A transport-class RPC failure also evicts the endpoint's cached channel
-//! ([`ChannelPool::evict_if_current`]) so the next attempt re-dials and
-//! re-resolves rather than reusing a channel pinned to a now-dead address
+//! A transport-class RPC failure evicts the endpoint's cached channel
+//! (in [`crate::attempt`], via [`ChannelPool::evict_if_current`]) so the
+//! next attempt re-dials and re-resolves rather than reusing a channel
+//! pinned to a now-dead address
 //! (issue #239: a static tonic `Endpoint` resolves once and never
 //! re-resolves, so a pod-replaced endpoint would otherwise keep the dead
 //! channel and its background reconnect task forever). Application errors
@@ -903,8 +901,7 @@ mod tests {
     /// redirect `FAILED_PRECONDITION`, never a misleading `NoReachableEndpoints`
     /// and never an unbounded loop. (Before the ride-out change this stopped at
     /// exactly `MAX_LEADER_REDIRECTS + 1` dials; the cap is now per-pass and the
-    /// deadline is the whole-call ceiling — see
-    /// docs/superpowers/specs/2026-05-25-client-ride-out-election-design.md.)
+    /// deadline is the whole-call ceiling (issue #340).)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn endless_redirect_chain_is_bounded_by_overall_deadline() {
         use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
