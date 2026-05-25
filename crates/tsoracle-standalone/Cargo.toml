@@ -1,0 +1,64 @@
+[package]
+name                   = "tsoracle-standalone"
+version                = "0.1.0"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description            = "Driver selection, configuration, and peer transport for running a standalone tsoracle node"
+publish                = true
+
+[features]
+default  = ["file", "openraft", "paxos"]
+file     = ["dep:tsoracle-driver-file"]
+openraft = [
+    "dep:tsoracle-driver-openraft", "dep:tsoracle-openraft-toolkit",
+    "dep:openraft", "dep:rocksdb", "dep:tonic", "dep:tonic-prost",
+    "dep:prost", "dep:postcard", "dep:tokio-stream", "dep:async-trait", "dep:futures",
+]
+paxos    = [
+    "dep:tsoracle-driver-paxos", "dep:tsoracle-paxos-toolkit",
+    "dep:omnipaxos", "dep:rocksdb", "dep:tonic", "dep:tonic-prost",
+    "dep:prost", "dep:postcard", "dep:parking_lot", "dep:tokio-stream",
+]
+
+[dependencies]
+tsoracle-core      = { path = "../tsoracle-core", version = "0.2.2" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.7" }
+tsoracle-server    = { path = "../tsoracle-server", version = "0.2.5" }
+tokio              = { workspace = true, features = ["signal", "net", "rt"] }
+tracing            = { workspace = true }
+thiserror          = { workspace = true }
+
+# file
+tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "0.1.7", optional = true }
+
+# openraft
+tsoracle-driver-openraft = { path = "../tsoracle-driver-openraft", version = "0.2.3", optional = true }
+tsoracle-openraft-toolkit = { path = "../tsoracle-openraft-toolkit", version = "0.1.8", features = ["rocksdb-log-store"], optional = true }
+openraft     = { workspace = true, optional = true }
+# `net` is required for tokio_stream::wrappers::TcpListenerStream, used by both
+# HA drivers' bind-before-spawn peer servers (build_openraft / build_paxos).
+tokio-stream = { workspace = true, optional = true, features = ["net"] }
+async-trait  = { workspace = true, optional = true }
+futures      = { workspace = true, optional = true }
+
+# paxos
+tsoracle-driver-paxos  = { path = "../tsoracle-driver-paxos", version = "0.2.3", optional = true }
+tsoracle-paxos-toolkit = { path = "../tsoracle-paxos-toolkit", version = "0.2.3", features = ["rocksdb-storage"], optional = true }
+omnipaxos   = { workspace = true, features = ["serde"], optional = true }
+parking_lot = { workspace = true, optional = true }
+
+# shared by openraft + paxos transport
+rocksdb     = { workspace = true, optional = true }
+tonic       = { workspace = true, optional = true }
+tonic-prost = { workspace = true, optional = true }
+prost       = { workspace = true, optional = true }
+postcard    = { workspace = true, optional = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
