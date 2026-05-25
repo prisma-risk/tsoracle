@@ -20,7 +20,7 @@
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -45,18 +45,27 @@ where
     host: H,
     /// Handle over the runner's leader-event channel. Each
     /// [`ConsensusDriver::leadership_events`] call mints a fresh stream from it,
-    /// gated by `stream_active` so at most one is live at a time: a *sequential*
-    /// re-subscription (e.g. an in-process restart that fully stops the prior
-    /// server before starting the replacement) is well-defined, while a
-    /// *concurrent* second subscription fails closed.
+    /// gated by `active_generation` so at most one is live at a time: a
+    /// *sequential* re-subscription (e.g. an in-process restart that fully stops
+    /// the prior server before starting the replacement) is well-defined, while
+    /// a *concurrent* second subscription fails closed.
     leader_subscriber: LeaderEventSubscriber,
-    /// Single-active-stream lease. `leadership_events` flips this `false -> true`
-    /// when it hands out a live stream and the stream flips it back on `Drop`.
-    /// A second call observing `true` returns a fail-closed empty stream instead
-    /// of a second live one, so two `Server`s built from one `Arc<PaxosDriver>`
-    /// cannot both seed allocators and issue overlapping timestamps. Shared via
-    /// `Arc` so the released-on-`Drop` guard outlives the borrow that minted it.
-    stream_active: Arc<AtomicBool>,
+    /// Mints a unique, monotonically increasing id for every
+    /// [`ConsensusDriver::leadership_events`] acquisition attempt, starting at
+    /// `1` (so `0` is reserved as the "slot free" sentinel). Unique ids are what
+    /// make the lease's release ABA-proof: a slot released and re-acquired holds
+    /// a *different* generation, so a stale lease can never free a newer holder.
+    next_generation: AtomicU64,
+    /// Single-active-stream lease slot. `0` means free; any other value is the
+    /// id of the generation currently holding a live stream.
+    /// `leadership_events` CASes `0 -> my_generation` when it hands out a live
+    /// stream, and the stream's [`StreamLease`] CASes `my_generation -> 0` on
+    /// `Drop`. A second call observing a non-zero slot returns a fail-closed
+    /// empty stream instead of a second live one, so two `Server`s built from
+    /// one `Arc<PaxosDriver>` cannot both seed allocators and issue overlapping
+    /// timestamps. Shared via `Arc` so the released-on-`Drop` guard outlives the
+    /// borrow that minted it.
+    active_generation: Arc<AtomicU64>,
 }
 
 impl<H> PaxosDriver<H>
@@ -68,14 +77,17 @@ where
     /// `leader_subscriber` is taken from the host (typically via
     /// `StandaloneHost::take_leader_subscriber`). [`ConsensusDriver::leadership_events`]
     /// mints a fresh, live stream that synchronously yields the current leadership
-    /// state, but only one such stream may be live at a time (see `stream_active`):
+    /// state, but only one such stream may be live at a time (see `active_generation`):
     /// a *sequential* re-subscription after the prior stream is dropped is
     /// well-defined, while a *concurrent* second subscription fails closed.
     pub fn new(host: H, leader_subscriber: LeaderEventSubscriber) -> Self {
         Self {
             host,
             leader_subscriber,
-            stream_active: Arc::new(AtomicBool::new(false)),
+            // Generation ids start at 1 so the `active_generation` slot can use 0
+            // as its unambiguous "free" sentinel.
+            next_generation: AtomicU64::new(1),
+            active_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -92,24 +104,37 @@ where
     H: PaxosHighWaterHost,
 {
     fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
-        // Single-active-stream lease. Acquire it before minting a stream so the
-        // driver hands out at most one live leadership stream at a time.
+        // Single-active-stream lease. Claim a fresh generation id and try to
+        // occupy the lease slot before minting a stream, so the driver hands out
+        // at most one live leadership stream at a time.
         //
         // A *sequential* re-subscription (the prior stream already dropped, e.g.
-        // an in-process restart) re-acquires the freed lease and is live. A
-        // *concurrent* second subscription (two `Server`s built from one
-        // `Arc<PaxosDriver>`, or a replacement `Server` started before the old
-        // one's stream is dropped) observes the lease held and FAILS CLOSED: it
-        // returns an empty stream. The server's leader-watch loop reads that EOF
-        // as `WatchStreamClosed`, poisons serving state, and stays `NotServing`,
-        // so the second server never seeds an independent allocator and the two
-        // endpoints cannot issue overlapping (duplicate) timestamps.
-        if self
-            .stream_active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        // an in-process restart) finds the slot free (`0`) and occupies it with
+        // its new generation. A *concurrent* second subscription (two `Server`s
+        // built from one `Arc<PaxosDriver>`, or a replacement `Server` started
+        // before the old one's stream is dropped) finds the slot held and FAILS
+        // CLOSED: it returns an empty stream. The server's leader-watch loop
+        // reads that EOF as `WatchStreamClosed`, poisons serving state, and stays
+        // `NotServing`, so the second server never seeds an independent allocator
+        // and the two endpoints cannot issue overlapping (duplicate) timestamps.
+        //
+        // A leaked lease (a server torn down without dropping its stream) leaves
+        // the slot occupied forever: recovery is operator-driven (process
+        // restart), but the rejection is now counted on
+        // `tsoracle.leadership_stream.rejected.total` so the stuck node is an
+        // alertable signal rather than a single log line.
+        let my_generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        if let Err(active_generation) = self.active_generation.compare_exchange(
+            0,
+            my_generation,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            #[cfg(feature = "metrics")]
+            metrics::counter!("tsoracle.leadership_stream.rejected.total").increment(1);
             tracing::error!(
+                rejected_generation = my_generation,
+                active_generation,
                 "PaxosDriver::leadership_events called while a leadership stream is already \
                  active; refusing the concurrent second subscription and returning a \
                  fail-closed empty stream. Build exactly one Server per consensus driver, and \
@@ -117,10 +142,11 @@ where
             );
             return Box::pin(futures::stream::empty());
         }
-        // Released on `Drop` of the returned stream, which re-opens the lease for
-        // the next (sequential) subscription.
+        // Released on `Drop` of the returned stream, which frees the slot for the
+        // next (sequential) subscription.
         let lease = StreamLease {
-            active: Arc::clone(&self.stream_active),
+            active: Arc::clone(&self.active_generation),
+            generation: my_generation,
         };
 
         // Mint the live stream. The subscriber's first poll yields the channel's
@@ -179,19 +205,27 @@ where
 
 /// RAII guard for the driver's single-active-stream lease.
 ///
-/// Held by the live [`LeasedStream`] `leadership_events` returns. Storing
-/// `false` back on `Drop` is what permits *sequential* re-subscription: once the
-/// live stream is dropped the next `leadership_events` call re-acquires the lease
-/// and mints a fresh live stream.
+/// Held by the live [`LeasedStream`] `leadership_events` returns, and carries the
+/// `generation` id that occupies the lease slot. Freeing the slot on `Drop` is
+/// what permits *sequential* re-subscription: once the live stream is dropped the
+/// next `leadership_events` call finds the slot free and mints a fresh live stream.
 struct StreamLease {
-    active: Arc<AtomicBool>,
+    active: Arc<AtomicU64>,
+    generation: u64,
 }
 
 impl Drop for StreamLease {
     fn drop(&mut self) {
-        // Release pairs with the `Acquire` failure-ordering on the next
-        // `compare_exchange`, so a re-subscription observes the freed lease.
-        self.active.store(false, Ordering::Release);
+        // Free the slot only if it still holds *our* generation. Under the
+        // fail-closed acquire this is always the case, but the conditional store
+        // makes release ABA-proof: a stale lease whose generation was already
+        // superseded becomes a no-op rather than clobbering a newer holder. The
+        // `Release` success-ordering pairs with the `Acquire` failure-ordering on
+        // the next acquiring `compare_exchange`, so a re-subscription observes the
+        // freed slot.
+        let _ =
+            self.active
+                .compare_exchange(self.generation, 0, Ordering::Release, Ordering::Relaxed);
     }
 }
 
@@ -464,5 +498,118 @@ mod tests {
         let (_sender, subscriber) = leader_event_channel();
         let driver = PaxosDriver::new(host, subscriber);
         assert_eq!(driver.load_high_water().await.unwrap(), 0);
+    }
+
+    /// `StreamLease::drop` must free the single-active slot only when it still
+    /// owns the generation occupying it. This is the ABA guard generation-numbering
+    /// buys over a bare boolean: a stale lease whose generation has already been
+    /// superseded is a no-op on `Drop`, so it can never clobber a newer holder's
+    /// lease. Unreachable through the fail-closed public API today, but correct
+    /// by construction — and the property that keeps the lease safe if reused.
+    #[test]
+    fn stream_lease_drop_frees_slot_only_for_its_own_generation() {
+        let slot = Arc::new(AtomicU64::new(0));
+
+        // Generation 9 currently holds the slot.
+        slot.store(9, Ordering::SeqCst);
+
+        // A stale lease for an older generation (5) dropping must NOT free gen 9.
+        let stale = StreamLease {
+            active: Arc::clone(&slot),
+            generation: 5,
+        };
+        drop(stale);
+        assert_eq!(
+            slot.load(Ordering::SeqCst),
+            9,
+            "a stale generation's Drop must not free a slot held by a newer generation",
+        );
+
+        // The rightful holder's Drop releases the slot back to free (0).
+        let rightful = StreamLease {
+            active: Arc::clone(&slot),
+            generation: 9,
+        };
+        drop(rightful);
+        assert_eq!(
+            slot.load(Ordering::SeqCst),
+            0,
+            "the owning generation's Drop must release the slot",
+        );
+    }
+
+    /// The fail-closed rejection of a concurrent second subscription must be
+    /// observable as a metric, not just a `tracing::error!`. A leaked lease
+    /// turns the node into a silent `NotServing` sink; the counter makes that
+    /// sink alertable. Mirrors `state_machine.rs::snapshot_health_metrics` —
+    /// a thread-local recorder captures real emission, not a mock.
+    #[cfg(feature = "metrics")]
+    mod rejection_metrics {
+        use super::*;
+        use metrics_util::{
+            MetricKind,
+            debugging::{DebugValue, DebuggingRecorder},
+        };
+
+        type RecordedMetric = (
+            metrics_util::CompositeKey,
+            Option<metrics::Unit>,
+            Option<metrics::SharedString>,
+            DebugValue,
+        );
+
+        fn counter(snapshot: &[RecordedMetric], name: &str) -> u64 {
+            for (composite, _u, _d, value) in snapshot {
+                if composite.kind() == MetricKind::Counter && composite.key().name() == name {
+                    if let DebugValue::Counter(n) = value {
+                        return *n;
+                    }
+                }
+            }
+            0
+        }
+
+        #[tokio::test]
+        async fn rejected_concurrent_subscription_increments_counter() {
+            const REJECTED: &str = "tsoracle.leadership_stream.rejected.total";
+
+            let host = StubHost::new();
+            let (sender, subscriber) = leader_event_channel();
+            let driver = PaxosDriver::new(host, subscriber);
+            sender
+                .send(LeaderState::Leader { epoch: Epoch(7) })
+                .unwrap();
+
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+
+            // A single, clean live subscription is not a rejection.
+            let first = metrics::with_local_recorder(&recorder, || driver.leadership_events());
+            assert_eq!(
+                counter(&snapshotter.snapshot().into_vec(), REJECTED),
+                0,
+                "a lone live subscription must not count as a rejection",
+            );
+
+            // A concurrent second subscription fails closed AND is counted.
+            let second = metrics::with_local_recorder(&recorder, || driver.leadership_events());
+            assert_eq!(
+                counter(&snapshotter.snapshot().into_vec(), REJECTED),
+                1,
+                "a fail-closed rejection must increment the counter",
+            );
+
+            // A SEQUENTIAL re-subscription after the first is dropped succeeds and
+            // must NOT count — only genuine rejections move the counter.
+            drop(first);
+            drop(second);
+            let _resubscribed =
+                metrics::with_local_recorder(&recorder, || driver.leadership_events());
+            assert_eq!(
+                counter(&snapshotter.snapshot().into_vec(), REJECTED),
+                1,
+                "a clean sequential re-subscription must not be counted as a rejection",
+            );
+        }
     }
 }
