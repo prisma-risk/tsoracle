@@ -187,7 +187,7 @@ async fn emits_documented_client_signals_end_to_end() {
     let mut booted_a = boot_server(server_a).await;
     let mut booted_b = boot_server(server_b).await;
     driver_b.become_leader(Epoch(1));
-    driver_a.become_follower(Some(format!("http://{}", booted_b.addr)));
+    driver_a.become_follower(Some(booted_b.addr.to_string()));
     wait_until_serving(&mut booted_b.state_rx).await;
     wait_until(&mut booted_a.state_rx, |s| {
         matches!(

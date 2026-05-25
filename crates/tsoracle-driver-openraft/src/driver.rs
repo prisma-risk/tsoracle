@@ -189,14 +189,14 @@ mod tests {
                 2u64,
                 crate::type_config::OpenraftPeer {
                     addr: "node-2:50052".into(),
-                    service_endpoint: "http://node-2:50051".into(),
+                    service_endpoint: "node-2:50051".into(),
                 },
             )),
         });
         assert_eq!(
             state,
             LeaderState::Follower {
-                leader_endpoint: Some("http://node-2:50051".into()),
+                leader_endpoint: Some("node-2:50051".into()),
                 leader_epoch: Some(Epoch(4)),
             }
         );

@@ -31,6 +31,24 @@ pub enum LeaderState {
     /// the leader's epoch (raft term) as observed by this follower, used by
     /// clients to reject a stale follower's lower-epoch redirect; `None` when
     /// the driver does not surface it.
+    ///
+    /// **Contract — endpoint shape:** `leader_endpoint`, when `Some`, MUST be a
+    /// scheme-less `host:port` (e.g. `leader:9000`, `10.0.0.7:50551`), never a
+    /// `http://...` or `https://...` URL. The follower-redirect path surfaces
+    /// this string to clients as a leader hint, and a TLS-configured client
+    /// *silently drops* any `http://` hint (`rejects_plaintext_hint`) to refuse
+    /// a transport downgrade — so a scheme-bearing endpoint makes this leader
+    /// unreachable via redirect, with only a log line as evidence. The shipped
+    /// drivers satisfy this by reading the operator-configured membership
+    /// service endpoint, which is itself contracted scheme-less.
+    ///
+    /// **Contract — epoch monotonicity:** `leader_epoch`, across successive
+    /// emissions from one node, MUST be non-decreasing. Clients gate redirects
+    /// on it (`compare_and_set_leader`): a hint whose epoch cannot outrank the
+    /// cached leader is dropped, so a regressing epoch makes clients drop valid
+    /// redirects (or, the other way, admit a stale one). Raft/Paxos terms are
+    /// monotonic per node, so the shipped drivers satisfy this by construction;
+    /// `None` (an epoch-less hint) is always permitted and gates nothing.
     Follower {
         leader_endpoint: Option<String>,
         leader_epoch: Option<Epoch>,
@@ -53,7 +71,7 @@ mod tests {
         assert_eq!(l1, LeaderState::Leader { epoch: Epoch(1) });
 
         let f_known = LeaderState::Follower {
-            leader_endpoint: Some("http://node-2".into()),
+            leader_endpoint: Some("node-2".into()),
             leader_epoch: Some(Epoch(4)),
         };
         let f_unknown = LeaderState::Follower {
@@ -67,7 +85,7 @@ mod tests {
         // Epoch participates in equality so the watch-debounce re-emits on a
         // follower-side epoch change, not just an endpoint change.
         let f_epoch_5 = LeaderState::Follower {
-            leader_endpoint: Some("http://node-2".into()),
+            leader_endpoint: Some("node-2".into()),
             leader_epoch: Some(Epoch(5)),
         };
         assert_ne!(f_known, f_epoch_5, "epoch must discriminate followers");

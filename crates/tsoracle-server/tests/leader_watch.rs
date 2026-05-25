@@ -325,7 +325,7 @@ async fn leader_watch_propagates_follower_epoch_into_serving_state() {
     let watch_server = server.clone();
     let watch_handle = tokio::spawn(async move { watch_server.run_leader_watch_for_tests().await });
 
-    driver.become_follower_with_epoch(Some("http://leader:9000".into()), Some(Epoch(7)));
+    driver.become_follower_with_epoch(Some("leader:9000".into()), Some(Epoch(7)));
 
     let mut state_rx = server.subscribe();
     let snapshot = timeout(Duration::from_secs(1), async {
@@ -349,7 +349,7 @@ async fn leader_watch_propagates_follower_epoch_into_serving_state() {
             leader_endpoint,
             leader_epoch,
         } => {
-            assert_eq!(leader_endpoint.as_deref(), Some("http://leader:9000"));
+            assert_eq!(leader_endpoint.as_deref(), Some("leader:9000"));
             assert_eq!(leader_epoch, Some(Epoch(7)));
         }
         other => panic!("expected NotServing, got {other:?}"),

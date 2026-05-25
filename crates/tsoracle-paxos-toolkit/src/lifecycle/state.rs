@@ -112,13 +112,13 @@ mod tests {
     fn leader_is_other_emits_follower_with_endpoint() {
         let peers = vec![TsoPeer {
             node_id: 2,
-            endpoint: "http://node-2:50051".into(),
+            endpoint: "node-2:50051".into(),
         }];
         let state = LeadershipState::from_omnipaxos(1, Some(2), Some(Epoch(7)), &peers);
         assert_eq!(
             state.to_consensus(),
             LeaderState::Follower {
-                leader_endpoint: Some("http://node-2:50051".into()),
+                leader_endpoint: Some("node-2:50051".into()),
                 leader_epoch: None,
             },
         );
