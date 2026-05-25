@@ -82,6 +82,16 @@ impl ServingCore {
         self.state_tx.borrow().clone()
     }
 
+    /// Non-cloning serving check for the hot-path NOT_LEADER gate. Borrows the
+    /// watch value and inspects the variant in place, where `serving_state`
+    /// would clone (and the caller then discard) a whole `ServingState`. The
+    /// gate only needs the yes/no answer; the rejected path re-reads through
+    /// `serving_state` to build the redirect hint, where cloning the
+    /// leader-endpoint `String` into the response is unavoidable regardless.
+    pub(crate) fn is_serving(&self) -> bool {
+        matches!(&*self.state_tx.borrow(), ServingState::Serving)
+    }
+
     pub(crate) fn publish_serving(&self) {
         self.state_tx.send_replace(ServingState::Serving);
     }
@@ -297,6 +307,30 @@ mod tests {
             Err(CoreError::NotLeader)
         ));
         assert!(!slot.would_grant(1, 1));
+    }
+
+    #[test]
+    fn is_serving_tracks_state_in_lockstep_with_serving_state() {
+        // The hot-path gate reads `is_serving` in place of cloning a
+        // `ServingState`; it must agree with `serving_state`'s variant across
+        // every transition. Fresh core is NotServing -> false; publish_serving
+        // -> true; step_down -> false again.
+        let core = ServingCore::new();
+        assert!(!core.is_serving(), "fresh core is NotServing");
+        assert!(matches!(
+            core.serving_state(),
+            ServingState::NotServing { .. }
+        ));
+
+        core.publish_serving();
+        assert!(
+            core.is_serving(),
+            "publish_serving must flip is_serving true"
+        );
+        assert!(matches!(core.serving_state(), ServingState::Serving));
+
+        core.step_down(Some("http://leader:9000".into()), Some(Epoch(1)));
+        assert!(!core.is_serving(), "step_down must flip is_serving false");
     }
 
     #[test]
