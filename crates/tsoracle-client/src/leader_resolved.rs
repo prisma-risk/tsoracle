@@ -60,6 +60,39 @@ pub(crate) struct CachedLeader {
     pub last_used: Instant,
 }
 
+/// Which writer is seating the leader cache. Both writers share one
+/// monotone-forward rule (see [`ChannelPool::seat_leader`]); the source only
+/// changes the trust model in the ambiguous epoch-less, different-endpoint
+/// case.
+///
+/// A `Confirmed` seat is backed by a *succeeded* RPC: hard proof the endpoint
+/// served as leader at the supplied epoch, but the completion can be
+/// arbitrarily delayed (a late response from a since-deposed term), so it may
+/// be stale by the time it lands. A `Hinted` seat is a third-party NOT_LEADER
+/// claim — a *forward-looking* "the leader is now X" assertion from a peer we
+/// just contacted. The asymmetry only decides the case where the cache holds
+/// no rankable epoch: a hint carrying fresh information seats, but a
+/// possibly-stale success that cannot prove it outranks the fresh entry must
+/// not clobber it (issue H2).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SeatSource {
+    Confirmed,
+    Hinted,
+}
+
+/// Merge an incoming epoch into the cached one without ever moving backward:
+/// the `max` of two known epochs, and a known epoch is never downgraded to
+/// `None`. A `None` cached epoch is upgraded to any incoming `Some`. Used by
+/// the same-endpoint path, where a late, lower-epoch (or epoch-less) write
+/// must keep the highest epoch the endpoint has been observed at.
+fn merge_epoch_forward(cached: Option<u128>, incoming: Option<u128>) -> Option<u128> {
+    match (cached, incoming) {
+        (Some(cached), Some(incoming)) => Some(cached.max(incoming)),
+        (Some(cached), None) => Some(cached),
+        (None, incoming) => incoming,
+    }
+}
+
 /// One pooled channel slot: the lazily-dialed channel cell plus the instant it
 /// was last handed out. `last_used` drives the LRU eviction that bounds the
 /// number of non-configured (hint-derived) entries (issue #341); it is
@@ -149,9 +182,9 @@ impl ChannelPool {
     /// Internal helper returning the full `CachedLeader` only when it is
     /// within the configured `leader_ttl`. Used by `cached_leader` (and
     /// thus `iter_round_robin`) and the test surface. The monotone-forward
-    /// freshness check in `compare_and_set_leader` is inlined there instead
-    /// of routed through this helper, because that path must hold the lock
-    /// across both the check and the write.
+    /// freshness check in `seat_leader` is inlined there instead of routed
+    /// through this helper, because that path must hold the lock across both
+    /// the check and the write.
     pub(crate) fn fresh_leader(&self) -> Option<CachedLeader> {
         let guard = self.leader.lock();
         match &*guard {
@@ -163,101 +196,107 @@ impl ChannelPool {
     }
 
     /// Record a successful RPC against `endpoint` that observed the leader at
-    /// `epoch`. Like [`Self::compare_and_set_leader`], the cached epoch only
-    /// ever moves forward: this method is the *other* writer to the same
-    /// `epoch` field, and a monotone-forward gate is only as strong as its
-    /// weakest writer (issue #333). A late-completing RPC against a
-    /// since-deposed leader — a normal failover artifact, or out-of-order
-    /// completion of two coalesced retries — carries a stale epoch that must
-    /// not lower the cache, or the CAS gate would then accept a
-    /// genuinely-stale hint it was designed to reject.
-    ///
-    /// - Same endpoint: refresh `last_used` (the endpoint just proved it is
-    ///   alive and serving, so it keeps its worklist slot regardless of the
-    ///   observed epoch) and `max` the epoch, which also upgrades a
-    ///   previously-unknown epoch to the observed one.
-    /// - Different endpoint: replace the entry unless the cache is *fresh*,
-    ///   both epochs are known, and the new epoch is *strictly below* the
-    ///   cached one — the same rule `compare_and_set_leader` applies, so an
-    ///   expired entry or an unknown cached epoch still imposes no floor.
+    /// `epoch`. A thin [`SeatSource::Confirmed`] wrapper over
+    /// [`Self::seat_leader`], which owns the monotone-forward rule. A
+    /// late-completing RPC against a since-deposed leader — a normal failover
+    /// artifact, or out-of-order completion of two coalesced retries — carries
+    /// a stale epoch, so the rule never lowers the cache: a same-endpoint
+    /// success `max`es the epoch, and a different-endpoint success may unseat a
+    /// fresh leader only when it proves it outranks it.
     pub(crate) fn record_success(&self, endpoint: &str, epoch: u128) {
+        self.seat_leader(endpoint, Some(epoch), SeatSource::Confirmed);
+    }
+
+    /// Apply the monotone-forward rule and, if it holds, seat `endpoint`/`epoch`
+    /// as the cached leader; returns whether the write happened. A thin
+    /// [`SeatSource::Hinted`] wrapper over [`Self::seat_leader`], where the
+    /// check and the write share one lock acquisition, so a concurrent
+    /// higher-epoch promotion cannot land between "the hint passed the gate"
+    /// and "the hint was written" and then be clobbered by this lower-or-equal
+    /// hint.
+    pub(crate) fn compare_and_set_leader(&self, endpoint: String, epoch: Option<u128>) -> bool {
+        self.seat_leader(&endpoint, epoch, SeatSource::Hinted)
+    }
+
+    /// The single monotone-forward writer to the leader cache. Both
+    /// [`Self::record_success`] and [`Self::compare_and_set_leader`] are thin
+    /// typed wrappers over it, so the rule that decides whether a
+    /// `(endpoint, epoch)` pair may seat the cache lives in exactly one place.
+    /// A monotone-forward gate is only as strong as its weakest writer, and two
+    /// hand-mirrored implementations were the root cause of issue H2: the
+    /// `record_success` mirror defended a *known*-epoch entry (issue #333) but
+    /// left a `None`-epoch entry — the epoch-less / mixed-version case, where
+    /// it matters most — unguarded, so a late cross-endpoint success flapped
+    /// the cache back to a deposed leader.
+    ///
+    /// The lock is held across the whole decision-and-write. Returns whether
+    /// the cache was (re)seated at `endpoint`. The rule, given the cache state:
+    ///
+    /// - **Absent or expired entry:** no monotone floor — accept and seat.
+    /// - **Same endpoint:** accept, refresh `last_used`, and merge the epoch
+    ///   forward (`max` of the known epochs; a known epoch is never downgraded
+    ///   to `None`). The endpoint just re-proved itself (a success) or was
+    ///   re-named as leader (a hint), so it keeps its slot regardless of the
+    ///   observed epoch. Reviving an expired same-endpoint entry carries no
+    ///   flap risk, so this path ignores freshness.
+    /// - **Different endpoint, fresh entry:** a write may unseat a fresh leader
+    ///   only when it can *prove* it outranks it.
+    ///   - **Both epochs known:** accept iff the incoming epoch is `>=` the
+    ///     cached one (the monotone-forward gate; rejects a strictly-stale
+    ///     write — issue #333).
+    ///   - **Known cached epoch, epoch-less write:** no epoch to rank. A
+    ///     `Hinted` write seats only when it names a *configured* endpoint —
+    ///     one we would dial in round-robin anyway (issue #357); a `Confirmed`
+    ///     write cannot reach here (a successful GetTs always carries a wire
+    ///     epoch) and defends the entry to keep the rule total.
+    ///   - **Unknown cached epoch:** no monotone floor. A `Hinted` write seats
+    ///     (the bootstrap / old-server path); a `Confirmed` write does *not* —
+    ///     a possibly-stale past proof with no rankable epoch must not flap the
+    ///     fresh entry back to a possibly-deposed leader (issue H2). The cache
+    ///     still converges, because an alive-but-follower endpoint redirects via
+    ///     the hint path and a fully-dead one self-heals at `leader_ttl`.
+    fn seat_leader(&self, endpoint: &str, epoch: Option<u128>, source: SeatSource) -> bool {
         let mut guard = self.leader.lock();
         match &mut *guard {
+            // Same endpoint: refresh and merge the epoch forward, regardless of
+            // freshness.
             Some(cached) if cached.endpoint == endpoint => {
-                cached.epoch = Some(cached.epoch.map_or(epoch, |current| current.max(epoch)));
+                cached.epoch = merge_epoch_forward(cached.epoch, epoch);
                 cached.last_used = Instant::now();
+                true
             }
-            // A fresh cache at a known, strictly-higher epoch wins: a late
-            // success against a now-deposed leader must not install a
-            // lower-epoch entry and re-open the CAS gate to stale hints.
-            Some(cached)
-                if cached.last_used.elapsed() < self.retry_policy.leader_ttl
-                    && cached.epoch.is_some_and(|current| epoch < current) => {}
+            // Different endpoint while the entry is still fresh.
+            Some(cached) if cached.last_used.elapsed() < self.retry_policy.leader_ttl => {
+                let accept = match (cached.epoch, epoch) {
+                    (Some(cached_epoch), Some(incoming)) => incoming >= cached_epoch,
+                    (Some(_), None) => match source {
+                        SeatSource::Hinted => self.is_configured(endpoint),
+                        SeatSource::Confirmed => false,
+                    },
+                    (None, _) => match source {
+                        SeatSource::Hinted => true,
+                        SeatSource::Confirmed => false,
+                    },
+                };
+                if accept {
+                    *guard = Some(CachedLeader {
+                        endpoint: endpoint.to_string(),
+                        epoch,
+                        last_used: Instant::now(),
+                    });
+                }
+                accept
+            }
+            // Absent or expired: no floor.
             _ => {
                 *guard = Some(CachedLeader {
                     endpoint: endpoint.to_string(),
-                    epoch: Some(epoch),
+                    epoch,
                     last_used: Instant::now(),
                 });
+                true
             }
         }
-    }
-
-    /// Atomically apply the monotone-forward rule and, if it holds, seat
-    /// `endpoint`/`epoch` as the cached leader. Returns whether the write
-    /// happened.
-    ///
-    /// The check and the write share one lock acquisition, so a concurrent
-    /// `record_success(higher_epoch)` cannot land between "the hint passed
-    /// the gate" and "the hint was written" and then be clobbered by the
-    /// lower-epoch hint. The rule, evaluated only while the cache is fresh
-    /// (within `leader_ttl`):
-    ///
-    /// - **Both epochs known:** accept iff the hint's epoch is `>=` the
-    ///   cached one (the monotone-forward gate; rejects a strictly-stale
-    ///   hint).
-    /// - **Known cache, epoch-less hint:** there is no epoch to rank, so
-    ///   accept only when the hint names a *configured* endpoint — one we
-    ///   would dial in round-robin regardless, and that a later successful
-    ///   RPC could confirm. An off-list epoch-less hint cannot downgrade the
-    ///   confirmed leader (issue #357).
-    /// - **Unknown cached epoch:** no monotone floor to defend, so the hint
-    ///   is accepted — the bootstrap / old-server path.
-    ///
-    /// An absent or expired entry also accepts the hint (no floor).
-    pub(crate) fn compare_and_set_leader(&self, endpoint: String, epoch: Option<u128>) -> bool {
-        let mut guard = self.leader.lock();
-        let accept = match &*guard {
-            Some(cached) if cached.last_used.elapsed() < self.retry_policy.leader_ttl => {
-                match (cached.epoch, epoch) {
-                    (Some(cached_epoch), Some(hint_epoch)) => hint_epoch >= cached_epoch,
-                    // No epoch to rank against a fresh, known-epoch leader
-                    // (issue #357): accept only when the hint names a
-                    // configured node — one we would dial in round-robin
-                    // anyway, and that a later successful RPC could confirm.
-                    // An off-list endpoint (a mixed-version peer's bad guess
-                    // or a misbehaving redirect source) cannot downgrade the
-                    // confirmed leader on an epoch-less claim.
-                    (Some(_), None) => self
-                        .configured
-                        .iter()
-                        .any(|configured| configured == &endpoint),
-                    // The cache itself holds no epoch (or is absent/expired):
-                    // no monotone floor to defend, so the bootstrap and
-                    // old-server paths still accept the hint.
-                    _ => true,
-                }
-            }
-            _ => true,
-        };
-        if accept {
-            *guard = Some(CachedLeader {
-                endpoint,
-                epoch,
-                last_used: Instant::now(),
-            });
-        }
-        accept
     }
 
     /// Pin the round-robin cursor to a known value so the order-asserting
@@ -614,8 +653,12 @@ mod tests {
         assert!(pool.compare_and_set_leader("a:1".into(), None));
         assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
 
-        // Pin the cache at epoch 5 via a confirmed RPC.
-        pool.record_success("b:1", 5);
+        // Seat the cache at `b:1` epoch 5. A *confirmed* RPC could not
+        // cross-seat over the fresh `a:1` unknown-epoch entry — that defense is
+        // issue H2 — but a hint carrying a known epoch is new information and
+        // seats over an unknown-epoch cache.
+        assert!(pool.compare_and_set_leader("b:1".into(), Some(5)));
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
 
         // A lower-epoch hint is rejected and must not move the cache.
         assert!(!pool.compare_and_set_leader("a:1".into(), Some(4)));
@@ -638,6 +681,52 @@ mod tests {
         // even once a known epoch has been observed.
         assert!(pool.compare_and_set_leader("a:1".into(), None));
         assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+    }
+
+    /// A hint naming the *same* endpoint as the cached leader is accepted and
+    /// holds the higher epoch, even when the hint's epoch is below the cached
+    /// one. Unifying both writers behind `seat_leader` made the same-endpoint
+    /// path uniform with `record_success`: the endpoint is the cached leader
+    /// either way, so it keeps its slot (and its higher epoch) and the worklist
+    /// still steers to it. The old `compare_and_set_leader` returned `false`
+    /// here (a `StaleLeaderHint`); the unified rule returns `true`.
+    #[test]
+    fn same_endpoint_lower_epoch_hint_is_accepted_and_holds_higher_epoch() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.record_success("a:1", 9);
+        assert!(pool.compare_and_set_leader("a:1".into(), Some(4)));
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+        assert_eq!(
+            pool.fresh_leader().expect("cache seated").epoch,
+            Some(9),
+            "a same-endpoint hint must not lower the cached epoch"
+        );
+    }
+
+    /// A same-endpoint *epoch-less* hint must not downgrade a known cached
+    /// epoch to `None`. The old `compare_and_set_leader` routed a same-endpoint
+    /// `(Some, None)` pair through the configured-list arm and overwrote the
+    /// entry, dropping the epoch; the unified `merge_epoch_forward` keeps it.
+    #[test]
+    fn same_endpoint_epochless_hint_keeps_known_epoch() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        pool.record_success("a:1", 9);
+        assert!(pool.compare_and_set_leader("a:1".into(), None));
+        assert_eq!(
+            pool.fresh_leader().expect("cache seated").epoch,
+            Some(9),
+            "an epoch-less same-endpoint hint must not drop the known epoch"
+        );
     }
 
     /// An epoch-less hint must not downgrade a *fresh, known-epoch* cached
@@ -856,6 +945,106 @@ mod tests {
             "a stale cross-endpoint success must not unseat the higher-epoch leader"
         );
         assert_eq!(pool.fresh_leader().expect("cache seated").epoch, Some(9));
+    }
+
+    /// The epoch-less flap (issue H2): a `None`-epoch cache entry — seated by
+    /// an epoch-less leader hint or at bootstrap — has no monotone floor, so a
+    /// late, genuinely-stale success against a *different*, now-deposed leader
+    /// must still not clobber it while it is fresh. Before the fix the
+    /// cross-endpoint reject arm only fired when the cached epoch was known
+    /// (`is_some_and`), so a `None`-epoch entry fell straight through to the
+    /// replace arm — exactly the backward flap the monotone-forward gate
+    /// exists to prevent, unguarded in the deployment (epoch-less / mixed
+    /// version) where it matters. A success is a *past* proof whose completion
+    /// can be arbitrarily delayed, so when it cannot prove it outranks the
+    /// fresh entry the entry is defended.
+    #[test]
+    fn record_success_different_endpoint_does_not_clobber_fresh_unknown_epoch_cache() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        // Seat `a:1` with an *unknown* epoch via an epoch-less hint (the
+        // mixed-version / bootstrap path).
+        assert!(pool.compare_and_set_leader("a:1".into(), None));
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+        // A late success against a different, now-deposed leader must not
+        // unseat the fresh entry, even though the cache has no epoch to rank.
+        pool.record_success("b:1", 5);
+        assert_eq!(
+            pool.cached_leader().as_deref(),
+            Some("a:1"),
+            "a stale cross-endpoint success must not clobber a fresh unknown-epoch entry"
+        );
+    }
+
+    /// The issue's literal "both epoch-less" case: an epoch-less cache plus a
+    /// success that carries the wire's zero epoch (an epoch-less / old server
+    /// sends `(0, 0)`, which reassembles to `Some(0)`). A different-endpoint
+    /// success still must not flap the fresh entry backward.
+    #[test]
+    fn record_success_epochless_does_not_clobber_fresh_unknown_epoch_cache() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        assert!(pool.compare_and_set_leader("a:1".into(), None));
+        // Epoch-less server: the success reassembles to epoch 0.
+        pool.record_success("b:1", 0);
+        assert_eq!(
+            pool.cached_leader().as_deref(),
+            Some("a:1"),
+            "an epoch-0 cross-endpoint success must not clobber a fresh unknown-epoch entry"
+        );
+    }
+
+    /// The flip side: once the unknown-epoch entry ages past `leader_ttl` it
+    /// imposes no floor, so a different-endpoint success seats freely — the
+    /// defense only guards a *fresh* entry, and the cache self-heals at TTL.
+    #[tokio::test(start_paused = true)]
+    async fn record_success_seats_against_unknown_epoch_cache_once_expired() {
+        let policy = RetryPolicy {
+            leader_ttl: std::time::Duration::from_millis(50),
+            ..RetryPolicy::default()
+        };
+        let pool = ChannelPool::new(vec!["a:1".into(), "b:1".into()], None, false, policy);
+        assert!(pool.compare_and_set_leader("a:1".into(), None));
+        // Fresh: the different-endpoint success is rejected.
+        pool.record_success("b:1", 5);
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+        // Advance past the TTL; the unknown-epoch entry is now stale.
+        tokio::time::advance(std::time::Duration::from_millis(75)).await;
+        // No floor remains, so the same success now seats.
+        pool.record_success("b:1", 5);
+        assert_eq!(pool.cached_leader().as_deref(), Some("b:1"));
+        assert_eq!(pool.fresh_leader().expect("cache seated").epoch, Some(5));
+    }
+
+    /// A success against the *same* endpoint as a fresh unknown-epoch entry
+    /// upgrades it to the observed epoch (and refreshes the TTL) — the
+    /// bootstrap-then-first-success path. The endpoint is unchanged, so there
+    /// is no flap concern; the cache simply gains the epoch it was missing.
+    #[test]
+    fn record_success_same_endpoint_upgrades_unknown_epoch() {
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into()],
+            None,
+            false,
+            RetryPolicy::default(),
+        );
+        assert!(pool.compare_and_set_leader("a:1".into(), None));
+        assert_eq!(pool.fresh_leader().expect("cache seated").epoch, None);
+        pool.record_success("a:1", 7);
+        assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
+        assert_eq!(
+            pool.fresh_leader().expect("cache seated").epoch,
+            Some(7),
+            "a same-endpoint success must upgrade an unknown cached epoch"
+        );
     }
 
     /// A genuine failover — a success against a different endpoint at a
