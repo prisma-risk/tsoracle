@@ -15,3 +15,16 @@ TLS is enabled. The Secret {{ .Values.tls.secretName | quote }} must contain:
 Peer connections between replicas require a CA shared across all nodes.
 Do not reuse a public CA here — provision a dedicated internal CA.
 {{- end }}
+{{- if and (ne .Values.driver "file") (not .Values.tls.enabled) }}
+
+WARNING: peer consensus traffic is UNAUTHENTICATED PLAINTEXT (tls.enabled=false,
+tls.allowInsecurePeer=true). Any pod that can reach port {{ .Values.ports.peer }} can inject
+raft/paxos RPCs and disrupt leadership, quorum, or timestamp ordering.
+{{- if .Values.networkPolicy.enabled }}
+A NetworkPolicy restricts the peer port to sibling replicas, but enable peer mTLS
+(tls.enabled=true with tls.secretName) before running this in production.
+{{- else }}
+networkPolicy.enabled=false — there is NO network restriction on the peer port.
+Enable peer mTLS or a NetworkPolicy before exposing this beyond a trusted network.
+{{- end }}
+{{- end }}

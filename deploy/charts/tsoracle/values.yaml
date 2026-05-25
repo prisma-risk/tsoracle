@@ -11,6 +11,9 @@ tls:
   enabled: false
   secretName: ""            # Secret with tls.crt / tls.key / ca.crt; mounted at /etc/tsoracle/tls
   clientMtls: false         # also require client certs on the client API
+  allowInsecurePeer: false  # HA drivers refuse to render with tls.enabled=false unless this is set
+networkPolicy:
+  enabled: true             # HA only; restrict the peer consensus port to sibling replicas
 server:
   windowAhead: 3s
   failoverAdvance: 1s
