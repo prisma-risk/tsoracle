@@ -2011,25 +2011,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "tsoracle-codec"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "tsoracle-consensus"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "futures",
+ "serde",
  "thiserror",
  "tsoracle-core",
 ]
 
 [[package]]
 name = "tsoracle-core"
-version = "0.1.4"
+version = "0.2.1"
 dependencies = [
+ "serde",
  "thiserror",
 ]
 
 [[package]]
 name = "tsoracle-driver-file"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "crc32c",
@@ -2042,11 +2053,12 @@ dependencies = [
  "tokio-stream",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-failpoint",
 ]
 
 [[package]]
 name = "tsoracle-driver-openraft"
-version = "0.1.4"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -2065,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-paxos"
-version = "0.1.4"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -2084,6 +2096,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsoracle-failpoint"
+version = "0.1.0"
+
+[[package]]
 name = "tsoracle-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -2100,7 +2116,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-openraft-toolkit"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "futures",
@@ -2111,30 +2127,33 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tsoracle-codec",
+ "tsoracle-failpoint",
 ]
 
 [[package]]
 name = "tsoracle-paxos-toolkit"
-version = "0.1.4"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures",
  "omnipaxos",
  "parking_lot",
  "pastey",
- "postcard",
  "serde",
  "thiserror",
  "tokio",
  "tokio-stream",
  "tracing",
+ "tsoracle-codec",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-failpoint",
 ]
 
 [[package]]
 name = "tsoracle-proto"
-version = "0.1.4"
+version = "0.2.2"
 dependencies = [
  "prost",
  "tonic",
@@ -2144,11 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-yieldpoint"
-version = "0.1.4"
-dependencies = [
- "parking_lot",
- "tokio",
-]
+version = "0.1.5"
 
 [[package]]
 name = "unicase"

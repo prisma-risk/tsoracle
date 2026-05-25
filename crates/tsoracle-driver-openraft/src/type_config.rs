@@ -52,6 +52,17 @@ declare_raft_types_ext! {
         SnapshotData    = Cursor<Vec<u8>>,
 }
 
+/// The concrete raft log entry for this type config, as decoded from the log
+/// column family on recovery and replication.
+///
+/// Exposed only so the fuzz harness can decode the full `[version | postcard]`
+/// log record (`log_store::decode_record`) against the real `Entry` shape —
+/// including the variable-length `EntryPayload::Membership` variant that
+/// decoding the inner [`HighWaterCommand`] alone never reaches. Hidden from the
+/// public API because nothing else should depend on the entry representation.
+#[doc(hidden)]
+pub type OpenraftEntry = openraft::type_config::alias::EntryOf<TypeConfig>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
