@@ -1,0 +1,19 @@
+[package]
+name                   = "kube-e2e-driver"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description            = "In-cluster assertion driver for the kind e2e lane"
+publish                = false
+
+[[bin]]
+name = "kube-e2e-driver"
+path = "src/main.rs"
+
+[dependencies]
+tsoracle-client = { path = "../../../crates/tsoracle-client", version = "0.2.3" }
+anyhow          = { workspace = true }
+clap            = { workspace = true }
+tokio           = { workspace = true }

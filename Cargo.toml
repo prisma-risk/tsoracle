@@ -28,6 +28,7 @@ members  = [
     "examples/tls-mtls",
     "benchmarks/minimal",
     "benchmarks/stress",
+    "e2e/kube/driver",
 ]
 # The fuzz crate is a standalone cargo project pinned to nightly via its own
 # rust-toolchain.toml. Excluding it here keeps `cargo build --workspace` on
