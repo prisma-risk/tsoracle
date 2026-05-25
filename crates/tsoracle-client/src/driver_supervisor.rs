@@ -63,6 +63,19 @@ pub(crate) async fn observe_driver_handle(handle: JoinHandle<()>) {
 mod tests {
     use super::*;
 
+    /// Install a process-global `TRACE` subscriber so the supervisor's
+    /// `tracing::error!` death-rattle actually formats its fields under test —
+    /// without a subscriber the macro short-circuits before evaluating its
+    /// arguments, leaving those lines unexecuted. Idempotent across tests;
+    /// mirrors the helper in `retry`.
+    fn enable_tracing() {
+        use tracing_subscriber::filter::LevelFilter;
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(LevelFilter::TRACE)
+            .with_test_writer()
+            .try_init();
+    }
+
     /// Normal-exit arm: a `JoinHandle` that completes cleanly drops
     /// through the supervisor without logging. The supervisor must
     /// return, not park.
@@ -79,6 +92,7 @@ mod tests {
     /// worse. The supervisor must absorb the panic and return.
     #[tokio::test]
     async fn observe_absorbs_panic_without_repanicking() {
+        enable_tracing();
         let handle = tokio::spawn(async {
             panic!("synthetic driver-task panic");
         });
@@ -94,6 +108,7 @@ mod tests {
     /// behaviour, different code path.
     #[tokio::test]
     async fn observe_handles_aborted_handle() {
+        enable_tracing();
         let handle = tokio::spawn(async {
             // Long enough that `abort()` reliably wins over the body.
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;

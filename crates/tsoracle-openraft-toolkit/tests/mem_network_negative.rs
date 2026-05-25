@@ -24,7 +24,7 @@ use std::time::Duration;
 use openraft::Vote;
 use openraft::error::{RPCError, StreamingError};
 use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
-use openraft::raft::{AppendEntriesRequest, VoteRequest};
+use openraft::raft::{AppendEntriesRequest, TransferLeaderRequest, VoteRequest};
 use openraft::storage::{Snapshot, SnapshotMeta};
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use tsoracle_openraft_toolkit::test_fakes::MemNetwork;
@@ -161,6 +161,37 @@ async fn full_snapshot_blocked_by_partition_returns_streaming_network_error() {
         .expect_err("isolated target must surface as a Network error");
     let StreamingError::Network(net_err) = err else {
         panic!("expected StreamingError::Network, got {err:?}");
+    };
+    assert!(net_err.to_string().contains("partitioned"));
+}
+
+#[tokio::test]
+async fn transfer_leader_to_unknown_peer_returns_network_error() {
+    let net = MemNetwork::<TestTypeConfig>::new();
+    let mut peer = new_peer_targeting(&net, 1, 99);
+    let req = TransferLeaderRequest::<TestTypeConfig>::new(sample_vote(), 99, None);
+    let err = peer
+        .transfer_leader(req, rpc_opt())
+        .await
+        .expect_err("unknown peer must surface as a Network error");
+    let RPCError::Network(net_err) = err else {
+        panic!("expected RPCError::Network, got {err:?}");
+    };
+    assert!(net_err.to_string().contains("unknown peer"));
+}
+
+#[tokio::test]
+async fn transfer_leader_blocked_by_partition_returns_network_error() {
+    let net = MemNetwork::<TestTypeConfig>::new();
+    net.partitions().cut_edge(1, 2);
+    let mut peer = new_peer_targeting(&net, 1, 2);
+    let req = TransferLeaderRequest::<TestTypeConfig>::new(sample_vote(), 2, None);
+    let err = peer
+        .transfer_leader(req, rpc_opt())
+        .await
+        .expect_err("cut edge must surface as a Network error");
+    let RPCError::Network(net_err) = err else {
+        panic!("expected RPCError::Network, got {err:?}");
     };
     assert!(net_err.to_string().contains("partitioned"));
 }

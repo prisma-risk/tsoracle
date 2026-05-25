@@ -121,6 +121,48 @@ impl ConsensusDriver for FaultyLoadDriver {
     }
 }
 
+/// Wraps `InMemoryDriver`: the leader-transition fence persist succeeds (so the
+/// server reaches `Serving` and the allocator seats a ceiling), but every
+/// *later* persist durably returns a stale value (`0`) that sits below that
+/// ceiling. The server's `commit_extension` then drops the extension as
+/// `NotAdvanced` — the benign "persisted but cannot advance" outcome (a leading
+/// indicator of persist reordering) that `extend_window` logs and counts
+/// without stepping the leader down.
+struct StalePersistDriver {
+    inner: Arc<InMemoryDriver>,
+    persists_observed: AtomicUsize,
+}
+
+impl StalePersistDriver {
+    fn new(inner: Arc<InMemoryDriver>) -> Self {
+        Self {
+            inner,
+            persists_observed: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ConsensusDriver for StalePersistDriver {
+    fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
+        self.inner.leadership_events()
+    }
+
+    async fn load_high_water(&self) -> Result<u64, ConsensusError> {
+        self.inner.load_high_water().await
+    }
+
+    async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
+        if self.persists_observed.fetch_add(1, Ordering::SeqCst) == 0 {
+            // Fence persist: let it through so the allocator seats a ceiling.
+            return self.inner.persist_high_water(at_least, epoch).await;
+        }
+        // A durable success that returns a value below the seated ceiling: the
+        // commit that follows cannot advance and is dropped as NotAdvanced.
+        Ok(0)
+    }
+}
+
 /// Boot a server with the given driver, drive it to `Serving`, and force the
 /// clock past the seeded high-water so the next `GetTs` triggers an extension.
 async fn boot_serving<D: ConsensusDriver + 'static>(
@@ -299,6 +341,58 @@ async fn extend_window_maps_permanent_driver_to_internal() {
     // Permanent driver errors do not step the server down either: the
     // server has no proof the epoch is stale, only that the driver is sick.
     assert!(matches!(*booted.state_rx.borrow(), ServingState::Serving));
+
+    booted.shutdown().await.unwrap();
+}
+
+/// A persist that durably succeeds but returns a value below the committed
+/// ceiling makes `commit_extension` drop the extension as `NotAdvanced` — a
+/// benign outcome (persist reordering) that `extend_window` logs and counts but
+/// must NOT step the leader down. Drives the `CommitOutcome::Ignored` arm of
+/// `extend_window`, which the error-injection tests above never reach: persist
+/// returns `Ok`, so the loud `NotLeader` / `Fenced` / driver-error arms are all
+/// skipped and only the post-persist ignored-commit branch runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extend_window_ignored_commit_is_benign_and_keeps_serving() {
+    // A TRACE subscriber so the "window extension commit ignored after persist"
+    // debug line formats its fields under test rather than short-circuiting.
+    use tracing_subscriber::filter::LevelFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(LevelFilter::TRACE)
+        .with_test_writer()
+        .try_init();
+
+    let in_memory = Arc::new(InMemoryDriver::new());
+    let stale = Arc::new(StalePersistDriver::new(in_memory.clone()));
+
+    let (booted, _clock) = boot_serving(stale, &in_memory).await;
+
+    let mut client = TsoServiceClient::connect(format!("http://{}", booted.addr))
+        .await
+        .unwrap();
+    // The extension persists, but its returned value cannot advance the ceiling,
+    // so the window stays exhausted and the retried grant surfaces Internal.
+    let status = client
+        .get_ts(GetTsRequest { count: 1 })
+        .await
+        .expect_err("a dropped (NotAdvanced) extension leaves the window exhausted");
+    assert_eq!(
+        status.code(),
+        tonic::Code::Internal,
+        "got status: {status:?}"
+    );
+    assert!(
+        status.message().contains("window exhausted"),
+        "got message: {}",
+        status.message(),
+    );
+
+    // NotAdvanced is benign: unlike NotLeader / Fenced it must leave the leader
+    // serving, since there is no evidence the epoch is stale.
+    assert!(
+        matches!(*booted.state_rx.borrow(), ServingState::Serving),
+        "an ignored (NotAdvanced) commit must not step the leader down",
+    );
 
     booted.shutdown().await.unwrap();
 }
