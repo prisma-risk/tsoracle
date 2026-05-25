@@ -50,3 +50,4 @@ proptest         = { workspace = true }
 rocksdb          = { workspace = true }
 tempfile         = { workspace = true }
 tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tracing-subscriber = { workspace = true }
