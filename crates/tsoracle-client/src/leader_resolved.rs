@@ -32,6 +32,18 @@ use crate::transport::apply_endpoint_config;
 // is unchanged.
 pub use tsoracle_proto::v1::{LeaderHintLookup, decode_leader_hint};
 
+/// Upper bound on the number of *non-configured* (wire-supplied leader-hint)
+/// channels the pool retains. Configured endpoints are operator-supplied and
+/// bounded, so they are exempt; hint endpoints (`LeaderHint.leader_endpoint`)
+/// are attacker-influenced strings, so a peer handing back a stream of
+/// distinct but reachable decoys would otherwise pin an unbounded number of
+/// live `Channel`s and their background reconnect tasks (issue #341). Once the
+/// non-configured entries exceed this cap, the least-recently-used one is
+/// evicted; the active leader, dialed on every request, stays most-recently-
+/// used and is never the victim. The total map size is therefore bounded at
+/// `configured.len() + MAX_HINT_CHANNELS`.
+const MAX_HINT_CHANNELS: usize = 8;
+
 /// Cached pointer to the endpoint that most recently behaved like the
 /// leader, along with the epoch that confirmed it and the instant the
 /// cache was last validated. `epoch` is `Option<u128>` (the full leader
@@ -47,6 +59,17 @@ pub(crate) struct CachedLeader {
     pub last_used: Instant,
 }
 
+/// One pooled channel slot: the lazily-dialed channel cell plus the instant it
+/// was last handed out. `last_used` drives the LRU eviction that bounds the
+/// number of non-configured (hint-derived) entries (issue #341); it is
+/// refreshed on every `client_with_cell` lookup — including cache hits — so the
+/// endpoint dialed on every request (the active leader) stays most-recently-
+/// used and is never chosen as a victim.
+struct PooledChannel {
+    cell: Arc<OnceCell<Channel>>,
+    last_used: Instant,
+}
+
 pub struct ChannelPool {
     configured: Vec<String>,
     /// One lazily-dialed channel per endpoint. The `parking_lot::Mutex`
@@ -56,7 +79,11 @@ pub struct ChannelPool {
     /// shared cell under the lock, drop the lock, then race into the cell's
     /// `get_or_try_init`, which runs the dial exactly once. A failed dial
     /// leaves the cell uninitialized so the next caller retries.
-    channels: Mutex<HashMap<String, Arc<OnceCell<Channel>>>>,
+    ///
+    /// Non-configured (hint-derived) entries are capped at
+    /// [`MAX_HINT_CHANNELS`] via LRU eviction keyed on each slot's `last_used`;
+    /// configured endpoints are exempt. See [`Self::enforce_hint_cap`].
+    channels: Mutex<HashMap<String, PooledChannel>>,
     leader: Mutex<Option<CachedLeader>>,
     connector: Option<std::sync::Arc<crate::transport::ChannelConnector>>,
     /// Set by `ClientBuilder::tls_config`; cleared by `channel_connector`.
@@ -242,10 +269,21 @@ impl ChannelPool {
     ) -> Result<(TsoServiceClient<Channel>, Arc<OnceCell<Channel>>), ClientError> {
         let cell = {
             let mut guard = self.channels.lock();
-            guard
+            let slot = guard
                 .entry(endpoint.to_string())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+                .or_insert_with(|| PooledChannel {
+                    cell: Arc::new(OnceCell::new()),
+                    last_used: Instant::now(),
+                });
+            // Refresh recency on every lookup (cache hit included) so the
+            // endpoint dialed on each request stays most-recently-used, then
+            // reclaim any non-configured slot that pushed us over the cap. The
+            // freshly-touched slot is the most-recently-used, so it is never
+            // its own victim (issue #341).
+            slot.last_used = Instant::now();
+            let cell = slot.cell.clone();
+            self.enforce_hint_cap(&mut guard, endpoint);
+            cell
         };
 
         let result = cell
@@ -319,9 +357,58 @@ impl ChannelPool {
         let mut guard = self.channels.lock();
         if guard
             .get(endpoint)
-            .is_some_and(|current| Arc::ptr_eq(current, cell))
+            .is_some_and(|current| Arc::ptr_eq(&current.cell, cell))
         {
             guard.remove(endpoint);
+        }
+    }
+
+    /// True when `endpoint` is one of the operator-supplied configured
+    /// endpoints. Configured endpoints are bounded and trusted, so they are
+    /// exempt from the hint-channel cap; only wire-supplied hint endpoints are
+    /// eligible for LRU eviction.
+    fn is_configured(&self, endpoint: &str) -> bool {
+        self.configured
+            .iter()
+            .any(|configured| configured == endpoint)
+    }
+
+    /// Evict least-recently-used non-configured channels until at most
+    /// [`MAX_HINT_CHANNELS`] remain, bounding the resources a peer can pin by
+    /// streaming distinct but reachable hint endpoints (issue #341).
+    /// `protected` — the endpoint just touched by the caller — is never chosen
+    /// as a victim, so a same-instant `last_used` tie cannot evict the very
+    /// slot we are about to hand out.
+    ///
+    /// Evicting only drops the map's reference; a caller mid-dial holds its own
+    /// clone of the `Arc<OnceCell<Channel>>`, so the channel survives until that
+    /// caller drops it — eviction merely forces a future re-dial, matching the
+    /// [`Self::evict_if_current`] contract.
+    fn enforce_hint_cap(&self, channels: &mut HashMap<String, PooledChannel>, protected: &str) {
+        loop {
+            let non_configured = channels
+                .keys()
+                .filter(|endpoint| !self.is_configured(endpoint))
+                .count();
+            if non_configured <= MAX_HINT_CHANNELS {
+                return;
+            }
+            let victim = channels
+                .iter()
+                .filter(|(endpoint, _)| {
+                    endpoint.as_str() != protected && !self.is_configured(endpoint)
+                })
+                .min_by_key(|(_, slot)| slot.last_used)
+                .map(|(endpoint, _)| endpoint.clone());
+            match victim {
+                Some(endpoint) => {
+                    channels.remove(&endpoint);
+                }
+                // Only the protected slot remains evictable; leave it so the
+                // caller still gets its channel (cap is restored on the next
+                // insert against a different endpoint).
+                None => return,
+            }
         }
     }
 
@@ -875,9 +962,118 @@ mod tests {
             guard
                 .get("a:1")
                 .expect("the dialed endpoint must have a cache entry")
+                .cell
                 .get()
                 .is_some(),
             "the retained cell must be initialized"
+        );
+    }
+
+    /// A stream of distinct but *reachable* wire-supplied hint endpoints must
+    /// not grow the channel map without bound (issue #341). The failed-dial
+    /// leak (#290) and transport-failure eviction (#239) only reclaim on
+    /// failure; a hint that dials *successfully* and never has a transport
+    /// failure was retained forever, each entry pinning a live `Channel` and
+    /// its background reconnect task. Non-configured (hint-derived) entries are
+    /// now capped at `MAX_HINT_CHANNELS`, so a peer pointing at live decoys
+    /// cannot pin unbounded resources.
+    #[tokio::test]
+    async fn successful_hint_dials_are_bounded() {
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async {
+                Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+            })
+        });
+        // No configured endpoints: every dial below is a hint-derived entry.
+        let pool = ChannelPool::new(Vec::new(), Some(connector), false, RetryPolicy::default());
+
+        for i in 0..50 {
+            let endpoint = format!("decoy-{i}:1");
+            pool.client(&endpoint)
+                .await
+                .expect("the success connector must seat a channel");
+        }
+
+        let guard = pool.channels.lock();
+        assert!(
+            guard.len() <= MAX_HINT_CHANNELS,
+            "non-configured channels must be capped at {MAX_HINT_CHANNELS}, found {}",
+            guard.len()
+        );
+    }
+
+    /// Configured (operator-supplied) endpoints are exempt from the hint cap:
+    /// they are bounded and trusted, so a flood of distinct hint endpoints must
+    /// never evict them. The total map stays bounded at
+    /// `configured.len() + MAX_HINT_CHANNELS`.
+    #[tokio::test]
+    async fn configured_endpoints_are_never_evicted() {
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async {
+                Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+            })
+        });
+        let pool = ChannelPool::new(
+            vec!["cfg-a:1".into(), "cfg-b:1".into()],
+            Some(connector),
+            false,
+            RetryPolicy::default(),
+        );
+        // Seat the configured endpoints, then never touch them again.
+        pool.client("cfg-a:1").await.expect("dial cfg-a");
+        pool.client("cfg-b:1").await.expect("dial cfg-b");
+        // Flood with distinct, reachable hint endpoints.
+        for i in 0..50 {
+            pool.client(&format!("decoy-{i}:1"))
+                .await
+                .expect("dial decoy");
+        }
+
+        let guard = pool.channels.lock();
+        assert!(
+            guard.contains_key("cfg-a:1") && guard.contains_key("cfg-b:1"),
+            "configured endpoints must survive a hint flood"
+        );
+        assert!(
+            guard.len() <= 2 + MAX_HINT_CHANNELS,
+            "total map size must stay bounded at configured.len() + cap, found {}",
+            guard.len()
+        );
+    }
+
+    /// LRU policy: an endpoint dialed on every round (standing in for the
+    /// active leader, which is dialed on each request) stays most-recently-used
+    /// and survives, while older idle hint endpoints are evicted. This is what
+    /// distinguishes LRU from a naive insertion-order/FIFO eviction — the
+    /// leader is seated *first*, so a FIFO policy would discard it.
+    #[tokio::test]
+    async fn lru_retains_the_repeatedly_dialed_endpoint() {
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async {
+                Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+            })
+        });
+        let pool = ChannelPool::new(Vec::new(), Some(connector), false, RetryPolicy::default());
+
+        // Seat the "leader" first so a FIFO policy would evict it earliest.
+        pool.client("leader:1").await.expect("dial leader");
+        for i in 0..50 {
+            pool.client(&format!("decoy-{i}:1"))
+                .await
+                .expect("dial decoy");
+            // Touch the leader every round, keeping it most-recently-used.
+            pool.client("leader:1").await.expect("redial leader");
+        }
+
+        let guard = pool.channels.lock();
+        assert!(
+            guard.contains_key("leader:1"),
+            "the repeatedly-dialed endpoint must survive LRU eviction"
+        );
+        assert!(
+            guard.len() <= MAX_HINT_CHANNELS,
+            "non-configured channels must stay capped, found {}",
+            guard.len()
         );
     }
 }
