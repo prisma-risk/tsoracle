@@ -105,157 +105,149 @@ pub(crate) async fn issue_rpc(
 ) -> Result<TimestampRange, ClientError> {
     let policy = pool.retry_policy().clone();
     let budget = Budget::start(&policy);
-    let initial_endpoints = pool.iter_round_robin();
-    // Floor the failed-attempt budget at the number of endpoints the worklist
-    // already knows about so a single cold-cache sweep always dials every one
-    // of them at least once. `iter_round_robin` starts the configured tail at a
-    // *randomly seeded* per-pool rotation offset; without this floor, a pool
-    // with more configured endpoints than `max_attempts` could exhaust the
-    // budget on the peers ahead of the offset and break before reaching the
-    // only reachable endpoint behind it — reporting a live cluster unreachable
-    // purely because of where the random offset landed. Leader-hint redirects
-    // grow the worklist *beyond* this initial length and stay uncharged against
-    // the budget (issue #340); the `overall_deadline` still bounds the worst
-    // case, so a pool full of dead peers cannot dial forever.
-    let attempt_cap = policy.max_attempts.max(initial_endpoints.len());
-    let mut worklist = Worklist::new(initial_endpoints);
+    // Persist across passes: the overall-deadline budget, the last error
+    // surfaced, and the failed-attempt budget (so `RetryPolicy::max_attempts`
+    // keeps its documented whole-call meaning — see the field's rustdoc).
     let mut last_err: Option<ClientError> = None;
-    // Counts only failed attempts (`AttemptOutcome::Err`); compared against
-    // `attempt_cap` (the larger of `max_attempts` and the initial worklist
-    // size). Leader-hint redirects are known progress, not throttled failures,
-    // so they neither consume the budget nor inflate the backoff exponent
-    // (issue #340); redirects stay bounded by the worklist visited-set and
-    // the overall deadline.
     let mut failed_attempts: u32 = 0;
-    // Counts actionable `LeaderHint` pivots — the only outcome that grows the
-    // worklist. Capped at `MAX_LEADER_REDIRECTS` so a peer that hints at a
-    // fresh endpoint on every dial cannot stretch the redirect chain across
-    // the whole `overall_deadline` (issue #340 left redirects uncharged
-    // against `max_attempts`; this is the absolute backstop).
-    let mut redirects: u32 = 0;
+    // The failed-attempt cap is floored at the initial worklist size so one
+    // cold sweep always dials every configured endpoint at least once even when
+    // `max_attempts` is smaller (issue #404). Computed once from the first
+    // pass's endpoint set.
+    let mut attempt_cap: usize = 0;
+    let mut pass: u32 = 0;
 
-    while let Some(endpoint) = worklist.next() {
-        if failed_attempts as usize >= attempt_cap {
-            break;
+    loop {
+        // Reset per pass: a fresh worklist (fresh visited-set), the redirect
+        // budget (so a settled cluster can be reached after an earlier pass hit
+        // the cap — see the design spec), and the election signal.
+        let initial_endpoints = pool.iter_round_robin();
+        if pass == 0 {
+            attempt_cap = policy.max_attempts.max(initial_endpoints.len());
         }
-        let Some(attempt_budget) = budget.next_attempt() else {
-            // Overall deadline reached; do not start another attempt.
-            break;
-        };
+        let mut worklist = Worklist::new(initial_endpoints);
+        let mut redirects: u32 = 0;
+        let mut saw_election_signal = false;
 
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            endpoint = %endpoint,
-            count,
-            failed_attempts,
-            budget_ms = attempt_budget.as_millis() as u64,
-            "tsoracle-client: dispatching GetTs to endpoint",
-        );
-
-        match attempt(pool, &endpoint, count, attempt_budget).await {
-            AttemptOutcome::Ok { range, epoch } => {
-                pool.record_success(&endpoint, epoch);
-                return Ok(range);
+        while let Some(endpoint) = worklist.next() {
+            if failed_attempts as usize >= attempt_cap {
+                break;
             }
-            AttemptOutcome::LeaderHint {
-                endpoint: hinted_endpoint,
-                epoch: hint_epoch,
-            } => {
-                // The cache write already happened atomically inside
-                // `classify_not_leader_hint` (the same lock that ran the
-                // monotone-forward check); here we only steer the worklist
-                // to the hinted leader. `hint_epoch` survives solely as a
-                // log field, so silence the unused-variable warning when
-                // `tracing` is off.
-                let _ = hint_epoch;
-                // Absolute backstop on the redirect chain (issue #340 exempts
-                // redirects from `max_attempts`). A peer that hints at a fresh
-                // endpoint on every dial would otherwise churn connections for
-                // the whole `overall_deadline`; stop after the cap and surface
-                // the redirect status — the network was fine, the cluster just
-                // never settled — rather than the misleading
-                // `NoReachableEndpoints` the worklist would otherwise yield.
-                if redirects >= MAX_LEADER_REDIRECTS {
+            let Some(attempt_budget) = budget.next_attempt() else {
+                // Overall deadline reached; do not start another attempt.
+                break;
+            };
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                endpoint = %endpoint,
+                count,
+                failed_attempts,
+                pass,
+                budget_ms = attempt_budget.as_millis() as u64,
+                "tsoracle-client: dispatching GetTs to endpoint",
+            );
+
+            match attempt(pool, &endpoint, count, attempt_budget).await {
+                AttemptOutcome::Ok { range, epoch } => {
+                    pool.record_success(&endpoint, epoch);
+                    return Ok(range);
+                }
+                AttemptOutcome::LeaderHint {
+                    endpoint: hinted_endpoint,
+                    epoch: hint_epoch,
+                } => {
+                    let _ = hint_epoch;
+                    if redirects >= MAX_LEADER_REDIRECTS {
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("tsoracle.client.leader_redirect_cap.total").increment(1);
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            from = %endpoint,
+                            to = %hinted_endpoint,
+                            max_redirects = MAX_LEADER_REDIRECTS,
+                            "tsoracle-client: leader-hint redirect cap reached this pass",
+                        );
+                        last_err = Some(ClientError::Rpc(tonic::Status::failed_precondition(
+                            format!(
+                                "leader-hint redirect cap ({MAX_LEADER_REDIRECTS}) reached \
+                                 before finding the live leader"
+                            ),
+                        )));
+                        // A later task turns this into an election signal so a
+                        // churning cluster is ridden out. For now: stop the pass.
+                        break;
+                    }
+                    redirects += 1;
                     #[cfg(feature = "metrics")]
-                    metrics::counter!("tsoracle.client.leader_redirect_cap.total").increment(1);
+                    metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
                     #[cfg(feature = "tracing")]
-                    tracing::warn!(
+                    tracing::debug!(
                         from = %endpoint,
                         to = %hinted_endpoint,
-                        max_redirects = MAX_LEADER_REDIRECTS,
-                        "tsoracle-client: leader-hint redirect cap reached; \
-                         abandoning the redirect chain",
+                        hint_epoch = ?hint_epoch,
+                        "tsoracle-client: pivoting to hinted leader",
                     );
-                    last_err = Some(ClientError::Rpc(tonic::Status::failed_precondition(
-                        format!(
-                            "leader-hint redirect cap ({MAX_LEADER_REDIRECTS}) reached \
-                             before finding the live leader"
-                        ),
-                    )));
-                    break;
+                    worklist.redirect_to(hinted_endpoint);
+                    continue;
                 }
-                redirects += 1;
-                #[cfg(feature = "metrics")]
-                metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
-                #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    from = %endpoint,
-                    to = %hinted_endpoint,
-                    hint_epoch = ?hint_epoch,
-                    "tsoracle-client: pivoting to hinted leader",
-                );
-                worklist.redirect_to(hinted_endpoint);
-                // No backoff and no budget charge: a leader hint is known
-                // progress, not a failure to throttle (issue #340).
-                continue;
-            }
-            AttemptOutcome::StaleLeaderHint(status) => {
-                #[cfg(feature = "metrics")]
-                metrics::counter!("tsoracle.client.leader_hint.stale.total").increment(1);
-                // A stale hint means the contacted peer is out of date,
-                // not that our cache is wrong. Keep the cache and advance
-                // the worklist without backoff (this is still a
-                // FAILED_PRECONDITION redirect attempt — just one we refuse
-                // to follow), and do not charge the attempt budget (issue
-                // #340). Preserve the status as last_err so a worklist that
-                // empties after only stale redirects surfaces the real
-                // NOT_LEADER, not a misleading NoReachableEndpoints.
-                last_err = Some(ClientError::Rpc(status));
-                continue;
-            }
-            AttemptOutcome::NoLeaderYet(status) => {
-                // Task 1: behave like HintRejected for now (record the status,
-                // advance without charging the budget). A later task turns this
-                // into the election signal that drives the ride-out re-poll.
-                last_err = Some(ClientError::Rpc(status));
-                continue;
-            }
-            AttemptOutcome::HintRejected(status) => {
-                // A NOT_LEADER whose hint we could not act on — malformed
-                // trailer, or a hinted endpoint dropped by the TLS-downgrade
-                // guard — is not evidence the cached leader is wrong, only
-                // that this peer could not redirect us. Leave the cache intact
-                // (clearing it stampedes every coalesced caller back onto a
-                // cold worklist on each flap) and advance the worklist without
-                // charging the attempt budget (issue #340), preserving the
-                // status to surface once exhausted.
-                last_err = Some(ClientError::Rpc(status));
-                continue;
-            }
-            AttemptOutcome::Err(err) => {
-                let should_sleep = should_backoff(&err);
-                last_err = Some(err);
-                failed_attempts = failed_attempts.saturating_add(1);
-                if should_sleep {
-                    let backoff = jittered_backoff(policy.base_backoff, failed_attempts - 1);
-                    let sleep_for = budget.clamp_backoff(backoff);
-                    if sleep_for > Duration::ZERO {
-                        tokio::time::sleep(sleep_for).await;
+                AttemptOutcome::NoLeaderYet(status) => {
+                    // A reachable peer has no leader to redirect us to: the
+                    // cluster is (re-)electing. Signal it so the worklist-empty
+                    // handler rides out the election. Known progress, not a
+                    // throttled failure — no budget charge, no in-pass backoff.
+                    saw_election_signal = true;
+                    last_err = Some(ClientError::Rpc(status));
+                    continue;
+                }
+                AttemptOutcome::StaleLeaderHint(status) => {
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("tsoracle.client.leader_hint.stale.total").increment(1);
+                    // A lagging peer pointed at an older-epoch leader — transient
+                    // cluster flux. Treat as an election signal; do not charge
+                    // the budget (issue #340).
+                    saw_election_signal = true;
+                    last_err = Some(ClientError::Rpc(status));
+                    continue;
+                }
+                AttemptOutcome::HintRejected(status) => {
+                    // NOT_LEADER we could not act on (malformed trailer or a
+                    // guard-dropped hint — absent-hint is NoLeaderYet above).
+                    // Deterministic, not an election: record and advance
+                    // without a signal.
+                    last_err = Some(ClientError::Rpc(status));
+                    continue;
+                }
+                AttemptOutcome::Err(err) => {
+                    let should_sleep = should_backoff(&err);
+                    last_err = Some(err);
+                    failed_attempts = failed_attempts.saturating_add(1);
+                    if should_sleep {
+                        let backoff = jittered_backoff(policy.base_backoff, failed_attempts - 1);
+                        let sleep_for = budget.clamp_backoff(backoff);
+                        if sleep_for > Duration::ZERO {
+                            tokio::time::sleep(sleep_for).await;
+                        }
                     }
+                    continue;
                 }
-                continue;
             }
         }
+
+        // The pass ended. Ride out only if a reachable server signalled an
+        // in-progress election this pass and the overall deadline still has
+        // room; otherwise fail fast (dead pool / deterministic rejection),
+        // surfacing the persisted last error.
+        if saw_election_signal && budget.next_attempt().is_some() {
+            let backoff = jittered_backoff(policy.base_backoff, pass);
+            let sleep_for = budget.clamp_backoff(backoff);
+            if sleep_for > Duration::ZERO {
+                tokio::time::sleep(sleep_for).await;
+            }
+            pass = pass.saturating_add(1);
+            continue;
+        }
+        break;
     }
     Err(last_err.unwrap_or(ClientError::NoReachableEndpoints))
 }
@@ -1721,6 +1713,264 @@ mod tests {
             MAX_LEADER_REDIRECTS as usize + 1,
             "the loop must dial through all MAX_LEADER_REDIRECTS redirects to the leader",
         );
+    }
+
+    /// A follower that answers FAILED_PRECONDITION with no hint (no leader yet)
+    /// for the first few calls, then serves once the election settles, must be
+    /// ridden out within `overall_deadline` — not surfaced as an error after a
+    /// single pass. Regression for the leader-election ride-out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rides_out_election_until_leader_appears() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        const NO_LEADER_REPLIES: usize = 4;
+
+        struct ElectingThenServing {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl TsoService for ElectingThenServing {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n < NO_LEADER_REPLIES {
+                    Err(tonic::Status::failed_precondition("no leader yet"))
+                } else {
+                    Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
+                        physical_ms: 1,
+                        logical_start: 0,
+                        count: 1,
+                        epoch_hi: 0,
+                        epoch_lo: 0,
+                    }))
+                }
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(ElectingThenServing {
+                    calls: server_calls,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                })
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::from_millis(5),
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["follower:1".into()], Some(connector), false, policy);
+
+        let range = issue_rpc(&pool, 1)
+            .await
+            .expect("the client must ride out the election and reach the leader");
+        assert_eq!(
+            range.count(),
+            1,
+            "the leader returned exactly one timestamp"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) > NO_LEADER_REPLIES,
+            "the loop must re-poll through every no-leader reply to the serving call",
+        );
+    }
+
+    /// A dead pool (all connections refused → transport Err, never a server
+    /// NOT_LEADER) must NOT ride out: no election signal is set, so the loop
+    /// fails after a single pass, well under `overall_deadline`. Pins
+    /// "dead != electing".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dead_pool_does_not_ride_out() {
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_millis(100),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(
+            vec!["http://127.0.0.1:1".into(), "http://127.0.0.1:2".into()],
+            None,
+            false,
+            policy,
+        );
+        let start = std::time::Instant::now();
+        let result = issue_rpc(&pool, 1).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "all-dead pool must surface an error");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a dead pool must fail fast, not ride out the full overall_deadline; took {elapsed:?}",
+        );
+    }
+
+    /// A NOT_LEADER carrying a *malformed* trailer is a deterministic peer bug,
+    /// not an election: it classifies as `HintRejected`, sets no signal, and the
+    /// single-endpoint loop fails fast rather than riding out to the deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_hint_does_not_ride_out() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct AlwaysMalformed;
+        #[tonic::async_trait]
+        impl TsoService for AlwaysMalformed {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                let mut status = tonic::Status::failed_precondition("not leader");
+                let key = tonic::metadata::MetadataKey::from_bytes(
+                    tsoracle_proto::v1::LEADER_HINT_TRAILER_KEY.as_bytes(),
+                )
+                .expect("trailer key is ascii");
+                let garbage: &[u8] = &[0x0a, 0x05, b'h', b'i'];
+                status.metadata_mut().insert_bin(
+                    key,
+                    tonic::metadata::BinaryMetadataValue::from_bytes(garbage),
+                );
+                Err(status)
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(AlwaysMalformed))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                })
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["peer:1".into()], Some(connector), false, policy);
+
+        let start = std::time::Instant::now();
+        let result = issue_rpc(&pool, 1).await;
+        let elapsed = start.elapsed();
+        assert!(
+            result.is_err(),
+            "malformed-hint NOT_LEADER must surface an error"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a deterministic malformed-hint rejection must not ride out; took {elapsed:?}",
+        );
+    }
+
+    /// A ride-out that exhausts the deadline must surface the real NOT_LEADER
+    /// status, never `NoReachableEndpoints` — `last_err` persists across passes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exhausted_ride_out_surfaces_not_leader() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct AlwaysElecting;
+        #[tonic::async_trait]
+        impl TsoService for AlwaysElecting {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::failed_precondition("no leader yet"))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(AlwaysElecting))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                })
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_millis(200),
+            overall_deadline: Duration::from_millis(300),
+            base_backoff: Duration::from_millis(5),
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["follower:1".into()], Some(connector), false, policy);
+
+        let err = issue_rpc(&pool, 1)
+            .await
+            .expect_err("a cluster that never elects must surface an error at the deadline");
+        match err {
+            ClientError::Rpc(status) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "must surface the NOT_LEADER status, not NoReachableEndpoints",
+            ),
+            other => panic!("expected ClientError::Rpc(FailedPrecondition), got {other:?}"),
+        }
     }
 
     /// Regression test for the "randomized rotation can skip the only live
