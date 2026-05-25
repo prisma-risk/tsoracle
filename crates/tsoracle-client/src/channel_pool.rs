@@ -140,6 +140,17 @@ pub struct ChannelPool {
     /// hash of the configured endpoints would *not* distribute load — every
     /// client ships the same endpoint list — so the seed must be random.
     rotation: AtomicUsize,
+    /// Test-only count of how many times [`Self::enforce_hint_cap`] has
+    /// actually run. The cap sweep is an O(n) `keys().filter()` scan (plus a
+    /// `min_by_key` on overflow) under the synchronous map lock, gated to fire
+    /// only when a brand-new slot is inserted — a cache hit reuses an existing
+    /// slot and cannot push the non-configured count over the cap. That gating
+    /// is invisible in the map's final state (a cache-hit sweep would be a
+    /// guaranteed no-op), so the only way to assert it is to observe that the
+    /// sweep did not run; this counter is that observation. `#[cfg(test)]`, so
+    /// it does not exist in production builds.
+    #[cfg(test)]
+    hint_cap_sweeps: AtomicUsize,
 }
 
 impl ChannelPool {
@@ -157,6 +168,8 @@ impl ChannelPool {
             tls_required,
             retry_policy,
             rotation: AtomicUsize::new(rand::random_range(0..=usize::MAX)),
+            #[cfg(test)]
+            hint_cap_sweeps: AtomicUsize::new(0),
         }
     }
 
@@ -304,6 +317,13 @@ impl ChannelPool {
     #[cfg(test)]
     pub(crate) fn pin_rotation_for_test(&self, seed: usize) {
         self.rotation.store(seed, Ordering::Relaxed);
+    }
+
+    /// Test-only read of the cap-sweep invocation counter; see the
+    /// [`Self::hint_cap_sweeps`] field.
+    #[cfg(test)]
+    pub(crate) fn hint_cap_sweep_count(&self) -> usize {
+        self.hint_cap_sweeps.load(Ordering::Relaxed)
     }
 
     /// Test-only convenience wrapper over [`Self::client_with_cell`] for the
@@ -477,6 +497,10 @@ impl ChannelPool {
     /// caller drops it — eviction merely forces a future re-dial, matching the
     /// [`Self::evict_if_current`] contract.
     fn enforce_hint_cap(&self, channels: &mut HashMap<String, PooledChannel>, protected: &str) {
+        // Record that the sweep ran so tests can assert it fires only on a real
+        // insert; the count is otherwise invisible in the map's final state.
+        #[cfg(test)]
+        self.hint_cap_sweeps.fetch_add(1, Ordering::Relaxed);
         loop {
             let non_configured = channels
                 .keys()
@@ -1469,6 +1493,108 @@ mod tests {
             guard.len() <= MAX_HINT_CHANNELS,
             "non-configured channels must stay capped, found {}",
             guard.len()
+        );
+    }
+
+    /// The cap sweep is the pool's hottest-path cost — an O(n) `keys().filter()`
+    /// scan (plus a `min_by_key` on overflow) under the synchronous map lock —
+    /// and it can only ever evict on a *new* insert: a cache hit reuses an
+    /// existing slot, so the non-configured count is unchanged and already
+    /// `<= MAX_HINT_CHANNELS` from the insert that seated it. The sweep is
+    /// therefore gated to run only when a brand-new slot is added. That contract
+    /// is invisible in the map's final state — a cache-hit sweep would be a
+    /// guaranteed no-op — so this asserts it directly via the sweep counter:
+    /// each genuine insert bumps it, each cache hit leaves it untouched.
+    #[tokio::test]
+    async fn cap_sweep_runs_on_insert_not_on_cache_hit() {
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async {
+                Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+            })
+        });
+        // No configured endpoints, so every dial below is a hint-derived slot
+        // eligible for the cap sweep.
+        let pool = ChannelPool::new(Vec::new(), Some(connector), false, RetryPolicy::default());
+
+        // First dial of `a:1` inserts a slot, so the cap sweep runs once.
+        pool.client("a:1").await.expect("insert a:1");
+        assert_eq!(
+            pool.hint_cap_sweep_count(),
+            1,
+            "the first dial inserts a slot and must sweep once"
+        );
+
+        // Re-dialing `a:1` is a cache hit: no new slot, so no sweep.
+        pool.client("a:1").await.expect("cache hit a:1");
+        assert_eq!(
+            pool.hint_cap_sweep_count(),
+            1,
+            "a cache hit must not run the O(n)-under-lock cap sweep"
+        );
+
+        // A different endpoint inserts again, so the sweep runs a second time.
+        pool.client("b:1").await.expect("insert b:1");
+        assert_eq!(
+            pool.hint_cap_sweep_count(),
+            2,
+            "a dial against a brand-new endpoint must sweep"
+        );
+
+        // Cache hits on either seated endpoint still add no sweeps.
+        pool.client("a:1").await.expect("cache hit a:1");
+        pool.client("b:1").await.expect("cache hit b:1");
+        assert_eq!(
+            pool.hint_cap_sweep_count(),
+            2,
+            "cache hits never sweep, regardless of which seated slot is reused"
+        );
+    }
+
+    /// The cap sweep is gated on insertion, but the `last_used` recency refresh
+    /// must stay *unconditional*: it is what keeps the active leader — re-dialed
+    /// on every request and thus almost always a cache hit — most-recently-used,
+    /// so the next insert's sweep never picks it as a victim (issue #341). This
+    /// guards that the insert gate did not also swallow the refresh: a cache hit
+    /// advances the slot's `last_used` while running no sweep and leaving the
+    /// map size unchanged. Were the refresh folded under the same gate, the
+    /// leader would age and the eviction protection of issue #341 would reopen.
+    #[tokio::test(start_paused = true)]
+    async fn cache_hit_refreshes_recency_without_sweeping() {
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async {
+                Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+            })
+        });
+        let pool = ChannelPool::new(Vec::new(), Some(connector), false, RetryPolicy::default());
+
+        pool.client("a:1").await.expect("insert a:1");
+        let seated_at = pool
+            .channels
+            .lock()
+            .get("a:1")
+            .expect("a:1 must be seated")
+            .last_used;
+        let sweeps_after_insert = pool.hint_cap_sweep_count();
+
+        // Let virtual time pass, then hit the cache for the same endpoint.
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
+        pool.client("a:1").await.expect("cache hit a:1");
+
+        let guard = pool.channels.lock();
+        assert_eq!(guard.len(), 1, "a cache hit must not grow the map");
+        assert!(
+            guard
+                .get("a:1")
+                .expect("a:1 must still be seated")
+                .last_used
+                > seated_at,
+            "a cache hit must refresh last_used unconditionally"
+        );
+        drop(guard);
+        assert_eq!(
+            pool.hint_cap_sweep_count(),
+            sweeps_after_insert,
+            "the recency refresh must not drag the cap sweep along with it"
         );
     }
 }
