@@ -3481,6 +3481,7 @@ dependencies = [
  "parking_lot",
  "postcard",
  "prost",
+ "rcgen",
  "rocksdb",
  "tempfile",
  "thiserror",

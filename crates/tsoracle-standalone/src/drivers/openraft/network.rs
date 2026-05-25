@@ -43,7 +43,7 @@ use openraft::raft::{
 };
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use tokio::sync::Mutex;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig};
 
 use tsoracle_driver_openraft::{OpenraftPeer as Node, TypeConfig};
 type NodeId = u64;
@@ -107,19 +107,15 @@ async fn evict<V>(pool: &Arc<Mutex<HashMap<(NodeId, String), V>>>, target: NodeI
 
 pub struct PeerFactory {
     pool: Pool,
+    tls: Option<ClientTlsConfig>,
 }
 
 impl PeerFactory {
-    pub fn new() -> Self {
+    pub fn new(tls: Option<ClientTlsConfig>) -> Self {
         Self {
             pool: Arc::new(Mutex::new(HashMap::new())),
+            tls,
         }
-    }
-}
-
-impl Default for PeerFactory {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -131,6 +127,7 @@ impl RaftNetworkFactory<TypeConfig> for PeerFactory {
             target,
             addr: node.addr.clone(),
             pool: self.pool.clone(),
+            tls: self.tls.clone(),
         }
     }
 }
@@ -143,6 +140,7 @@ pub struct PeerNetwork {
     target: NodeId,
     addr: String,
     pool: Pool,
+    tls: Option<ClientTlsConfig>,
 }
 
 impl PeerNetwork {
@@ -155,10 +153,21 @@ impl PeerNetwork {
                 return Ok(client.clone());
             }
         }
-        let url = format!("http://{}", self.addr);
-        let client = RaftPeerServiceClient::connect(url)
-            .await
-            .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?;
+        let channel = match &self.tls {
+            Some(tls) => Channel::from_shared(format!("https://{}", self.addr))
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?
+                .tls_config(tls.clone())
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?
+                .connect()
+                .await
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?,
+            None => Channel::from_shared(format!("http://{}", self.addr))
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?
+                .connect()
+                .await
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?,
+        };
+        let client = RaftPeerServiceClient::new(channel);
         self.pool.lock().await.insert(key, client.clone());
         Ok(client)
     }

@@ -37,6 +37,9 @@ pub use error::StandaloneError;
 mod transport;
 pub use transport::TransportHandle;
 
+#[cfg(any(feature = "openraft", feature = "paxos"))]
+pub(crate) mod peer_tls;
+
 /// A constructed, running standalone node: the consensus driver plus the
 /// background peer-transport task (if any). The caller (the bin) owns the
 /// client-facing `tsoracle_server::Server`; this type owns only the driver
