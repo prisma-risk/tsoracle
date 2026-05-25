@@ -13,6 +13,9 @@ pub use config::{
 
 mod drivers;
 
+#[cfg(feature = "file")]
+pub use drivers::file::init_file_seeded;
+
 mod error;
 pub use error::StandaloneError;
 

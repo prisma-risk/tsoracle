@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use tsoracle_consensus::ConsensusDriver;
@@ -6,6 +7,16 @@ use tsoracle_driver_file::FileDriver;
 use crate::config::FileConfig;
 use crate::error::StandaloneError;
 use crate::{Standalone, TransportHandle};
+
+/// One-shot seeded initialization for the file driver (migration setup).
+pub fn init_file_seeded(state_dir: &Path, seed_physical_ms: u64) -> Result<(), StandaloneError> {
+    FileDriver::init_seeded(state_dir, seed_physical_ms).map_err(|source| {
+        StandaloneError::Storage {
+            path: state_dir.to_path_buf(),
+            source: Box::new(source),
+        }
+    })
+}
 
 pub(crate) fn build_file(cfg: FileConfig) -> Result<Standalone, StandaloneError> {
     let driver =

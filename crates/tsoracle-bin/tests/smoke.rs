@@ -57,6 +57,7 @@ async fn binary_serves_timestamps() {
 
     let mut child = Command::new(binary_path)
         .arg("serve")
+        .arg("file")
         .arg("--listen")
         .arg(listen_addr.to_string())
         .arg("--state-dir")
@@ -115,6 +116,7 @@ async fn sigterm_triggers_graceful_shutdown() {
 
     let mut child = Command::new(binary_path)
         .arg("serve")
+        .arg("file")
         .arg("--listen")
         .arg(listen_addr.to_string())
         .arg("--state-dir")
