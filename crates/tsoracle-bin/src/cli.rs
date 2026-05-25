@@ -107,7 +107,7 @@ pub struct OpenraftArgs {
     /// Initialize the cluster on exactly one node, first boot only.
     #[arg(long)]
     pub bootstrap: bool,
-    /// Initial membership, ONLY with --bootstrap: `id=raft_host:port/service_host:port,...`.
+    /// Initial membership, ONLY with --bootstrap: `id=raft_host:port/service_host:port/admin_host:port,...`.
     #[arg(long)]
     pub members: Option<String>,
     #[arg(long, default_value = "250")]

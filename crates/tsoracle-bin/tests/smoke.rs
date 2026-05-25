@@ -200,6 +200,7 @@ async fn serve_openraft_single_node_serves_after_bootstrap() {
     let raft_dir = tempdir().unwrap();
     let listen_addr = bind_unused().await;
     let raft_addr = bind_unused().await;
+    let admin_addr = bind_unused().await;
 
     let mut child = Command::new(binary_path)
         .arg("serve")
@@ -214,7 +215,7 @@ async fn serve_openraft_single_node_serves_after_bootstrap() {
         .arg(raft_dir.path())
         .arg("--bootstrap")
         .arg("--members")
-        .arg(format!("1={raft_addr}/{listen_addr}"))
+        .arg(format!("1={raft_addr}/{listen_addr}/{admin_addr}"))
         .arg("--log")
         .arg("warn")
         .kill_on_drop(true)
@@ -365,6 +366,7 @@ async fn serve_openraft_with_peer_mtls_boots_and_serves() {
     let raft_dir = tempdir().unwrap();
     let listen_addr = bind_unused().await;
     let raft_addr = bind_unused().await;
+    let admin_addr = bind_unused().await;
 
     let mut child = Command::new(binary_path)
         .arg("serve")
@@ -379,7 +381,7 @@ async fn serve_openraft_with_peer_mtls_boots_and_serves() {
         .arg(raft_dir.path())
         .arg("--bootstrap")
         .arg("--members")
-        .arg(format!("1={raft_addr}/{listen_addr}"))
+        .arg(format!("1={raft_addr}/{listen_addr}/{admin_addr}"))
         .arg("--peer-tls-cert")
         .arg(&certs.cert)
         .arg("--peer-tls-key")

@@ -97,6 +97,7 @@ mod openraft_driver {
             MemberAddr {
                 raft_addr: raft_addr.to_string(),
                 service_endpoint: service_endpoint.to_string(),
+                admin_endpoint: "127.0.0.1:3".to_string(),
             },
         );
         OpenraftConfig {
@@ -182,6 +183,7 @@ mod openraft_driver {
             MemberAddr {
                 raft_addr: "127.0.0.1:1".into(),
                 service_endpoint: "127.0.0.1:2".into(),
+                admin_endpoint: "127.0.0.1:3".into(),
             },
         );
         let cfg = OpenraftConfig {
@@ -207,6 +209,7 @@ mod openraft_driver {
             MemberAddr {
                 raft_addr: "127.0.0.1:1".into(),
                 service_endpoint: "127.0.0.1:2".into(),
+                admin_endpoint: "127.0.0.1:3".into(),
             },
         );
         let cfg = OpenraftConfig {

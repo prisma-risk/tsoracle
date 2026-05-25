@@ -290,11 +290,19 @@ fn parse_members(input: &str) -> Result<BTreeMap<u64, tsoracle_standalone::Membe
             continue;
         }
         let (id, addrs) = entry.split_once('=').with_context(|| {
-            format!("bad member {entry:?}, expected id=raft_addr/service_endpoint")
+            format!("bad member {entry:?}, expected id=raft_addr/service_endpoint/admin_endpoint")
         })?;
-        let (raft_addr, service_endpoint) = addrs.split_once('/').with_context(|| {
-            format!("bad member {entry:?}, expected raft_addr/service_endpoint")
-        })?;
+        let mut parts = addrs.split('/');
+        let raft_addr = parts.next().filter(|s| !s.is_empty());
+        let service_endpoint = parts.next();
+        let admin_endpoint = parts.next();
+        let (Some(raft_addr), Some(service_endpoint), Some(admin_endpoint)) =
+            (raft_addr, service_endpoint, admin_endpoint)
+        else {
+            anyhow::bail!(
+                "bad member {entry:?}, expected raft_addr/service_endpoint/admin_endpoint"
+            );
+        };
         out.insert(
             id.trim()
                 .parse()
@@ -302,8 +310,33 @@ fn parse_members(input: &str) -> Result<BTreeMap<u64, tsoracle_standalone::Membe
             tsoracle_standalone::MemberAddr {
                 raft_addr: raft_addr.trim().to_string(),
                 service_endpoint: service_endpoint.trim().to_string(),
+                admin_endpoint: admin_endpoint.trim().to_string(),
             },
         );
     }
     Ok(out)
+}
+
+#[cfg(all(test, feature = "openraft"))]
+mod parse_members_tests {
+    use super::parse_members;
+
+    #[test]
+    fn parses_three_address_members() {
+        let map = parse_members("1=10.0.0.1:9/10.0.0.1:8/10.0.0.1:7").unwrap();
+        let member = map.get(&1).expect("id 1 present");
+        assert_eq!(member.raft_addr, "10.0.0.1:9");
+        assert_eq!(member.service_endpoint, "10.0.0.1:8");
+        assert_eq!(member.admin_endpoint, "10.0.0.1:7");
+    }
+
+    #[test]
+    fn rejects_member_missing_admin_endpoint() {
+        let err = parse_members("1=10.0.0.1:9/10.0.0.1:8").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("raft_addr/service_endpoint/admin_endpoint"),
+            "got: {err}"
+        );
+    }
 }

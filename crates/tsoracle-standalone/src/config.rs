@@ -25,12 +25,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// openraft's two-address membership entry (#408): the raft peer RPC address
-/// and the scheme-less host:port service endpoint clients are redirected to.
+/// openraft's three-address membership entry: the raft peer RPC address, the
+/// scheme-less service endpoint clients are redirected to, and the scheme-less
+/// admin endpoint the `tsoracle admin` CLI is redirected to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberAddr {
     pub raft_addr: String,
     pub service_endpoint: String,
+    pub admin_endpoint: String,
 }
 
 /// openraft timing knobs (milliseconds), defaulted to the values the example used.
