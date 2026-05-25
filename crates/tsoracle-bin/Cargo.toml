@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace      = true
 repository.workspace   = true
 description  = "Standalone timestamp oracle server"
+readme       = "README.md"
 publish      = true
 
 [[bin]]
