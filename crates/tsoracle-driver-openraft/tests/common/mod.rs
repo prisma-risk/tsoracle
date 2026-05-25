@@ -227,6 +227,7 @@ pub async fn build_single_node_with_config(config: Arc<Config>) -> TestCluster {
         1u64,
         OpenraftPeer {
             addr: "self".into(),
+            service_endpoint: String::new(),
         },
     );
     raft.initialize(mem).await.expect("initialize");
@@ -292,6 +293,7 @@ pub async fn build_three_node() -> TestCluster {
             id,
             OpenraftPeer {
                 addr: format!("mem-node-{id}"),
+                service_endpoint: String::new(),
             },
         );
     }

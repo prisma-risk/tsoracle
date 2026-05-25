@@ -1,6 +1,6 @@
 # Three-node tsoracle cluster on openraft (standalone)
 
-Multi-process tsoracle cluster backed by [openraft](https://github.com/databendlabs/openraft), wired together via [`tsoracle-driver-openraft`](../../crates/tsoracle-driver-openraft/). The driver crate provides the `ConsensusDriver` impl, the openraft `TypeConfig`, the `HighWaterStateMachine`, and the `StandaloneHost` that owns its own raft cluster. This example supplies the rest: a tonic raft peer transport (`src/network.rs`), the openraft `Config` + bootstrap glue (`src/main.rs`), and the `--tso-peers` map (`NodeId -> tsoracle-service-addr`) passed to `OpenraftDriver::with_peers` for `LeaderHint` follower-redirect resolution.
+Multi-process tsoracle cluster backed by [openraft](https://github.com/databendlabs/openraft), wired together via [`tsoracle-driver-openraft`](../../crates/tsoracle-driver-openraft/). The driver crate provides the `ConsensusDriver` impl, the openraft `TypeConfig`, the `HighWaterStateMachine`, and the `StandaloneHost` that owns its own raft cluster. This example supplies the rest: a tonic raft peer transport (`src/network.rs`), the openraft `Config` + bootstrap glue (`src/main.rs`), and the `--tso-peers` map (`NodeId -> tsoracle-service-addr`), which seeds each member's `service_endpoint` in raft membership at bootstrap so the driver can resolve `LeaderHint` follower-redirects from the leader's membership node.
 
 If your service already runs openraft for other state and you want TSO to share it, see the [`openraft-piggyback`](../openraft-piggyback/) example instead.
 
@@ -37,7 +37,7 @@ Against any node:
 
     grpcurl -plaintext -d '{"count":1}' 127.0.0.1:50561 tsoracle.v1.TsoService/GetTs
 
-A follower will respond with a `LeaderHint` trailer pointing at the current leader's tsoracle address (see `--tso-peers`). The address is resolved by `OpenraftDriver::with_peers`, which maps the leader's `NodeId` against the `--tso-peers` map passed at startup.
+A follower will respond with a `LeaderHint` trailer pointing at the current leader's tsoracle address (see `--tso-peers`). That address is the leader's `service_endpoint` carried in raft membership (seeded from `--tso-peers` at bootstrap); the driver reads it from the leader's membership node.
 
 ## Observe failover
 
@@ -45,7 +45,7 @@ Find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that pr
 
 ## What's in this example
 
-- `src/main.rs` — CLI parse, openraft `Config`, one rocksdb instance with three CFs (`raft_log` / `raft_meta` for the log store, `raft_snapshot` for `RocksdbSnapshotStore`), `Raft::new`, optional `initialize`, and the driver wiring: `StandaloneHost::new` → `OpenraftDriver::with_peers(host, tso_addrs)` where `tso_addrs` is the `NodeId -> tsoracle-service-addr` map from `--tso-peers`. About 150 lines including config and bootstrap.
+- `src/main.rs` — CLI parse, openraft `Config`, one rocksdb instance with three CFs (`raft_log` / `raft_meta` for the log store, `raft_snapshot` for `RocksdbSnapshotStore`), `Raft::new`, optional `initialize`, and the driver wiring: `StandaloneHost::new` → `OpenraftDriver::new(host)`, with the `--tso-peers` addresses written into each member's `service_endpoint` in raft membership at bootstrap. About 150 lines including config and bootstrap.
 - `src/network.rs` — tonic raft peer transport (`AppendEntries`, `Vote`, chunked snapshot stream). The bulk of the example; ports across cleanly because the driver crate's `TypeConfig` is the only handle the network needs.
 - `proto/raft.proto`, `build.rs` — peer-RPC service definition + tonic codegen.
 - `scripts/run.sh` — 3-node bring-up.
@@ -61,6 +61,12 @@ This example shows the **minimum** wiring to take `ConsensusDriver` end-to-end w
 - **Authentication & TLS.** Every RPC (raft peer and tsoracle client) is plaintext, and the raft peer transport is **unauthenticated by design** — any client that can reach `--raft-addr` can drive replication (append-entries/vote) and stream snapshots into the node. The memory bounds above stop a reachable peer from OOMing the process, but they are not an access control: before exposing the raft port beyond a trusted control plane, do one of (a) bind loopback or a private subnet reachable only by cluster peers, (b) wrap the transport in mTLS with a client-cert allowlist (see the [`tls-mtls`](../tls-mtls/) example), or (c) front it with an authorizing proxy. Note that all bind addresses are operator-supplied — `--raft-addr` is a required flag with no default, so a bare `cargo run` fails rather than exposing anything by accident, and the bundled `scripts/run.sh` binds loopback.
 
 - **Leader-watch debounce.** The toolkit's `leadership_events_from_metrics` emits a new state whenever the projected leadership state changes (role, term, or leader identity). It does not coalesce bursts: if openraft flips Leader → Candidate → Leader within a single metrics tick the server will fence, un-fence, and fence again. Production wiring may want a short hold-off (50–100 ms) before propagating Unknown / Follower transitions.
+
+## Addressing and pod restarts
+
+Peer addresses live in replicated raft membership, not in per-process config. Each member carries two addresses: `addr`, the raft transport endpoint as a scheme-less `host:port`, and `service_endpoint`, the tsoracle gRPC endpoint clients redirect to as a scheme-less `host:port` (the client applies `https://` under TLS, `http://` otherwise; an explicit `http://` is refused by a TLS client). Configure both with stable DNS names — run the cluster as a StatefulSet behind a headless Service so each pod has a durable name like `tso-0.tso.ns.svc.cluster.local`, never a raw pod IP. A pod that reschedules with a new IP keeps its name; the transport re-resolves it on the next dial (the pool evicts a failed channel), so no membership change is needed for an IP change. Production placement-driver/consensus stacks (Spanner, CockroachDB, FoundationDB) use this same stable-name model.
+
+This example's peer RPCs are unframed postcard, and widening the membership node bumped the toolkit `SCHEMA_VERSION`, so this build requires a **fresh cluster**: a rolling/mixed-version upgrade across the change is unsupported.
 
 ## Cleaning up
 

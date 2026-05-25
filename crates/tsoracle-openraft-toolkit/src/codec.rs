@@ -33,4 +33,10 @@ pub use tsoracle_codec::{CodecError, decode, encode};
 /// same frame — it was previously persisted as bare, unversioned postcard, so a
 /// v1 store's meta records read against this version loud-reject rather than
 /// risk a silent misdecode of the recovery-critical vote.
-pub const SCHEMA_VERSION: u8 = 2;
+///
+/// v3 widened the openraft driver's `OpenraftPeer` membership node (a
+/// `service_endpoint` field beside `addr`), changing the postcard layout of
+/// membership log entries. The bump is global to this toolkit, so a v2 store's
+/// records — for any config, not just the standalone driver — loud-reject when
+/// read against v3 rather than risk a silent misdecode.
+pub const SCHEMA_VERSION: u8 = 3;

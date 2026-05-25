@@ -134,6 +134,7 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
             id,
             OpenraftPeer {
                 addr: format!("snapshot-node-{id}"),
+                service_endpoint: String::new(),
             },
         );
     }
