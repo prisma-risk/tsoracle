@@ -108,5 +108,5 @@ Recommendation: **do not** make it a stress topology. The stress harness's whole
 ## Prerequisites this lane surfaces
 
 1. **A Dockerfile.** None exists in the repo today. `e2e/kube/Dockerfile` is part of this sketch.
-2. **SIGTERM handling in the example binaries.** The standalone examples should feed `serve_with_shutdown` a future that resolves on SIGTERM (and SIGINT), not `ctrl_c()` alone. The stock binary's `shutdown_signal()` helper (`crates/tsoracle-bin/src/main.rs`) is the pattern to copy. Until that lands, set a long `terminationGracePeriodSeconds` and treat SIGKILL-on-drain as a known gap the lane documents rather than asserts against.
+2. **SIGTERM handling in the example binaries.** Done (#406): the standalone examples now feed `serve_with_shutdown` the shared `tsoracle_server::shutdown_signal()` future, which resolves on SIGTERM and SIGINT. The graceful rolling-restart assertion in the kube lane exercises this path.
 3. **Optional: `grpc.health.v1.Health`.** Adding the standard gRPC health service would let probes use `grpc_health_probe` and report leader/serving state precisely. Not required for the TCP-based contract above, but a clean follow-up.
