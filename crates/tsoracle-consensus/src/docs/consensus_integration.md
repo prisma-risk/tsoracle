@@ -19,7 +19,7 @@ Return the durably-persisted high-water. The read MUST be linearized — the ret
 
 ## persist_high_water
 
-"Advance the durable high-water to at least `at_least`, return the actual value." Critical properties: monotonic-advance, durable before returning Ok, fenced by `epoch`.
+"Advance the durable high-water to at least `at_least`, return the actual value." Critical properties: monotonic-advance, durable before returning Ok, and stale-leader rejection. The `epoch` enables that last property, but the *mechanism* is the driver's choice: a driver MAY reject a stale-leader write with an up-front `epoch` pre-check (returning `ConsensusError::Fenced`), or rely on the `max(prev, at_least)` apply plus consensus leader-forwarding (returning `ConsensusError::NotLeader`) and ignore `epoch` entirely. Both are trait-compliant; the server treats `Fenced` and `NotLeader` identically — "this leader is stale, retry against the new leader." See the rustdoc on `ConsensusDriver::persist_high_water` for the normative statement.
 
 - **openraft:** submit `TsoExtend { at_least, epoch }` through `Raft::client_write()`. State machine apply does `stored = max(stored, at_least)`; returns the post-apply value. Stale leaders' writes fail because openraft refuses non-leader client_writes.
 - **raft-rs:** propose a `TsoExtend` log entry. On commit, apply does `max(stored, at_least)`. Stale leaders fail at the propose layer.

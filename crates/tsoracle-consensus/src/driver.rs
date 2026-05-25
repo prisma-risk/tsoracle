@@ -61,8 +61,30 @@ pub trait ConsensusDriver: Send + Sync + 'static {
     /// least," never "absolute set." For consensus-backed implementations,
     /// the state-machine apply path computes `max(prev, at_least)`.
     ///
-    /// The `epoch` lets the driver reject stale-leader writes; single-node
-    /// drivers may ignore it.
+    /// **Contract — epoch-fencing (driver's choice of mechanism):** the
+    /// `epoch` names the leadership term the caller believed it held when it
+    /// issued the write. A consensus-backed driver MAY reject a stale-leader
+    /// write through *either* of two trait-compliant mechanisms, and which one
+    /// it uses is a driver-internal detail callers must not depend on:
+    ///   * **Pre-check** — compare `epoch` against the driver's current term
+    ///     before proposing and return [`ConsensusError::Fenced`] on mismatch.
+    ///     The paxos driver does this against its current ballot-derived epoch
+    ///     to avoid wasting a log slot on a write that would be superseded
+    ///     downstream anyway.
+    ///   * **Apply-time monotonicity + leader-forwarding** — admit the
+    ///     proposal and rely on the `max(prev, at_least)` apply (above) plus
+    ///     consensus leader-forwarding, which surfaces a superseded leader as
+    ///     [`ConsensusError::NotLeader`]. The openraft driver does this and
+    ///     ignores `epoch` entirely: a stale write either no-ops under `max`
+    ///     or is rejected because the node is no longer leader.
+    ///
+    /// Both outcomes carry the same meaning to the caller — *this leader is
+    /// stale; retry against the new leader* — so callers MUST treat
+    /// [`ConsensusError::Fenced`] and [`ConsensusError::NotLeader`]
+    /// identically (the server fence collapses them into one step-down arm,
+    /// and both map to `FAILED_PRECONDITION` + `LeaderHint`; see
+    /// [`ConsensusError`]). Single-node drivers have no term to fence against
+    /// and may ignore `epoch`.
     async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError>;
 }
 
