@@ -32,7 +32,7 @@ No openraft, no real network, no real disk. The `InMemoryDriver` exposes `become
 
 ## openraft-standalone example
 
-`examples/openraft-standalone/` is the worked HA setup: three independent processes, each running a tsoracle server backed by `tsoracle-driver-openraft`. The integration body is just three driver bindings (`StandaloneHost::new`, `OpenraftDriver::new`, `StandaloneRouter::new`) in `src/main.rs`; everything else is operational plumbing (tonic raft peer transport in `src/network.rs`, openraft `Config` + bootstrap in `src/main.rs`).
+`examples/openraft-standalone/` is the worked HA setup: three independent processes, each running a tsoracle server backed by `tsoracle-driver-openraft`. The integration body is just two driver bindings (`StandaloneHost::new`, `OpenraftDriver::with_peers`) in `src/main.rs`; everything else is operational plumbing (tonic raft peer transport in `src/network.rs`, openraft `Config` + bootstrap in `src/main.rs`).
 
 See the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-standalone) for prerequisites, manual node startup, and design notes. Quickstart:
 
@@ -40,12 +40,12 @@ See the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/exa
 examples/openraft-standalone/scripts/run.sh
 ```
 
-starts three node processes in the background, with logs under `examples/openraft-standalone/.data/n*.log`. Node 1 carries `--bootstrap`; nodes 2 and 3 join. Issue a timestamp with `grpcurl` against any node — followers respond with a `LeaderHint` trailer pointing at the current leader's advertised tsoracle address. The trailer is populated by `StandaloneRouter`, a small wrapper in `src/router.rs` that adds host-specific `NodeId -> tsoracle-addr` resolution to the generic `OpenraftDriver`.
+starts three node processes in the background, with logs under `examples/openraft-standalone/.data/n*.log`. Node 1 carries `--bootstrap`; nodes 2 and 3 join. Issue a timestamp with `grpcurl` against any node — followers respond with a `LeaderHint` trailer pointing at the current leader's advertised tsoracle address. The trailer is populated from the `NodeId -> tsoracle-addr` map passed to `OpenraftDriver::with_peers` (a list of `TsoPeer { node_id, endpoint }`), which the driver consults on the follower branch to resolve the elected leader's advertised endpoint.
 
 What this example demonstrates:
 
-- The minimum boot sequence: `RocksdbLogStore` (from `tsoracle-openraft-toolkit`) + `RocksdbSnapshotStore` + `HighWaterStateMachine::with_store` + `StandaloneHost` + `OpenraftDriver`, all sharing one `Arc<DB>` so the log and snapshot fsync together. The integration code is a handful of `let` bindings in `main.rs` plus the `StandaloneRouter` wrapper for endpoint resolution.
-- The compose-the-driver pattern: when the driver crate's generic mapping doesn't suit your `C::Node`, wrap `ConsensusDriver` and reimplement only the methods that need host-specific knowledge.
+- The minimum boot sequence: `RocksdbLogStore` (from `tsoracle-openraft-toolkit`) + `RocksdbSnapshotStore` + `HighWaterStateMachine::with_store` + `StandaloneHost` + `OpenraftDriver`, all sharing one `Arc<DB>` so the log and snapshot fsync together. The integration code is a handful of `let` bindings in `main.rs`, with endpoint resolution supplied to `OpenraftDriver::with_peers` as a `TsoPeer` list.
+- Generic endpoint resolution: `OpenraftDriver::with_peers` takes a `NodeId -> tsoracle-addr` map (as `TsoPeer { node_id, endpoint }` entries) and resolves the elected leader's advertised endpoint for `LeaderHint` redirects — no host-specific driver wrapper required.
 - Snapshots are persisted through `RocksdbSnapshotStore` (sharing the same rocksdb instance as the log store), so the example runs with openraft's default snapshot policy and the raft log is bounded. Embedders with custom state machines that still keep state in memory should disable snapshots via `SnapshotPolicy::Never` — see the `openraft-piggyback` example.
 
 To observe failover: find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that process, watch the survivors elect, then re-issue `GetTs`. Typical re-leader latency is 2–5 seconds (election + fence).
@@ -69,7 +69,7 @@ pub enum HostCommand {
 }
 ```
 
-Your apply path enforces TSO monotonicity (`max(prev, target)`) in a field next to your KV map; your snapshot carries both halves; your `OpenraftHighWaterHost` impl wraps `HighWaterCommand::Bump` in `HostCommand::Tso` when submitting. See [`docs/consensus-integration.md`](consensus-integration.md#openrafthighwaterhost-trait) for the trait contract and the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-piggyback) for the walkthrough.
+Your apply path enforces TSO monotonicity (`max(prev, target)`) in a field next to your KV map; your snapshot carries both halves; your `OpenraftHighWaterHost` impl wraps `HighWaterCommand::Advance(AdvancePayload { at_least })` in `HostCommand::Tso` when submitting. See [`docs/consensus-integration.md`](consensus-integration.md#openrafthighwaterhost-trait) for the trait contract and the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-piggyback) for the walkthrough.
 
 ## Testing strategy
 
