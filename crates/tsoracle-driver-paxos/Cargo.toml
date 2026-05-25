@@ -13,10 +13,12 @@ authors.workspace      = true
 default          = ["rocksdb-storage"]
 rocksdb-storage  = ["tsoracle-paxos-toolkit/rocksdb-storage"]
 yieldpoints      = ["tsoracle-yieldpoint/yieldpoints"]
+metrics          = ["dep:metrics", "tsoracle-paxos-toolkit/metrics"]
 
 [dependencies]
 async-trait          = { workspace = true }
 futures              = { workspace = true }
+metrics              = { workspace = true, optional = true }
 omnipaxos            = { workspace = true, features = ["serde"] }
 parking_lot          = { workspace = true }
 postcard             = { workspace = true }
@@ -32,6 +34,7 @@ tsoracle-yieldpoint  = { workspace = true }
 
 [dev-dependencies]
 anyhow           = { workspace = true }
+metrics-util     = { workspace = true }
 proptest         = { workspace = true }
 rocksdb          = { workspace = true }
 tempfile         = { workspace = true }

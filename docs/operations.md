@@ -14,7 +14,7 @@ Default is 1 second. On leadership gain, the new leader first computes `serving_
 
 ## Monitoring hooks
 
-Both `tsoracle-server` and `tsoracle-client` emit signals through the [`metrics`](https://docs.rs/metrics) crate facade. Emission is gated behind the `metrics` Cargo feature on each crate (off by default so the dependency stays opt-in for embedders who do not want it). The client additionally emits structured events through the [`tracing`](https://docs.rs/tracing) crate; `tracing` is on by default for `tsoracle-client` (matching `tsoracle-server`).
+`tsoracle-server`, `tsoracle-client`, and the OmniPaxos backend (`tsoracle-driver-paxos` / `tsoracle-paxos-toolkit`) emit signals through the [`metrics`](https://docs.rs/metrics) crate facade. Emission is gated behind the `metrics` Cargo feature on each crate (off by default so the dependency stays opt-in for embedders who do not want it); enabling the feature on `tsoracle-driver-paxos` also turns it on for the toolkit it depends on. The client additionally emits structured events through the [`tracing`](https://docs.rs/tracing) crate; `tracing` is on by default for `tsoracle-client` (matching `tsoracle-server`).
 
 **Server signals**
 
@@ -29,6 +29,13 @@ Both `tsoracle-server` and `tsoracle-client` emit signals through the [`metrics`
 - `tsoracle.leader_transition.fence_latency` — duration of the failover fence (histogram, seconds)
 - `tsoracle.leader_transition.fence_transient_retries.total` — fence retried a transient consensus error during failover (counter)
 - `tsoracle.not_leader.total` — RPCs rejected with `NOT_LEADER` (counter)
+
+**Paxos consensus signals** (emitted by `tsoracle-driver-paxos` / `tsoracle-paxos-toolkit` when their `metrics` feature is enabled)
+
+- `tsoracle.paxos.snapshot.total` — snapshot attempts triggered by the snapshot policy after a successful apply (counter)
+- `tsoracle.paxos.snapshot.failures.total` — snapshot attempts the OmniPaxos handle rejected (counter). Snapshot failure is non-fatal for liveness, so the success rate is `total - failures`; a sustained non-zero rate points at a degrading snapshot/compaction path.
+- `tsoracle.paxos.snapshot.last_index` — decided index of the last snapshot that succeeded (gauge). This should keep advancing under load; a stall while `snapshot.total` keeps climbing means snapshots are firing but failing.
+- `tsoracle.paxos.storage.async_write_failures.total{op}` — non-synced RocksDB storage writes that failed (counter). `op` is one of `set_decided_idx`, `set_compacted_idx`, `trim`, `set_snapshot`, `set_stopsign`. These writes are recoverable after a crash, so a failure is not immediately fatal, but a recurring rate signals disk pressure or storage faults that would otherwise stay hidden in logs.
 
 **Client signals**
 
