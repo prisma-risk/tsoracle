@@ -23,6 +23,8 @@
 
 //! Driver selection, configuration, and peer transport for a standalone
 //! tsoracle node. See `build`.
+//!
+//! [`Standalone::admin`] is the runtime membership-admin handle ([`MembershipAdmin`]): live for the openraft driver (add a learner, promote it to voter, remove a node, and list members — served over the `--admin-listen` gRPC port), and [`UnsupportedAdmin`] for the file and paxos drivers, which reject every mutating op.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 use std::future::Future;
