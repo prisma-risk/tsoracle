@@ -200,7 +200,7 @@ async fn build_node(
     let sink = Arc::new(MeshSink {
         network: network.clone(),
     });
-    runner.start(sink);
+    runner.start(sink).context("paxos runner already running")?;
 
     // ---- Driver + tsoracle server ----
     let host = PiggybackHost::new(omnipaxos.clone(), state.clone(), id);
