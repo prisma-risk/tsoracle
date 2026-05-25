@@ -1,0 +1,6 @@
+# NOTE: do not exclude *.md or docs/ — the Rust build pulls several files in at
+# compile time via include_str! (e.g. crates/*/README.md and
+# crates/tsoracle-core/src/docs/algorithm.md), so stripping them breaks the build.
+target/
+.git/
+benchmarks/stress/target/
