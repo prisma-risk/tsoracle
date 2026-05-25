@@ -19,6 +19,7 @@ mod fence;
 mod leader_hint;
 mod server;
 mod service;
+mod serving_core;
 
 pub mod docs;
 

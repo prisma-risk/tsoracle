@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use tsoracle_consensus::{ConsensusError, LeaderState};
 
-use crate::server::{Server, ServerError, ServingState};
+use crate::server::{Server, ServerError};
 
 // Fence retry tuning for the volatile post-election window. When a fence hits
 // `TransientDriver`, the retry loop does NOT give up: a still-elected leader
@@ -89,7 +89,7 @@ pub(crate) async fn run_leader_watch(
                     // instead of dispatching one more leadership event first.
                     biased;
                     _ = &mut cancel => {
-                        server.step_down_due_to_consensus_rejection(None, None);
+                        server.core.step_down(None, None);
                         return Ok(());
                     }
                     next = stream.next() => match next {
@@ -117,11 +117,8 @@ pub(crate) async fn run_leader_watch(
 
                 // Clear serving so new GetTs requests return NOT_LEADER until the
                 // fence republishes Serving below.
-                server.state_tx.send_replace(ServingState::NotServing {
-                    leader_endpoint: None,
-                    leader_epoch: None,
-                });
-                server.allocator.lock().on_leadership_lost();
+                server.core.publish_not_serving(None, None);
+                server.core.clear_allocator();
 
                 // Count the transition after the clear above, not on the fence's
                 // success path below: a Leader event is "observed" the moment we
@@ -168,7 +165,7 @@ pub(crate) async fn run_leader_watch(
                         // would deadlock against an extender holding
                         // `extension_lock` and waiting on `read()`. Keep the
                         // fence `extension_lock`-free.
-                        let drain_guard = server.extension_gate.write().await;
+                        let drain_guard = server.core.drain_barrier_write().await;
 
                         // Linearized load of the durably-persisted high-water.
                         // prior_max is an INCLUSIVE high-water: the prior leader
@@ -216,14 +213,12 @@ pub(crate) async fn run_leader_watch(
                         // the lower bound; committed_ceiling = actual is the
                         // post-persist upper bound the allocator can serve
                         // through without an extra extension round-trip.
-                        server.allocator.lock().try_on_leadership_gained(
-                            serving_floor,
-                            actual,
-                            epoch,
-                        )?;
+                        server
+                            .core
+                            .seed_on_leadership_gained(serving_floor, actual, epoch)?;
 
                         // Publish serving, then release the drain guard.
-                        server.state_tx.send_replace(ServingState::Serving);
+                        server.core.publish_serving();
                         drop(drain_guard);
 
                         tsoracle_failpoint::failpoint!("server::fence::after_serving_published");
@@ -244,10 +239,7 @@ pub(crate) async fn run_leader_watch(
                         Err(ServerError::Consensus(
                             ConsensusError::NotLeader { .. } | ConsensusError::Fenced { .. },
                         )) => {
-                            server.state_tx.send_replace(ServingState::NotServing {
-                                leader_endpoint: None,
-                                leader_epoch: None,
-                            });
+                            server.core.publish_not_serving(None, None);
                             break;
                         }
                         // Recoverable driver hiccup. Retry, but race the backoff
@@ -279,7 +271,7 @@ pub(crate) async fn run_leader_watch(
                                 // is honored rather than spun past.
                                 biased;
                                 _ = &mut cancel => {
-                                    server.step_down_due_to_consensus_rejection(None, None);
+                                    server.core.step_down(None, None);
                                     return Ok(());
                                 }
                                 _ = tokio::time::sleep(backoff) => {}
@@ -304,22 +296,18 @@ pub(crate) async fn run_leader_watch(
                 leader_endpoint,
                 leader_epoch,
             } => {
-                server.allocator.lock().on_leadership_lost();
-                server.state_tx.send_replace(ServingState::NotServing {
-                    leader_endpoint,
-                    leader_epoch,
-                });
+                server.core.clear_allocator();
+                server
+                    .core
+                    .publish_not_serving(leader_endpoint, leader_epoch);
                 // Emit after the NotServing publish so a blocking recorder
                 // cannot delay the safety state change.
                 #[cfg(feature = "metrics")]
                 metrics::counter!("tsoracle.leader_transition.total").increment(1);
             }
             LeaderState::Unknown => {
-                server.allocator.lock().on_leadership_lost();
-                server.state_tx.send_replace(ServingState::NotServing {
-                    leader_endpoint: None,
-                    leader_epoch: None,
-                });
+                server.core.clear_allocator();
+                server.core.publish_not_serving(None, None);
                 // Emit after the NotServing publish so a blocking recorder
                 // cannot delay the safety state change.
                 #[cfg(feature = "metrics")]

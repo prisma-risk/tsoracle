@@ -40,7 +40,7 @@ fn wire_epoch(epoch: Option<Epoch>) -> Option<EpochWire> {
 /// wherever we need to surface a `FAILED_PRECONDITION` "not leader" response
 /// from a service-layer code path; matches what the fast NOT_LEADER gate emits.
 fn leader_hint_from(server: &Server) -> LeaderHint {
-    let (leader_endpoint, leader_epoch) = match server.state_tx.borrow().clone() {
+    let (leader_endpoint, leader_epoch) = match server.core.serving_state() {
         ServingState::NotServing {
             leader_endpoint,
             leader_epoch,
@@ -127,7 +127,7 @@ impl TsoService for TsoServiceImpl {
         if let ServingState::NotServing {
             leader_endpoint,
             leader_epoch,
-        } = self.server.state_tx.borrow().clone()
+        } = self.server.core.serving_state()
         {
             return Err(not_leader_status(LeaderHint {
                 leader_endpoint,
@@ -159,10 +159,7 @@ impl TsoService for TsoServiceImpl {
         let now_ms = self.server.clock.now_ms();
         let mut attempt = 0;
         loop {
-            let outcome = {
-                let mut allocator = self.server.allocator.lock();
-                allocator.try_grant(now_ms, count)
-            };
+            let outcome = self.server.core.try_grant(now_ms, count);
             match outcome {
                 Ok(grant) => {
                     #[cfg(feature = "metrics")]
@@ -211,38 +208,36 @@ impl TsoServiceImpl {
     /// the clock) so the would_grant predicate matches the retry try_grant at the
     /// same logical instant — see the sampling comment in `get_ts`.
     async fn extend_window(&self, now_ms: u64, count: u32) -> Result<(), Status> {
-        // Single-flight gate: serialize peer extenders so consensus is hit
-        // once per stampede, not once per stampeder.
-        let _extension_lock = self.server.extension_lock.lock().await;
+        // Single-flight gate: serialize peer extenders so consensus is hit once
+        // per stampede, not once per stampeder. The slot holds `extension_lock`.
+        let slot = self.server.core.extension_slot().await;
 
-        // Recheck-after-acquire: a peer extender may have run prepare →
-        // persist → commit while we waited for the lock. If the outer
-        // try_grant retry would now succeed, skip the consensus round-trip.
-        // Using get_ts's single `now_ms` sample keeps the predicate aligned
-        // with what the outer loop's retry try_grant will observe.
-        if self.server.allocator.lock().would_grant(now_ms, count) {
+        // Recheck-after-acquire: a peer extender may have run prepare → persist →
+        // commit while we waited for the slot. If the outer try_grant retry would
+        // now succeed, skip the consensus round-trip. Uses get_ts's single
+        // `now_ms` sample so the predicate matches the retry try_grant.
+        if slot.would_grant(now_ms, count) {
             return Ok(());
         }
 
-        // Drain barrier: leader-watch's write() waits behind this read until
-        // our commit applies (or is silently dropped by the epoch check).
-        let _gate = self.server.extension_gate.read().await;
+        // Drain barrier: the fence's write() waits behind this read until our
+        // commit applies (or is dropped by the epoch check). Reachable only
+        // through the slot, so `extension_lock` → `extension_gate` cannot invert.
+        let _gate = slot.drain_barrier().await;
         tsoracle_failpoint::failpoint!("server::service::extension_gate_held");
 
-        let (requested, epoch) = {
-            let allocator = self.server.allocator.lock();
-            let Some(epoch) = allocator.epoch() else {
+        let (requested, epoch) =
+            match slot.prepare_extension(now_ms, self.server.window_ahead.as_millis() as u64) {
+                Ok(prepared) => prepared,
                 // Lost leadership between the outer fast-gate check and here.
                 // Surface as a leader redirect (with the hint the serving-state
                 // channel knows about), not a bare FAILED_PRECONDITION without
                 // metadata.
-                return Err(not_leader_status(leader_hint_from(&self.server)));
+                Err(CoreError::NotLeader) => {
+                    return Err(not_leader_status(leader_hint_from(&self.server)));
+                }
+                Err(other) => return Err(core_status(other)),
             };
-            let target = allocator
-                .try_prepare_window_extension(now_ms, self.server.window_ahead.as_millis() as u64)
-                .map_err(core_status)?;
-            (target, epoch)
-        };
         // Count and time only the consensus round-trip itself: the
         // recheck-after-acquire short-circuit above skips it, and operators
         // tuning `window_ahead` care about how often a stampede actually
@@ -275,12 +270,11 @@ impl TsoServiceImpl {
             // its next leader against. NotLeader during persist exposes no
             // such epoch here, so its hint omits one.
             Err(ConsensusError::Fenced { current, .. }) => {
-                self.server
-                    .step_down_due_to_consensus_rejection(None, Some(current));
+                self.server.core.step_down(None, Some(current));
                 return Err(not_leader_status(leader_hint_from(&self.server)));
             }
             Err(ConsensusError::NotLeader { .. }) => {
-                self.server.step_down_due_to_consensus_rejection(None, None);
+                self.server.core.step_down(None, None);
                 return Err(not_leader_status(leader_hint_from(&self.server)));
             }
             // Transient driver failure: storage hiccup, peer transport flap,
@@ -297,9 +291,8 @@ impl TsoServiceImpl {
         };
         let commit_outcome = self
             .server
-            .allocator
-            .lock()
-            .try_commit_window_extension(actual, epoch)
+            .core
+            .commit_extension(actual, epoch)
             .map_err(core_status)?;
         // A dropped commit after a paid-for persist round-trip is benign but
         // worth surfacing: the epoch-fencing / monotonic-bound logic discarded
@@ -357,10 +350,9 @@ mod tests {
             .clock(std::sync::Arc::new(tsoracle_core::SystemClock))
             .build()
             .unwrap();
-        server.state_tx.send_replace(ServingState::NotServing {
-            leader_endpoint: Some("http://other-node:9000".into()),
-            leader_epoch: Some(Epoch(7)),
-        });
+        server
+            .core
+            .publish_not_serving(Some("http://other-node:9000".into()), Some(Epoch(7)));
         let hint = leader_hint_from(&server);
         assert_eq!(
             hint.leader_endpoint.as_deref(),
@@ -370,7 +362,7 @@ mod tests {
         assert_eq!(hint.leader_epoch, Some(EpochWire { hi, lo }));
 
         // The Serving branch flips endpoint and epoch to None.
-        server.state_tx.send_replace(ServingState::Serving);
+        server.core.publish_serving();
         let hint = leader_hint_from(&server);
         assert!(hint.leader_endpoint.is_none());
         assert!(hint.leader_epoch.is_none());
