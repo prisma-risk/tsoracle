@@ -123,16 +123,13 @@ impl TsoService for TsoServiceImpl {
         #[cfg(feature = "metrics")]
         metrics::counter!("tsoracle.get_ts.requests.total").increment(1);
 
-        // Fast NOT_LEADER gate.
-        if let ServingState::NotServing {
-            leader_endpoint,
-            leader_epoch,
-        } = self.server.core.serving_state()
-        {
-            return Err(not_leader_status(LeaderHint {
-                leader_endpoint,
-                leader_epoch: wire_epoch(leader_epoch),
-            }));
+        // Fast NOT_LEADER gate. `is_serving` answers the gate without cloning a
+        // `ServingState`; only the rejected path re-reads (via `leader_hint_from`)
+        // to build the redirect hint. The two reads are not atomic, but the hint
+        // is best-effort either way — this mirrors the NotLeader arm below, which
+        // also re-reads after `try_grant`.
+        if !self.server.core.is_serving() {
+            return Err(not_leader_status(leader_hint_from(&self.server)));
         }
 
         // At most two attempts: the first may return WindowExhausted, in which
