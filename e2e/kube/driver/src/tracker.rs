@@ -64,6 +64,37 @@ impl<T: Ord + Copy> Tracker<T> {
         );
         passed
     }
+
+    /// Soak variant of [`report`](Self::report): monotonicity stays the hard,
+    /// zero-tolerance invariant, but a small final-error rate is allowed.
+    ///
+    /// A graceful rolling restart of a consensus cluster has an irreducible
+    /// window where an in-flight RPC to a terminating pod is severed — a
+    /// transport error the client's retry cannot always mask, and which the
+    /// batch driver can fan out to several counted errors. Mature clients
+    /// (etcd, CockroachDB, TiKV) tolerate this transient rather than
+    /// guaranteeing zero client-visible errors across an election/restart. A
+    /// run passes if it made at least one call, never went backwards, and its
+    /// final error rate is below `max_error_rate`.
+    pub fn report_within_error_tolerance(&self, label: &str, max_error_rate: f64) -> bool {
+        let error_rate = if self.calls == 0 {
+            1.0
+        } else {
+            self.errors as f64 / self.calls as f64
+        };
+        let passed = self.calls > 0 && self.violations == 0 && error_rate < max_error_rate;
+        println!(
+            "{label}: calls={} errors={} error_rate={:.4}% (max {:.4}%) \
+             monotonicity_violations={} -> {}",
+            self.calls,
+            self.errors,
+            error_rate * 100.0,
+            max_error_rate * 100.0,
+            self.violations,
+            if passed { "PASS" } else { "FAIL" }
+        );
+        passed
+    }
 }
 
 impl<T: Ord + Copy> Default for Tracker<T> {
@@ -109,6 +140,41 @@ mod tests {
     fn no_calls_does_not_pass() {
         let t = Tracker::<u64>::new();
         assert!(!t.passed());
+    }
+
+    #[test]
+    fn error_rate_below_tolerance_passes() {
+        let mut t = Tracker::<u64>::new();
+        for i in 1..=1000u64 {
+            t.record_ok(i);
+        }
+        t.record_err(); // 1 / 1001 ≈ 0.0999% < 0.5%
+        assert!(t.report_within_error_tolerance("soak", 0.005));
+    }
+
+    #[test]
+    fn error_rate_above_tolerance_fails() {
+        let mut t = Tracker::<u64>::new();
+        t.record_ok(1);
+        t.record_err(); // 1 / 2 = 50% >= 0.5%
+        assert!(!t.report_within_error_tolerance("soak", 0.005));
+    }
+
+    #[test]
+    fn monotonicity_violation_fails_regardless_of_error_rate() {
+        let mut t = Tracker::<u64>::new();
+        for i in 1..=1000u64 {
+            t.record_ok(i);
+        }
+        t.record_ok(5); // goes backwards → violation, even with 0 errors
+        assert_eq!(t.errors, 0);
+        assert!(!t.report_within_error_tolerance("soak", 0.005));
+    }
+
+    #[test]
+    fn no_calls_within_tolerance_does_not_pass() {
+        let t = Tracker::<u64>::new();
+        assert!(!t.report_within_error_tolerance("soak", 0.005));
     }
 
     /// `report` prints a one-line summary and returns the same verdict as
