@@ -36,5 +36,6 @@ pub use state_machine::{HighWaterStateMachine, HighWaterStateMachineSnapshot};
 pub use tsoracle_consensus::AdvancePayload;
 pub use tsoracle_core::TsoPeer;
 pub use type_config::{
-    HighWaterApplied, OpenraftEntry, OpenraftLogId, OpenraftPeer, OpenraftVote, TypeConfig,
+    HighWaterApplied, OpenraftEntry, OpenraftLogId, OpenraftPeer, OpenraftVote, ServiceEndpoint,
+    TypeConfig,
 };

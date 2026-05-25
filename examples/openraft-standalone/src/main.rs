@@ -195,7 +195,14 @@ async fn main() -> anyhow::Result<()> {
     if cli.bootstrap {
         let mut nodes: BTreeMap<u64, OpenraftPeer> = BTreeMap::new();
         for (id, addr) in raft_addrs.iter() {
-            nodes.insert(*id, OpenraftPeer { addr: addr.clone() });
+            let service_endpoint = tso_addrs.get(id).cloned().unwrap_or_default();
+            nodes.insert(
+                *id,
+                OpenraftPeer {
+                    addr: addr.clone(),
+                    service_endpoint,
+                },
+            );
         }
         if let Err(e) = raft.initialize(nodes).await {
             // "already initialized" on a re-run with --bootstrap still set is

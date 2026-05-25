@@ -25,12 +25,38 @@ use crate::log_entry::HighWaterCommand;
 
 /// Peer identity carried in the membership entries.
 ///
-/// Currently holds just an address; richer metadata can be added later without
-/// breaking the wire format because the codec is length-prefixed and the
-/// `Default` impl gives missing fields a deterministic value.
+/// Holds two stable addresses, mirroring etcd's peerURLs/clientURLs split:
+///
+/// * `addr` — the raft transport address, a scheme-less `host:port` (a DNS name
+///   and port). The peer transport prepends `http://` itself, so a scheme here
+///   would double up.
+/// * `service_endpoint` — the tsoracle gRPC endpoint clients redirect to, a full
+///   schemeful URL such as `http://host:port`. Empty means "no client redirect".
+///
+/// Widening this struct changes the postcard layout of membership log entries
+/// and therefore requires a `tsoracle_openraft_toolkit::SCHEMA_VERSION` bump.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenraftPeer {
     pub addr: String,
+    pub service_endpoint: String,
+}
+
+/// Resolves a membership `Node`'s tsoracle client endpoint for `LeaderHint`
+/// follower redirects. Implemented by every `Node` type used with
+/// [`crate::OpenraftDriver`]; return `None` for nodes that do not redirect
+/// tsoracle clients.
+pub trait ServiceEndpoint {
+    fn service_endpoint(&self) -> Option<&str>;
+}
+
+impl ServiceEndpoint for OpenraftPeer {
+    fn service_endpoint(&self) -> Option<&str> {
+        if self.service_endpoint.is_empty() {
+            None
+        } else {
+            Some(&self.service_endpoint)
+        }
+    }
 }
 
 /// Per-entry apply result.
@@ -88,6 +114,7 @@ mod tests {
     fn openraft_peer_round_trips() {
         let peer = OpenraftPeer {
             addr: "10.0.0.1:50051".to_string(),
+            service_endpoint: String::new(),
         };
         let bytes = postcard::to_stdvec(&peer).expect("serialize");
         let back: OpenraftPeer = postcard::from_bytes(&bytes).expect("deserialize");
@@ -95,15 +122,17 @@ mod tests {
     }
 
     #[test]
-    fn openraft_peer_default_is_empty_addr() {
+    fn openraft_peer_default_has_all_empty_fields() {
         let peer = OpenraftPeer::default();
         assert_eq!(peer.addr, "");
+        assert_eq!(peer.service_endpoint, "");
     }
 
     #[test]
     fn openraft_peer_round_trips_empty_addr() {
         let peer = OpenraftPeer {
             addr: String::new(),
+            service_endpoint: String::new(),
         };
         let bytes = postcard::to_stdvec(&peer).expect("serialize");
         let back: OpenraftPeer = postcard::from_bytes(&bytes).expect("deserialize");
@@ -126,5 +155,32 @@ mod tests {
             let back: HighWaterApplied = postcard::from_bytes(&bytes).expect("deserialize");
             assert_eq!(back, applied);
         }
+    }
+
+    #[test]
+    fn openraft_peer_round_trips_both_fields() {
+        let peer = OpenraftPeer {
+            addr: "node-1:50052".to_string(),
+            service_endpoint: "http://node-1:50051".to_string(),
+        };
+        let bytes = postcard::to_stdvec(&peer).expect("serialize");
+        let back: OpenraftPeer = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, peer);
+    }
+
+    #[test]
+    fn service_endpoint_is_some_when_set_none_when_empty() {
+        use crate::type_config::ServiceEndpoint;
+        let with = OpenraftPeer {
+            addr: "node-1:50052".to_string(),
+            service_endpoint: "http://node-1:50051".to_string(),
+        };
+        assert_eq!(with.service_endpoint(), Some("http://node-1:50051"));
+
+        let without = OpenraftPeer {
+            addr: "node-1:50052".to_string(),
+            service_endpoint: String::new(),
+        };
+        assert_eq!(without.service_endpoint(), None);
     }
 }

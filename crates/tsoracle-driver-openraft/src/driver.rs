@@ -261,6 +261,7 @@ mod tests {
                     2u64,
                     crate::type_config::OpenraftPeer {
                         addr: "raft-addr".into(),
+                        service_endpoint: String::new(),
                     },
                 )),
             },
@@ -312,6 +313,7 @@ mod tests {
                     2u64,
                     crate::type_config::OpenraftPeer {
                         addr: "raft-addr".into(),
+                        service_endpoint: String::new(),
                     },
                 )),
             },
@@ -336,6 +338,7 @@ mod tests {
                     9u64,
                     crate::type_config::OpenraftPeer {
                         addr: "raft-addr".into(),
+                        service_endpoint: String::new(),
                     },
                 )),
             },
@@ -365,6 +368,7 @@ mod tests {
                     2u64,
                     crate::type_config::OpenraftPeer {
                         addr: "raft-addr".into(),
+                        service_endpoint: String::new(),
                     },
                 )),
             },
