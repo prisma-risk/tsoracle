@@ -20,6 +20,7 @@ paxos    = [
     "dep:tsoracle-driver-paxos", "dep:tsoracle-paxos-toolkit",
     "dep:omnipaxos", "dep:rocksdb", "dep:tonic", "dep:tonic-prost",
     "dep:prost", "dep:postcard", "dep:parking_lot", "dep:tokio-stream",
+    "dep:async-trait",
 ]
 
 [dependencies]
