@@ -275,8 +275,8 @@ impl PaxosTopology {
                 .snapshot_policy(SnapshotPolicy::disabled())
                 .build()
                 .with_context(|| format!("paxos topology: build StandaloneHost for node {id}"))?;
-            let leader_stream = host.take_leader_stream().ok_or_else(|| {
-                anyhow::anyhow!("paxos topology: leader stream for node {id} already taken")
+            let leader_subscriber = host.take_leader_subscriber().ok_or_else(|| {
+                anyhow::anyhow!("paxos topology: leader subscriber for node {id} already taken")
             })?;
 
             let sink = Arc::new(MeshSink {
@@ -286,7 +286,7 @@ impl PaxosTopology {
                 .context("paxos topology: host not already running")?;
 
             // ---- Driver + tsoracle server ----
-            let driver = Arc::new(PaxosDriver::new(host, leader_stream));
+            let driver = Arc::new(PaxosDriver::new(host, leader_subscriber));
             let server = Server::builder()
                 .consensus_driver(driver)
                 .build()
@@ -727,15 +727,21 @@ mod tests {
         let server_handles = topology.server_handles;
         // Fire the per-node shutdown signals.
         Box::new(topology.controller).shutdown().await;
-        // Each server task must complete within a generous window after
-        // its shutdown oneshot fires. A hung handle means `shutdown` is
-        // not actually triggering the server's drain path.
+        // Each server task must complete within a generous window after its
+        // shutdown oneshot fires. The window only guards against a genuine
+        // hang — `shutdown` failing to trigger the server's drain path — which
+        // never completes regardless of how long we wait; a healthy drain
+        // finishes in milliseconds. It is sized at 30s (not 5s) because the
+        // libtest harness runs this file's many `multi_thread` topology tests
+        // concurrently, each demanding 4 workers, so on an oversubscribed CI
+        // runner the spawned drain task can be scheduling-starved well past a
+        // few seconds of wall-clock without anything being wrong.
         for (idx, handle) in server_handles.into_iter().enumerate() {
-            match tokio::time::timeout(Duration::from_secs(5), handle).await {
+            match tokio::time::timeout(Duration::from_secs(30), handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(join_err)) => panic!("server task {idx} did not exit cleanly: {join_err:?}"),
                 Err(_elapsed) => {
-                    panic!("server task {idx} did not complete within 5s after shutdown")
+                    panic!("server task {idx} did not complete within 30s after shutdown")
                 }
             }
         }

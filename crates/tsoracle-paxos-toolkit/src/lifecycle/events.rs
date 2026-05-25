@@ -37,19 +37,17 @@ pub enum SendError {
 
 /// Create a new leader-event channel.
 ///
-/// The returned [`LeaderEventStream`] yields `LeaderState::Unknown` on its
-/// first poll (the channel's initial value) and every distinct subsequent
-/// value sent via the [`LeaderEventSender`]. Identical successive sends
-/// are debounced — receivers see one transition per unique value, not
-/// one per `send()` call.
-pub fn leader_event_channel() -> (LeaderEventSender, LeaderEventStream) {
+/// Returns a [`LeaderEventSender`] (the runner's emit half) and a
+/// [`LeaderEventSubscriber`] (the consumer's subscribe half). The
+/// subscriber mints a fresh [`LeaderEventStream`] on every
+/// [`LeaderEventSubscriber::subscribe`] call; each stream yields the
+/// channel's *current* value (`LeaderState::Unknown` until the first
+/// transition is sent) on its first poll and every distinct subsequent
+/// value. Identical successive sends are debounced — a stream sees one
+/// transition per unique value, not one per `send()` call.
+pub fn leader_event_channel() -> (LeaderEventSender, LeaderEventSubscriber) {
     let (tx, rx) = watch::channel(LeaderState::Unknown);
-    (
-        LeaderEventSender { tx },
-        LeaderEventStream {
-            inner: WatchStream::new(rx),
-        },
-    )
+    (LeaderEventSender { tx }, LeaderEventSubscriber { rx })
 }
 
 /// Sending half of the leader-event channel.
@@ -79,6 +77,45 @@ impl LeaderEventSender {
             return Ok(());
         }
         self.tx.send(state).map_err(|_| SendError::Closed)
+    }
+}
+
+/// Subscribe half of the leader-event channel.
+///
+/// Holds a `watch::Receiver` and mints a fresh [`LeaderEventStream`] on every
+/// [`Self::subscribe`] call — the analogue of cloning an openraft metrics watch
+/// receiver. Two properties make this the right handle to hand a consumer that
+/// may subscribe more than once (e.g. a driver re-derived across an in-process
+/// restart):
+///
+/// - **Re-subscribable:** every `subscribe()` returns an independent live
+///   stream whose first poll yields the channel's *current* value, so a second
+///   (or third) subscription is never a silent blackout.
+/// - **Keeps the channel open:** the retained receiver counts toward the
+///   channel's receiver count, so while a subscriber is held the sender's
+///   `send` cannot observe a closed channel. The runner's drop-based shutdown
+///   (all receivers gone ⇒ [`SendError::Closed`]) therefore fires only once
+///   this subscriber *and* every stream it minted have been dropped.
+///
+/// Cloneable: each clone is an independent receiver over the same channel.
+#[derive(Clone)]
+pub struct LeaderEventSubscriber {
+    rx: watch::Receiver<LeaderState>,
+}
+
+impl LeaderEventSubscriber {
+    /// Mint a fresh [`LeaderEventStream`] over this channel.
+    ///
+    /// The returned stream yields the channel's current [`LeaderState`] on its
+    /// first poll (`WatchStream::new` reads the held value rather than waiting
+    /// for the next change) and every distinct subsequent value. Calling this
+    /// repeatedly is well-defined: each call hands back a new, independent
+    /// stream, so a late or second subscriber is never blacked out.
+    #[must_use]
+    pub fn subscribe(&self) -> LeaderEventStream {
+        LeaderEventStream {
+            inner: WatchStream::new(self.rx.clone()),
+        }
     }
 }
 
@@ -131,7 +168,8 @@ mod tests {
         // Watch channels coalesce intermediate values: multiple sends without
         // an intervening poll collapse to the latest. Poll between sends so
         // each transition is yielded distinctly.
-        let (sender, mut stream) = leader_event_channel();
+        let (sender, subscriber) = leader_event_channel();
+        let mut stream = subscriber.subscribe();
         assert_eq!(stream.next().await, Some(LeaderState::Unknown));
 
         sender
@@ -162,7 +200,7 @@ mod tests {
         // on identical payloads while a receiver is alive. Stream output
         // cannot be used to observe debounce because watch already
         // coalesces.
-        let (sender, _stream) = leader_event_channel();
+        let (sender, _subscriber) = leader_event_channel();
         let same = LeaderState::Leader { epoch: Epoch(1) };
         assert!(sender.send(same.clone()).is_ok());
         assert!(sender.send(same).is_ok());
@@ -170,12 +208,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_returns_closed_after_stream_dropped() {
-        // Atomicity contract: dropping the stream makes the next send
-        // return SendError::Closed immediately. Exercises the change-path
-        // in `send` (the watch::Sender::send arm).
-        let (sender, stream) = leader_event_channel();
-        drop(stream);
+    async fn send_returns_closed_after_subscriber_dropped() {
+        // Atomicity contract: dropping the last receiver (here the subscriber,
+        // which has minted no stream) makes the next send return
+        // SendError::Closed immediately. Exercises the change-path in `send`
+        // (the watch::Sender::send arm).
+        let (sender, subscriber) = leader_event_channel();
+        drop(subscriber);
         let result = sender.send(LeaderState::Leader { epoch: Epoch(1) });
         assert!(matches!(result, Err(SendError::Closed)));
     }
@@ -183,15 +222,87 @@ mod tests {
     #[tokio::test]
     async fn send_returns_closed_for_debounced_payload_after_drop() {
         // Exercises the debounce-with-closed-channel arm: an unchanged
-        // payload still surfaces SendError::Closed when the receiver is
+        // payload still surfaces SendError::Closed when every receiver is
         // gone, so the runner can shut down even when nothing changed.
-        let (sender, stream) = leader_event_channel();
+        let (sender, subscriber) = leader_event_channel();
         sender
             .send(LeaderState::Leader { epoch: Epoch(1) })
-            .expect("first send succeeds while stream alive");
-        drop(stream);
+            .expect("first send succeeds while subscriber alive");
+        drop(subscriber);
         let result = sender.send(LeaderState::Leader { epoch: Epoch(1) });
         assert!(matches!(result, Err(SendError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn send_stays_open_while_a_minted_stream_outlives_the_subscriber() {
+        // A stream minted from a subscriber is itself a receiver, so dropping
+        // the subscriber while a stream is still alive must NOT close the
+        // channel — the runner keeps emitting to the surviving stream.
+        let (sender, subscriber) = leader_event_channel();
+        let _stream = subscriber.subscribe();
+        drop(subscriber);
+        assert!(
+            sender.send(LeaderState::Leader { epoch: Epoch(1) }).is_ok(),
+            "channel must stay open while a minted stream survives the subscriber",
+        );
+    }
+
+    #[tokio::test]
+    async fn into_pin_stream_dropped_closes_channel() {
+        // The into_pin'd trait-object stream is still a watch receiver: once it
+        // and the subscriber are dropped, the channel closes. Guards the boxed
+        // path the driver actually hands the server.
+        let (sender, subscriber) = leader_event_channel();
+        let pinned = subscriber.subscribe().into_pin();
+        drop(subscriber);
+        drop(pinned);
+        assert!(matches!(
+            sender.send(LeaderState::Leader { epoch: Epoch(1) }),
+            Err(SendError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn subscriber_mints_independent_streams_each_yielding_current_state() {
+        // A subscriber re-derives a fresh stream on every call, and each fresh
+        // stream yields the channel's *current* value on its first poll — the
+        // synchronous-first-item contract `ConsensusDriver::leadership_events`
+        // requires. Crucially a *second* subscription is not a blackout: both
+        // streams below see the post-send leader state, not an empty stream.
+        let (sender, subscriber) = leader_event_channel();
+        sender
+            .send(LeaderState::Leader { epoch: Epoch(1) })
+            .unwrap();
+
+        let mut first = subscriber.subscribe();
+        let mut second = subscriber.subscribe();
+        assert_eq!(
+            first.next().await,
+            Some(LeaderState::Leader { epoch: Epoch(1) })
+        );
+        assert_eq!(
+            second.next().await,
+            Some(LeaderState::Leader { epoch: Epoch(1) })
+        );
+    }
+
+    #[tokio::test]
+    async fn subscriber_streams_observe_transitions_after_subscribe() {
+        // A stream minted before a transition still observes the transition:
+        // proves subscribe() returns a live WatchStream, not a one-shot
+        // snapshot of the value at subscription time.
+        let (sender, subscriber) = leader_event_channel();
+        let mut stream = subscriber.subscribe();
+        assert_eq!(stream.next().await, Some(LeaderState::Unknown));
+
+        sender
+            .send(LeaderState::Leader { epoch: Epoch(2) })
+            .unwrap();
+        yield_now().await;
+        assert_eq!(
+            stream.next().await,
+            Some(LeaderState::Leader { epoch: Epoch(2) })
+        );
     }
 
     #[tokio::test]
@@ -200,8 +311,8 @@ mod tests {
         // equivalent to the underlying LeaderEventStream — yields the
         // initial value and subsequent changes via the boxed-pinned
         // trait object path consumers use.
-        let (sender, stream) = leader_event_channel();
-        let mut pinned = stream.into_pin();
+        let (sender, subscriber) = leader_event_channel();
+        let mut pinned = subscriber.subscribe().into_pin();
         assert_eq!(pinned.next().await, Some(LeaderState::Unknown));
 
         sender

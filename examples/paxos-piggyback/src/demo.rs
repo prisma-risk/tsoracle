@@ -157,11 +157,11 @@ async fn build_node(
     ));
     let state = HostState::new();
 
-    // ---- Runner + leader stream ----
+    // ---- Runner + leader subscriber ----
     let mut runner = PaxosRunner::new(omnipaxos.clone(), id, vec![], TICK_INTERVAL);
-    let leader_stream = runner
-        .take_leader_stream()
-        .context("leader stream is fresh")?;
+    let leader_subscriber = runner
+        .take_leader_subscriber()
+        .context("leader subscriber is fresh")?;
     let runner_apply_notify = runner.apply_notify();
 
     // ---- Pumps: inbox + apply ----
@@ -204,7 +204,7 @@ async fn build_node(
 
     // ---- Driver + tsoracle server ----
     let host = PiggybackHost::new(omnipaxos.clone(), state.clone(), id);
-    let driver = Arc::new(PaxosDriver::new(host, leader_stream));
+    let driver = Arc::new(PaxosDriver::new(host, leader_subscriber));
     let server = TsoServer::builder().consensus_driver(driver).build()?;
     let serving_state_rx = server.subscribe();
 

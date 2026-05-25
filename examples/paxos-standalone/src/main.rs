@@ -186,16 +186,16 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .context("build StandaloneHost")?;
 
-    let leader_stream = host
-        .take_leader_stream()
-        .context("leader stream available on a fresh host")?;
+    let leader_subscriber = host
+        .take_leader_subscriber()
+        .context("leader subscriber available on a fresh host")?;
 
     // ---- Start runner + apply task ----
     let sink = Arc::new(PeerSink::new(paxos_addrs));
     host.start(sink).context("host not already running")?;
 
     // ---- ConsensusDriver ----
-    let driver = Arc::new(PaxosDriver::new(host, leader_stream));
+    let driver = Arc::new(PaxosDriver::new(host, leader_subscriber));
 
     // ---- Tsoracle gRPC server ----
     let tso = TsoServer::builder().consensus_driver(driver).build()?;

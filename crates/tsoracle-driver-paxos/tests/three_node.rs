@@ -129,11 +129,11 @@ async fn fence_check_rejects_stale_epoch_and_accepts_current() {
     let follower_handle = cluster.node(follower_id).omnipaxos();
     let follower_apply = FollowerProxyHost::new(follower_handle.clone());
 
-    // The PaxosDriver doesn't actually use leader_stream for
-    // persist_high_water; it only consumes it via leadership_events. Use
-    // an empty channel.
-    let (_sender, stream) = tsoracle_paxos_toolkit::lifecycle::leader_event_channel();
-    let driver = PaxosDriver::new(follower_apply, stream);
+    // The PaxosDriver doesn't actually use the leader-event channel for
+    // persist_high_water; it only consumes it via leadership_events. Use a
+    // bare channel and hand the driver its subscriber.
+    let (_sender, subscriber) = tsoracle_paxos_toolkit::lifecycle::leader_event_channel();
+    let driver = PaxosDriver::new(follower_apply, subscriber);
 
     // Path A: stale epoch is rejected.
     let stale_epoch = Epoch(0xDEAD_BEEF);
