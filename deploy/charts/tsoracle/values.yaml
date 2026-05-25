@@ -1,0 +1,31 @@
+driver: openraft            # file | openraft | paxos
+replicas: 3                 # ignored (forced to 1) when driver=file
+image:
+  repository: ghcr.io/prisma-risk/tsoracle   # use ...-openraft/-paxos/-file for a lean image
+  tag: ""                   # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+ports:
+  client: 50551
+  peer: 51001
+tls:
+  enabled: false
+  secretName: ""            # Secret with tls.crt / tls.key / ca.crt; mounted at /etc/tsoracle/tls
+  clientMtls: false         # also require client certs on the client API
+server:
+  windowAhead: 3s
+  failoverAdvance: 1s
+  logLevel: info
+persistence:
+  size: 1Gi
+  storageClassName: ""
+resources: {}
+terminationGracePeriodSeconds: 30
+# The image runs as non-root uid 10001; fsGroup makes a freshly-provisioned PVC
+# group-writable so RocksDB/file-driver state can be created (required on most
+# storage classes). fsGroupChangePolicy avoids re-chowning a large volume.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
