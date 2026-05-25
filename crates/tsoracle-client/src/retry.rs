@@ -432,8 +432,9 @@ fn classify_not_leader_hint(
                     from = %endpoint,
                     to = %hinted,
                     hint_epoch = ?hint_epoch,
-                    "tsoracle-client: dropping stale leader hint with epoch \
-                     behind the cached leader's epoch",
+                    "tsoracle-client: dropping leader hint that cannot outrank \
+                     the cached leader — either a stale epoch behind the cached \
+                     one, or an epoch-less hint to an off-list endpoint",
                 );
                 AttemptOutcome::StaleLeaderHint(status)
             }
