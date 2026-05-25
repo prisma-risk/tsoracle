@@ -26,6 +26,9 @@ mod retry_policy;
 mod transport;
 mod worklist;
 
+#[cfg(test)]
+mod test_support;
+
 pub use error::ClientError;
 pub use retry_policy::RetryPolicy;
 pub use transport::BoxError;
