@@ -260,7 +260,12 @@ impl HighWaterStateMachine {
             .as_ref()
             .and_then(|s| s.meta.last_log_id);
         if !supersedes_published(meta.last_log_id, published) {
-            tracing::warn!(
+            // `debug!`, not `warn!`: this file is on the per-entry apply hot
+            // path (`#[PerformanceCriticalPath]`), where info-or-higher logging
+            // is banned. A discarded stale publish is also a benign, expected
+            // race resolution — the monotone gate doing its job — not an
+            // operational fault, so debug is the right level on the merits too.
+            tracing::debug!(
                 incoming.last_log_id = ?meta.last_log_id,
                 published.last_log_id = ?published,
                 snapshot_id = %meta.snapshot_id,
@@ -466,13 +471,13 @@ mod tests {
 
     // --- Test helpers ---
 
-    /// Install a process-wide `WARN`-level subscriber so the `tracing::warn!`
+    /// Install a process-wide `DEBUG`-level subscriber so the `tracing::debug!`
     /// on the stale-publish reject path actually evaluates its fields (without
     /// an interested subscriber the macro short-circuits and the argument
     /// expressions are never executed). Idempotent across tests via `try_init`.
     fn enable_tracing() {
         let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(tracing::Level::DEBUG)
             .with_test_writer()
             .try_init();
     }
