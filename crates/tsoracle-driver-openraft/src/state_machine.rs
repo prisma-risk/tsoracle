@@ -859,13 +859,14 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_payload_pins_v1_layout() {
-        // Hand-built v1 frame: [SCHEMA_VERSION | postcard(payload)]. The
-        // postcard body of {current_value: 7, last_applied: None,
-        // last_membership: default} is [7, 0, 0, 0, 0] — value 7, Option::None,
+    fn snapshot_payload_pins_v2_layout() {
+        // Hand-built v2 frame: [SCHEMA_VERSION | postcard(payload)]. The leading
+        // byte advanced 1 -> 2 when the log-store meta column gained the same
+        // version frame (a breaking on-disk change); the postcard body is
+        // unchanged. Body [7, 0, 0, 0, 0] = current_value 7, last_applied None,
         // then default StoredMembership (None log id + empty configs + empty
-        // nodes). Reordering or inserting a field changes these bytes and
-        // trips this test, forcing a SCHEMA_VERSION bump.
+        // nodes). Reordering or inserting a field changes these bytes and trips
+        // this test, forcing a SCHEMA_VERSION bump.
         let payload = HighWaterStateMachineSnapshot {
             current_value: 7,
             last_applied: None,
@@ -874,16 +875,17 @@ mod tests {
         let framed =
             tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
                 .expect("encode");
-        assert_eq!(framed, vec![1, 7, 0, 0, 0, 0]);
+        assert_eq!(framed, vec![2, 7, 0, 0, 0, 0]);
     }
 
     #[test]
-    fn log_entry_pins_v1_layout() {
-        // The bytes RocksdbLogStore<TypeConfig> persists per entry: the v1
+    fn log_entry_pins_v2_layout() {
+        // The bytes RocksdbLogStore<TypeConfig> persists per entry: the v2
         // frame around a Normal entry carrying Advance(AdvancePayload { at_least: 5 })
-        // at log id (term 1, node 1, index 1). Body [1,1,1,1,0,5] = leader
-        // (term 1, node 1), index 1, EntryPayload::Normal tag (1), Advance
-        // variant (0), at_least 5 — byte-identical to the pre-newtype layout.
+        // at log id (term 1, node 1, index 1). Leading byte 2 is SCHEMA_VERSION;
+        // body [1,1,1,1,0,5] = leader (term 1, node 1), index 1,
+        // EntryPayload::Normal tag (1), Advance variant (0), at_least 5 —
+        // byte-identical to the pre-newtype layout.
         let lid = openraft::testing::log_id::<TypeConfig>(1, 1, 1);
         let entry: EntryOf<TypeConfig> = EntryOf::<TypeConfig>::new_normal(
             lid,
@@ -892,7 +894,24 @@ mod tests {
         let framed =
             tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &entry)
                 .expect("encode");
-        assert_eq!(framed, vec![1, 1, 1, 1, 1, 0, 5]);
+        assert_eq!(framed, vec![2, 1, 1, 1, 1, 0, 5]);
+    }
+
+    #[test]
+    fn meta_vote_pins_v2_layout() {
+        // The bytes RocksdbLogStore<TypeConfig> now persists in the meta column
+        // for a Vote — historically a bare, unversioned postcard blob, now the
+        // same [SCHEMA_VERSION | postcard] frame as the log column. This is the
+        // recovery-critical field (term/leader-election safety) the framing
+        // protects: a foreign version loud-rejects instead of misdecoding. Body
+        // [7, 3, 1] = leader (term 7, node 3), committed flag true; leading byte
+        // 2 is SCHEMA_VERSION. A layout change to Vote trips this test.
+        let vote: openraft::type_config::alias::VoteOf<TypeConfig> =
+            openraft::Vote::new_committed(7, 3);
+        let framed =
+            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &vote)
+                .expect("encode");
+        assert_eq!(framed, vec![2, 7, 3, 1]);
     }
 
     #[tokio::test]

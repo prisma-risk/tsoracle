@@ -25,7 +25,6 @@ failpoints         = ["tsoracle-failpoint/failpoints"]
 
 [dependencies]
 async-trait      = { workspace = true }
-postcard         = { workspace = true }
 futures          = { workspace = true }
 openraft         = { workspace = true }
 parking_lot      = { workspace = true, optional = true }

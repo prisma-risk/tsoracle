@@ -19,13 +19,15 @@ pub use key_space::{Flat, GroupPrefixed, KeySpace, MetaLabel};
 
 use thiserror::Error;
 
-/// Errors produced by the rocksdb-backed log store.
+/// Errors produced opening the rocksdb-backed log store.
+///
+/// Construction (`open`) only fails when a named column family is absent;
+/// every later storage operation reports through `io::Error` to match the
+/// `RaftLogStorage` trait surface (decode/version failures route through the
+/// `[SCHEMA_VERSION | postcard]` codec, surfacing a foreign version as
+/// `InvalidData`).
 #[derive(Debug, Error)]
 pub enum RocksdbLogStoreError {
-    #[error("rocksdb error: {0}")]
-    RocksDb(#[from] rocksdb::Error),
-    #[error("decode error: {0}")]
-    Decode(#[from] postcard::Error),
     #[error("column family `{0}` not found")]
     MissingColumnFamily(String),
 }
@@ -290,7 +292,6 @@ where
     async fn read_vote(&mut self) -> Result<Option<VoteOf<C>>, io::Error> {
         let cf = self.meta_cf_handle();
         meta::read::<VoteOf<C>, K>(&self.db, &cf, &self.keys, MetaLabel::Vote)
-            .map_err(io::Error::other)
     }
 }
 
@@ -309,8 +310,7 @@ where
     async fn get_log_state(&mut self) -> Result<LogState<C>, io::Error> {
         let cf_meta = self.meta_cf_handle();
         let last_purged_log_id: Option<LogIdOf<C>> =
-            meta::read::<LogIdOf<C>, K>(&self.db, &cf_meta, &self.keys, MetaLabel::LastPurged)
-                .map_err(io::Error::other)?;
+            meta::read::<LogIdOf<C>, K>(&self.db, &cf_meta, &self.keys, MetaLabel::LastPurged)?;
 
         let last_in_log = self.last_log_id_in_cf()?;
         let last_log_id = last_in_log.or_else(|| last_purged_log_id.clone());
@@ -324,8 +324,7 @@ where
     async fn save_vote(&mut self, vote: &VoteOf<C>) -> Result<(), io::Error> {
         let cf_meta = self.meta_cf_handle();
         let mut batch = WriteBatch::default();
-        meta::put::<VoteOf<C>, K>(&mut batch, &cf_meta, &self.keys, MetaLabel::Vote, vote)
-            .map_err(io::Error::other)?;
+        meta::put::<VoteOf<C>, K>(&mut batch, &cf_meta, &self.keys, MetaLabel::Vote, vote)?;
         // fsync: the vote must be durable before it is acknowledged, or a crash
         // could let this node vote twice in one term and split the cluster.
         let wo = Self::write_sync_opts();
@@ -343,8 +342,7 @@ where
                 &self.keys,
                 MetaLabel::Committed,
                 &committed,
-            )
-            .map_err(io::Error::other)?,
+            )?,
             None => meta::delete::<K>(&mut batch, &cf_meta, &self.keys, MetaLabel::Committed),
         }
         // No fsync (the deliberate exception to `write_sync_opts`): persisting
@@ -357,7 +355,6 @@ where
     async fn read_committed(&mut self) -> Result<Option<LogIdOf<C>>, io::Error> {
         let cf_meta = self.meta_cf_handle();
         meta::read::<LogIdOf<C>, K>(&self.db, &cf_meta, &self.keys, MetaLabel::Committed)
-            .map_err(io::Error::other)
     }
 
     async fn append<I>(&mut self, entries: I, callback: IOFlushed<C>) -> Result<(), io::Error>
@@ -450,8 +447,7 @@ where
             &self.keys,
             MetaLabel::LastPurged,
             &log_id,
-        )
-        .map_err(io::Error::other)?;
+        )?;
 
         // fsync: the prefix deletes and the `LastPurged` marker share one
         // atomic batch; losing them would let recovery rebuild log state from a
