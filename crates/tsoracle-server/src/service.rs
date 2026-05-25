@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tsoracle_consensus::ConsensusError;
 #[cfg(feature = "metrics")]
 use tsoracle_core::IgnoreReason;
 use tsoracle_core::{CommitOutcome, CoreError, Epoch};
@@ -23,6 +22,7 @@ use tsoracle_proto::v1::{
 };
 
 use crate::leader_hint::not_leader_status;
+use crate::persist_disposition::{PersistDisposition, classify};
 use crate::server::{Server, ServingState};
 
 /// Convert an optional leader epoch into the nested wire form carried by
@@ -257,37 +257,40 @@ impl TsoServiceImpl {
         }
         let actual = match persist_outcome {
             Ok(v) => v,
-            // NotLeader / Fenced are authoritative proof from the consensus
-            // driver that this node's epoch is stale. Step down immediately
-            // — letting subsequent try_grant calls keep serving from a
-            // fenced epoch, even briefly, is the wrong tradeoff for a TSO.
-            // The step_down helper clears the allocator and publishes
-            // NotServing under the single transition API; leader_hint_from
-            // then snapshots that freshly-published state for the redirect.
-            //
-            // Fenced names the epoch that fenced us as `current`; publish it
-            // so the NOT_LEADER hint carries an epoch the client can validate
-            // its next leader against. NotLeader during persist exposes no
-            // such epoch here, so its hint omits one.
-            Err(ConsensusError::Fenced { current, .. }) => {
-                self.server.core.step_down(None, Some(current));
-                return Err(not_leader_status(leader_hint_from(&self.server)));
-            }
-            Err(ConsensusError::NotLeader { .. }) => {
-                self.server.core.step_down(None, None);
-                return Err(not_leader_status(leader_hint_from(&self.server)));
-            }
-            // Transient driver failure: storage hiccup, peer transport flap,
-            // quorum momentarily lost. Tell the client it MAY retry.
-            Err(ConsensusError::TransientDriver(e)) => {
-                return Err(Status::unavailable(format!("persist: {e}")));
-            }
-            // Permanent driver failure: read-only filesystem, corruption,
-            // gone storage device, invariant violation. Surface honestly so
-            // clients do not silently retry into a tarpit.
-            Err(ConsensusError::PermanentDriver(e)) => {
-                return Err(Status::internal(format!("persist: {e}")));
-            }
+            // Route the failure through the shared classifier and apply the
+            // *extend path's* policy to each disposition. The fence path
+            // (`fence::run_leader_watch`) maps the same dispositions
+            // differently — that divergence is the whole point of factoring
+            // the classification out: it now lives at these two call sites
+            // explicitly rather than as two near-identical variant matches.
+            Err(error) => match classify(error) {
+                // Leadership moved under us — authoritative proof this node's
+                // epoch is stale. Step down immediately: letting subsequent
+                // try_grant calls keep serving from a fenced epoch, even
+                // briefly, is the wrong tradeoff for a TSO. step_down clears
+                // the allocator and publishes NotServing under the single
+                // transition API; leader_hint_from then snapshots that
+                // freshly-published state for the redirect. `fenced_by` is the
+                // epoch the client can validate its next leader against —
+                // present for Fenced, absent for NotLeader.
+                PersistDisposition::SteppedDown { fenced_by } => {
+                    self.server.core.step_down(None, fenced_by);
+                    return Err(not_leader_status(leader_hint_from(&self.server)));
+                }
+                // Transient driver failure: storage hiccup, peer transport
+                // flap, quorum momentarily lost. Tell the client it MAY retry;
+                // do NOT step down — there is no proof the epoch is stale.
+                PersistDisposition::Transient(source) => {
+                    return Err(Status::unavailable(format!("persist: {source}")));
+                }
+                // Permanent driver failure: read-only filesystem, corruption,
+                // gone storage device, invariant violation. Surface honestly
+                // so clients do not silently retry into a tarpit; do NOT step
+                // down — the driver is sick, not fenced.
+                PersistDisposition::Permanent(source) => {
+                    return Err(Status::internal(format!("persist: {source}")));
+                }
+            },
         };
         let commit_outcome = self
             .server
