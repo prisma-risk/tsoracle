@@ -192,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- Start runner + apply task ----
     let sink = Arc::new(PeerSink::new(paxos_addrs));
-    host.start(sink);
+    host.start(sink).context("host not already running")?;
 
     // ---- ConsensusDriver ----
     let driver = Arc::new(PaxosDriver::new(host, leader_stream));
