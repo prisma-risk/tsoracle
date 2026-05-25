@@ -60,7 +60,6 @@ rust-version = "1.88"
 license      = "Apache-2.0"
 repository   = "https://github.com/prisma-risk/tsoracle"
 homepage     = "https://github.com/prisma-risk/tsoracle"
-readme       = "README.md"
 authors      = ["Sebastian Thiebaud <sebastian@prismarisk.com>"]
 
 [workspace.dependencies]
