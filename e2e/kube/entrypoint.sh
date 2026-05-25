@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
-# Derive this node's raft identity and peer maps from the StatefulSet ordinal.
+# Derive this node's raft identity and membership map from the StatefulSet ordinal.
 #
 # A StatefulSet ships one pod spec for every replica, so each pod must work
-# out its own --id and the full --peers / --tso-peers maps at start time.
+# out its own --id and the full --members map at start time.
 # Pod hostnames are "<statefulset>-<ordinal>" (e.g. tsoracle-0); node IDs are
 # 1-based, so id = ordinal + 1. Peer FQDNs come from the headless service.
 set -eu
@@ -18,14 +18,12 @@ set -eu
 ordinal="${HOSTNAME##*-}"
 node_id=$((ordinal + 1))
 
-peers=""
-tso_peers=""
+members=""
 i=0
 while [ "$i" -lt "$REPLICAS" ]; do
     id=$((i + 1))
     fqdn="${STATEFULSET_NAME}-${i}.${PEER_SERVICE}.${POD_NAMESPACE}.svc.cluster.local"
-    peers="${peers}${peers:+,}${id}=${fqdn}:${RAFT_PORT}"
-    tso_peers="${tso_peers}${tso_peers:+,}${id}=${fqdn}:${TSO_PORT}"
+    members="${members}${members:+,}${id}=${fqdn}:${RAFT_PORT}/${fqdn}:${TSO_PORT}"
     i=$((i + 1))
 done
 
@@ -37,11 +35,9 @@ if [ "$node_id" -eq 1 ]; then
     bootstrap="--bootstrap"
 fi
 
-exec openraft-standalone \
+exec tsoracle serve openraft \
     --id "$node_id" \
     --raft-addr "0.0.0.0:${RAFT_PORT}" \
-    --tso-addr "0.0.0.0:${TSO_PORT}" \
-    --peers "$peers" \
-    --tso-peers "$tso_peers" \
+    --listen "0.0.0.0:${TSO_PORT}" \
     --raft-dir "${DATA_DIR}/raft" \
-    $bootstrap
+    ${bootstrap:+$bootstrap --members "$members"}

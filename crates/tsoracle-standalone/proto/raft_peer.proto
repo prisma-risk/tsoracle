@@ -1,16 +1,16 @@
 syntax = "proto3";
 
-package raft.v1;
+package tsoracle.raft.peer.v1;
 
 // Peer-transport service for openraft.
 //
-// AppendEntries / Vote payloads are bincode-encoded openraft messages; we treat
+// AppendEntries / Vote payloads are postcard-encoded openraft messages; we treat
 // them as opaque bytes because openraft's wire types are not protobuf-shaped.
 //
 // Snapshot is a *client-streaming* RPC. The client sends exactly one
 // `SnapshotChunk { header }` followed by zero or more `SnapshotChunk { data }`
 // chunks; the server concatenates `data` chunks in order, then calls
-// `Raft::install_full_snapshot`. The reply is a single bincode-encoded
+// `Raft::install_full_snapshot`. The reply is a single postcard-encoded
 // `SnapshotResponse` carried in `RaftMessage.payload`.
 service RaftPeerService {
   rpc AppendEntries (RaftMessage) returns (RaftMessage);
@@ -38,8 +38,8 @@ message SnapshotChunk {
 
 // Per-snapshot header sent once at the start of the stream.
 message SnapshotHeader {
-  // bincode-encoded openraft Vote (sender's current vote).
+  // postcard-encoded openraft Vote (sender's current vote).
   bytes vote = 1;
-  // bincode-encoded openraft SnapshotMeta (last_log_id, last_membership, snapshot_id).
+  // postcard-encoded openraft SnapshotMeta (last_log_id, last_membership, snapshot_id).
   bytes meta = 2;
 }

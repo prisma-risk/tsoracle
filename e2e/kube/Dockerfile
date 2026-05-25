@@ -1,8 +1,7 @@
-# Multi-stage build for the openraft-standalone cluster node.
+# Multi-stage build for the kind e2e cluster node.
 #
-# The stock `tsoracle serve` binary is single-node (file driver); a real
-# cluster runs the `openraft-standalone` example, which takes peer topology
-# on the command line. The entrypoint derives that topology from the
+# Each pod runs the shipped `tsoracle serve openraft` subcommand. The
+# entrypoint derives the node id and membership topology from the
 # StatefulSet ordinal at runtime.
 
 FROM rust:1-bookworm AS build
@@ -15,7 +14,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-RUN cargo build --release -p example-openraft-standalone --bin openraft-standalone
+RUN cargo build --release -p tsoracle --bin tsoracle
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
@@ -23,7 +22,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home tsoracle
 
-COPY --from=build /src/target/release/openraft-standalone /usr/local/bin/openraft-standalone
+COPY --from=build /src/target/release/tsoracle /usr/local/bin/tsoracle
 COPY e2e/kube/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

@@ -114,7 +114,6 @@ mod tests {
     #[test]
     fn picks_the_most_caught_up_follower() {
         let v = voters(&[1, 2, 3]);
-        // Node 1 is the leader; node 3 has replicated further than node 2.
         let matched = BTreeMap::from([(2, 40), (3, 70)]);
         assert_eq!(pick_handoff_target(1, &v, &matched), Some(3));
     }
@@ -122,7 +121,6 @@ mod tests {
     #[test]
     fn excludes_self_even_when_most_caught_up() {
         let v = voters(&[1, 2, 3]);
-        // The leader (1) has the highest index but must never pick itself.
         let matched = BTreeMap::from([(1, 100), (2, 40), (3, 30)]);
         assert_eq!(pick_handoff_target(1, &v, &matched), Some(2));
     }
@@ -130,8 +128,6 @@ mod tests {
     #[test]
     fn treats_missing_replication_as_zero() {
         let v = voters(&[1, 2, 3]);
-        // No replication info at all: still returns *a* voter (not None), so a
-        // handoff is attempted rather than skipped.
         let matched = BTreeMap::new();
         assert!(matches!(pick_handoff_target(1, &v, &matched), Some(2 | 3)));
     }
@@ -144,8 +140,6 @@ mod tests {
 
     #[test]
     fn ignores_non_voter_progress() {
-        // A learner (id 9) is the most caught up but is not a voter, so it is
-        // never chosen.
         let v = voters(&[1, 2]);
         let matched = BTreeMap::from([(2, 10), (9, 999)]);
         assert_eq!(pick_handoff_target(1, &v, &matched), Some(2));

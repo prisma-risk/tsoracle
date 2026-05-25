@@ -17,29 +17,13 @@ default    = []
 reflection = ["tsoracle-server/reflection"]
 
 [dependencies]
-tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.2.2" }
-tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.7" }
-tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.2.5" }
-tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.2.3" }
-tsoracle-openraft-toolkit         = { path = "../../crates/tsoracle-openraft-toolkit", version = "0.1.8", features = ["rocksdb-log-store"] }
-
-openraft           = { workspace = true }
-rocksdb            = { workspace = true }
-tonic              = { workspace = true }
-tonic-prost        = { workspace = true }
-prost              = { workspace = true }
-tokio              = { workspace = true, features = ["signal"] }
-tokio-stream       = { workspace = true }
-futures            = { workspace = true }
-async-trait        = { workspace = true }
-clap               = { workspace = true }
-tracing            = { workspace = true }
-tracing-subscriber = { workspace = true }
-postcard           = { workspace = true }
-anyhow             = { workspace = true }
-
-[build-dependencies]
-tonic-prost-build = { workspace = true }
+tsoracle-server     = { path = "../../crates/tsoracle-server", version = "0.2.5" }
+tsoracle-standalone = { path = "../../crates/tsoracle-standalone", version = "0.1.0", default-features = false, features = ["openraft"] }
+tokio               = { workspace = true, features = ["signal", "macros", "rt-multi-thread"] }
+clap                = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+anyhow              = { workspace = true }
 
 [dev-dependencies]
 tokio    = { workspace = true, features = ["process", "net", "time", "macros", "rt-multi-thread"] }

@@ -845,26 +845,13 @@ name = "example-openraft-standalone"
 version = "0.1.4"
 dependencies = [
  "anyhow",
- "async-trait",
  "clap",
- "futures",
- "openraft",
- "postcard",
- "prost",
- "rocksdb",
  "tempfile",
  "tokio",
- "tokio-stream",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
  "tracing",
  "tracing-subscriber",
- "tsoracle-consensus",
- "tsoracle-core",
- "tsoracle-driver-openraft",
- "tsoracle-openraft-toolkit",
  "tsoracle-server",
+ "tsoracle-standalone",
 ]
 
 [[package]]
@@ -913,24 +900,12 @@ name = "example-paxos-standalone"
 version = "0.1.4"
 dependencies = [
  "anyhow",
- "async-trait",
  "clap",
- "omnipaxos",
- "parking_lot",
- "postcard",
- "prost",
- "rocksdb",
  "tokio",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
  "tracing",
  "tracing-subscriber",
- "tsoracle-consensus",
- "tsoracle-core",
- "tsoracle-driver-paxos",
- "tsoracle-paxos-toolkit",
  "tsoracle-server",
+ "tsoracle-standalone",
 ]
 
 [[package]]
@@ -3268,6 +3243,7 @@ dependencies = [
  "tsoracle-core",
  "tsoracle-driver-file",
  "tsoracle-server",
+ "tsoracle-standalone",
 ]
 
 [[package]]
@@ -3492,6 +3468,36 @@ dependencies = [
  "tsoracle-proto",
  "tsoracle-server",
  "turmoil",
+]
+
+[[package]]
+name = "tsoracle-standalone"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "omnipaxos",
+ "openraft",
+ "parking_lot",
+ "postcard",
+ "prost",
+ "rocksdb",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "tsoracle-consensus",
+ "tsoracle-core",
+ "tsoracle-driver-file",
+ "tsoracle-driver-openraft",
+ "tsoracle-driver-paxos",
+ "tsoracle-openraft-toolkit",
+ "tsoracle-paxos-toolkit",
+ "tsoracle-server",
 ]
 
 [[package]]

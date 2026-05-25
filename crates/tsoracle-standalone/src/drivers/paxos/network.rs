@@ -35,7 +35,7 @@ use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_paxos_toolkit::lifecycle::MessageSink;
 
 pub mod proto {
-    tonic::include_proto!("tsoracle.example.paxos.v1");
+    tonic::include_proto!("tsoracle.paxos.peer.v1");
 }
 
 use proto::paxos_peer_service_client::PaxosPeerServiceClient;

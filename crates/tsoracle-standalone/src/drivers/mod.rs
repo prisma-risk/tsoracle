@@ -10,11 +10,9 @@
 //  https://github.com/prisma-risk/tsoracle
 //
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_prost_build::configure()
-        .build_server(true)
-        .build_client(true)
-        .compile_protos(&["proto/raft.proto"], &["proto"])?;
-    println!("cargo:rerun-if-changed=proto/raft.proto");
-    Ok(())
-}
+#[cfg(feature = "file")]
+pub(crate) mod file;
+#[cfg(feature = "openraft")]
+pub(crate) mod openraft;
+#[cfg(feature = "paxos")]
+pub(crate) mod paxos;

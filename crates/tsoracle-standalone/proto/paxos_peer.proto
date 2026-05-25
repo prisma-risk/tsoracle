@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package tsoracle.example.paxos.v1;
+package tsoracle.paxos.peer.v1;
 
 // Peer-transport service for OmniPaxos.
 //

@@ -151,7 +151,19 @@ COV_IGNORE_TEST_SUPPORT := crates/tsoracle-server/src/test_support
 # its own unit tests; only the unreachable I/O entrypoint is dropped here.
 COV_IGNORE_KUBE_E2E_MAIN := e2e/kube/driver/src/main
 
-COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_BENCHMARKS)|$(COV_IGNORE_TEST_SUPPORT)|$(COV_IGNORE_KUBE_E2E_MAIN))\.rs
+# The standalone crate's node-to-node peer transports (`RaftNetworkV2` +
+# tonic client/server for openraft, the `MessageSink` + tonic client/server for
+# paxos). Like the openraft-toolkit lifecycle shims above, these are thin
+# wrappers around live cross-node RPC: every method either dials a peer or hands
+# a decoded request to a live `Raft`/`OmniPaxos`, so earning real coverage needs
+# a running multi-node cluster — which the kind e2e lane provides and `cargo
+# test` deliberately does not stand up. The same code lived in the (excluded)
+# `example-*-standalone` crates before this crate absorbed it. The pure,
+# cluster-free logic (snapshot reassembly bounds, pool eviction/keying) keeps its
+# own in-module unit tests; only the live-RPC wrappers are dropped here.
+COV_IGNORE_STANDALONE_PEER_TRANSPORT := crates/tsoracle-standalone/src/drivers/(openraft|paxos)/network
+
+COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_BENCHMARKS)|$(COV_IGNORE_TEST_SUPPORT)|$(COV_IGNORE_KUBE_E2E_MAIN)|$(COV_IGNORE_STANDALONE_PEER_TRANSPORT))\.rs
 
 # Shared exclude flags so `coverage` (lcov for CI) and `coverage-html` (local
 # browsable report) cannot drift apart on which crates participate.
