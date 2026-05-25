@@ -124,6 +124,23 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
+      # Coverage links every test binary with `-C instrument-coverage` and full
+      # debuginfo, so the artifacts are even larger than the plain `test` job —
+      # `make coverage` was hitting ENOSPC inside `ld` at the final link step.
+      # Same reclaim as the `test` job: strip the pre-installed Android SDK /
+      # .NET / Haskell toolchains (~30 GB) before any cargo work begins. The
+      # Rust toolchain installed below lives in ~/.cargo and the rust-cache
+      # restore is untouched by `tool-cache: false`.
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
