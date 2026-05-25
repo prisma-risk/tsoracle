@@ -1,6 +1,6 @@
 # Three-node tsoracle cluster on openraft (standalone)
 
-Multi-process tsoracle cluster backed by [openraft](https://github.com/databendlabs/openraft), wired together via [`tsoracle-driver-openraft`](../../crates/tsoracle-driver-openraft/). The driver crate provides the `ConsensusDriver` impl, the openraft `TypeConfig`, the `HighWaterStateMachine`, and the `StandaloneHost` that owns its own raft cluster. This example supplies the rest: a tonic raft peer transport (`src/network.rs`), the openraft `Config` + bootstrap glue (`src/main.rs`), and the `--tso-peers` map (`NodeId -> tsoracle-service-addr`) passed to `OpenraftDriver::with_peers` for `LeaderHint` follower-redirect resolution.
+Multi-process tsoracle cluster backed by [openraft](https://github.com/databendlabs/openraft), wired together via [`tsoracle-driver-openraft`](../../crates/tsoracle-driver-openraft/). The driver crate provides the `ConsensusDriver` impl, the openraft `TypeConfig`, the `HighWaterStateMachine`, and the `StandaloneHost` that owns its own raft cluster. This example supplies the rest: a tonic raft peer transport (`src/network.rs`), the openraft `Config` + bootstrap glue (`src/main.rs`), and the `--tso-peers` map (`NodeId -> tsoracle-service-addr`), which seeds each member's `service_endpoint` in raft membership at bootstrap so the driver can resolve `LeaderHint` follower-redirects from the leader's membership node.
 
 If your service already runs openraft for other state and you want TSO to share it, see the [`openraft-piggyback`](../openraft-piggyback/) example instead.
 
@@ -37,7 +37,7 @@ Against any node:
 
     grpcurl -plaintext -d '{"count":1}' 127.0.0.1:50561 tsoracle.v1.TsoService/GetTs
 
-A follower will respond with a `LeaderHint` trailer pointing at the current leader's tsoracle address (see `--tso-peers`). The address is resolved by `OpenraftDriver::with_peers`, which maps the leader's `NodeId` against the `--tso-peers` map passed at startup.
+A follower will respond with a `LeaderHint` trailer pointing at the current leader's tsoracle address (see `--tso-peers`). That address is the leader's `service_endpoint` carried in raft membership (seeded from `--tso-peers` at bootstrap); the driver reads it from the leader's membership node.
 
 ## Observe failover
 
@@ -45,7 +45,7 @@ Find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that pr
 
 ## What's in this example
 
-- `src/main.rs` — CLI parse, openraft `Config`, one rocksdb instance with three CFs (`raft_log` / `raft_meta` for the log store, `raft_snapshot` for `RocksdbSnapshotStore`), `Raft::new`, optional `initialize`, and the driver wiring: `StandaloneHost::new` → `OpenraftDriver::with_peers(host, tso_addrs)` where `tso_addrs` is the `NodeId -> tsoracle-service-addr` map from `--tso-peers`. About 150 lines including config and bootstrap.
+- `src/main.rs` — CLI parse, openraft `Config`, one rocksdb instance with three CFs (`raft_log` / `raft_meta` for the log store, `raft_snapshot` for `RocksdbSnapshotStore`), `Raft::new`, optional `initialize`, and the driver wiring: `StandaloneHost::new` → `OpenraftDriver::new(host)`, with the `--tso-peers` addresses written into each member's `service_endpoint` in raft membership at bootstrap. About 150 lines including config and bootstrap.
 - `src/network.rs` — tonic raft peer transport (`AppendEntries`, `Vote`, chunked snapshot stream). The bulk of the example; ports across cleanly because the driver crate's `TypeConfig` is the only handle the network needs.
 - `proto/raft.proto`, `build.rs` — peer-RPC service definition + tonic codegen.
 - `scripts/run.sh` — 3-node bring-up.

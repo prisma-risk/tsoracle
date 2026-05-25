@@ -13,7 +13,7 @@
 //! Multi-process 3-node tsoracle cluster backed by `tsoracle-driver-openraft`.
 //!
 //! The integration body is just two bindings (`StandaloneHost::new`,
-//! `OpenraftDriver::with_peers`); everything else is transport plumbing
+//! `OpenraftDriver::new`); everything else is transport plumbing
 //! (`src/network.rs`) and config parsing.
 //!
 //! `--bootstrap` flag goes on exactly one node at first cluster init.
@@ -31,7 +31,7 @@ use openraft::{Config, Raft};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tsoracle_driver_openraft::{
     HighWaterStateMachine, OpenraftDriver, OpenraftPeer, RocksdbSnapshotStore, SnapshotStore,
-    StandaloneHost, TsoPeer, TypeConfig,
+    StandaloneHost, TypeConfig,
 };
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 use tsoracle_server::Server as TsoServer;
@@ -214,14 +214,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ---- Driver: StandaloneHost -> OpenraftDriver (with endpoint resolution) ----
-    // `--tso-peers` is the NodeId -> tsoracle-service-addr map; the driver
-    // consults it to populate LeaderHint follower-redirects.
+    // ---- Driver: StandaloneHost -> OpenraftDriver ----
+    // Follower redirects resolve from the leader's membership node
+    // (OpenraftPeer.service_endpoint), so no static peer map is passed here.
     let host = StandaloneHost::new(raft.clone(), state_machine_for_host);
-    let tso_peers = tso_addrs
-        .into_iter()
-        .map(|(node_id, endpoint)| TsoPeer { node_id, endpoint });
-    let driver = OpenraftDriver::with_peers(host, tso_peers);
+    let driver = OpenraftDriver::new(host);
 
     // ---- Tsoracle gRPC server ----
     let tso = TsoServer::builder().consensus_driver(driver).build()?;
