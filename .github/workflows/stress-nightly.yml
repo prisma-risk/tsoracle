@@ -65,6 +65,22 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The release build pulls in rocksdb/openraft; reclaim ~30 GB up front to
+      # keep headroom for the link step. Gated on the same filter as the build
+      # below so skipped matrix cells stay no-ops; tool-cache: false leaves
+      # ~/.cargo and the rust-cache restore untouched.
+      - name: free disk space
+        if: steps.filter.outputs.skip != 'true'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+
       - uses: actions/checkout@v6
         if: steps.filter.outputs.skip != 'true'
 

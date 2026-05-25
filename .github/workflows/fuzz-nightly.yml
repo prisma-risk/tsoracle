@@ -47,6 +47,21 @@ jobs:
           - paxos_meta_ballot_decode
           - paxos_codec_roundtrip
     steps:
+      # cargo-fuzz compiles the whole dependency tree (rocksdb included) with
+      # ASAN instrumentation, so the artifacts are large. Reclaim ~30 GB before
+      # cargo starts; tool-cache: false keeps the runner tool cache (where
+      # cargo-fuzz is installed) intact.
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+
       - uses: actions/checkout@v6
 
       - name: Skip non-matching target (manual dispatch)
