@@ -64,18 +64,40 @@ fn warn_on_stuck_fence(transient_retries: u32) -> bool {
             == 0
 }
 
-pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerError> {
+pub(crate) async fn run_leader_watch(
+    server: Arc<Server>,
+    cancel: impl std::future::Future<Output = ()>,
+) -> Result<(), ServerError> {
     let mut stream = server.consensus.leadership_events();
     // A leadership event observed while a fence is mid-retry is stashed here and
     // dispatched on the next iteration instead of being awaited fresh.
     let mut pending: Option<LeaderState> = None;
+    // Cooperative cancellation (see `Server::into_router` / `WatchGuard`).
+    // Pinned once and observed only at the `select!` boundaries below — the
+    // event wait and the transient-retry backoff — never inside a fence
+    // attempt, so an in-flight fence always runs to completion rather than
+    // being torn down mid-`extension_gate.write()`. On cancel we publish
+    // `NotServing` (the same fail-safe every other termination performs) and
+    // return `Ok(())`: the stop was requested, so it is not an error.
+    tokio::pin!(cancel);
     loop {
         let evt = match pending.take() {
             Some(evt) => evt,
-            None => match stream.next().await {
-                Some(evt) => evt,
-                None => break,
-            },
+            None => {
+                tokio::select! {
+                    // Bias toward cancel so a pending stop is honored promptly
+                    // instead of dispatching one more leadership event first.
+                    biased;
+                    _ = &mut cancel => {
+                        server.step_down_due_to_consensus_rejection(None, None);
+                        return Ok(());
+                    }
+                    next = stream.next() => match next {
+                        Some(evt) => evt,
+                        None => break,
+                    },
+                }
+            }
         };
         // `tsoracle.leader_transition.total` is emitted per-arm *after* that
         // arm's safety state change (clear/publish), never here before the
@@ -252,6 +274,14 @@ pub(crate) async fn run_leader_watch(server: Arc<Server>) -> Result<(), ServerEr
                                 FENCE_RETRY_CAP,
                             );
                             tokio::select! {
+                                // Bias toward cancel so a stop requested while
+                                // a fence is stuck retrying a transient error
+                                // is honored rather than spun past.
+                                biased;
+                                _ = &mut cancel => {
+                                    server.step_down_due_to_consensus_rejection(None, None);
+                                    return Ok(());
+                                }
                                 _ = tokio::time::sleep(backoff) => {}
                                 next = stream.next() => {
                                     match next {

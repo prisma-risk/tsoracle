@@ -8,7 +8,7 @@ This crate hosts the deterministic-simulation-testing (DST) harness that runs a 
 
 A small set of helpers built on `tsoracle-server`'s public API:
 
-- `into_sim_parts(server)` — capture a built `Server`'s `Routes`, leader-watch `JoinHandle`, and `ServingState` receiver.
+- `into_sim_parts(server)` — capture a built `Server`'s `Routes`, leader-watch `WatchGuard`, and `ServingState` receiver.
 - `serve(routes, port)` — serve those `Routes` over a turmoil listener inside a host closure.
 - `client(host, port)` / `sim_channel(endpoint)` — lazy tonic client/channel that dials over the simulated network.
 

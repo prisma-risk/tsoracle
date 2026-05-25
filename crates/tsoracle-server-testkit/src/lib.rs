@@ -31,14 +31,13 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tonic::service::Routes;
 use tonic::transport::server::{Connected, TcpConnectInfo};
 use tonic::transport::{Channel, Endpoint, Server as TonicServer};
 use tsoracle_proto::v1::tso_service_client::TsoServiceClient;
 use turmoil::net::{TcpListener, TcpStream};
 
-use tsoracle_server::{Server, ServerError, ServingState};
+use tsoracle_server::{Server, ServerError, ServingState, WatchGuard};
 
 // Matches turmoil's `Result` error type so `?` works directly in host/client
 // closures.
@@ -48,11 +47,13 @@ type ConnFut = Pin<
 >;
 
 /// The pieces needed to drive a server inside a turmoil host: the gRPC
-/// `Routes` (serve them with [`serve`]), the already-spawned leader-watch
-/// `JoinHandle`, and a clone of the observable `ServingState` channel.
+/// `Routes` (serve them with [`serve`]), the leader-watch [`WatchGuard`]
+/// (keep it alive for as long as the host should serve — dropping it
+/// cooperatively stops the task), and a clone of the observable
+/// `ServingState` channel.
 pub struct SimParts {
     pub routes: Routes,
-    pub watch: JoinHandle<Result<(), ServerError>>,
+    pub watch: WatchGuard,
     pub state_rx: watch::Receiver<ServingState>,
 }
 
