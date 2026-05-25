@@ -23,7 +23,7 @@
 //! deterministic scheduler — the `extension_lock` contention (and so the
 //! coalescing) is exercised identically, but deterministically and instantly.
 //!
-//! Opt in: `cargo test -p tsoracle-server --features dst --test extension_stampede_dst`.
+//! Opt in: `cargo test -p tsoracle-tests --features dst --test extension_stampede_dst`.
 
 use core::pin::Pin;
 use std::sync::Arc;
@@ -37,8 +37,8 @@ use tsoracle_core::{Epoch, testing::MockClock};
 use tsoracle_proto::v1::GetTsRequest;
 use tsoracle_server::Server;
 use tsoracle_server::test_fakes::InMemoryDriver;
-use tsoracle_server::test_support::dst::{client, into_sim_parts, serve};
 use tsoracle_server::test_support::wait_until_serving;
+use tsoracle_server_testkit::{client, into_sim_parts, serve};
 
 const PORT: u16 = 9_999;
 const STAMPEDE_SIZE: usize = 50;

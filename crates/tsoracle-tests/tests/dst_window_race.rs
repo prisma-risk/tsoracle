@@ -22,7 +22,7 @@
 //! client run inside `turmoil`'s single-threaded simulation, with a `Clock` that
 //! advances 1ms on every read — making the two-read skew happen on every run
 //! from a fixed seed. RED before the read-once fix, GREEN after. The turmoil
-//! transport glue is shared from `tsoracle_server::test_support::dst`.
+//! transport glue is shared from `tsoracle_server_testkit`.
 //!
 //! Opt in: `cargo test -p tsoracle-tests --features dst --test dst_window_race`.
 
@@ -35,7 +35,7 @@ use tsoracle_core::{Clock, Epoch};
 use tsoracle_proto::v1::GetTsRequest;
 use tsoracle_server::Server;
 use tsoracle_server::test_fakes::StallableDriver;
-use tsoracle_server::test_support::dst::{client, into_sim_parts, serve};
+use tsoracle_server_testkit::{client, into_sim_parts, serve};
 use turmoil::Builder;
 
 const PORT: u16 = 9_999;

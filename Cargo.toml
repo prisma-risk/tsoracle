@@ -16,6 +16,7 @@ members  = [
     "crates/tsoracle-yieldpoint",
     "crates/tsoracle-failpoint",
     "crates/tsoracle-codec",
+    "crates/tsoracle-server-testkit",
     "examples/embedded-server",
     "examples/failover-demo",
     "examples/metrics-prometheus",

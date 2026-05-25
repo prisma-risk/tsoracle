@@ -31,7 +31,7 @@ use tsoracle_client::{Client, ClientBuilder, ClientError};
 use tsoracle_core::{Clock, Epoch};
 use tsoracle_server::Server;
 use tsoracle_server::test_fakes::InMemoryDriver;
-use tsoracle_server::test_support::dst::{into_sim_parts, serve, sim_channel};
+use tsoracle_server_testkit::{into_sim_parts, serve, sim_channel};
 
 const PORT: u16 = 9_999;
 const EPOCH_BASE_MS: u64 = 1_700_000_000_001;
