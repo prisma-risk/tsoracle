@@ -113,6 +113,14 @@ bench             = false
 doctest           = false
 
 [[bin]]
+name              = "codec_roundtrip"
+path              = "fuzz_targets/codec_roundtrip.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
 name              = "paxos_log_entry_decode"
 path              = "fuzz_targets/paxos_log_entry_decode.rs"
 test              = false
@@ -131,6 +139,14 @@ doctest           = false
 [[bin]]
 name              = "paxos_meta_ballot_decode"
 path              = "fuzz_targets/paxos_meta_ballot_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
+name              = "paxos_codec_roundtrip"
+path              = "fuzz_targets/paxos_codec_roundtrip.rs"
 test              = false
 doc               = false
 bench             = false
