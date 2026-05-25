@@ -20,7 +20,7 @@
 //! verbatim by the paxos toolkit. Only [`SCHEMA_VERSION`] is owned here, so
 //! this toolkit's wire/on-disk format versions independently of the others.
 
-pub use tsoracle_codec::{CodecError, decode, encode};
+pub use tsoracle_codec::{CodecError, codec_io_error, decode, encode};
 
 /// On-disk/wire schema version stamped as the leading byte of every framed
 /// snapshot, log entry, and storage record produced by this toolkit. Bump

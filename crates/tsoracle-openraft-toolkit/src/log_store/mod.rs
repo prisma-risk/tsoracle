@@ -197,24 +197,14 @@ fn range_boundary<RB: RangeBounds<u64>>(range: RB) -> (u64, u64) {
 
 /// Encode a log record as `[SCHEMA_VERSION | postcard(value)]`.
 fn encode_record<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
-    crate::codec::encode(crate::codec::SCHEMA_VERSION, value).map_err(codec_io_error)
+    crate::codec::encode(crate::codec::SCHEMA_VERSION, value)
+        .map_err(|err| crate::codec::codec_io_error("log-store record encode", err))
 }
 
 /// Decode a record framed by [`encode_record`], rejecting a foreign version.
 fn decode_record<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
-    crate::codec::decode(crate::codec::SCHEMA_VERSION, bytes).map_err(codec_io_error)
-}
-
-/// Map a codec failure to `io::Error`, surfacing a version mismatch as
-/// `InvalidData` so a foreign-format record is a distinguishable, structured
-/// error rather than a generic decode failure.
-fn codec_io_error(err: crate::codec::CodecError) -> io::Error {
-    match err {
-        e @ crate::codec::CodecError::Version { .. } => {
-            io::Error::new(io::ErrorKind::InvalidData, e)
-        }
-        other => io::Error::other(other),
-    }
+    crate::codec::decode(crate::codec::SCHEMA_VERSION, bytes)
+        .map_err(|err| crate::codec::codec_io_error("log-store record decode", err))
 }
 
 impl<C, K> RocksdbLogStore<C, K>

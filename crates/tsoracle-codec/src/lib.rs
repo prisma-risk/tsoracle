@@ -12,6 +12,8 @@
 
 #![doc = include_str!("../README.md")]
 
+use std::io;
+
 use serde::{Serialize, de::DeserializeOwned};
 
 /// Failure modes of the version-prefixed postcard codec.
@@ -80,6 +82,30 @@ pub fn decode<T: DeserializeOwned>(expected_version: u8, bytes: &[u8]) -> Result
         });
     }
     Ok(value)
+}
+
+/// Map a [`CodecError`] to an [`io::Error`], tagging the message with `context`
+/// so the failing boundary is identifiable.
+///
+/// A [`CodecError::Version`] mismatch becomes [`io::ErrorKind::InvalidData`]: a
+/// foreign on-disk/wire format is a structured, distinguishable condition — a
+/// caller can react to "this record is from another schema version" specifically
+/// rather than treating it as a generic decode failure. Every other variant maps
+/// through [`io::Error::other`].
+///
+/// Consumers whose trait surface speaks `io::Error` — the openraft
+/// `RaftLogStorage` / `RaftStateMachine` implementations — share this one mapping
+/// so the version-mismatch-to-`InvalidData` contract can't drift between them.
+/// (The paxos toolkit surfaces [`CodecError`] through its own `thiserror` error
+/// enum and so does not use this.)
+pub fn codec_io_error(context: &str, err: CodecError) -> io::Error {
+    match err {
+        version_mismatch @ CodecError::Version { .. } => io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{context}: {version_mismatch}"),
+        ),
+        other => io::Error::other(format!("{context}: {other}")),
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +186,37 @@ mod tests {
             decode::<Sample>(1, &bytes),
             Err(CodecError::TrailingBytes { extra: 3 })
         ));
+    }
+
+    #[test]
+    fn codec_io_error_maps_version_mismatch_to_invalid_data() {
+        // A record stamped at version 2 read against version 1 is a version
+        // mismatch — the boundary `codec_io_error` must surface as `InvalidData`.
+        let v2_bytes = encode(
+            2,
+            &Sample {
+                idx: 1,
+                name: "x".into(),
+            },
+        )
+        .unwrap();
+        let err = decode::<Sample>(1, &v2_bytes).expect_err("must reject");
+        assert!(matches!(err, CodecError::Version { .. }));
+        let io_err = codec_io_error("vote decode", err);
+        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            io_err.to_string().starts_with("vote decode: "),
+            "context must prefix the message, got {io_err}"
+        );
+    }
+
+    #[test]
+    fn codec_io_error_maps_other_variants_to_other_kind() {
+        // `Empty` is not a version mismatch, so it must not masquerade as the
+        // `InvalidData` reserved for a foreign schema version.
+        let io_err = codec_io_error("vote decode", CodecError::Empty);
+        assert_ne!(io_err.kind(), io::ErrorKind::InvalidData);
+        assert!(io_err.to_string().starts_with("vote decode: "));
     }
 
     use proptest::prelude::*;
