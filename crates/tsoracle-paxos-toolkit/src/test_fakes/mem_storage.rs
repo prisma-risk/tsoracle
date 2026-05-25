@@ -79,9 +79,10 @@ where
     fn append_entry(&mut self, entry: T) -> StorageResult<u64> {
         let mut inner = self.inner.lock();
         // After a full trim the log is empty; the next absolute write index
-        // must floor at `compacted_idx` (matching production `next_log_idx`),
-        // not reset to 0, or the entry lands below the compaction floor and
-        // becomes unreachable via get_suffix(compacted_idx).
+        // must floor at `compacted_idx` (matching production `RocksdbStorage`,
+        // whose cached `next_idx` falls back to the compaction floor), not
+        // reset to 0, or the entry lands below the floor and becomes
+        // unreachable via get_suffix(compacted_idx).
         let next = inner
             .log
             .keys()

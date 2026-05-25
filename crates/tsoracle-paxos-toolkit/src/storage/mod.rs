@@ -62,6 +62,19 @@ pub enum StorageError {
 pub struct RocksdbStorage<T: Entry> {
     db: Arc<DB>,
     cf_name: String,
+    /// Cached next absolute write index. Holds `(highest_log_key + 1).max(compacted_idx)`
+    /// when the log is non-empty, else `compacted_idx` — the same value the old
+    /// per-append reverse scan computed. Seeded once at [`RocksdbStorage::open_in`]
+    /// and maintained in lockstep with every mutating write (always *after* the
+    /// write succeeds), so the append hot path discovers the next index from
+    /// memory rather than from a RocksDB iterator. The `&mut self` on every
+    /// mutating `Storage` method makes this sound without interior mutability;
+    /// correctness assumes a single `RocksdbStorage` owns its column family,
+    /// which is the documented usage.
+    next_idx: u64,
+    /// Cached compaction offset, a mirror of the persisted `M/compacted_idx`.
+    /// Only [`omnipaxos::storage::Storage::set_compacted_idx`] writes it.
+    compacted_idx: u64,
     _marker: PhantomData<T>,
 }
 
@@ -81,11 +94,60 @@ impl<T: Entry> RocksdbStorage<T> {
         if db.cf_handle(cf_name).is_none() {
             return Err(StorageError::ColumnFamilyNotFound(cf_name.to_string()));
         }
-        Ok(Self {
+        let mut storage = Self {
             db,
             cf_name: cf_name.to_string(),
+            next_idx: 0,
+            compacted_idx: 0,
             _marker: PhantomData,
-        })
+        };
+        // Seed the in-memory cursors from disk exactly once. This is the only
+        // place the log is scanned for its tail; every later mutation keeps the
+        // cursors current, so appends never re-scan. A reopen after a crash
+        // re-derives both from the persisted state here.
+        storage.compacted_idx = storage.read_compacted_idx()?;
+        storage.next_idx = storage.scan_next_log_idx(storage.compacted_idx)?;
+        Ok(storage)
+    }
+
+    /// Reverse-scan the log column family for the highest absolute index,
+    /// returning `(highest + 1).max(compacted)`, or `compacted` when the log
+    /// is empty. Used only by [`RocksdbStorage::open_in`] to seed `next_idx`;
+    /// the floor matches the on-disk invariant a fresh append must satisfy
+    /// (`next >= compacted_idx`) so a snapshot that trims every surviving log
+    /// key cannot let an append land below the compaction floor.
+    fn scan_next_log_idx(&self, compacted: u64) -> Result<u64, StorageError> {
+        use crate::storage::key_space::{LOG_PREFIX, log_key_range, parse_log_key};
+        use rocksdb::IteratorMode;
+
+        let cf = self.cf()?;
+        let (_, upper) = log_key_range();
+        let iter = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&upper, rocksdb::Direction::Reverse));
+        for result in iter {
+            let (key, _value) = result?;
+            if key.starts_with(LOG_PREFIX) {
+                let idx = parse_log_key(&key).ok_or_else(|| {
+                    StorageError::LogIntegrity(format!("malformed log key: {key:?}"))
+                })?;
+                return Ok((idx + 1).max(compacted));
+            }
+        }
+        Ok(compacted)
+    }
+
+    /// Read the persisted compaction offset (`M/compacted_idx`), defaulting to
+    /// `0` when absent. Used only to seed `compacted_idx` at
+    /// [`RocksdbStorage::open_in`]; thereafter the cached field is authoritative.
+    fn read_compacted_idx(&self) -> Result<u64, StorageError> {
+        use crate::storage::key_space::meta_compacted_idx_key;
+        use crate::storage::meta::decode_u64;
+        let cf = self.cf()?;
+        match self.db.get_cf(&cf, meta_compacted_idx_key())? {
+            Some(bytes) => Ok(decode_u64(&bytes)?),
+            None => Ok(0),
+        }
     }
 
     pub(crate) fn cf(&self) -> Result<Arc<BoundColumnFamily<'_>>, StorageError> {
@@ -177,42 +239,6 @@ impl<T> RocksdbStorage<T>
 where
     T: Entry + serde::Serialize + serde::de::DeserializeOwned + Clone + 'static,
 {
-    fn next_log_idx(&self) -> Result<u64, StorageError> {
-        use crate::storage::key_space::{LOG_PREFIX, log_key_range, parse_log_key};
-        use rocksdb::IteratorMode;
-
-        // The next absolute write index must satisfy
-        // `next >= compacted_idx`; otherwise a snapshot that trims every
-        // surviving log key would let a fresh append land at L/0 and
-        // become unreachable via get_suffix(compacted_idx).
-        let compacted = self.compacted_idx_inner()?;
-        let cf = self.cf()?;
-        let (_, upper) = log_key_range();
-        let iter = self
-            .db
-            .iterator_cf(&cf, IteratorMode::From(&upper, rocksdb::Direction::Reverse));
-        for result in iter {
-            let (key, _value) = result?;
-            if key.starts_with(LOG_PREFIX) {
-                let idx = parse_log_key(&key).ok_or_else(|| {
-                    StorageError::LogIntegrity(format!("malformed log key: {key:?}"))
-                })?;
-                return Ok((idx + 1).max(compacted));
-            }
-        }
-        Ok(compacted)
-    }
-
-    fn compacted_idx_inner(&self) -> Result<u64, StorageError> {
-        use crate::storage::key_space::meta_compacted_idx_key;
-        use crate::storage::meta::decode_u64;
-        let cf = self.cf()?;
-        match self.db.get_cf(&cf, meta_compacted_idx_key())? {
-            Some(bytes) => Ok(decode_u64(&bytes)?),
-            None => Ok(0),
-        }
-    }
-
     fn store_log_entry(
         &self,
         batch: &mut WriteBatch,
@@ -237,15 +263,17 @@ where
 {
     fn append_entry(&mut self, entry: T) -> omnipaxos::storage::StorageResult<u64> {
         tsoracle_failpoint::failpoint!("paxos_toolkit::storage::append_entry");
-        let next = self.next_log_idx().map_err(box_err)?;
+        let next = self.next_idx;
         self.batch_sync(|cf, batch| self.store_log_entry(batch, &cf, next, &entry))
             .map_err(box_err)?;
-        let compacted = self.get_compacted_idx()?;
-        Ok((next + 1).saturating_sub(compacted))
+        // Advance the cursor only after the write commits, so a failed write
+        // leaves the cache matching disk.
+        self.next_idx = next + 1;
+        Ok(self.next_idx.saturating_sub(self.compacted_idx))
     }
 
     fn append_entries(&mut self, entries: Vec<T>) -> omnipaxos::storage::StorageResult<u64> {
-        let start = self.next_log_idx().map_err(box_err)?;
+        let start = self.next_idx;
         let count = entries.len() as u64;
         self.batch_sync(|cf, batch| {
             for (offset, entry) in entries.iter().enumerate() {
@@ -254,8 +282,8 @@ where
             Ok(())
         })
         .map_err(box_err)?;
-        let compacted = self.get_compacted_idx()?;
-        Ok((start + count).saturating_sub(compacted))
+        self.next_idx = start + count;
+        Ok(self.next_idx.saturating_sub(self.compacted_idx))
     }
 
     fn append_on_prefix(
@@ -275,8 +303,11 @@ where
             Ok(())
         })
         .map_err(box_err)?;
-        let compacted = self.get_compacted_idx()?;
-        Ok((from_idx + count).saturating_sub(compacted))
+        // The write truncated every key `>= from_idx` and re-appended `count`
+        // of them, so the new tail is `from_idx + count`, floored at the
+        // compaction offset just as a fresh append would be.
+        self.next_idx = (from_idx + count).max(self.compacted_idx);
+        Ok(self.next_idx.saturating_sub(self.compacted_idx))
     }
 
     fn set_promise(
@@ -389,9 +420,7 @@ where
     }
 
     fn get_log_len(&self) -> omnipaxos::storage::StorageResult<u64> {
-        let next = self.next_log_idx().map_err(box_err)?;
-        let compacted = self.get_compacted_idx()?;
-        Ok(next.saturating_sub(compacted))
+        Ok(self.next_idx.saturating_sub(self.compacted_idx))
     }
 
     fn get_suffix(&self, from: u64) -> omnipaxos::storage::StorageResult<Vec<T>> {
@@ -479,6 +508,12 @@ where
             Ok(())
         })
         .map_err(box_err)?;
+        // Trimming a prefix leaves the tail untouched unless it removes every
+        // live key (`idx` past the highest one). A now-empty log falls back to
+        // the compaction floor, matching what a reverse scan would find.
+        if idx >= self.next_idx {
+            self.next_idx = self.compacted_idx;
+        }
         Ok(())
     }
 
@@ -491,11 +526,15 @@ where
             Ok(())
         })
         .map_err(box_err)?;
+        self.compacted_idx = idx;
+        // Raising the floor past every live key floats the next write up to it,
+        // preserving the `next >= compacted_idx` invariant.
+        self.next_idx = self.next_idx.max(idx);
         Ok(())
     }
 
     fn get_compacted_idx(&self) -> omnipaxos::storage::StorageResult<u64> {
-        self.compacted_idx_inner().map_err(box_err)
+        Ok(self.compacted_idx)
     }
 
     fn set_snapshot(
@@ -796,6 +835,29 @@ mod decided_compacted_tests {
         let mut storage = fresh_storage(&dir);
         storage.set_compacted_idx(17).unwrap();
         assert_eq!(storage.get_compacted_idx().unwrap(), 17);
+    }
+
+    #[test]
+    fn append_floors_at_compacted_idx_raised_past_live_keys() {
+        // Advancing compacted_idx past every live key WITHOUT trimming must
+        // float the next write index up to the compaction floor: the next
+        // append lands at `compacted_idx`, not just past the highest key.
+        // Otherwise the entry would persist below the floor and be
+        // unreachable via get_suffix(compacted_idx). (This is RocksdbStorage's
+        // own contract — the `.max(compacted)` floor — and is intentionally a
+        // Rocksdb-only test: MemStorage floors only on an empty log, so the
+        // two impls diverge in this OmniPaxos-unreachable corner.)
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage
+            .append_entries(vec![TestEntry { value: 1 }, TestEntry { value: 2 }])
+            .unwrap();
+        storage.set_compacted_idx(10).unwrap();
+        let new_len = storage.append_entry(TestEntry { value: 7 }).unwrap();
+        assert_eq!(new_len, 1, "physical remaining = (10 + 1) - 10");
+        let at_floor = storage.get_entries(10, 11).unwrap();
+        assert_eq!(at_floor.len(), 1);
+        assert_eq!(at_floor[0].value, 7, "append floors at compacted_idx = 10");
     }
 
     #[test]

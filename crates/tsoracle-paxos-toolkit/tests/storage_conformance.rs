@@ -124,6 +124,61 @@ fn run_scenario<S: Storage<TestCommand>>(mut storage: S) {
     assert!(storage.get_stopsign().unwrap().is_none());
 }
 
+/// Exercises how the next absolute write index moves under operations that
+/// do not simply grow the log: `append_on_prefix` that shrinks the tail, and
+/// an unpaired full `trim`. Both impls must agree on where the following
+/// append lands. These are the corners a cached `next_idx` is most likely to
+/// get wrong (a naive cache only ever increments), so the cross-impl check
+/// pins the cache to the source-of-truth model `MemStorage` embodies.
+fn run_index_tracking_scenario<S: Storage<TestCommand>>(mut storage: S) {
+    // append_on_prefix that shrinks the log must move `next` *backward*: the
+    // next append continues from the new, lower tail rather than the old one.
+    storage
+        .append_entries(vec![
+            TestCommand(1),
+            TestCommand(2),
+            TestCommand(3),
+            TestCommand(4),
+            TestCommand(5),
+        ])
+        .unwrap();
+    storage
+        .append_on_prefix(2, vec![TestCommand(20), TestCommand(30)])
+        .unwrap();
+    // Log now holds absolute indices 0,1,2,3 -> next == 4.
+    let len = storage.append_entry(TestCommand(40)).unwrap();
+    assert_eq!(len, 5, "append continues at idx 4; physical len = 5");
+    let at_four = storage.get_entries(4, 5).unwrap();
+    assert_eq!(at_four.len(), 1);
+    assert_eq!(
+        at_four[0].0, 40,
+        "new entry lands at absolute idx 4, no gap"
+    );
+    let all = storage.get_suffix(0).unwrap();
+    assert_eq!(all.len(), 5);
+    assert_eq!(all[2].0, 20);
+    assert_eq!(all[4].0, 40);
+}
+
+/// An unpaired full `trim` (every key removed, `compacted_idx` left at 0)
+/// must reset the next write index to `compacted_idx`, so the following
+/// append re-fills from idx 0 rather than leaving a phantom gap.
+fn run_unpaired_full_trim_scenario<S: Storage<TestCommand>>(mut storage: S) {
+    storage
+        .append_entries(vec![TestCommand(1), TestCommand(2), TestCommand(3)])
+        .unwrap();
+    storage.trim(3).unwrap();
+    assert_eq!(storage.get_log_len().unwrap(), 0, "every key trimmed");
+    let len = storage.append_entry(TestCommand(9)).unwrap();
+    assert_eq!(len, 1);
+    let at_zero = storage.get_entries(0, 1).unwrap();
+    assert_eq!(at_zero.len(), 1);
+    assert_eq!(
+        at_zero[0].0, 9,
+        "after a full unpaired trim, append resumes at idx 0"
+    );
+}
+
 #[test]
 fn mem_storage_conforms() {
     run_scenario(MemStorage::<TestCommand>::new());
@@ -135,4 +190,30 @@ fn rocksdb_storage_conforms() {
     let storage: RocksdbStorage<TestCommand> =
         RocksdbStorage::open_in(database, TEST_CF).expect("open_in");
     run_scenario(storage);
+}
+
+#[test]
+fn mem_storage_tracks_index_under_shrink() {
+    run_index_tracking_scenario(MemStorage::<TestCommand>::new());
+}
+
+#[test]
+fn rocksdb_storage_tracks_index_under_shrink() {
+    let (_dir, database) = open_rocksdb_in_tempdir(TEST_CF);
+    let storage: RocksdbStorage<TestCommand> =
+        RocksdbStorage::open_in(database, TEST_CF).expect("open_in");
+    run_index_tracking_scenario(storage);
+}
+
+#[test]
+fn mem_storage_resets_index_after_unpaired_full_trim() {
+    run_unpaired_full_trim_scenario(MemStorage::<TestCommand>::new());
+}
+
+#[test]
+fn rocksdb_storage_resets_index_after_unpaired_full_trim() {
+    let (_dir, database) = open_rocksdb_in_tempdir(TEST_CF);
+    let storage: RocksdbStorage<TestCommand> =
+        RocksdbStorage::open_in(database, TEST_CF).expect("open_in");
+    run_unpaired_full_trim_scenario(storage);
 }
