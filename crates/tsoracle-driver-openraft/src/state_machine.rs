@@ -46,7 +46,7 @@ use openraft::type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMe
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use tsoracle_openraft_toolkit::{SCHEMA_VERSION, decode, encode};
+use tsoracle_openraft_toolkit::{SCHEMA_VERSION, codec_io_error, decode, encode};
 
 use crate::log_entry::HighWaterCommand;
 use crate::snapshot_store::{InMemorySnapshotStore, SnapshotStore};
@@ -104,19 +104,6 @@ struct Core {
 struct StoredSnapshot {
     meta: SnapMeta,
     data: Vec<u8>,
-}
-
-/// Map a toolkit codec failure to `io::Error`, surfacing a version mismatch as
-/// `InvalidData` (a distinguishable, structured error) and prefixing `context`
-/// so the failing boundary is identifiable.
-fn codec_io_error(context: &str, err: tsoracle_openraft_toolkit::CodecError) -> io::Error {
-    use tsoracle_openraft_toolkit::CodecError;
-    match err {
-        e @ CodecError::Version { .. } => {
-            io::Error::new(io::ErrorKind::InvalidData, format!("{context}: {e}"))
-        }
-        other => io::Error::other(format!("{context}: {other}")),
-    }
 }
 
 /// `RaftStateMachine` for the high-water counter, with pluggable snapshot
