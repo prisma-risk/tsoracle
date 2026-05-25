@@ -128,10 +128,13 @@ deny:
 # consumer; the compile-time signature shims catch API drift.
 COV_IGNORE_OPENRAFT_LIFECYCLE := crates/tsoracle-openraft-toolkit/src/lifecycle/(bootstrap|membership)
 
-# `clap` argument-parsing wrapper around `stress::run` /
-# `stress::run_inject_violation`. The library entry points are exercised
-# end-to-end by `benchmarks/stress/tests/smoke.rs`.
-COV_IGNORE_STRESS_BIN := benchmarks/stress/src/bin/stress
+# Benchmark harnesses (`benchmarks/minimal` / `benchmarks/stress`): load-gen,
+# chaos, and topology tooling, not shipped product. `benchmarks/minimal` is
+# also `--exclude`d below as a whole crate so it never builds under coverage;
+# `benchmarks/stress` keeps building so its `tests/smoke.rs` still runs in the
+# coverage job, but its sources are dropped from the report. The trailing `.*`
+# is required because the variables share the `\.rs$` suffix appended below.
+COV_IGNORE_BENCHMARKS := benchmarks/.*
 
 # Shared integration-test bootstrap helper. Gated by `test-support` (and
 # `cfg(test)`); never ships in the published library. Lives in `src/` only
@@ -141,7 +144,7 @@ COV_IGNORE_STRESS_BIN := benchmarks/stress/src/bin/stress
 # legitimate "rare race" retry paths that local CI never trips.
 COV_IGNORE_TEST_SUPPORT := crates/tsoracle-server/src/test_support
 
-COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_STRESS_BIN)|$(COV_IGNORE_TEST_SUPPORT))\.rs
+COV_IGNORE := ($(COV_IGNORE_OPENRAFT_LIFECYCLE)|$(COV_IGNORE_BENCHMARKS)|$(COV_IGNORE_TEST_SUPPORT))\.rs
 
 # Shared exclude flags so `coverage` (lcov for CI) and `coverage-html` (local
 # browsable report) cannot drift apart on which crates participate.
