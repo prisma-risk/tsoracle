@@ -3,7 +3,6 @@ mod network;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use openraft::async_runtime::watch::WatchReceiver;
 use openraft::{Config, Raft};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tokio::sync::oneshot;
@@ -109,22 +108,6 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
     )
     .await
     .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?;
-
-    // Non-bootstrap restart: membership is recovered from persisted raft state
-    // (#408). Refuse to come up isolated against an empty/uninitialized store.
-    if !cfg.bootstrap {
-        // `membership_config` is `Arc<StoredMembership<..>>`; `.nodes()` yields
-        // `(&NodeId, &Node)` (mirrors the toolkit's `lifecycle/leader.rs`).
-        let recovered = raft.metrics().borrow_watched().membership_config.clone();
-        let known_self = recovered.nodes().any(|(id, _)| *id == cfg.id);
-        if !known_self {
-            return Err(StandaloneError::Config(format!(
-                "node {} started without --bootstrap but persisted state has no \
-                 membership including it; bootstrap the cluster first",
-                cfg.id
-            )));
-        }
-    }
 
     // Bind the peer listener BEFORE spawning, so bind failures surface here.
     let listener = tokio::net::TcpListener::bind(cfg.raft_addr)
