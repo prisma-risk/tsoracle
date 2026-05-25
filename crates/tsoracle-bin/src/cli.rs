@@ -44,6 +44,55 @@ pub enum Cmd {
     Serve(Box<ServeCmd>),
     /// Initialize a fresh file-driver state directory at a seeded high-water.
     Init(InitArgs),
+    /// Administer cluster membership over the admin gRPC port.
+    #[cfg(feature = "openraft")]
+    #[command(subcommand)]
+    Admin(AdminCmd),
+}
+
+#[cfg(feature = "openraft")]
+#[derive(Subcommand, Debug)]
+pub enum AdminCmd {
+    /// List current members.
+    Members(AdminEndpointArgs),
+    /// Add a non-voting learner.
+    AddLearner(AddLearnerArgs),
+    /// Promote a learner to voter.
+    Promote(AdminIdArgs),
+    /// Remove a node.
+    Remove(AdminIdArgs),
+}
+
+#[cfg(feature = "openraft")]
+#[derive(Parser, Debug)]
+pub struct AdminEndpointArgs {
+    /// Any node's admin endpoint, e.g. `http://127.0.0.1:50561`.
+    #[arg(long)]
+    pub endpoint: String,
+}
+
+#[cfg(feature = "openraft")]
+#[derive(Parser, Debug)]
+pub struct AdminIdArgs {
+    #[arg(long)]
+    pub endpoint: String,
+    #[arg(long)]
+    pub id: u64,
+}
+
+#[cfg(feature = "openraft")]
+#[derive(Parser, Debug)]
+pub struct AddLearnerArgs {
+    #[arg(long)]
+    pub endpoint: String,
+    #[arg(long)]
+    pub id: u64,
+    #[arg(long)]
+    pub raft_addr: String,
+    #[arg(long)]
+    pub service_endpoint: String,
+    #[arg(long)]
+    pub admin_endpoint: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -116,6 +165,9 @@ pub struct OpenraftArgs {
     pub election_min_ms: u64,
     #[arg(long, default_value = "2000")]
     pub election_max_ms: u64,
+    /// Bind address for the membership-admin gRPC server. Omit to serve no admin surface.
+    #[arg(long)]
+    pub admin_listen: Option<SocketAddr>,
     /// PEM node certificate for the peer transport (enables peer mTLS; needs all three).
     #[arg(long)]
     pub peer_tls_cert: Option<std::path::PathBuf>,

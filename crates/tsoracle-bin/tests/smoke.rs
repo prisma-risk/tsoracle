@@ -420,6 +420,108 @@ async fn serve_openraft_with_peer_mtls_boots_and_serves() {
     child.kill().await.unwrap();
 }
 
+/// Boot a single-node openraft cluster with `--admin-listen`, wait for it to
+/// elect itself leader, then run `tsoracle admin members` and assert that the
+/// output contains the bootstrapped node id.
+#[cfg(feature = "openraft")]
+#[tokio::test]
+async fn admin_members_lists_the_bootstrap_node() {
+    let binary_path = env!("CARGO_BIN_EXE_tsoracle");
+    let raft_dir = tempdir().unwrap();
+    let listen_addr = bind_unused().await;
+    let raft_addr = bind_unused().await;
+    let admin_addr = bind_unused().await;
+
+    let mut server = Command::new(binary_path)
+        .arg("serve")
+        .arg("openraft")
+        .arg("--id")
+        .arg("1")
+        .arg("--listen")
+        .arg(listen_addr.to_string())
+        .arg("--raft-addr")
+        .arg(raft_addr.to_string())
+        .arg("--raft-dir")
+        .arg(raft_dir.path())
+        .arg("--bootstrap")
+        .arg("--members")
+        .arg(format!("1={raft_addr}/{listen_addr}/{admin_addr}"))
+        .arg("--admin-listen")
+        .arg(admin_addr.to_string())
+        .arg("--heartbeat-ms")
+        .arg("50")
+        .arg("--election-min-ms")
+        .arg("150")
+        .arg("--election-max-ms")
+        .arg("300")
+        .arg("--log")
+        .arg("warn")
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    // Wait for both the client gRPC port and the admin gRPC port to accept.
+    let client_ready = wait_until_accepting(listen_addr, Duration::from_secs(15));
+    let admin_ready = wait_until_accepting(admin_addr, Duration::from_secs(15));
+    tokio::pin!(client_ready);
+    tokio::pin!(admin_ready);
+    tokio::select! {
+        result = &mut client_ready => {
+            result.expect("binary did not start accepting on client port");
+        }
+        child_result = server.wait() => {
+            let status = child_result.expect("wait on child failed");
+            panic!("binary exited before accepting connections: status={status}");
+        }
+    }
+    tokio::select! {
+        result = &mut admin_ready => {
+            result.expect("binary did not start accepting on admin port");
+        }
+        child_result = server.wait() => {
+            let status = child_result.expect("wait on child failed");
+            panic!("binary exited before accepting on admin port: status={status}");
+        }
+    }
+
+    // Wait for the node to elect itself leader so that list_members returns
+    // a coherent view.
+    let tso_client = Client::connect(vec![listen_addr.to_string()])
+        .await
+        .unwrap();
+    wait_until_responsive(&tso_client, Duration::from_secs(15))
+        .await
+        .expect("openraft node never became responsive before admin query");
+
+    // Run: tsoracle admin members --endpoint http://<admin_addr>
+    let output = Command::new(binary_path)
+        .arg("admin")
+        .arg("members")
+        .arg("--endpoint")
+        .arg(format!("http://{admin_addr}"))
+        .output()
+        .await
+        .expect("spawn tsoracle admin members");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "tsoracle admin members failed (status={})\nstdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("id=1"),
+        "expected stdout to contain 'id=1', got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("role=Voter"),
+        "expected the role rendered as a human-readable name, got:\n{stdout}"
+    );
+
+    server.kill().await.unwrap();
+}
+
 /// A build without the paxos feature must reject `serve paxos` with the
 /// friendly "not included in this build" message, not a clap parse error.
 #[tokio::test]

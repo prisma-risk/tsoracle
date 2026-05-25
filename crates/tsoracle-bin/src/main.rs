@@ -72,6 +72,8 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Some(Cmd::Init(args)) => run_init(args.state_dir, args.seed_physical_ms),
         Some(Cmd::Serve(serve)) => dispatch_serve(*serve).await,
+        #[cfg(feature = "openraft")]
+        Some(Cmd::Admin(cmd)) => dispatch_admin(cmd).await,
         // Bare `tsoracle` defaults to `serve file` when file is compiled in.
         None => {
             #[cfg(feature = "file")]
@@ -133,7 +135,7 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
                         args.peer_tls_key,
                         args.peer_tls_ca,
                     )?,
-                    admin_listen: None,
+                    admin_listen: args.admin_listen,
                 });
                 run_serve(args.common, cfg).await
             }
@@ -316,6 +318,115 @@ fn parse_members(input: &str) -> Result<BTreeMap<u64, tsoracle_standalone::Membe
         );
     }
     Ok(out)
+}
+
+#[cfg(feature = "openraft")]
+async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
+    use cli::AdminCmd;
+    use tsoracle_standalone::admin_proto::membership_admin_client::MembershipAdminClient;
+    use tsoracle_standalone::admin_proto::{
+        AddLearnerRequest, AdminErrorKind, ChangeResponse, ListMembersRequest, MemberRole,
+        PromoteRequest, RemoveNodeRequest,
+    };
+
+    // Re-run `op` against the leader if the first call says NOT_LEADER.
+    async fn with_redirect<MakeCall>(endpoint: String, op: MakeCall) -> Result<ChangeResponse>
+    where
+        MakeCall: Fn(
+            MembershipAdminClient<tonic::transport::Channel>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ChangeResponse, tonic::Status>> + Send>,
+        >,
+    {
+        let client = MembershipAdminClient::connect(endpoint.clone())
+            .await
+            .with_context(|| format!("connect {endpoint}"))?;
+        let resp = op(client).await.context("admin rpc")?;
+        if resp.error == AdminErrorKind::NotLeader as i32 && !resp.leader_admin_endpoint.is_empty()
+        {
+            let leader = format!("http://{}", resp.leader_admin_endpoint);
+            let client = MembershipAdminClient::connect(leader.clone())
+                .await
+                .with_context(|| format!("connect leader {leader}"))?;
+            return op(client).await.context("admin rpc (leader)");
+        }
+        Ok(resp)
+    }
+
+    fn report(resp: ChangeResponse) -> Result<()> {
+        if resp.ok {
+            println!("ok");
+            Ok(())
+        } else {
+            let kind = AdminErrorKind::try_from(resp.error)
+                .map(|kind| format!("{kind:?}"))
+                .unwrap_or_else(|_| resp.error.to_string());
+            anyhow::bail!("admin error ({kind}): {}", resp.message)
+        }
+    }
+
+    match cmd {
+        AdminCmd::Members(args) => {
+            let mut client = MembershipAdminClient::connect(args.endpoint.clone())
+                .await
+                .with_context(|| format!("connect {}", args.endpoint))?;
+            let view = client
+                .list_members(ListMembersRequest {})
+                .await
+                .context("list_members")?
+                .into_inner();
+            let leader_str: String = if view.has_leader {
+                view.leader.to_string()
+            } else {
+                "none".into()
+            };
+            println!("leader: {leader_str}");
+            for member in view.members {
+                let role = MemberRole::try_from(member.role)
+                    .map(|role| format!("{role:?}"))
+                    .unwrap_or_else(|_| member.role.to_string());
+                println!(
+                    "  id={} role={role} raft={} service={} admin={}",
+                    member.id, member.raft_addr, member.service_endpoint, member.admin_endpoint
+                );
+            }
+            Ok(())
+        }
+        AdminCmd::AddLearner(args) => report(
+            with_redirect(args.endpoint.clone(), move |mut client| {
+                let request = AddLearnerRequest {
+                    id: args.id,
+                    raft_addr: args.raft_addr.clone(),
+                    service_endpoint: args.service_endpoint.clone(),
+                    admin_endpoint: args.admin_endpoint.clone(),
+                };
+                Box::pin(async move { client.add_learner(request).await.map(|r| r.into_inner()) })
+            })
+            .await?,
+        ),
+        AdminCmd::Promote(args) => report(
+            with_redirect(args.endpoint.clone(), move |mut client| {
+                Box::pin(async move {
+                    client
+                        .promote(PromoteRequest { id: args.id })
+                        .await
+                        .map(|r| r.into_inner())
+                })
+            })
+            .await?,
+        ),
+        AdminCmd::Remove(args) => report(
+            with_redirect(args.endpoint.clone(), move |mut client| {
+                Box::pin(async move {
+                    client
+                        .remove_node(RemoveNodeRequest { id: args.id })
+                        .await
+                        .map(|r| r.into_inner())
+                })
+            })
+            .await?,
+        ),
+    }
 }
 
 #[cfg(all(test, feature = "openraft"))]
