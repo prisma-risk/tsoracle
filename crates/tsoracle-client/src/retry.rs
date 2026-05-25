@@ -46,8 +46,10 @@
 //! - `max_attempts`: caps the number of *failed* attempts (dialed
 //!   endpoints that returned an error). Leader-hint redirects are not
 //!   charged against it — they are bounded instead by the worklist
-//!   visited-set and the overall deadline — so a legitimate failover
-//!   redirect chain can still reach the live leader (issue #340).
+//!   visited-set, the overall deadline, and the absolute
+//!   [`MAX_LEADER_REDIRECTS`] backstop — so a legitimate failover redirect
+//!   chain can still reach the live leader (issue #340) while a
+//!   pathological one cannot churn connections for the whole deadline.
 //!
 //! Between attempts whose last error is `Unavailable`,
 //! `DeadlineExceeded`, or a transport-layer failure, the loop sleeps a
@@ -74,6 +76,22 @@ use crate::response::{TimestampRange, decode_get_ts_response};
 use crate::retry_policy::{is_transport_failure, jittered_backoff, should_backoff};
 use crate::worklist::Worklist;
 
+/// Absolute ceiling on actionable leader-hint pivots in a single
+/// `issue_rpc` call, independent of `overall_deadline`.
+///
+/// Issue #340 deliberately stopped charging leader-hint redirects against
+/// [`RetryPolicy::max_attempts`](crate::RetryPolicy::max_attempts) so a
+/// legitimate failover chain can outlast the failure budget, leaving the
+/// `overall_deadline` as the only bound on redirect count. This constant is
+/// the backstop that bound omitted: a malicious or persistently flapping peer
+/// that returns a fresh, never-visited hint on every dial would otherwise
+/// churn outbound connections for the whole deadline. The cap is far above any
+/// real failover — legitimate hints point at a finite cluster and dedup via
+/// the worklist visited-set, so a healthy redirect chain is bounded by the
+/// node count long before this bites — and only a pathological chain reaches
+/// it.
+const MAX_LEADER_REDIRECTS: u32 = 16;
+
 pub(crate) async fn issue_rpc(
     pool: &ChannelPool,
     count: u32,
@@ -88,6 +106,12 @@ pub(crate) async fn issue_rpc(
     // (issue #340); redirects stay bounded by the worklist visited-set and
     // the overall deadline.
     let mut failed_attempts: u32 = 0;
+    // Counts actionable `LeaderHint` pivots — the only outcome that grows the
+    // worklist. Capped at `MAX_LEADER_REDIRECTS` so a peer that hints at a
+    // fresh endpoint on every dial cannot stretch the redirect chain across
+    // the whole `overall_deadline` (issue #340 left redirects uncharged
+    // against `max_attempts`; this is the absolute backstop).
+    let mut redirects: u32 = 0;
 
     while let Some(endpoint) = worklist.next() {
         if failed_attempts as usize >= policy.max_attempts {
@@ -123,6 +147,33 @@ pub(crate) async fn issue_rpc(
                 // log field, so silence the unused-variable warning when
                 // `tracing` is off.
                 let _ = hint_epoch;
+                // Absolute backstop on the redirect chain (issue #340 exempts
+                // redirects from `max_attempts`). A peer that hints at a fresh
+                // endpoint on every dial would otherwise churn connections for
+                // the whole `overall_deadline`; stop after the cap and surface
+                // the redirect status — the network was fine, the cluster just
+                // never settled — rather than the misleading
+                // `NoReachableEndpoints` the worklist would otherwise yield.
+                if redirects >= MAX_LEADER_REDIRECTS {
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("tsoracle.client.leader_redirect_cap.total").increment(1);
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        from = %endpoint,
+                        to = %hinted_endpoint,
+                        max_redirects = MAX_LEADER_REDIRECTS,
+                        "tsoracle-client: leader-hint redirect cap reached; \
+                         abandoning the redirect chain",
+                    );
+                    last_err = Some(ClientError::Rpc(tonic::Status::failed_precondition(
+                        format!(
+                            "leader-hint redirect cap ({MAX_LEADER_REDIRECTS}) reached \
+                             before finding the live leader"
+                        ),
+                    )));
+                    break;
+                }
+                redirects += 1;
                 #[cfg(feature = "metrics")]
                 metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
                 #[cfg(feature = "tracing")]
@@ -1379,6 +1430,199 @@ mod tests {
             calls.load(Ordering::SeqCst),
             REDIRECTS + 1,
             "the loop must dial through all {REDIRECTS} redirects to the leader",
+        );
+    }
+
+    /// Security hardening: a peer that answers every dial with a fresh,
+    /// never-visited leader hint must not drive the client through an
+    /// unbounded redirect chain. Issue #340 deliberately stopped charging
+    /// redirects against `max_attempts`, leaving `overall_deadline` as the
+    /// only ceiling — so a malicious or persistently flapping peer could churn
+    /// outbound connections for the whole deadline. `MAX_LEADER_REDIRECTS`
+    /// restores an absolute cap on actionable pivots: the loop must stop after
+    /// that many redirects and surface the redirect status (the network was
+    /// fine; the cluster just never settled), not loop until the deadline and
+    /// surface a misleading `NoReachableEndpoints`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redirect_chain_exceeding_cap_is_bounded() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        // Always redirect to a fresh, unvisited endpoint (epoch-less, so it is
+        // followed unconditionally) — the live leader is never reached.
+        struct AlwaysRedirecting {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl TsoService for AlwaysRedirecting {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                    leader_epoch: None,
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(AlwaysRedirecting {
+                    calls: server_calls,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        // Every hinted endpoint resolves to the one backend; the (would-be
+        // endless) chain lives in the server, not in distinct listeners.
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                })
+            });
+
+        // Generous overall_deadline so the cap — not the clock — is what stops
+        // the loop. If the cap regressed, the loop would run until this
+        // deadline and the call-count assertion below would blow past CAP + 1.
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
+
+        let err = issue_rpc(&pool, 1)
+            .await
+            .expect_err("an endless redirect chain must surface an error, not a timestamp");
+        match err {
+            ClientError::Rpc(status) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "a capped redirect chain must surface the redirect status, \
+                 not NoReachableEndpoints",
+            ),
+            other => panic!("expected ClientError::Rpc(FailedPrecondition), got {other:?}"),
+        }
+        // Initial dial + MAX_LEADER_REDIRECTS pivots; the loop then refuses the
+        // next pivot before dialing it. Exactly CAP + 1 dials reach the server.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            MAX_LEADER_REDIRECTS as usize + 1,
+            "the loop must stop after MAX_LEADER_REDIRECTS actionable pivots",
+        );
+    }
+
+    /// The cap must not bite a legitimate failover: a redirect chain of
+    /// exactly `MAX_LEADER_REDIRECTS` hops must still reach the leader. This
+    /// pins the off-by-one — the cap permits CAP pivots and rejects only the
+    /// (CAP + 1)th — so a real cluster that needs the full budget to settle is
+    /// never cut short one hop early.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redirect_chain_at_cap_still_reaches_leader() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        // Redirect for the first MAX_LEADER_REDIRECTS calls, then answer with a
+        // timestamp — a chain that consumes the whole redirect budget and no
+        // more.
+        struct RedirectsExactlyToCap {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl TsoService for RedirectsExactlyToCap {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n < MAX_LEADER_REDIRECTS as usize {
+                    Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                        leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                        leader_epoch: None,
+                    }))
+                } else {
+                    Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
+                        physical_ms: 1,
+                        logical_start: 0,
+                        count: 1,
+                        epoch_hi: 0,
+                        epoch_lo: 0,
+                    }))
+                }
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(RedirectsExactlyToCap {
+                    calls: server_calls,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                })
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
+
+        let range = issue_rpc(&pool, 1)
+            .await
+            .expect("a chain of exactly MAX_LEADER_REDIRECTS hops must reach the leader");
+        assert_eq!(
+            range.count(),
+            1,
+            "the leader returned exactly one timestamp"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            MAX_LEADER_REDIRECTS as usize + 1,
+            "the loop must dial through all MAX_LEADER_REDIRECTS redirects to the leader",
         );
     }
 }
