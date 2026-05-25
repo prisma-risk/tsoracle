@@ -313,10 +313,21 @@ where
             Ok(())
         })
         .map_err(box_err)?;
-        // The write truncated every key `>= from_idx` and re-appended `count`
-        // of them, so the new tail is `from_idx + count`, floored at the
-        // compaction offset just as a fresh append would be.
-        self.next_idx = (from_idx + count).max(self.compacted_idx);
+        // Derive the new tail from what the batch actually changed on disk,
+        // matching the highest surviving log key a reverse scan would find.
+        // When `count > 0` the highest re-appended key is `from_idx + count - 1`,
+        // so the tail is `from_idx + count`. When `count == 0` nothing is
+        // written and the delete only removes keys `>= from_idx`; the surviving
+        // tail is therefore `min(from_idx, current_tail)` — crucially, a
+        // `from_idx` past the current tail removes no keys and must leave the
+        // cursor where it was rather than jumping forward into a phantom gap.
+        // Both cases are floored at the compaction offset, as a fresh append is.
+        let new_tail = if count > 0 {
+            from_idx + count
+        } else {
+            from_idx.min(self.next_idx)
+        };
+        self.next_idx = new_tail.max(self.compacted_idx);
         Ok(self.next_idx.saturating_sub(self.compacted_idx))
     }
 
@@ -754,6 +765,35 @@ mod log_tests {
         assert_eq!(all[0].value, 1);
         assert_eq!(all[1].value, 9);
         assert_eq!(all[2].value, 8);
+    }
+
+    #[test]
+    fn append_on_prefix_empty_beyond_tail_leaves_cursor_unchanged() {
+        // append_on_prefix(from_idx, []) with from_idx past the current tail
+        // deletes no keys (none exist `>= from_idx`) and writes none, so the
+        // physical tail is unchanged. The cached next_idx must NOT jump to
+        // from_idx; otherwise get_log_len reports a phantom length and the next
+        // append lands at the inflated index, leaving a gap on disk.
+        let dir = TempDir::new().unwrap();
+        let mut storage = fresh_storage(&dir);
+        storage
+            .append_entries(vec![TestEntry { value: 1 }, TestEntry { value: 2 }])
+            .unwrap();
+        // Tail is now 2. Truncate from an index well past it with no entries.
+        let len = storage.append_on_prefix(5, Vec::new()).unwrap();
+        assert_eq!(len, 2, "no keys removed or added, the length is unchanged");
+        assert_eq!(storage.get_log_len().unwrap(), 2);
+
+        // A fresh append must continue at absolute index 2, not the phantom 5.
+        storage.append_entry(TestEntry { value: 3 }).unwrap();
+        assert_eq!(storage.get_log_len().unwrap(), 3);
+        let at_two = storage.get_entries(2, 3).unwrap();
+        assert_eq!(at_two.len(), 1, "new entry is contiguous at absolute idx 2");
+        assert_eq!(at_two[0].value, 3);
+        // No phantom gap: the whole log reads back as three contiguous entries.
+        let all = storage.get_suffix(0).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].value, 3);
     }
 }
 
