@@ -199,14 +199,11 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- Tsoracle gRPC server ----
     let tso = TsoServer::builder().consensus_driver(driver).build()?;
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("ctrl-c received, draining");
-    };
     println!(
         "tsoracle paxos node {} on http://{}",
         cli.node_id, cli.tso_listen
     );
-    tso.serve_with_shutdown(cli.tso_listen, shutdown).await?;
+    tso.serve_with_shutdown(cli.tso_listen, tsoracle_server::shutdown_signal())
+        .await?;
     Ok(())
 }

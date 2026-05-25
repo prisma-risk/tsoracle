@@ -20,10 +20,12 @@ mod leader_hint;
 mod server;
 mod service;
 mod serving_core;
+mod signal;
 
 pub mod docs;
 
 pub use server::{BuildError, Server, ServerBuilder, ServerError, ServingState, WatchGuard};
+pub use signal::shutdown_signal;
 
 #[cfg(any(test, feature = "test-fakes"))]
 pub mod test_fakes;

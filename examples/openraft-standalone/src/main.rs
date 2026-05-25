@@ -218,14 +218,11 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- Tsoracle gRPC server ----
     let tso = TsoServer::builder().consensus_driver(driver).build()?;
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("ctrl-c received, shutting down");
-    };
     println!(
         "tsoracle openraft node {} on http://{}",
         cli.id, cli.tso_addr
     );
-    tso.serve_with_shutdown(cli.tso_addr, shutdown).await?;
+    tso.serve_with_shutdown(cli.tso_addr, tsoracle_server::shutdown_signal())
+        .await?;
     Ok(())
 }
