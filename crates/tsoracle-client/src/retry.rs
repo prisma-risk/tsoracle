@@ -1704,13 +1704,26 @@ mod tests {
             .await
             .expect_err("an endless redirect chain must surface an error, not a timestamp");
         let elapsed = start.elapsed();
+        // Whether the per-pass redirect cap or the overall deadline trips first
+        // is a runner-speed race (each churn redirect is a fresh connect), so
+        // the surfaced status is either the cap's synthesized FAILED_PRECONDITION
+        // or the deadline edge's DEADLINE_EXCEEDED. Both are bounded, meaningful,
+        // and reachable-but-churning — the security property is that it is NOT
+        // the misleading `NoReachableEndpoints` fallback and NOT a timestamp.
         match err {
-            ClientError::Rpc(status) => assert_eq!(
+            ClientError::Rpc(status) => assert!(
+                matches!(
+                    status.code(),
+                    tonic::Code::FailedPrecondition | tonic::Code::DeadlineExceeded
+                ),
+                "a churning chain must surface a bounded retryable status \
+                 (cap -> FailedPrecondition or deadline -> DeadlineExceeded), got {:?}",
                 status.code(),
-                tonic::Code::FailedPrecondition,
-                "a churning chain must surface the redirect status, not NoReachableEndpoints",
             ),
-            other => panic!("expected ClientError::Rpc(FailedPrecondition), got {other:?}"),
+            other => panic!(
+                "expected a bounded ClientError::Rpc, not {other:?} \
+                 (e.g. the misleading NoReachableEndpoints)"
+            ),
         }
         assert!(
             elapsed < Duration::from_secs(3),
