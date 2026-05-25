@@ -24,7 +24,8 @@ use tsoracle_core::Epoch;
 use tsoracle_server::Server;
 use tsoracle_server::test_fakes::InMemoryDriver;
 use tsoracle_server::test_support::{
-    boot_server, wait_for_grpc_handshake, wait_for_grpc_handshake_tls, wait_until_serving,
+    boot_fixed_hint_server_tls, boot_server, wait_for_grpc_handshake, wait_for_grpc_handshake_tls,
+    wait_until_serving,
 };
 
 struct CertBundle {
@@ -355,16 +356,17 @@ async fn leader_hint_rejects_plaintext_under_tls_config() {
         .expect("plaintext leader ready");
 
     let plaintext_endpoint = format!("http://127.0.0.1:{}", booted_plaintext.addr.port());
-    let follower_driver = Arc::new(InMemoryDriver::new());
-    follower_driver.become_follower(Some(plaintext_endpoint.clone()));
-    let follower = Server::builder()
-        .consensus_driver(follower_driver.clone())
-        .tls_config(server_tls_config(&bundle))
-        .build()
-        .expect("follower build");
-    let booted_follower = boot_server(follower).await;
+    // Inject the adversarial plaintext hint at the wire via a fake TLS peer
+    // rather than through a real follower's leader-watch path. Surfacing a
+    // scheme-bearing `leader_endpoint` is a driver-contract violation the
+    // server-side debug guard rejects (see `fence::debug_assert_leader_state_contract`),
+    // but the behaviour under test here is the *client's* refusal to follow
+    // such a hint, so the misbehaving peer is simulated directly. The trailer
+    // is byte-identical to a real NOT_LEADER rejection.
+    let follower_addr =
+        boot_fixed_hint_server_tls(plaintext_endpoint.clone(), server_tls_config(&bundle)).await;
     wait_for_grpc_handshake_tls(
-        booted_follower.addr,
+        follower_addr,
         client_tls_config_with_ca(&bundle),
         Duration::from_secs(5),
     )
@@ -373,7 +375,7 @@ async fn leader_hint_rejects_plaintext_under_tls_config() {
 
     let client = tsoracle_client::ClientBuilder::endpoints(vec![format!(
         "127.0.0.1:{}",
-        booted_follower.addr.port()
+        follower_addr.port()
     )])
     .tls_config(client_tls_config_with_ca(&bundle))
     .build()
@@ -394,7 +396,8 @@ async fn leader_hint_rejects_plaintext_under_tls_config() {
 
     drop(client);
     booted_plaintext.shutdown().await.expect("plaintext exit");
-    booted_follower.shutdown().await.expect("follower exit");
+    // The follower is a detached fake-peer task (no shutdown handle); it dies
+    // with the test runtime.
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

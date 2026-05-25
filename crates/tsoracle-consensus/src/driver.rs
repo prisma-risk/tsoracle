@@ -62,6 +62,15 @@ pub trait ConsensusDriver: Send + Sync + 'static {
     /// `tokio::sync::watch` + `tokio_stream::wrappers::WatchStream` satisfy this
     /// because the watch is seeded with an initial value the stream yields
     /// immediately.
+    ///
+    /// **Contract — `Follower` payload shape:** the `leader_endpoint` and
+    /// `leader_epoch` a driver places on [`LeaderState::Follower`] are
+    /// load-bearing for client redirects and carry their own rules — a
+    /// scheme-less `host:port` endpoint and a per-node non-decreasing epoch.
+    /// Violations are silent in production (dropped redirects); see the
+    /// `LeaderState::Follower` field docs for the full contract. The server's
+    /// leader-watch task `debug_assert!`s both in debug builds, so a
+    /// contract-violating driver trips loudly in its own tests.
     fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>>;
 
     /// Read the durably-persisted high-water.

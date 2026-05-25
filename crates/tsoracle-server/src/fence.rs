@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tsoracle_consensus::{ConsensusError, LeaderState};
+use tsoracle_core::Epoch;
 
 use crate::persist_disposition::{PersistDisposition, classify};
 use crate::server::{Server, ServerError};
@@ -65,6 +66,65 @@ fn warn_on_stuck_fence(transient_retries: u32) -> bool {
             == 0
 }
 
+/// Whether `endpoint` is a scheme-less `host:port` — the shape
+/// `LeaderState::Follower::leader_endpoint` is contracted to carry.
+///
+/// Match shape mirrors the client's `normalize_uri` / `rejects_plaintext_hint`:
+/// ASCII-lowercase `http://` and `https://` prefixes. An uppercase variant
+/// would already fail to parse downstream, so checking the lowercase form is
+/// sufficient.
+fn endpoint_is_scheme_less(endpoint: &str) -> bool {
+    !endpoint.starts_with("http://") && !endpoint.starts_with("https://")
+}
+
+/// Debug-only guard that a driver-surfaced [`LeaderState`] honors the two
+/// `LeaderState::Follower` contracts (see [`tsoracle_consensus::LeaderState`]):
+///
+///   * `leader_endpoint` is a scheme-less `host:port`. A scheme-bearing hint is
+///     silently dropped by the client's `rejects_plaintext_hint` under TLS, so
+///     a contract-violating driver makes that leader unreachable via redirect.
+///   * `leader_epoch` is non-decreasing across emissions. The client's
+///     monotone-forward gate (`compare_and_set_leader`) drops a hint that
+///     cannot outrank the cached leader, so a regressing epoch makes clients
+///     drop valid redirects.
+///
+/// Compiled out in release builds (`debug_assert!`), so it costs nothing in
+/// production and fires only in a driver author's own test suite — turning a
+/// silent production trap into a loud test-time failure. `last_epoch` carries
+/// the highest epoch observed so far across the watch loop; `None` epochs
+/// (epoch-less paxos hints, `Unknown`) are a documented valid case and advance
+/// nothing.
+fn debug_assert_leader_state_contract(evt: &LeaderState, last_epoch: &mut Option<Epoch>) {
+    if let LeaderState::Follower {
+        leader_endpoint: Some(endpoint),
+        ..
+    } = evt
+    {
+        debug_assert!(
+            endpoint_is_scheme_less(endpoint),
+            "consensus driver surfaced a scheme-bearing leader_endpoint ({endpoint:?}); \
+             LeaderState::Follower::leader_endpoint must be a scheme-less host:port — \
+             the TLS client silently drops http(s):// hints to avoid transport downgrade",
+        );
+    }
+    let epoch = match evt {
+        LeaderState::Leader { epoch } => Some(*epoch),
+        LeaderState::Follower { leader_epoch, .. } => *leader_epoch,
+        LeaderState::Unknown => None,
+    };
+    if let Some(epoch) = epoch {
+        if let Some(prev) = *last_epoch {
+            debug_assert!(
+                epoch >= prev,
+                "consensus driver surfaced a leader_epoch that regressed \
+                 ({epoch:?} < {prev:?}); LeaderState epochs must be non-decreasing — \
+                 the client's monotone-forward leader cache drops lower-epoch redirects",
+            );
+        }
+        *last_epoch = Some(epoch);
+    }
+}
+
 pub(crate) async fn run_leader_watch(
     server: Arc<Server>,
     cancel: impl std::future::Future<Output = ()>,
@@ -73,6 +133,10 @@ pub(crate) async fn run_leader_watch(
     // A leadership event observed while a fence is mid-retry is stashed here and
     // dispatched on the next iteration instead of being awaited fresh.
     let mut pending: Option<LeaderState> = None;
+    // Highest leader epoch observed so far, threaded through the debug-only
+    // driver-contract guard below. Carries no production behavior; the guard's
+    // `debug_assert!`s compile out in release.
+    let mut last_epoch: Option<Epoch> = None;
     // Cooperative cancellation (see `Server::into_router` / `WatchGuard`).
     // Pinned once and observed only at the `select!` boundaries below — the
     // event wait and the transient-retry backoff — never inside a fence
@@ -100,6 +164,11 @@ pub(crate) async fn run_leader_watch(
                 }
             }
         };
+        // Debug-only driver-contract check: a scheme-bearing leader_endpoint or
+        // a regressing leader_epoch is a silent trap in production (dropped
+        // redirects) but a loud failure in a driver author's test suite. Costs
+        // nothing in release — the asserts compile out.
+        debug_assert_leader_state_contract(&evt, &mut last_epoch);
         // `tsoracle.leader_transition.total` is emitted per-arm *after* that
         // arm's safety state change (clear/publish), never here before the
         // `match`. The counter answers "how often is leadership churning"; one
@@ -342,4 +411,74 @@ pub(crate) async fn run_leader_watch(
     // termination always routes through the poisoning branch in `into_router`
     // and is observable to callers of `serve_with_*`. See #72.
     Err(ServerError::WatchStreamClosed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tsoracle_core::Epoch;
+
+    #[test]
+    fn bare_host_port_is_scheme_less() {
+        assert!(endpoint_is_scheme_less("leader:9000"));
+        assert!(endpoint_is_scheme_less("10.9.8.7:50551"));
+        assert!(endpoint_is_scheme_less("node-2"));
+    }
+
+    #[test]
+    fn http_and_https_are_not_scheme_less() {
+        assert!(!endpoint_is_scheme_less("http://leader:9000"));
+        assert!(!endpoint_is_scheme_less("https://leader:9000"));
+    }
+
+    #[test]
+    fn monotone_sequence_with_bare_endpoints_passes_guard() {
+        let mut last_epoch = None;
+        for evt in [
+            LeaderState::Unknown,
+            LeaderState::Leader { epoch: Epoch(5) },
+            LeaderState::Follower {
+                leader_endpoint: Some("leader:9000".into()),
+                leader_epoch: Some(Epoch(5)),
+            },
+            LeaderState::Follower {
+                leader_endpoint: None,
+                leader_epoch: None,
+            },
+            LeaderState::Leader { epoch: Epoch(6) },
+        ] {
+            debug_assert_leader_state_contract(&evt, &mut last_epoch);
+        }
+        assert_eq!(last_epoch, Some(Epoch(6)));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "scheme-less host:port")]
+    fn scheme_bearing_follower_endpoint_trips_guard() {
+        let mut last_epoch = None;
+        let evt = LeaderState::Follower {
+            leader_endpoint: Some("http://leader:9000".into()),
+            leader_epoch: Some(Epoch(1)),
+        };
+        debug_assert_leader_state_contract(&evt, &mut last_epoch);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "leader_epoch that regressed")]
+    fn regressing_epoch_trips_guard() {
+        let mut last_epoch = None;
+        debug_assert_leader_state_contract(
+            &LeaderState::Leader { epoch: Epoch(7) },
+            &mut last_epoch,
+        );
+        debug_assert_leader_state_contract(
+            &LeaderState::Follower {
+                leader_endpoint: Some("leader:9000".into()),
+                leader_epoch: Some(Epoch(6)),
+            },
+            &mut last_epoch,
+        );
+    }
 }

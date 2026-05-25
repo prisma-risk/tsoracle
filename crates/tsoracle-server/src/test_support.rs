@@ -41,6 +41,14 @@ use tonic::transport::{Endpoint, Server as TonicServer};
 
 use crate::{Server, ServerError, ServingState};
 
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+use crate::leader_hint::not_leader_status;
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+use tsoracle_proto::v1::{
+    GetTsRequest, GetTsResponse, LeaderHint,
+    tso_service_server::{TsoService, TsoServiceServer},
+};
+
 /// A running [`Server`] with its captured bind address, observable
 /// [`ServingState`], a graceful-shutdown signal, and the spawned task's
 /// `JoinHandle`.
@@ -253,4 +261,63 @@ pub async fn wait_for_grpc_handshake_tls(
             }
         }
     }
+}
+
+/// A minimal [`TsoService`] that always rejects with `NOT_LEADER`, carrying a
+/// well-formed leader-hint trailer pointing at `hint_endpoint`. Booted over TLS
+/// by [`boot_fixed_hint_server_tls`].
+///
+/// Exists so TLS client tests can simulate a misconfigured or adversarial peer
+/// that surfaces a plaintext `http://` leader hint *at the wire* — the input a
+/// TLS-configured client must refuse to follow. Injecting the trailer here
+/// bypasses a real server's leader-watch path, whose debug guard (correctly)
+/// rejects a scheme-bearing `leader_endpoint` as a driver-contract violation;
+/// the behaviour under test is the *client's* downgrade defence, not the
+/// server's contract enforcement. The trailer is produced by the production
+/// [`not_leader_status`] encoder, so it is byte-identical to a real rejection.
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+struct FixedHintService {
+    hint_endpoint: String,
+}
+
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+#[tonic::async_trait]
+impl TsoService for FixedHintService {
+    async fn get_ts(
+        &self,
+        _request: tonic::Request<GetTsRequest>,
+    ) -> Result<tonic::Response<GetTsResponse>, tonic::Status> {
+        Err(not_leader_status(LeaderHint {
+            leader_endpoint: Some(self.hint_endpoint.clone()),
+            leader_epoch: None,
+        }))
+    }
+}
+
+/// Bind a TLS gRPC peer on `127.0.0.1:0` that always replies `NOT_LEADER` with a
+/// leader-hint trailer pointing at `hint_endpoint`, and return its address. The
+/// spawned task is detached and lives until the test process exits. See
+/// [`FixedHintService`] for why tests inject the hint here rather than through a
+/// real server's leader-watch path.
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+pub async fn boot_fixed_hint_server_tls(
+    hint_endpoint: String,
+    tls_config: tonic::transport::ServerTlsConfig,
+) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind 127.0.0.1:0 for fixed-hint TLS server");
+    let addr = listener
+        .local_addr()
+        .expect("local_addr for fixed-hint TLS server");
+    let server = TonicServer::builder()
+        .tls_config(tls_config)
+        .expect("fixed-hint server tls config")
+        .add_service(TsoServiceServer::new(FixedHintService { hint_endpoint }));
+    tokio::spawn(async move {
+        let _ = server
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await;
+    });
+    addr
 }
