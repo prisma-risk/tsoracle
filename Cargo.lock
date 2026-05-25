@@ -3366,6 +3366,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "metrics",
+ "metrics-util 0.19.1",
  "omnipaxos",
  "parking_lot",
  "postcard",
@@ -3417,6 +3419,8 @@ version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures",
+ "metrics",
+ "metrics-util 0.19.1",
  "omnipaxos",
  "parking_lot",
  "pastey",

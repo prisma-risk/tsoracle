@@ -184,12 +184,28 @@ pub fn maybe_snapshot<S>(
     S: Storage<HighWaterCommand> + Send + 'static,
 {
     if policy.should_snapshot(decided_idx) {
+        // Count every attempt so the success rate is recoverable as
+        // `snapshot.total - snapshot.failures.total`.
+        #[cfg(feature = "metrics")]
+        metrics::counter!("tsoracle.paxos.snapshot.total").increment(1);
+
         let mut handle = omnipaxos.lock();
         // local_only=false: best-effort cluster-wide snapshot. Errors
         // are logged but not propagated; snapshot failure is not fatal
-        // for liveness.
-        if let Err(err) = handle.snapshot(Some(decided_idx), false) {
-            tracing::warn!(?err, "snapshot trigger failed");
+        // for liveness. A persistent failure would otherwise stay hidden
+        // behind log lines, so it is also counted as a health signal.
+        match handle.snapshot(Some(decided_idx), false) {
+            Ok(()) => {
+                // The last successfully-snapshotted index. Operators alert on
+                // this gauge ceasing to advance.
+                #[cfg(feature = "metrics")]
+                metrics::gauge!("tsoracle.paxos.snapshot.last_index").set(decided_idx as f64);
+            }
+            Err(err) => {
+                #[cfg(feature = "metrics")]
+                metrics::counter!("tsoracle.paxos.snapshot.failures.total").increment(1);
+                tracing::warn!(?err, "snapshot trigger failed");
+            }
         }
     }
 }
@@ -606,5 +622,142 @@ mod drain_tests {
         let mut policy = SnapshotPolicy::disabled();
         maybe_snapshot(&leader_handle(&cluster), &mut policy, 0);
         assert!(!policy.should_snapshot(u64::MAX));
+    }
+
+    #[cfg(feature = "metrics")]
+    mod snapshot_health_metrics {
+        //! `maybe_snapshot` must surface snapshot health as metrics: every
+        //! attempt bumps `tsoracle.paxos.snapshot.total`, a success sets the
+        //! `tsoracle.paxos.snapshot.last_index` gauge, and a failure bumps
+        //! `tsoracle.paxos.snapshot.failures.total` (instead of only logging).
+        //! A thread-local recorder captures real emission, not a mock.
+
+        use super::*;
+        use metrics_util::{
+            MetricKind,
+            debugging::{DebugValue, DebuggingRecorder},
+        };
+
+        type RecordedMetric = (
+            metrics_util::CompositeKey,
+            Option<metrics::Unit>,
+            Option<metrics::SharedString>,
+            DebugValue,
+        );
+
+        fn counter(snapshot: &[RecordedMetric], name: &str) -> u64 {
+            for (composite, _u, _d, value) in snapshot {
+                if composite.kind() == MetricKind::Counter && composite.key().name() == name {
+                    if let DebugValue::Counter(n) = value {
+                        return *n;
+                    }
+                }
+            }
+            0
+        }
+
+        fn gauge(snapshot: &[RecordedMetric], name: &str) -> Option<f64> {
+            for (composite, _u, _d, value) in snapshot {
+                if composite.kind() == MetricKind::Gauge && composite.key().name() == name {
+                    if let DebugValue::Gauge(g) = value {
+                        return Some(g.into_inner());
+                    }
+                }
+            }
+            None
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn successful_snapshot_emits_attempt_and_last_index_gauge() {
+            let mut cluster = build_cluster(3);
+            drive_to_leader_election(&mut cluster).await;
+
+            leader_handle(&cluster)
+                .lock()
+                .append(HighWaterCommand::Advance(AdvancePayload { at_least: 1 }))
+                .expect("append");
+            drive_until(
+                &mut cluster,
+                |state| {
+                    state
+                        .nodes
+                        .iter()
+                        .all(|node| node.omnipaxos.lock().get_decided_idx() >= 1)
+                },
+                500,
+            )
+            .await;
+
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let handle = leader_handle(&cluster);
+            let mut policy = SnapshotPolicy::every(1);
+            metrics::with_local_recorder(&recorder, || maybe_snapshot(&handle, &mut policy, 1));
+
+            let snapshot = snapshotter.snapshot().into_vec();
+            assert_eq!(
+                counter(&snapshot, "tsoracle.paxos.snapshot.total"),
+                1,
+                "a fired snapshot attempt must be counted",
+            );
+            assert_eq!(
+                gauge(&snapshot, "tsoracle.paxos.snapshot.last_index"),
+                Some(1.0),
+                "a successful snapshot must publish its decided index as the health gauge",
+            );
+            assert_eq!(
+                counter(&snapshot, "tsoracle.paxos.snapshot.failures.total"),
+                0,
+                "a successful snapshot must not be counted as a failure",
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn failed_snapshot_increments_failure_counter() {
+            let mut cluster = build_cluster(3);
+            drive_to_leader_election(&mut cluster).await;
+
+            leader_handle(&cluster)
+                .lock()
+                .append(HighWaterCommand::Advance(AdvancePayload { at_least: 1 }))
+                .expect("append");
+            drive_until(
+                &mut cluster,
+                |state| {
+                    state
+                        .nodes
+                        .iter()
+                        .all(|node| node.omnipaxos.lock().get_decided_idx() >= 1)
+                },
+                500,
+            )
+            .await;
+
+            // Request a snapshot far beyond the decided index. OmniPaxos rejects
+            // compaction past what has been decided, so the snapshot fails — the
+            // failure path `maybe_snapshot` previously only logged.
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let handle = leader_handle(&cluster);
+            let mut policy = SnapshotPolicy::every(1);
+            metrics::with_local_recorder(&recorder, || maybe_snapshot(&handle, &mut policy, 999));
+
+            let snapshot = snapshotter.snapshot().into_vec();
+            assert_eq!(
+                counter(&snapshot, "tsoracle.paxos.snapshot.total"),
+                1,
+                "the rejected snapshot is still an attempt",
+            );
+            assert_eq!(
+                counter(&snapshot, "tsoracle.paxos.snapshot.failures.total"),
+                1,
+                "a rejected snapshot must increment the failure counter",
+            );
+            assert_eq!(
+                gauge(&snapshot, "tsoracle.paxos.snapshot.last_index"),
+                None,
+                "a failed snapshot must not advance the last-index health gauge",
+            );
+        }
     }
 }
