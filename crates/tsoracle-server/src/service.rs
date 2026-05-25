@@ -15,7 +15,9 @@
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tsoracle_consensus::ConsensusError;
-use tsoracle_core::{CoreError, Epoch};
+#[cfg(feature = "metrics")]
+use tsoracle_core::IgnoreReason;
+use tsoracle_core::{CommitOutcome, CoreError, Epoch};
 use tsoracle_proto::v1::{
     EpochWire, GetTsRequest, GetTsResponse, LeaderHint, tso_service_server::TsoService,
 };
@@ -73,6 +75,21 @@ fn core_status(error: CoreError) -> Status {
         } => Status::internal(format!(
             "invalid leadership window: fence_floor {fence_floor} exceeds committed_ceiling {committed_ceiling}"
         )),
+    }
+}
+
+/// The per-reason counter name for an ignored window-extension commit. Each
+/// reason gets its own flat counter (matching the rest of the catalog) so an
+/// operator can alert on epoch churn (`not_leader` / `epoch_mismatch`)
+/// separately from persist reordering (`not_advanced`).
+#[cfg(feature = "metrics")]
+fn ignored_commit_metric(reason: IgnoreReason) -> &'static str {
+    match reason {
+        IgnoreReason::NotLeader => "tsoracle.window.extensions.ignored.not_leader.total",
+        IgnoreReason::EpochMismatch { .. } => {
+            "tsoracle.window.extensions.ignored.epoch_mismatch.total"
+        }
+        IgnoreReason::NotAdvanced { .. } => "tsoracle.window.extensions.ignored.not_advanced.total",
     }
 }
 
@@ -260,11 +277,22 @@ impl TsoServiceImpl {
                 return Err(Status::internal(format!("persist: {e}")));
             }
         };
-        self.server
+        let commit_outcome = self
+            .server
             .allocator
             .lock()
             .try_commit_window_extension(actual, epoch)
             .map_err(core_status)?;
+        // A dropped commit after a paid-for persist round-trip is benign but
+        // worth surfacing: the epoch-fencing / monotonic-bound logic discarded
+        // a durably-persisted value, a leading indicator of epoch churn
+        // (NotLeader / EpochMismatch) or persist reordering (NotAdvanced).
+        if let CommitOutcome::Ignored(_reason) = commit_outcome {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(reason = ?_reason, "window extension commit ignored after persist");
+            #[cfg(feature = "metrics")]
+            metrics::counter!(ignored_commit_metric(_reason)).increment(1);
+        }
         Ok(())
     }
 }
@@ -343,5 +371,32 @@ mod tests {
         assert_eq!(wire_epoch(Some(cross)), Some(EpochWire { hi, lo }));
 
         assert_eq!(wire_epoch(None), None);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn ignored_commit_metric_names_each_reason_distinctly() {
+        use tsoracle_core::IgnoreReason;
+        // Each ignore reason maps to its own counter so an operator can tell
+        // epoch churn (not_leader / epoch_mismatch) from persist reordering
+        // (not_advanced) at the metric layer, not just in the logs.
+        assert_eq!(
+            ignored_commit_metric(IgnoreReason::NotLeader),
+            "tsoracle.window.extensions.ignored.not_leader.total"
+        );
+        assert_eq!(
+            ignored_commit_metric(IgnoreReason::EpochMismatch {
+                expected: Epoch(4),
+                current: Epoch(5),
+            }),
+            "tsoracle.window.extensions.ignored.epoch_mismatch.total"
+        );
+        assert_eq!(
+            ignored_commit_metric(IgnoreReason::NotAdvanced {
+                persisted: 3_000,
+                committed: 5_000,
+            }),
+            "tsoracle.window.extensions.ignored.not_advanced.total"
+        );
     }
 }
