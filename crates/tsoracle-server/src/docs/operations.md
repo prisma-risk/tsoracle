@@ -34,6 +34,7 @@ The server emits the following signals through the [`metrics`](https://docs.rs/m
 - `tsoracle.leader_transition.fence_latency` — duration of the failover fence (histogram, seconds)
 - `tsoracle.leader_transition.fence_transient_retries.total` — fence retried a transient consensus error during failover (counter)
 - `tsoracle.not_leader.total` — RPCs rejected with `NOT_LEADER` (counter)
+- `tsoracle.shutdown.watch_aborted.total` — a graceful shutdown had to forcibly abort the leader-watch task because it did not stop within `shutdown_grace`, almost always because a consensus-driver call (`load_high_water` / `persist_high_water`) was wedged; any non-zero value means a shutdown narrowly avoided a SIGKILL stall and warrants investigating driver latency (counter)
 
 The library is exporter-agnostic: embedders install whichever recorder they want (`metrics-exporter-prometheus`, `metrics-exporter-influx`, a custom sink) before constructing the [`Server`]. The example below wires Prometheus over an HTTP listener:
 

@@ -73,11 +73,21 @@ pub enum ServingState {
     Serving,
 }
 
+/// Default bound on how long a graceful shutdown waits for the leader-watch
+/// task to stop cooperatively before forcibly aborting it. The abort is a
+/// last-resort safety net for a consensus driver whose `load_high_water` /
+/// `persist_high_water` is wedged (the trait places no latency bound; see
+/// [`ConsensusDriver`]). Chosen to sit comfortably under a typical Kubernetes
+/// `terminationGracePeriodSeconds` (30s) so the abort, the tonic drain, and
+/// process exit all complete before the kubelet escalates to SIGKILL.
+const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
 pub struct ServerBuilder {
     consensus: Option<Arc<dyn ConsensusDriver>>,
     clock: Option<Arc<dyn Clock>>,
     window_ahead: Duration,
     failover_advance: Duration,
+    shutdown_grace: Duration,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -89,6 +99,7 @@ impl Default for ServerBuilder {
             clock: None,
             window_ahead: Duration::from_secs(3),
             failover_advance: Duration::from_secs(1),
+            shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: None,
         }
@@ -113,6 +124,25 @@ impl ServerBuilder {
         self
     }
 
+    /// Bound on how long a graceful shutdown waits for the leader-watch task to
+    /// stop cooperatively before forcibly aborting it.
+    ///
+    /// On shutdown the server drops the watch task's cancel signal and waits for
+    /// it to publish `NotServing` and return. That wait is normally
+    /// near-instant, but the task observes cancellation only at its `select!`
+    /// boundaries — never inside a fence attempt. A consensus driver whose
+    /// `load_high_water` / `persist_high_water` never returns (the trait places
+    /// no latency bound) would otherwise park the task mid-fence and block
+    /// process exit indefinitely, leading to a SIGKILL on a Kubernetes drain.
+    /// Once `shutdown_grace` elapses the server aborts the task so exit always
+    /// makes progress. Set this comfortably below your deployment's
+    /// `terminationGracePeriodSeconds`. Defaults to 10s. A value of zero aborts
+    /// immediately without waiting for a cooperative stop.
+    pub fn shutdown_grace(mut self, shutdown_grace: Duration) -> Self {
+        self.shutdown_grace = shutdown_grace;
+        self
+    }
+
     /// Configure TLS termination for this server. Applied inside
     /// [`Server::serve`], [`Server::serve_with_shutdown`], and
     /// [`Server::serve_with_listener`]. Not applied to [`Server::into_router`] —
@@ -132,6 +162,7 @@ impl ServerBuilder {
             clock,
             window_ahead: self.window_ahead,
             failover_advance: self.failover_advance,
+            shutdown_grace: self.shutdown_grace,
             core: ServingCore::new(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: self.tls_config,
@@ -144,6 +175,9 @@ pub struct Server {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) window_ahead: Duration,
     pub(crate) failover_advance: Duration,
+    /// Bound on the graceful-shutdown wait for the leader-watch task before a
+    /// forced abort. See [`ServerBuilder::shutdown_grace`].
+    pub(crate) shutdown_grace: Duration,
     /// Owns the allocator, serving-state channel, and both extension locks, with
     /// the lock-ordering and step-down invariants private behind its methods.
     pub(crate) core: ServingCore,
@@ -213,12 +247,17 @@ impl Server {
     /// That decode happens before the leader-watch task is spawned, so a failure
     /// leaves nothing running to clean up.
     pub fn into_router(self) -> Result<(Routes, WatchGuard), ServerError> {
+        // Read the `Copy` grace before `into_router_parts` consumes `self`, so
+        // the returned guard can bound its own shutdown wait identically to the
+        // `serve_*` paths.
+        let shutdown_grace = self.shutdown_grace;
         let (routes, cancel_tx, handle) = self.into_router_parts()?;
         Ok((
             routes,
             WatchGuard {
                 cancel_tx: Some(cancel_tx),
                 handle: Some(handle),
+                shutdown_grace,
             },
         ))
     }
@@ -306,7 +345,9 @@ impl Server {
     ///
     /// Three outcomes:
     /// 1. `shutdown` fires first → tonic drains in-flights and returns Ok.
-    ///    The watch handle is aborted; any error it had been about to return
+    ///    The watch task is then stopped cooperatively, bounded by
+    ///    `shutdown_grace` and forcibly aborted if it overruns (e.g. parked in a
+    ///    wedged consensus-driver call); any error it had been about to return
     ///    is forfeited (the process is shutting down anyway).
     /// 2. Watch returns `Ok(Err(e))` → poisoned state is already published;
     ///    `cancel_tx` triggers tonic's graceful shutdown; in-flight `GetTs`
@@ -325,6 +366,8 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
+        // Read the `Copy` grace before `into_router_parts` consumes `self`.
+        let shutdown_grace = self.shutdown_grace;
         let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
@@ -337,7 +380,14 @@ impl Server {
             .add_routes(routes)
             .serve_with_shutdown(addr, combined_shutdown);
 
-        serve_inner(watch_cancel_tx, watch_handle, serve, cancel_tx).await
+        serve_inner(
+            watch_cancel_tx,
+            watch_handle,
+            serve,
+            cancel_tx,
+            shutdown_grace,
+        )
+        .await
     }
 
     /// Run the gRPC server on a caller-provided `TcpListener` until either
@@ -370,6 +420,8 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
+        // Read the `Copy` grace before `into_router_parts` consumes `self`.
+        let shutdown_grace = self.shutdown_grace;
         let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
@@ -384,7 +436,14 @@ impl Server {
             .add_routes(routes)
             .serve_with_incoming_shutdown(incoming, combined_shutdown);
 
-        serve_inner(watch_cancel_tx, watch_handle, serve, cancel_tx).await
+        serve_inner(
+            watch_cancel_tx,
+            watch_handle,
+            serve,
+            cancel_tx,
+            shutdown_grace,
+        )
+        .await
     }
 }
 
@@ -406,6 +465,9 @@ pub struct WatchGuard {
     // signal: the task's `cancel` future resolves on sender-drop too.
     cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
     handle: Option<tokio::task::JoinHandle<Result<(), ServerError>>>,
+    /// Bound on the cooperative-stop wait in [`Self::shutdown`] before a forced
+    /// abort. Inherited from [`ServerBuilder::shutdown_grace`].
+    shutdown_grace: Duration,
 }
 
 impl WatchGuard {
@@ -417,11 +479,19 @@ impl WatchGuard {
     /// its own (driver error, stream EOF, or panic) the original outcome is
     /// surfaced verbatim: `Err(e)` or [`ServerError::WatchPanic`]. Either way
     /// serving state is `NotServing` once this returns.
+    ///
+    /// The cooperative wait is bounded by the configured
+    /// [`ServerBuilder::shutdown_grace`]: if the task is parked in a
+    /// consensus-driver call that never returns it is aborted once the grace
+    /// elapses (still reported as `Ok(())`), so an embedder's shutdown can never
+    /// wedge behind a hung driver.
     pub async fn shutdown(mut self) -> Result<(), ServerError> {
         // Dropping the sender fires the task's cancel future.
         self.cancel_tx.take();
         match self.handle.take() {
-            Some(handle) => join_to_server_result(handle.await),
+            Some(mut handle) => join_to_server_result(
+                await_watch_within_grace(&mut handle, self.shutdown_grace).await,
+            ),
             None => Ok(()),
         }
     }
@@ -483,6 +553,49 @@ fn combined_shutdown_with_cancel(
     (combined_shutdown, cancel_tx)
 }
 
+/// Wait for the leader-watch task to stop cooperatively, but no longer than
+/// `grace`, then forcibly abort it if it is still running.
+///
+/// The watch task observes its cancel signal only at the `select!` boundaries
+/// in [`crate::fence::run_leader_watch`], never inside a fence attempt. A
+/// consensus driver whose `load_high_water` / `persist_high_water` never
+/// returns (the trait places no latency bound; see
+/// [`tsoracle_consensus::ConsensusDriver`]) therefore parks the task upstream
+/// of any cancel-observing await, so dropping the cancel sender cannot stop it.
+/// Left unbounded, the shutdown wait would block process exit until the kubelet
+/// escalates to SIGKILL on a drain. Bounding the wait by `grace` and aborting
+/// on expiry guarantees forward progress: `tokio` tears a suspended task (and
+/// the wedged driver future it holds) down at the abort, dropping its
+/// drain-barrier guard.
+///
+/// Returns the task's join result. A clean cooperative stop forwards its real
+/// outcome verbatim; an aborted task surfaces as a cancelled `JoinError`, which
+/// [`join_to_server_result`] maps to `Ok(())` — the stop was requested, so a
+/// forced abort during shutdown is not an error. A `grace` of zero aborts
+/// immediately (the `timeout` future is already elapsed on first poll).
+async fn await_watch_within_grace(
+    watch_handle: &mut tokio::task::JoinHandle<Result<(), ServerError>>,
+    grace: Duration,
+) -> Result<Result<(), ServerError>, tokio::task::JoinError> {
+    match tokio::time::timeout(grace, &mut *watch_handle).await {
+        Ok(join_result) => join_result,
+        Err(_elapsed) => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!("tsoracle.shutdown.watch_aborted.total").increment(1);
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                grace_ms = grace.as_millis() as u64,
+                "leader-watch task did not stop within the shutdown grace; aborting it (a consensus-driver call likely exceeded its latency bound)"
+            );
+            watch_handle.abort();
+            // Reap the aborted task so its Drop (releasing any held drain-barrier
+            // guard) runs before we report shutdown complete. Bounded: an aborted
+            // task resolves at its next poll.
+            (&mut *watch_handle).await
+        }
+    }
+}
+
 /// Drive the gRPC `serve_future` against the leader-watch task, shared by
 /// [`Server::serve_with_shutdown`] and [`Server::serve_with_listener`].
 ///
@@ -499,12 +612,14 @@ fn combined_shutdown_with_cancel(
 /// [`WatchGuard`] holds for embedders); dropping it stops the task. Taking the
 /// raw parts rather than a `WatchGuard` keeps this path free of the guard's
 /// `Option` fields — neither the watch handle nor the cancel sender is optional
-/// here.
+/// here. `shutdown_grace` bounds the user-shutdown arm's wait for the watch task
+/// (see [`await_watch_within_grace`]).
 async fn serve_inner<S>(
     watch_cancel_tx: tokio::sync::oneshot::Sender<()>,
     mut watch_handle: tokio::task::JoinHandle<Result<(), ServerError>>,
     serve_future: S,
     tonic_cancel_tx: tokio::sync::oneshot::Sender<()>,
+    shutdown_grace: Duration,
 ) -> Result<(), ServerError>
 where
     S: Future<Output = Result<(), tonic::transport::Error>>,
@@ -531,16 +646,21 @@ where
         serve_result = &mut serve_future => {
             // User shutdown fired (or our cancel — but watch arm has
             // `biased` priority, so reaching here means user shutdown).
-            // Stop the watch task cooperatively rather than with a hard
-            // abort: dropping its cancel sender resolves the task's cancel
-            // future, and we await the task so it never gets torn down
-            // mid-fence while holding `extension_gate.write()`. The wait is
-            // bounded — the cancel arms in `run_leader_watch` fire even when
-            // a fence is stuck retrying a transient error. The task's own
-            // outcome is a clean `Ok(())` (we asked it to stop) and is not
-            // surfaced; the user-requested shutdown result wins.
+            // Prefer a cooperative stop: dropping the cancel sender resolves
+            // the task's cancel future so it stops at its next `select!`
+            // boundary, having published `NotServing` and never torn down
+            // mid-fence while holding `extension_gate.write()`. But a
+            // cooperative stop is only observed at those boundaries, never
+            // inside a fence attempt — a consensus-driver call that never
+            // returns (the trait places no latency bound) would park the task
+            // upstream of any cancel point and block process exit until a
+            // kubelet SIGKILL. `await_watch_within_grace` therefore bounds the
+            // wait by `shutdown_grace` and aborts the task if it overruns. The
+            // task's own outcome (a clean `Ok(())` on cooperative stop, a
+            // cancelled `JoinError` on abort) is discarded; the user-requested
+            // shutdown result wins.
             drop(watch_cancel_tx);
-            let _ = (&mut watch_handle).await;
+            let _ = await_watch_within_grace(&mut watch_handle, shutdown_grace).await;
             serve_result?;
             Ok(())
         }

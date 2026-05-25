@@ -26,6 +26,27 @@ use crate::leadership::LeaderState;
 /// Implementations own leadership election, peer transport, durable storage,
 /// and the topology knowledge needed to populate `LeaderHint` on follower
 /// redirects. The library never names peers or opens peer sockets.
+///
+/// **Contract — cancellation & latency (`load_high_water` / `persist_high_water`):**
+/// the server drives these inside its leader-watch fence, which it may stop at
+/// any time — most importantly on graceful shutdown. That stop is cooperative
+/// and observed only *between* fence steps, never inside an in-flight call, so a
+/// method that blocks indefinitely (e.g. waiting out a lost quorum) stalls the
+/// fence and, on shutdown, forces the server to abort the watch task once its
+/// shutdown grace elapses, dropping the in-flight future. Implementations
+/// therefore MUST honour two rules:
+///   * **Cancel-safety.** Dropping an in-flight `load_high_water` /
+///     `persist_high_water` future MUST NOT corrupt durable state. A
+///     `persist_high_water` whose proposal was already submitted MAY still
+///     commit after its future is dropped; the monotonic-advance contract on
+///     that method makes the late apply safe — it can only raise the
+///     high-water, never regress it.
+///   * **Latency bound.** Prefer returning [`ConsensusError::TransientDriver`]
+///     once a round-trip exceeds a sane internal deadline over blocking
+///     forever. The fence's retry loop is cancel-observant: a `TransientDriver`
+///     lets it back off, race the leadership stream, and honour a pending stop,
+///     whereas an unbounded await can only be broken by a forced abort during
+///     shutdown.
 #[async_trait::async_trait]
 pub trait ConsensusDriver: Send + Sync + 'static {
     /// Stream of leadership transitions. The server holds this for its lifetime.
