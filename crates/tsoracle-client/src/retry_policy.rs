@@ -20,10 +20,12 @@
 //! candidate endpoints — the retry loop short-circuits once it elapses,
 //! so a flapping leader cannot stretch a single caller's `request.await`
 //! across many RTTs. `max_attempts` caps the number of *failed* attempts
-//! (dialed endpoints that returned an error); it does not charge leader-hint
-//! redirects (issue #340). Pathological leader-hint redirect chains are
-//! bounded separately — by the worklist visited-set, the `overall_deadline`,
-//! and the absolute `MAX_LEADER_REDIRECTS` backstop in `crate::retry`.
+//! (dialed endpoints that returned an error), floored at the initial worklist
+//! size so a single cold-cache sweep always dials every known endpoint at
+//! least once; it does not charge leader-hint redirects (issue #340).
+//! Pathological leader-hint redirect chains are bounded separately — by the
+//! worklist visited-set, the `overall_deadline`, and the absolute
+//! `MAX_LEADER_REDIRECTS` backstop in `crate::retry`.
 //! `base_backoff` is
 //! the unit for the jittered exponential backoff applied between
 //! attempts when the previous attempt returned `Unavailable` or
@@ -46,13 +48,24 @@ use std::time::Duration;
 pub struct RetryPolicy {
     /// Maximum number of *failed* attempts `issue_rpc` will make before
     /// returning the last error — that is, endpoints dialed that returned
-    /// an error, not total loop iterations. Leader-hint redirects are not
-    /// charged against this budget (they are known discovery progress,
-    /// bounded instead by the per-endpoint visited-set, the
-    /// `overall_deadline`, and the absolute `MAX_LEADER_REDIRECTS` backstop
-    /// in `crate::retry`), so a legitimate failover redirect chain can be
-    /// longer than `max_attempts` and still reach the live leader (issue
-    /// #340).
+    /// an error, not total loop iterations.
+    ///
+    /// The budget is floored at the size of the initial worklist (the cached
+    /// leader, if fresh, plus the configured endpoints), so a single
+    /// cold-cache sweep always dials every endpoint at least once even when
+    /// `max_attempts` is smaller than the endpoint count. Without this floor,
+    /// the randomly seeded rotation offset in `ChannelPool::iter_round_robin`
+    /// could leave the only reachable endpoint untried whenever a pool has
+    /// more configured endpoints than `max_attempts`. The `overall_deadline`
+    /// still bounds the worst case, so a pool full of dead peers cannot dial
+    /// forever.
+    ///
+    /// Leader-hint redirects are not charged against this budget (they are
+    /// known discovery progress, bounded instead by the per-endpoint
+    /// visited-set, the `overall_deadline`, and the absolute
+    /// `MAX_LEADER_REDIRECTS` backstop in `crate::retry`), so a legitimate
+    /// failover redirect chain can be longer than `max_attempts` and still
+    /// reach the live leader (issue #340).
     pub max_attempts: usize,
     /// Wall-clock deadline applied to each `(connect, get_ts)` pair.
     /// Pushed down to `Endpoint::connect_timeout` / `Endpoint::timeout`
