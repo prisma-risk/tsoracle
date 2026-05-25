@@ -10,10 +10,11 @@ The single most important invariant the stress harness checks is *global monoton
 
 ## Topologies
 
-Three modes, behind `--topology={mem,raft,process}`:
+Four modes, behind `--topology={mem,raft,paxos,process}`:
 
 - **mem** — single in-process tsoracle server backed by `InMemoryDriver`. Chaos via the driver's `become_leader`/`become_follower` affordances plus in-process failpoints. Fastest, cheapest, catches allocator + fence + leader-watch bugs. Use this for the bulk of development.
 - **raft** — three-node openraft cluster on `MemNetwork`, all in-process. Chaos via raft network partition (drop the leader's messages, let the cluster elect a new one) plus in-process failpoints. Catches openraft-driver-side bugs that mem cannot see.
+- **paxos** — three-node OmniPaxos cluster on `MemNetwork`, all in-process (OmniPaxos requires a 3-node quorum, so `--nodes` must be at least 3). Chaos by partitioning the leader's outbound messages to force the remaining quorum to re-elect, plus in-process failpoints. Catches paxos-driver-side bugs that mem cannot see.
 - **process** — spawned `tsoracle` binaries. Chaos via POSIX signals (SIGKILL/SIGSTOP/SIGCONT) plus `FAILPOINTS` env propagation. Unix-only. Catches process-level fault recovery, exit handling, and reconnection paths.
 
 Each topology speaks the same `ChaosController` vocabulary (`kill_leader`, `pause_leader`, `arm_failpoint`, `disarm_failpoint`), so the same scenario runs against any of them.
@@ -44,6 +45,9 @@ cargo run --release -p stress -- run --topology mem --scenario killer-loop --dur
 # Raft topology, 5m soak with the failpoint-cycle scenario (requires stress-failpoints feature).
 cargo run --release -p stress --features stress-failpoints -- \
   run --topology raft --scenario failpoint-cycle --duration 5m --nodes 3 --clients 16
+
+# Paxos topology, killer-loop, 30s (OmniPaxos requires a 3-node quorum).
+cargo run --release -p stress -- run --topology paxos --scenario killer-loop --duration 30s --nodes 3 --clients 16
 
 # Process topology, with schedule dump for replay.
 cargo run --release -p stress -- run --topology process --scenario killer-loop --duration 30s --nodes 3 --schedule-out /tmp/sched.json
@@ -96,8 +100,8 @@ The schedule pins both the named-or-random source and the materialized op sequen
 
 ## CI surface
 
-- **Per-PR**: `.github/workflows/ci.yml` contains a `stress-smoke` job that runs all three topologies with `--ci-smoke` plus the `inject-violation` positive control. Builds the tsoracle and stress binaries once, then exercises all four steps.
-- **Nightly**: `.github/workflows/stress-nightly.yml` runs the full scenario menu against each topology at `--duration 5m` (matrix of 3 topologies × 7 scenarios = 21 jobs). Results are uploaded as artifacts; failures auto-file a deduplicated GitHub issue via `.github/actions/stress-auto-issue`.
+- **Per-PR**: `.github/workflows/ci.yml` contains a `stress-smoke` job that runs all four topologies with `--ci-smoke` plus the `inject-violation` positive control. Builds the tsoracle and stress binaries once, then exercises all five steps.
+- **Nightly**: `.github/workflows/stress-nightly.yml` runs the full scenario menu against each topology at `--duration 5m` (matrix of 4 topologies × 7 scenarios = 28 jobs). Results are uploaded as artifacts; failures auto-file a deduplicated GitHub issue via `.github/actions/stress-auto-issue`.
 - **Multi-hour soak**: not CI-gated. Run locally against a candidate release build:
 
   ```bash
