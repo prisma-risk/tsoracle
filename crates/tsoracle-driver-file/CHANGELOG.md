@@ -4,6 +4,22 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v0.1.6...tsoracle-driver-file-v0.1.7) - 2026-05-25
+
+### Added
+
+- extract shared tsoracle-failpoint crate ([#306](https://github.com/prisma-risk/tsoracle/pull/306))
+
+### Fixed
+
+- *(deps)* remove unused production dependencies ([#378](https://github.com/prisma-risk/tsoracle/pull/378))
+- *(consensus)* reject out-of-range high-water advance before persisting ([#360](https://github.com/prisma-risk/tsoracle/pull/360))
+
+### Other
+
+- reflect paxos stress topology in README and stress-testing guide ([#388](https://github.com/prisma-risk/tsoracle/pull/388))
+- *(driver-file)* document leader_tx via #[expect] instead of #[allow(dead_code)] ([#294](https://github.com/prisma-risk/tsoracle/pull/294))
+
 ## [0.1.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v0.1.5...tsoracle-driver-file-v0.1.6) - 2026-05-24
 
 ### Other

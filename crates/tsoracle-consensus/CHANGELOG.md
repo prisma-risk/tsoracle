@@ -4,6 +4,24 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.6...tsoracle-consensus-v0.1.7) - 2026-05-25
+
+### Added
+
+- *(consensus)* give the high-water advance rule a single home via AdvancePayload::merge ([#369](https://github.com/prisma-risk/tsoracle/pull/369))
+- *(consensus)* unify HighWaterCommand advance naming across backends ([#323](https://github.com/prisma-risk/tsoracle/pull/323))
+
+### Fixed
+
+- *(consensus)* reject out-of-range high-water advance before persisting ([#360](https://github.com/prisma-risk/tsoracle/pull/360))
+
+### Other
+
+- *(consensus)* specify persist_high_water epoch-fencing contract ([#389](https://github.com/prisma-risk/tsoracle/pull/389))
+- reflect paxos stress topology in README and stress-testing guide ([#388](https://github.com/prisma-risk/tsoracle/pull/388))
+- *(consensus)* split lib.rs into per-concern modules ([#361](https://github.com/prisma-risk/tsoracle/pull/361))
+- *(consensus)* make leadership_events first-item contract normative ([#254](https://github.com/prisma-risk/tsoracle/pull/254)) ([#321](https://github.com/prisma-risk/tsoracle/pull/321))
+
 ## [0.1.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.5...tsoracle-consensus-v0.1.6) - 2026-05-24
 
 ### Added

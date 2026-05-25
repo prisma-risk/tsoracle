@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.2.2...tsoracle-paxos-toolkit-v0.2.3) - 2026-05-25
+
+### Added
+
+- *(paxos)* surface snapshot and async-persistence failures as health metrics ([#367](https://github.com/prisma-risk/tsoracle/pull/367))
+- *(core)* lift a shared TsoPeer type into tsoracle-core ([#266](https://github.com/prisma-risk/tsoracle/pull/266)) ([#325](https://github.com/prisma-risk/tsoracle/pull/325))
+- extract the version-prefixed postcard codec into a shared tsoracle-codec crate ([#324](https://github.com/prisma-risk/tsoracle/pull/324))
+- extract shared tsoracle-failpoint crate ([#306](https://github.com/prisma-risk/tsoracle/pull/306))
+
+### Fixed
+
+- *(driver-paxos)* re-subscribe leadership_events instead of take-once ([#262](https://github.com/prisma-risk/tsoracle/pull/262)) ([#396](https://github.com/prisma-risk/tsoracle/pull/396))
+
+### Other
+
+- *(paxos-toolkit)* cache next/compacted log indices instead of scanning per append ([#391](https://github.com/prisma-risk/tsoracle/pull/391))
+- reflect paxos stress topology in README and stress-testing guide ([#388](https://github.com/prisma-risk/tsoracle/pull/388))
+- *(paxos-toolkit)* require Send + Sync on box_err input ([#387](https://github.com/prisma-risk/tsoracle/pull/387))
+- *(paxos)* isolate async_write failpoint tests into the integration binary ([#377](https://github.com/prisma-risk/tsoracle/pull/377))
+- make the remaining real-time consensus-harness tests deterministic ([#326](https://github.com/prisma-risk/tsoracle/pull/326))
+- *(driver-paxos)* deterministic step-driver for the paxos harness (+ convert the steppable tests) ([#312](https://github.com/prisma-risk/tsoracle/pull/312))
+
 ## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.2.1...tsoracle-paxos-toolkit-v0.2.2) - 2026-05-24
 
 ### Added

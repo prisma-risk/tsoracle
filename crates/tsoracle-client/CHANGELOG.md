@@ -4,6 +4,28 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.2.2...tsoracle-client-v0.2.3) - 2026-05-25
+
+### Added
+
+- *(client)* expose Client::cached_leader() and drop the dead pool field ([#329](https://github.com/prisma-risk/tsoracle/pull/329))
+
+### Fixed
+
+- *(client)* rotate iter_round_robin worklist over configured endpoints ([#395](https://github.com/prisma-risk/tsoracle/pull/395))
+- *(client)* bound leader-hint redirect chains with an absolute cap ([#386](https://github.com/prisma-risk/tsoracle/pull/386))
+- *(client)* bound channel pool against wire-supplied leader-hint endpoints ([#383](https://github.com/prisma-risk/tsoracle/pull/383))
+- *(client)* reject off-list epoch-less leader hint over a fresh known-epoch leader ([#381](https://github.com/prisma-risk/tsoracle/pull/381))
+- *(client)* decompose retry loop and stop redirects consuming the attempt budget ([#376](https://github.com/prisma-risk/tsoracle/pull/376))
+- *(client)* preserve Status metadata when fanning RPC errors to siblings ([#366](https://github.com/prisma-risk/tsoracle/pull/366))
+- *(client)* make record_success epoch-monotone ([#362](https://github.com/prisma-risk/tsoracle/pull/362))
+- *(client)* drop unused async-trait dependency ([#314](https://github.com/prisma-risk/tsoracle/pull/314))
+
+### Other
+
+- reflect paxos stress topology in README and stress-testing guide ([#388](https://github.com/prisma-risk/tsoracle/pull/388))
+- *(client)* thread compact TimestampRange through decode and delivery ([#370](https://github.com/prisma-risk/tsoracle/pull/370))
+
 ## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.2.1...tsoracle-client-v0.2.2) - 2026-05-24
 
 ### Fixed

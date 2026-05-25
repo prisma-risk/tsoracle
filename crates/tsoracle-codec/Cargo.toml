@@ -1,7 +1,7 @@
 [package]
 name         = "tsoracle-codec"
 description  = "Shared version-prefixed postcard codec: one `[version_byte | postcard(value)]` framing re-used across the tsoracle toolkits so an on-disk layout change fails loudly instead of misdecoding"
-version      = "0.1.0"
+version      = "0.1.1"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true

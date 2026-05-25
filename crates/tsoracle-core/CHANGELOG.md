@@ -4,6 +4,23 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.2.1...tsoracle-core-v0.2.2) - 2026-05-25
+
+### Added
+
+- *(core)* return CommitOutcome from try_commit_window_extension ([#365](https://github.com/prisma-risk/tsoracle/pull/365))
+- *(core)* lift a shared TsoPeer type into tsoracle-core ([#266](https://github.com/prisma-risk/tsoracle/pull/266)) ([#325](https://github.com/prisma-risk/tsoracle/pull/325))
+
+### Fixed
+
+- *(core)* name all operands on window-extension overflow ([#384](https://github.com/prisma-risk/tsoracle/pull/384))
+- *(core)* make WindowGrant valid-by-construction so first/last can't panic ([#363](https://github.com/prisma-risk/tsoracle/pull/363))
+
+### Other
+
+- reflect paxos stress topology in README and stress-testing guide ([#388](https://github.com/prisma-risk/tsoracle/pull/388))
+- *(core)* extract projected_grant; try_grant writes back only on success ([#250](https://github.com/prisma-risk/tsoracle/pull/250)) ([#301](https://github.com/prisma-risk/tsoracle/pull/301))
+
 ## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.2.0...tsoracle-core-v0.2.1) - 2026-05-24
 
 ### Fixed

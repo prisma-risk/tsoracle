@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle-server"
-version      = "0.2.4"
+version      = "0.2.5"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -42,8 +42,8 @@ tonic              = { workspace = true }
 tonic-prost        = { workspace = true }
 tonic-reflection   = { workspace = true, optional = true }
 tracing            = { workspace = true, optional = true }
-tsoracle-core      = { path = "../tsoracle-core", version = "0.2.1" }
-tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.6" }
+tsoracle-core      = { path = "../tsoracle-core", version = "0.2.2" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.7" }
 tsoracle-proto     = { path = "../tsoracle-proto", version = "0.2.1" }
 tsoracle-yieldpoint = { workspace = true }
 tsoracle-failpoint = { workspace = true }
@@ -51,7 +51,7 @@ tsoracle-failpoint = { workspace = true }
 [dev-dependencies]
 tokio        = { workspace = true, features = ["test-util"] }
 metrics-util = { workspace = true }
-tsoracle-core = { path = "../tsoracle-core", version = "0.2.1", features = ["test-clock"] }
+tsoracle-core = { path = "../tsoracle-core", version = "0.2.2", features = ["test-clock"] }
 
 [[test]]
 name = "e2e"
