@@ -165,6 +165,29 @@ fn paxos_config(node_id: u64, cluster: &ClusterConfig) -> OmniPaxosConfig {
     }
 }
 
+/// Build the toolkit peer list for node `my_id`: every *other* node paired with
+/// its service endpoint.
+///
+/// The endpoint must be a **scheme-less** `host:port`. `StandaloneHost` surfaces
+/// it verbatim as `LeaderState::Follower::leader_endpoint`, which the server's
+/// `run_leader_watch` guard requires to be scheme-less (a `http(s)://` hint is
+/// silently dropped by a TLS client's redirect path, so a follower would point
+/// clients at an unreachable leader). A `SocketAddr`'s `Display` is exactly that
+/// shape; the in-process `MeshSink` routes by node id, so this string is only
+/// ever used as a leader hint, never dialed. See
+/// `build_toolkit_peers_yields_scheme_less_endpoints`.
+#[allow(dead_code)]
+fn build_toolkit_peers(tso_endpoints: &[(u64, SocketAddr)], my_id: u64) -> Vec<TsoPeer> {
+    tso_endpoints
+        .iter()
+        .filter(|(peer_id, _)| *peer_id != my_id)
+        .map(|(peer_id, peer_addr)| TsoPeer {
+            node_id: *peer_id,
+            endpoint: peer_addr.to_string(),
+        })
+        .collect()
+}
+
 /// `MessageSink` that routes outbound paxos messages back through the
 /// shared `MemNetwork`. Lifted from `examples/paxos-embedded`.
 #[allow(dead_code)]
@@ -259,14 +282,7 @@ impl PaxosTopology {
             });
 
             // ---- StandaloneHost ----
-            let toolkit_peers: Vec<TsoPeer> = tso_endpoints
-                .iter()
-                .filter(|(peer_id, _)| *peer_id != id)
-                .map(|(peer_id, peer_addr)| TsoPeer {
-                    node_id: *peer_id,
-                    endpoint: format!("http://{peer_addr}"),
-                })
-                .collect();
+            let toolkit_peers = build_toolkit_peers(&tso_endpoints, id);
             let mut host = StandaloneHost::builder()
                 .omnipaxos(omnipaxos.clone())
                 .my_node_id(id)
@@ -517,6 +533,38 @@ impl ChaosController for PaxosController {
 mod tests {
     use super::*;
     use std::time::Instant as StdInstant;
+
+    // The follower-redirect contract this guards is enforced at runtime only by
+    // a `debug_assert` in the server's `run_leader_watch`, which fires solely
+    // when a follower has observed a *stable* leader long enough to surface its
+    // hint. On a fast host the chaos tests finish before that happens, so the
+    // guard's coverage is timing-dependent (it slipped through once, surfacing
+    // as a slow-CI-only flake). This test pins the contract at the construction
+    // site instead — fully deterministic, independent of leader-election timing.
+    #[test]
+    fn build_toolkit_peers_yields_scheme_less_endpoints() {
+        let tso_endpoints: Vec<(u64, SocketAddr)> = vec![
+            (1, "127.0.0.1:5001".parse().unwrap()),
+            (2, "127.0.0.1:5002".parse().unwrap()),
+            (3, "127.0.0.1:5003".parse().unwrap()),
+        ];
+
+        let peers = build_toolkit_peers(&tso_endpoints, 2);
+
+        assert_eq!(peers.len(), 2, "a node must not list itself as a peer");
+        assert!(
+            peers.iter().all(|peer| peer.node_id != 2),
+            "node 2 must be filtered from its own peer list, got {peers:?}"
+        );
+        for peer in &peers {
+            assert!(
+                !peer.endpoint.starts_with("http://") && !peer.endpoint.starts_with("https://"),
+                "peer leader_endpoint must be a scheme-less host:port (a TLS client \
+                 drops http(s):// hints); got {:?}",
+                peer.endpoint
+            );
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn spawn_3_nodes_reports_endpoints_and_leader() {
