@@ -30,8 +30,7 @@ use crate::log_entry::HighWaterCommand;
 /// * `addr` — the raft transport address, a scheme-less `host:port` (a DNS name
 ///   and port). The peer transport prepends `http://` itself, so a scheme here
 ///   would double up.
-/// * `service_endpoint` — the tsoracle gRPC endpoint clients redirect to, a full
-///   schemeful URL such as `http://host:port`. Empty means "no client redirect".
+/// * `service_endpoint` — the tsoracle gRPC endpoint clients redirect to, as a scheme-less `host:port`. The client applies its own transport scheme (`https://` under TLS, `http://` otherwise); an explicit `http://` here is refused by a TLS client as a downgrade, so leave the scheme off. Empty means "no client redirect".
 ///
 /// Widening this struct changes the postcard layout of membership log entries
 /// and therefore requires a `tsoracle_openraft_toolkit::SCHEMA_VERSION` bump.
