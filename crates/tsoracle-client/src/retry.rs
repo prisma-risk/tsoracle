@@ -106,10 +106,10 @@ const MAX_LEADER_REDIRECTS: u32 = 16;
 /// When a pass over the worklist ends without a timestamp, `issue_rpc` re-polls
 /// (backing off, bounded by `overall_deadline`) **only** if that pass saw a
 /// reachable server report an in-progress election: an absent-hint NOT_LEADER
-/// (`AttemptOutcome::NoLeaderYet`), a `StaleLeaderHint`, or the
+/// (`AttemptOutcome::NoLeaderYet`), a `HintUnusable { reason: StaleEpoch }`, or the
 /// `MAX_LEADER_REDIRECTS` cap being hit (a churning leadership transfer). A pass
 /// that only hit transport failures or deterministic hint rejections
-/// (`HintRejected`) does not re-poll — a genuinely-unreachable pool still fails
+/// (`HintUnusable { reason: Rejected }`) does not re-poll — a genuinely-unreachable pool still fails
 /// fast. `failed_attempts` and the last error persist across passes (so
 /// `max_attempts` keeps its whole-call meaning and the surfaced error is the
 /// real NOT_LEADER / transport status, never `NoReachableEndpoints`); the
@@ -233,22 +233,21 @@ pub(crate) async fn issue_rpc(
                     last_err = Some(ClientError::Rpc(status));
                     continue;
                 }
-                AttemptOutcome::StaleLeaderHint(status) => {
-                    #[cfg(feature = "metrics")]
-                    metrics::counter!("tsoracle.client.leader_hint.stale.total").increment(1);
-                    // A lagging peer pointed at an older-epoch leader — transient
-                    // cluster flux. Treat as an election signal; do not charge
-                    // the budget (issue #340).
-                    saw_election_signal = true;
-                    election_signal = Some(status.clone());
-                    last_err = Some(ClientError::Rpc(status));
-                    continue;
-                }
-                AttemptOutcome::HintRejected(status) => {
-                    // NOT_LEADER we could not act on (malformed trailer or a
-                    // guard-dropped hint — absent-hint is NoLeaderYet above).
-                    // Deterministic, not an election: record and advance
-                    // without a signal.
+                AttemptOutcome::HintUnusable { status, reason } => {
+                    if matches!(reason, HintUnusableReason::StaleEpoch) {
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("tsoracle.client.leader_hint.stale.total").increment(1);
+                        // A lagging peer pointed at an older-epoch leader —
+                        // transient cluster flux. Treat as an election signal so
+                        // the worklist-empty handler rides it out, and record it
+                        // as a sticky `election_signal` so a later budget-squeezed
+                        // transport straggler can't bury it (see `surface_error`);
+                        // do not charge the budget (issue #340). A deterministic
+                        // `Rejected` (malformed trailer / TLS-downgrade drop) sets
+                        // no signal, so a genuinely bad peer still fails fast.
+                        saw_election_signal = true;
+                        election_signal = Some(status.clone());
+                    }
                     last_err = Some(ClientError::Rpc(status));
                     continue;
                 }
@@ -290,7 +289,8 @@ pub(crate) async fn issue_rpc(
 ///
 /// Precedence, highest first:
 /// 1. A *non-transport* `last_err` — a deterministic server rejection
-///    (a malformed-hint `HintRejected`, a genuine `Internal`, …). The server
+///    (a malformed-hint `HintUnusable { reason: Rejected }`, a genuine
+///    `Internal`, …). The server
 ///    spoke definitively about this request, so report it verbatim.
 /// 2. The sticky `election_signal`, if one was ever recorded. A reachable
 ///    server told us "no leader yet" / pointed at a stale leader; that is the
@@ -319,14 +319,7 @@ fn surface_error(
     }
 }
 
-/// Per-attempt outcome. Surfaces FAILED_PRECONDITION redirects as
-/// their own variants so the caller can preserve the existing "no
-/// backoff on hint" behaviour while still applying backoff to other
-/// retriable failures. `StaleLeaderHint` carries the originating
-/// `FAILED_PRECONDITION` status: the arm does not mutate the cache, but it
-/// records the status as `last_err` so a worklist that empties after only
-/// stale redirects surfaces the real NOT_LEADER rather than the misleading
-/// `NoReachableEndpoints` fallback.
+/// Per-attempt outcome the retry loop dispatches on.
 #[cfg_attr(test, derive(Debug))]
 enum AttemptOutcome {
     Ok {
@@ -347,15 +340,37 @@ enum AttemptOutcome {
         /// future hints must meet to be honored.
         epoch: Option<u128>,
     },
-    StaleLeaderHint(tonic::Status),
-    HintRejected(tonic::Status),
     /// A reachable peer returned `FAILED_PRECONDITION` with **no** leader-hint
     /// trailer: it cannot redirect us because no leader is known yet. Distinct
-    /// from `HintRejected` (malformed trailer / TLS-downgrade-guard drop, which
-    /// are deterministic and must keep failing fast) so the retry loop can ride
-    /// out an in-progress election. Carries the originating status as `last_err`.
+    /// from `HintUnusable` (which carries an actionable-but-unfollowable hint)
+    /// so the retry loop can ride out an in-progress election. Carries the
+    /// originating status as `last_err`.
     NoLeaderYet(tonic::Status),
+    /// A NOT_LEADER carrying a hint the client could not follow. `reason`
+    /// distinguishes transient cluster flux the loop rides out (`StaleEpoch`)
+    /// from a deterministic rejection it must keep failing fast on
+    /// (`Rejected`). Carries the originating `FAILED_PRECONDITION` so a
+    /// worklist that empties after only unusable hints surfaces the real
+    /// NOT_LEADER rather than the misleading `NoReachableEndpoints` fallback.
+    HintUnusable {
+        status: tonic::Status,
+        reason: HintUnusableReason,
+    },
     Err(ClientError),
+}
+
+/// Why a decoded leader hint could not be followed — selects the retry loop's
+/// reaction (ride out the election vs. fail fast).
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum HintUnusableReason {
+    /// A well-formed hint that could not outrank the cached leader (a strictly
+    /// lower epoch, or an epoch-less hint to an off-list endpoint). Transient
+    /// cluster flux — an election signal the loop rides out (issue #340).
+    StaleEpoch,
+    /// A NOT_LEADER the client could not act on for a deterministic reason: a
+    /// malformed trailer, or a plaintext hint dropped under `tls_config`. Not
+    /// an election — the loop must keep failing fast.
+    Rejected,
 }
 
 async fn attempt(
@@ -540,7 +555,7 @@ fn classify_not_leader_hint(
             // No leader-hint trailer: the peer is up but no leader is known
             // yet (the election signature). Return early as its own outcome so
             // the retry loop can ride out the election — distinct from the
-            // malformed / guard-dropped cases below, which stay `HintRejected`
+            // malformed / guard-dropped cases below, which stay `HintUnusable { reason: Rejected }`
             // and keep failing fast.
             #[cfg(feature = "tracing")]
             tracing::warn!(
@@ -585,10 +600,16 @@ fn classify_not_leader_hint(
                      the cached leader — either a stale epoch behind the cached \
                      one, or an epoch-less hint to an off-list endpoint",
                 );
-                AttemptOutcome::StaleLeaderHint(status)
+                AttemptOutcome::HintUnusable {
+                    status,
+                    reason: HintUnusableReason::StaleEpoch,
+                }
             }
         }
-        None => AttemptOutcome::HintRejected(status),
+        None => AttemptOutcome::HintUnusable {
+            status,
+            reason: HintUnusableReason::Rejected,
+        },
     }
 }
 
@@ -681,7 +702,8 @@ mod tests {
     /// Symmetric guard: a *deterministic* (non-transport) server rejection is
     /// definitive about this request and must be surfaced verbatim, even when
     /// an election was seen earlier. Stickiness is scoped to transport-class
-    /// stragglers, not to a `HintRejected` / `Internal` the server returned.
+    /// stragglers, not to a `HintUnusable { reason: Rejected }` / `Internal`
+    /// the server returned.
     #[test]
     fn deterministic_rejection_outranks_a_stale_election_signal() {
         let election = tonic::Status::failed_precondition("no leader yet");
@@ -901,7 +923,7 @@ mod tests {
     /// A FAILED_PRECONDITION with NO leader-hint trailer (a follower that does
     /// not yet know a leader — the election signature) classifies as
     /// `NoLeaderYet`, distinct from a malformed/guard-dropped hint
-    /// (`HintRejected`). Pins the split that lets the retry loop ride out an
+    /// (`HintUnusable { reason: Rejected }`). Pins the split that lets the retry loop ride out an
     /// election without also riding out deterministic bad-hint rejections.
     #[test]
     fn absent_hint_classifies_as_no_leader_yet() {
@@ -931,10 +953,10 @@ mod tests {
 
     /// A trailer containing bytes that don't decode as a `LeaderHint`
     /// (here: 0xff repeated — never a valid protobuf prefix) must
-    /// route to `HintRejected`, not panic, and must bump the
+    /// route to `HintUnusable { reason: Rejected }`, not panic, and must bump the
     /// decode-failures metric. Covers `LeaderHintLookup::Malformed`.
     #[test]
-    fn classify_malformed_hint_returns_hint_rejected() {
+    fn classify_malformed_hint_returns_rejected() {
         enable_tracing();
         use tonic::metadata::{BinaryMetadataValue, MetadataKey};
         let pool = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
@@ -946,8 +968,11 @@ mod tests {
             BinaryMetadataValue::from_bytes(&[0xff, 0xff, 0xff, 0xff]),
         );
         match classify_not_leader_hint(&pool, "a:1", status) {
-            AttemptOutcome::HintRejected(_) => {}
-            other => panic!("expected HintRejected, got {other:?}"),
+            AttemptOutcome::HintUnusable {
+                reason: HintUnusableReason::Rejected,
+                ..
+            } => {}
+            other => panic!("expected HintUnusable {{ reason: Rejected }}, got {other:?}"),
         }
     }
 
@@ -1025,10 +1050,10 @@ mod tests {
     /// the cached leader's epoch must be dropped — that is the whole
     /// point of the epoch-monotone gate. The outcome carries the
     /// originating `FAILED_PRECONDITION` so the retry loop's
-    /// `StaleLeaderHint` arm can record it as `last_err`; the arm
+    /// `HintUnusable { reason: StaleEpoch }` arm can record it as `last_err`; the arm
     /// continues without mutating the cache.
     #[test]
-    fn classify_stale_epoch_hint_returns_stale_leader_hint() {
+    fn classify_stale_epoch_hint_returns_stale_epoch() {
         enable_tracing();
         let pool = ChannelPool::new(
             vec!["a:1".into(), "b:1".into()],
@@ -1042,10 +1067,13 @@ mod tests {
             leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
-            AttemptOutcome::StaleLeaderHint(status) => {
+            AttemptOutcome::HintUnusable {
+                status,
+                reason: HintUnusableReason::StaleEpoch,
+            } => {
                 assert_eq!(status.code(), tonic::Code::FailedPrecondition);
             }
-            other => panic!("expected StaleLeaderHint, got {other:?}"),
+            other => panic!("expected HintUnusable {{ reason: StaleEpoch }}, got {other:?}"),
         }
         // Cache must be untouched.
         assert_eq!(pool.cached_leader().as_deref(), Some("a:1"));
@@ -1078,11 +1106,11 @@ mod tests {
 
     /// Under `tls_required = true`, a hint with an explicit `http://`
     /// scheme must be refused so a malicious or misconfigured peer
-    /// cannot downgrade the transport. The outcome is `HintRejected`
-    /// (not `StaleLeaderHint`) because the cache is still valid; the
+    /// cannot downgrade the transport. The outcome is `HintUnusable { reason: Rejected }`
+    /// (not `HintUnusable { reason: StaleEpoch }`) because the cache is still valid; the
     /// hint just wasn't usable.
     #[test]
-    fn classify_plaintext_hint_under_tls_returns_hint_rejected() {
+    fn classify_plaintext_hint_under_tls_returns_rejected() {
         enable_tracing();
         let pool = ChannelPool::new(vec!["a:1".into()], None, true, RetryPolicy::default());
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
@@ -1090,8 +1118,11 @@ mod tests {
             leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 7 }),
         });
         match classify_not_leader_hint(&pool, "a:1", status) {
-            AttemptOutcome::HintRejected(_) => {}
-            other => panic!("expected HintRejected, got {other:?}"),
+            AttemptOutcome::HintUnusable {
+                reason: HintUnusableReason::Rejected,
+                ..
+            } => {}
+            other => panic!("expected HintUnusable {{ reason: Rejected }}, got {other:?}"),
         }
     }
 
@@ -1186,7 +1217,7 @@ mod tests {
     /// and mixed-version clusters, where stale redirects are common.
     ///
     /// Drives the real `issue_rpc` loop against a loopback peer so the
-    /// `attempt → classify_not_leader_hint → StaleLeaderHint` path — and the
+    /// `attempt → classify_not_leader_hint → HintUnusable { reason: StaleEpoch }` path — and the
     /// loop's `last_err` bookkeeping — is exercised end to end.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stale_leader_hint_surfaces_failed_precondition_not_no_reachable_endpoints() {
@@ -1203,7 +1234,7 @@ mod tests {
             {
                 // NOT_LEADER with a well-formed hint at epoch 5 — strictly
                 // behind the epoch-10 leader the client has cached, so the
-                // epoch-monotone gate drops it: AttemptOutcome::StaleLeaderHint.
+                // epoch-monotone gate drops it: AttemptOutcome::HintUnusable { reason: StaleEpoch }.
                 Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
                     leader_endpoint: Some("b:1".into()),
                     leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
@@ -1264,7 +1295,7 @@ mod tests {
             ),
             other => panic!(
                 "expected ClientError::Rpc(FailedPrecondition), got {other:?} \
-                 (NoReachableEndpoints means the StaleLeaderHint arm dropped last_err)"
+                 (NoReachableEndpoints means the HintUnusable {{ reason: StaleEpoch }} arm dropped last_err)"
             ),
         }
     }
@@ -2054,7 +2085,7 @@ mod tests {
     }
 
     /// A NOT_LEADER carrying a *malformed* trailer is a deterministic peer bug,
-    /// not an election: it classifies as `HintRejected`, sets no signal, and the
+    /// not an election: it classifies as `HintUnusable { reason: Rejected }`, sets no signal, and the
     /// single-endpoint loop fails fast rather than riding out to the deadline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn malformed_hint_does_not_ride_out() {
