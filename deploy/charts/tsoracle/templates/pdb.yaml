@@ -1,0 +1,14 @@
+{{- if ne .Values.driver "file" }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tsoracle.name" . }}
+  labels:
+    {{- include "tsoracle.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ add (div (int .Values.replicas) 2) 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tsoracle
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

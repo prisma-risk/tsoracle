@@ -1,0 +1,17 @@
+tsoracle is running with driver={{ .Values.driver }}.
+
+To reach the timestamp oracle from within the cluster:
+
+  {{ include "tsoracle.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.client }}
+
+{{- if .Values.tls.enabled }}
+
+TLS is enabled. The Secret {{ .Values.tls.secretName | quote }} must contain:
+  tls.crt  — server certificate (or chain)
+  tls.key  — server private key
+  ca.crt   — cluster-dedicated CA certificate used to sign peer and (when
+             clientMtls=true) client certificates
+
+Peer connections between replicas require a CA shared across all nodes.
+Do not reuse a public CA here — provision a dedicated internal CA.
+{{- end }}

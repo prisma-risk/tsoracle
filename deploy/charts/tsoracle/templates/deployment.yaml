@@ -1,0 +1,80 @@
+{{- if eq .Values.driver "file" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tsoracle.name" . }}
+  labels:
+    {{- include "tsoracle.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tsoracle
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "tsoracle.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: tsoracle
+          image: {{ include "tsoracle.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: DRIVER
+              value: "file"
+            - name: TSO_PORT
+              value: {{ .Values.ports.client | quote }}
+            - name: DATA_DIR
+              value: /data
+            - name: WINDOW_AHEAD
+              value: {{ .Values.server.windowAhead | quote }}
+            - name: FAILOVER_ADVANCE
+              value: {{ .Values.server.failoverAdvance | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.server.logLevel | quote }}
+            {{- if .Values.tls.enabled }}
+            - name: TLS_DIR
+              value: /etc/tsoracle/tls
+            - name: CLIENT_MTLS
+              value: {{ .Values.tls.clientMtls | quote }}
+            {{- end }}
+          ports:
+            - name: tso
+              containerPort: {{ .Values.ports.client }}
+          readinessProbe:
+            tcpSocket:
+              port: tso
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: tso
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /etc/tsoracle/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "tsoracle.name" . }}-data
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+{{- end }}

@@ -1,0 +1,110 @@
+{{- if ne .Values.driver "file" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "tsoracle.name" . }}
+  labels:
+    {{- include "tsoracle.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "tsoracle.peerService" . }}
+  replicas: {{ include "tsoracle.replicas" . }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tsoracle
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "tsoracle.labels" . | nindent 8 }}
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: tsoracle
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: tsoracle
+          image: {{ include "tsoracle.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: DRIVER
+              value: {{ .Values.driver | quote }}
+            - name: REPLICAS
+              value: {{ .Values.replicas | quote }}
+            - name: STATEFULSET_NAME
+              value: {{ include "tsoracle.name" . | quote }}
+            - name: PEER_SERVICE
+              value: {{ include "tsoracle.peerService" . | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PEER_PORT
+              value: {{ .Values.ports.peer | quote }}
+            - name: TSO_PORT
+              value: {{ .Values.ports.client | quote }}
+            - name: DATA_DIR
+              value: /data
+            - name: WINDOW_AHEAD
+              value: {{ .Values.server.windowAhead | quote }}
+            - name: FAILOVER_ADVANCE
+              value: {{ .Values.server.failoverAdvance | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.server.logLevel | quote }}
+            {{- if .Values.tls.enabled }}
+            - name: TLS_DIR
+              value: /etc/tsoracle/tls
+            - name: CLIENT_MTLS
+              value: {{ .Values.tls.clientMtls | quote }}
+            {{- end }}
+          ports:
+            - name: peer
+              containerPort: {{ .Values.ports.peer }}
+            - name: tso
+              containerPort: {{ .Values.ports.client }}
+          readinessProbe:
+            tcpSocket:
+              port: tso
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: tso
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /etc/tsoracle/tls
+              readOnly: true
+            {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+        {{- with .Values.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+{{- end }}
