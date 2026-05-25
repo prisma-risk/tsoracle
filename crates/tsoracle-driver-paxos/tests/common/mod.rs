@@ -438,6 +438,28 @@ pub fn build_mem_cluster(node_count: usize) -> MemCluster {
 }
 
 pub fn build_mem_cluster_with_policy(node_count: usize, policy: SnapshotPolicy) -> MemCluster {
+    build_mem_cluster_inner(node_count, policy, None)
+}
+
+/// Build a cluster with an explicit barrier-wait timeout (default snapshot
+/// policy). Lets the barrier-liveness tests force the deadline path on a short,
+/// virtual-time-friendly timeout instead of the host's multi-second default.
+pub fn build_mem_cluster_with_barrier_timeout(
+    node_count: usize,
+    barrier_timeout: Duration,
+) -> MemCluster {
+    build_mem_cluster_inner(
+        node_count,
+        SnapshotPolicy::disabled(),
+        Some(barrier_timeout),
+    )
+}
+
+fn build_mem_cluster_inner(
+    node_count: usize,
+    policy: SnapshotPolicy,
+    barrier_timeout: Option<Duration>,
+) -> MemCluster {
     assert!(
         node_count >= 3,
         "omnipaxos 0.2 rejects ClusterConfig with fewer than 3 nodes"
@@ -469,14 +491,16 @@ pub fn build_mem_cluster_with_policy(node_count: usize, policy: SnapshotPolicy) 
         let shared_omnipaxos = Arc::new(Mutex::new(omnipaxos));
         let inbox = network.register(node_id);
 
-        let host = StandaloneHost::builder()
+        let mut builder = StandaloneHost::builder()
             .omnipaxos(shared_omnipaxos.clone())
             .my_node_id(node_id)
             .peers(Vec::new())
             .tick_interval(DEFAULT_TICK_INTERVAL)
-            .snapshot_policy(policy)
-            .build()
-            .expect("build standalone host");
+            .snapshot_policy(policy);
+        if let Some(barrier_timeout) = barrier_timeout {
+            builder = builder.barrier_timeout(barrier_timeout);
+        }
+        let host = builder.build().expect("build standalone host");
         let leader_stream = host.take_leader_stream();
         nodes.push(NodeHandle {
             node_id,

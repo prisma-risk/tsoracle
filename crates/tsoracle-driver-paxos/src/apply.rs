@@ -28,6 +28,7 @@
 //! public [`crate::state_machine`] primitives.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use omnipaxos::OmniPaxos;
 use omnipaxos::storage::Storage;
@@ -40,6 +41,15 @@ use crate::log_entry::HighWaterCommand;
 use crate::snapshot_policy::SnapshotPolicy;
 use crate::state_machine::{ApplyState, drain_decided_into, maybe_snapshot};
 
+/// Liveness of the async apply task, tracked so a barrier waiter can tell
+/// "no task has ever been spawned" (the synchronous stepping path drives
+/// `apply_once` itself) from "a task was spawned and has since died" (a panic
+/// or shutdown — the barrier can never be folded, so the waiter must fail
+/// fast rather than park).
+const APPLY_NEVER_SPAWNED: u8 = 0;
+const APPLY_ALIVE: u8 = 1;
+const APPLY_DEAD: u8 = 2;
+
 /// Apply state + snapshot policy + the drain/snapshot step.
 ///
 /// Cheap to clone (Arc-wrapped fields). [`ApplyEngine::spawn`] moves a clone
@@ -49,6 +59,11 @@ use crate::state_machine::{ApplyState, drain_decided_into, maybe_snapshot};
 pub(crate) struct ApplyEngine {
     apply_state: ApplyState,
     policy: Arc<Mutex<SnapshotPolicy>>,
+    /// Shared liveness of the spawned apply task — see the `APPLY_*` constants.
+    /// `spawn` flips it to `APPLY_ALIVE`; the task's death-guard flips it to
+    /// `APPLY_DEAD` on any exit. Read by the host's barrier waits via
+    /// [`Self::apply_task_died`].
+    apply_liveness: Arc<AtomicU8>,
 }
 
 impl ApplyEngine {
@@ -56,7 +71,18 @@ impl ApplyEngine {
         Self {
             apply_state: ApplyState::new(),
             policy: Arc::new(Mutex::new(policy)),
+            apply_liveness: Arc::new(AtomicU8::new(APPLY_NEVER_SPAWNED)),
         }
+    }
+
+    /// Whether a spawned apply task has died (panicked or been shut down).
+    ///
+    /// `false` while no task has ever been spawned — the synchronous stepping
+    /// path ([`crate::StandaloneHost::apply_once`]) folds barriers itself, so
+    /// "never spawned" must not be mistaken for "dead". A barrier waiter uses
+    /// this to fail fast once the task that would fold its barrier is gone.
+    pub(crate) fn apply_task_died(&self) -> bool {
+        self.apply_liveness.load(Ordering::Acquire) == APPLY_DEAD
     }
 
     /// Fold the decided suffix from `*cursor` into the apply state *without*
@@ -137,7 +163,22 @@ impl ApplyEngine {
         let shutdown = Arc::new(Notify::new());
         let task_shutdown = shutdown.clone();
         let engine = self.clone();
+
+        // Mark the task live *before* spawning so a `start()` caller that
+        // immediately issues a barrier read observes `APPLY_ALIVE`, never a
+        // transient `APPLY_NEVER_SPAWNED`. The death-guard, moved into the
+        // task, flips it back to `APPLY_DEAD` on any exit — the shutdown
+        // break, a panic in `apply_step`, or the task being aborted/dropped —
+        // and wakes parked barrier readers on the apply-state notifier so they
+        // fail fast instead of hanging on a task that will never fold again.
+        self.apply_liveness.store(APPLY_ALIVE, Ordering::Release);
+        let death_guard = ApplyDeathGuard {
+            liveness: self.apply_liveness.clone(),
+            waiters: self.apply_notifier(),
+        };
+
         let handle = tokio::spawn(async move {
+            let _death_guard = death_guard;
             loop {
                 tokio::select! {
                     _ = apply_notify.notified() => {
@@ -159,6 +200,25 @@ impl ApplyEngine {
             }
         });
         ApplyTask { handle, shutdown }
+    }
+}
+
+/// Drop-guard moved into the spawned apply task. On the task's exit — by any
+/// path, including a panic unwind or an abort — it marks the apply path dead
+/// and wakes parked barrier readers so they observe the death and fail fast.
+///
+/// `store(DEAD)` happens *before* `notify_waiters` so a reader woken by the
+/// notify always observes `APPLY_DEAD` on its re-check, never a stale
+/// `APPLY_ALIVE`.
+struct ApplyDeathGuard {
+    liveness: Arc<AtomicU8>,
+    waiters: Arc<Notify>,
+}
+
+impl Drop for ApplyDeathGuard {
+    fn drop(&mut self) {
+        self.liveness.store(APPLY_DEAD, Ordering::Release);
+        self.waiters.notify_waiters();
     }
 }
 
