@@ -45,6 +45,12 @@ pub use drivers::file::init_file_seeded;
 mod error;
 pub use error::StandaloneError;
 
+mod admin;
+pub use admin::{
+    AdminError, MemberEntry, MemberRole, MembershipAdmin, MembershipView, NewMember,
+    UnsupportedAdmin,
+};
+
 mod transport;
 pub use transport::TransportHandle;
 
@@ -62,6 +68,11 @@ pub struct Standalone {
     /// client server stops accepting (openraft: graceful leadership handoff;
     /// file/paxos: none). Lazy — it reads live state when awaited at shutdown.
     drain: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    /// Runtime membership administration for this driver.
+    pub admin: Arc<dyn MembershipAdmin>,
+    /// Peer transport for the membership-admin gRPC server (openraft only;
+    /// `noop` for file/paxos in this sub-project).
+    admin_transport: TransportHandle,
 }
 
 impl Standalone {
@@ -76,6 +87,7 @@ impl Standalone {
     /// Cooperatively stop the peer transport. Call off the same shutdown
     /// signal that stops the client gRPC server.
     pub async fn shutdown(mut self) {
+        self.admin_transport.shutdown().await;
         self.transport.shutdown().await;
     }
 }

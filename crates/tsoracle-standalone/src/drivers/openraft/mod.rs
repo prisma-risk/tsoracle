@@ -212,5 +212,12 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         drain: Some(Box::pin(async move {
             handoff::graceful_leader_handoff(&raft_for_drain, my_id).await
         })),
+        admin: std::sync::Arc::new(crate::admin::UnsupportedAdmin::new(
+            crate::admin::MembershipView {
+                members: Vec::new(),
+                leader: None,
+            },
+        )),
+        admin_transport: crate::TransportHandle::noop(),
     })
 }
