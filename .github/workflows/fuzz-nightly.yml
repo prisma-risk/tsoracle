@@ -17,6 +17,9 @@ on:
         default: "1800"
         type: string
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   fuzz:
     name: ${{ matrix.target }}
