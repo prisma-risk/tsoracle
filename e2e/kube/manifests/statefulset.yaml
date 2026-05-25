@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tsoracle
+  labels:
+    app.kubernetes.io/name: tsoracle
+spec:
+  serviceName: tsoracle-peer
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tsoracle
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsoracle
+    spec:
+      # Spread the three replicas across the three kind workers so a node
+      # drain takes out at most one quorum member.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: tsoracle
+              topologyKey: kubernetes.io/hostname
+      # The standalone example only handles SIGINT today; until SIGTERM is
+      # wired into serve_with_shutdown, drains hit this grace window and then
+      # SIGKILL. Keep it generous so the known gap does not flap the lane.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: tsoracle
+          image: tsoracle-e2e:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REPLICAS
+              value: "3"
+            - name: STATEFULSET_NAME
+              value: tsoracle
+            - name: PEER_SERVICE
+              value: tsoracle-peer
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RAFT_PORT
+              value: "5100"
+            - name: TSO_PORT
+              value: "5051"
+            - name: DATA_DIR
+              value: /data
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: raft
+              containerPort: 5100
+            - name: tso
+              containerPort: 5051
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # Readiness on the tso port: a follower is ready — it serves
+          # LeaderHint redirects and must stay in Service rotation. A GetTs
+          # probe would wrongly evict every non-leader.
+          readinessProbe:
+            tcpSocket:
+              port: tso
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          # Liveness on the raft port proves the peer transport is up.
+          livenessProbe:
+            tcpSocket:
+              port: raft
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
