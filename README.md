@@ -25,7 +25,7 @@ A distributed timestamp oracle for Rust — highly available and fault-tolerant,
 - 🔌 **Pluggable consensus, openraft + OmniPaxos included** — `tsoracle-driver-openraft` and `tsoracle-driver-paxos` ship production-ready replicated drivers; implement one trait (`ConsensusDriver`) to back tsoracle with raft-rs, etcd, or your own replicated log instead. See [`docs/consensus-integration.md`](docs/consensus-integration.md#choosing-a-driver) for picking between drivers.
 - 📦 **gRPC client included** — `tsoracle-client` handles leader discovery, request coalescing, and reconnection for you.
 - 📈 **Operational metrics** — enable the `metrics` feature on `tsoracle-server` to emit allocator, leader, and request metrics through the `metrics` facade.
-- 🧪 **Hardened** — coverage-guided fuzzing on the postcard decoders, failpoint-driven crash tests, and a stress harness covering single-process and multi-process raft topologies.
+- 🧪 **Hardened** — coverage-guided fuzzing on the postcard decoders, failpoint-driven crash tests, and a stress harness covering in-process and multi-process topologies across the openraft and OmniPaxos backends.
 - 🧩 **Embeddable** — host the server inside your own binary with a few lines of Rust, or run the standalone CLI.
 
 ## Quickstart
