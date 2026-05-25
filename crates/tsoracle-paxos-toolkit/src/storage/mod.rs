@@ -923,8 +923,10 @@ mod crash_recovery_conformance {
     //! resurrect an earlier write while losing a later one. Because OmniPaxos
     //! (and this crate's own pairing tests) issue `trim(idx)` before
     //! `set_compacted_idx(idx)`, the realistic partial-crash state is "trim
-    //! persisted, compacted-index update lost", which the failpoint test below
-    //! reproduces faithfully.
+    //! persisted, compacted-index update lost", which
+    //! `lost_compacted_index_after_trim_recovers_forward_only` in
+    //! `tests/failpoints.rs` reproduces faithfully via the `async_write`
+    //! failpoint.
     //!
     //! fsync itself is not in-process observable (a clean drop + reopen flushes
     //! everything), so a lost write is modeled by making that specific write
@@ -979,147 +981,6 @@ mod crash_recovery_conformance {
         assert_eq!(
             single[0].value, 99,
             "next append continues at absolute idx 4"
-        );
-    }
-
-    #[cfg(feature = "failpoints")]
-    #[test]
-    fn lost_compacted_index_after_trim_recovers_forward_only() {
-        // Realistic crash: trim persists, then the set_compacted_idx write is
-        // lost (the WAL tail is truncated past trim). On reopen the compacted
-        // offset is stale-low, but recovery must stay forward-only — surviving
-        // entries remain readable at their absolute indices, no phantom entry
-        // appears at a low index, and the next append lands past the survivors
-        // rather than overwriting one.
-        let dir = TempDir::new().unwrap();
-        {
-            let db = open_db(&dir, "tso_paxos");
-            let mut storage: RocksdbStorage<TestEntry> =
-                RocksdbStorage::open_in(db, "tso_paxos").unwrap();
-            storage
-                .append_entries(vec![
-                    TestEntry { value: 1 },
-                    TestEntry { value: 2 },
-                    TestEntry { value: 3 },
-                    TestEntry { value: 4 },
-                ])
-                .unwrap();
-            // trim persists (deletes physical keys 0,1).
-            storage.trim(2).unwrap();
-            // The paired compacted-index update is lost in the crash.
-            tsoracle_failpoint::fail::cfg("paxos_toolkit::storage::async_write", "return").unwrap();
-            let lost = storage.set_compacted_idx(2);
-            tsoracle_failpoint::fail::remove("paxos_toolkit::storage::async_write");
-            assert!(
-                lost.is_err(),
-                "the failpoint must drop the compacted-index write"
-            );
-        }
-
-        let db = open_db(&dir, "tso_paxos");
-        let mut storage: RocksdbStorage<TestEntry> =
-            RocksdbStorage::open_in(db, "tso_paxos").unwrap();
-        assert_eq!(
-            storage.get_compacted_idx().unwrap(),
-            0,
-            "the lost compacted-index update leaves the offset stale-low",
-        );
-        // The trimmed-but-uncompacted entries are still readable at their
-        // absolute indices; the trimmed-away keys 0,1 do NOT reappear.
-        let suffix = storage.get_suffix(0).unwrap();
-        assert_eq!(suffix.len(), 2, "only the untrimmed entries survive");
-        assert_eq!(suffix[0].value, 3);
-        assert_eq!(suffix[1].value, 4);
-
-        // Forward-only: the next append lands at idx 4 (past the survivors at
-        // 2,3), never overwriting a survivor or planting a phantom at idx 0.
-        storage.append_entry(TestEntry { value: 99 }).unwrap();
-        let single = storage.get_entries(4, 5).unwrap();
-        assert_eq!(single.len(), 1);
-        assert_eq!(single[0].value, 99);
-        let suffix = storage.get_suffix(2).unwrap();
-        assert_eq!(suffix.len(), 3);
-        assert_eq!(suffix[2].value, 99);
-    }
-}
-
-#[cfg(all(
-    test,
-    feature = "metrics",
-    feature = "failpoints",
-    feature = "rocksdb-storage"
-))]
-mod async_write_metrics_tests {
-    //! A failing async (non-synced) write must increment
-    //! `tsoracle.paxos.storage.async_write_failures.total`, labelled with the
-    //! storage operation that failed. The `async_write` failpoint forces the
-    //! `batch_async` body to return an error; a thread-local recorder captures
-    //! the emitted counter so the assertion observes real emission, not a mock.
-
-    use super::log_tests::fresh_storage;
-    use metrics_util::{
-        MetricKind,
-        debugging::{DebugValue, DebuggingRecorder},
-    };
-    use omnipaxos::storage::Storage;
-    use tempfile::TempDir;
-
-    const ASYNC_WRITE_FP: &str = "paxos_toolkit::storage::async_write";
-
-    /// Counter value for `name` whose label set contains `op = <expected_op>`.
-    fn counter_with_op(
-        snapshot: &[(
-            metrics_util::CompositeKey,
-            Option<metrics::Unit>,
-            Option<metrics::SharedString>,
-            DebugValue,
-        )],
-        name: &str,
-        expected_op: &str,
-    ) -> u64 {
-        for (composite, _unit, _desc, value) in snapshot {
-            if composite.kind() != MetricKind::Counter || composite.key().name() != name {
-                continue;
-            }
-            let has_op = composite
-                .key()
-                .labels()
-                .any(|label| label.key() == "op" && label.value() == expected_op);
-            if has_op {
-                if let DebugValue::Counter(n) = value {
-                    return *n;
-                }
-            }
-        }
-        0
-    }
-
-    #[test]
-    fn failed_async_write_increments_labelled_failure_counter() {
-        let dir = TempDir::new().unwrap();
-        let mut storage = fresh_storage(&dir);
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        tsoracle_failpoint::fail::cfg(ASYNC_WRITE_FP, "return").unwrap();
-        let result = metrics::with_local_recorder(&recorder, || storage.set_compacted_idx(5));
-        tsoracle_failpoint::fail::remove(ASYNC_WRITE_FP);
-
-        assert!(
-            result.is_err(),
-            "armed failpoint must surface a write error"
-        );
-
-        let snapshot = snapshotter.snapshot().into_vec();
-        assert_eq!(
-            counter_with_op(
-                &snapshot,
-                "tsoracle.paxos.storage.async_write_failures.total",
-                "set_compacted_idx",
-            ),
-            1,
-            "a failed set_compacted_idx must increment the op-labelled failure counter once",
         );
     }
 }
