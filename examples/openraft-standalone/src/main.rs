@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // ---- Raft ----
-    let network = PeerFactory::new(raft_addrs.clone());
+    let network = PeerFactory::new();
     let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
         cli.id,
         config,

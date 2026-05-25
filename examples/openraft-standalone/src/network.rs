@@ -89,30 +89,46 @@ pub const MAX_PEER_MESSAGE_BYTES: usize = SNAPSHOT_CHUNK_SIZE + 256 * 1024;
 const SNAPSHOT_STREAM_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
+// Pool type + eviction helper.
+// ---------------------------------------------------------------------------
+
+type Pool = Arc<Mutex<HashMap<(NodeId, String), RaftPeerServiceClient<Channel>>>>;
+
+// Generic over the value type so the keying/eviction logic is unit-testable
+// without constructing a live RaftPeerServiceClient.
+async fn evict<V>(pool: &Arc<Mutex<HashMap<(NodeId, String), V>>>, target: NodeId, addr: &str) {
+    pool.lock().await.remove(&(target, addr.to_string()));
+}
+
+// ---------------------------------------------------------------------------
 // PeerFactory — constructs PeerNetwork instances for each target node.
 // ---------------------------------------------------------------------------
 
 pub struct PeerFactory {
-    addrs: Arc<HashMap<NodeId, String>>,
-    pool: Arc<Mutex<HashMap<NodeId, RaftPeerServiceClient<Channel>>>>,
+    pool: Pool,
 }
 
 impl PeerFactory {
-    pub fn new(addrs: HashMap<NodeId, String>) -> Self {
+    pub fn new() -> Self {
         Self {
-            addrs: Arc::new(addrs),
             pool: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl Default for PeerFactory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl RaftNetworkFactory<TypeConfig> for PeerFactory {
     type Network = PeerNetwork;
 
-    async fn new_client(&mut self, target: NodeId, _node: &Node) -> Self::Network {
+    async fn new_client(&mut self, target: NodeId, node: &Node) -> Self::Network {
         PeerNetwork {
             target,
-            addrs: self.addrs.clone(),
+            addr: node.addr.clone(),
             pool: self.pool.clone(),
         }
     }
@@ -124,28 +140,25 @@ impl RaftNetworkFactory<TypeConfig> for PeerFactory {
 
 pub struct PeerNetwork {
     target: NodeId,
-    addrs: Arc<HashMap<NodeId, String>>,
-    pool: Arc<Mutex<HashMap<NodeId, RaftPeerServiceClient<Channel>>>>,
+    addr: String,
+    pool: Pool,
 }
 
 impl PeerNetwork {
     /// Return a cached (or freshly connected) tonic client to the target.
     async fn client(&self) -> Result<RaftPeerServiceClient<Channel>, RPCError<TypeConfig>> {
-        let mut pool = self.pool.lock().await;
-        if let Some(c) = pool.get(&self.target) {
-            return Ok(c.clone());
+        let key = (self.target, self.addr.clone());
+        {
+            let pool = self.pool.lock().await;
+            if let Some(client) = pool.get(&key) {
+                return Ok(client.clone());
+            }
         }
-        let endpoint = self.addrs.get(&self.target).ok_or_else(|| {
-            RPCError::Network(NetworkError::from_string(format!(
-                "no address configured for node {}",
-                self.target
-            )))
-        })?;
-        let url = format!("http://{endpoint}");
+        let url = format!("http://{}", self.addr);
         let client = RaftPeerServiceClient::connect(url)
             .await
-            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
-        pool.insert(self.target, client.clone());
+            .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?;
+        self.pool.lock().await.insert(key, client.clone());
         Ok(client)
     }
 }
@@ -158,14 +171,17 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
         let mut c = self.client().await?;
         let payload =
-            postcard::to_stdvec(&rpc).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
-        let resp = c
-            .append_entries(RaftMessage { payload })
-            .await
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+            postcard::to_stdvec(&rpc).map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
+        let resp = match c.append_entries(RaftMessage { payload }).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                evict(&self.pool, self.target, &self.addr).await;
+                return Err(RPCError::Network(NetworkError::new(&err)));
+            }
+        };
         let body: AppendEntriesResponse<TypeConfig> =
             postcard::from_bytes(&resp.into_inner().payload)
-                .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+                .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
         Ok(body)
     }
 
@@ -176,13 +192,16 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         let mut c = self.client().await?;
         let payload =
-            postcard::to_stdvec(&rpc).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
-        let resp = c
-            .vote(RaftMessage { payload })
-            .await
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+            postcard::to_stdvec(&rpc).map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
+        let resp = match c.vote(RaftMessage { payload }).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                evict(&self.pool, self.target, &self.addr).await;
+                return Err(RPCError::Network(NetworkError::new(&err)));
+            }
+        };
         let body: VoteResponse<TypeConfig> = postcard::from_bytes(&resp.into_inner().payload)
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+            .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
         Ok(body)
     }
 
@@ -243,12 +262,17 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
         // outbound stream and aborts on the server side.
         tokio::select! {
             result = c.snapshot(outbound) => {
-                let inner = result
-                    .map_err(|e| StreamingError::Network(NetworkError::new(&e)))?
-                    .into_inner();
+                let raw = match result {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        evict(&self.pool, self.target, &self.addr).await;
+                        return Err(StreamingError::Network(NetworkError::new(&err)));
+                    }
+                };
+                let inner = raw.into_inner();
                 let resp: SnapshotResponse<TypeConfig> =
                     postcard::from_bytes(&inner.payload)
-                        .map_err(|e| StreamingError::Network(NetworkError::new(&e)))?;
+                        .map_err(|err| StreamingError::Network(NetworkError::new(&err)))?;
                 Ok(resp)
             }
             closed = cancel => {
@@ -429,10 +453,37 @@ pub fn server<SM: Send + Sync + 'static>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use openraft::Vote;
     use openraft::type_config::alias::SnapshotMetaOf;
+    use tokio::sync::Mutex;
 
     use super::*;
+
+    #[tokio::test]
+    async fn pool_key_distinguishes_addr_changes() {
+        // Same NodeId, different addr, must not collide in the pool.
+        let mut map: HashMap<(u64, String), u8> = HashMap::new();
+        map.insert((1, "old:1".to_string()), 0);
+        assert!(!map.contains_key(&(1, "new:1".to_string())));
+        assert!(map.contains_key(&(1, "old:1".to_string())));
+    }
+
+    #[tokio::test]
+    async fn evict_removes_only_the_targeted_entry() {
+        let pool: Arc<Mutex<HashMap<(u64, String), u8>>> = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut guard = pool.lock().await;
+            guard.insert((1, "a:1".to_string()), 0);
+            guard.insert((2, "b:2".to_string()), 0);
+        }
+        evict(&pool, 1, "a:1").await;
+        let guard = pool.lock().await;
+        assert!(!guard.contains_key(&(1, "a:1".to_string())));
+        assert!(guard.contains_key(&(2, "b:2".to_string())));
+    }
 
     fn header_chunk() -> SnapshotChunk {
         let vote: VoteOf<TypeConfig> = Vote::new(1, 1);
