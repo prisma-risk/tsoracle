@@ -67,7 +67,11 @@ async fn runners_emit_leader_or_follower_event_after_election() {
             peers,
             Duration::from_millis(10),
         );
-        let stream = runner.take_leader_stream().expect("stream").into_pin();
+        let stream = runner
+            .take_leader_subscriber()
+            .expect("subscriber")
+            .subscribe()
+            .into_pin();
         runner.start(sink.clone());
         runners.push(runner);
         streams.push(stream);

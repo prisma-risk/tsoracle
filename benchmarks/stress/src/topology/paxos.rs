@@ -275,8 +275,8 @@ impl PaxosTopology {
                 .snapshot_policy(SnapshotPolicy::disabled())
                 .build()
                 .with_context(|| format!("paxos topology: build StandaloneHost for node {id}"))?;
-            let leader_stream = host.take_leader_stream().ok_or_else(|| {
-                anyhow::anyhow!("paxos topology: leader stream for node {id} already taken")
+            let leader_subscriber = host.take_leader_subscriber().ok_or_else(|| {
+                anyhow::anyhow!("paxos topology: leader subscriber for node {id} already taken")
             })?;
 
             let sink = Arc::new(MeshSink {
@@ -286,7 +286,7 @@ impl PaxosTopology {
                 .context("paxos topology: host not already running")?;
 
             // ---- Driver + tsoracle server ----
-            let driver = Arc::new(PaxosDriver::new(host, leader_stream));
+            let driver = Arc::new(PaxosDriver::new(host, leader_subscriber));
             let server = Server::builder()
                 .consensus_driver(driver)
                 .build()

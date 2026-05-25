@@ -44,7 +44,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tsoracle_driver_paxos::{HighWaterCommand, SnapshotPolicy, StandaloneHost};
-use tsoracle_paxos_toolkit::lifecycle::{LeaderEventStream, MessageSink};
+use tsoracle_paxos_toolkit::lifecycle::{LeaderEventSubscriber, MessageSink};
 use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
 use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
 
@@ -102,10 +102,11 @@ where
     /// Inbox receiver registered with the shared [`MemNetwork`]. `Option`
     /// because the spawned pump task takes ownership of it.
     inbox: Option<mpsc::Receiver<Message<HighWaterCommand>>>,
-    /// The leader-event stream taken off the host before start. Used by
-    /// tests that build a `PaxosDriver` directly. Optional because a test
-    /// can leave it on the host instead.
-    pub leader_stream: Option<LeaderEventStream>,
+    /// The leader-event subscriber taken off the host before start. Used by
+    /// tests that build a `PaxosDriver` directly, and otherwise retained so the
+    /// channel stays open. Optional because a test can leave it on the host
+    /// instead.
+    pub leader_subscriber: Option<LeaderEventSubscriber>,
     /// Shared OmniPaxos handle for direct inspection (`get_decided_idx`,
     /// `get_current_leader`, `append`, etc.).
     ///
@@ -501,12 +502,12 @@ fn build_mem_cluster_inner(
             builder = builder.barrier_timeout(barrier_timeout);
         }
         let host = builder.build().expect("build standalone host");
-        let leader_stream = host.take_leader_stream();
+        let leader_subscriber = host.take_leader_subscriber();
         nodes.push(NodeHandle {
             node_id,
             host: Some(host),
             inbox: Some(inbox),
-            leader_stream,
+            leader_subscriber,
             omnipaxos: Some(shared_omnipaxos),
             pump_stop: None,
             pump_handle: None,
@@ -580,13 +581,13 @@ pub fn build_rocksdb_cluster_with_policy(
             .snapshot_policy(policy)
             .build()
             .expect("build standalone host");
-        let leader_stream = host.take_leader_stream();
+        let leader_subscriber = host.take_leader_subscriber();
         tempdirs.insert(node_id, dir);
         nodes.push(NodeHandle {
             node_id,
             host: Some(host),
             inbox: Some(inbox),
-            leader_stream,
+            leader_subscriber,
             omnipaxos: Some(shared_omnipaxos),
             pump_stop: None,
             pump_handle: None,
@@ -640,7 +641,7 @@ impl Cluster<RocksdbStorage<HighWaterCommand>> {
             .snapshot_policy(SnapshotPolicy::disabled())
             .build()
             .expect("build standalone host after restart");
-        let leader_stream = host.take_leader_stream();
+        let leader_subscriber = host.take_leader_subscriber();
 
         let slot = self
             .nodes
@@ -649,7 +650,7 @@ impl Cluster<RocksdbStorage<HighWaterCommand>> {
             .expect("node id present");
         slot.host = Some(host);
         slot.inbox = Some(inbox);
-        slot.leader_stream = leader_stream;
+        slot.leader_subscriber = leader_subscriber;
         slot.omnipaxos = Some(shared_omnipaxos);
     }
 }

@@ -21,10 +21,9 @@ use core::pin::Pin;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use parking_lot::Mutex;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
-use tsoracle_paxos_toolkit::lifecycle::LeaderEventStream;
+use tsoracle_paxos_toolkit::lifecycle::LeaderEventSubscriber;
 
 use crate::host::PaxosHighWaterHost;
 use crate::type_config::encode_epoch;
@@ -41,7 +40,12 @@ where
     H: PaxosHighWaterHost,
 {
     host: H,
-    leader_stream: Mutex<Option<LeaderEventStream>>,
+    /// Re-subscribable handle over the runner's leader-event channel. Each
+    /// [`ConsensusDriver::leadership_events`] call mints a fresh stream from it,
+    /// so a second subscriber (e.g. an in-process restart) is never blacked out
+    /// — mirroring the openraft driver, which re-derives its stream from the
+    /// raft metrics watch on every call.
+    leader_subscriber: LeaderEventSubscriber,
 }
 
 impl<H> PaxosDriver<H>
@@ -50,16 +54,15 @@ where
 {
     /// Build a driver around a host.
     ///
-    /// `leader_stream` is taken from the host (typically via
-    /// `StandaloneHost::take_leader_stream`). The driver consumes it
-    /// once on the first call to [`ConsensusDriver::leadership_events`];
-    /// subsequent calls return an empty stream that closes immediately
-    /// (the trait permits this since it is documented as a once-per-
-    /// lifetime subscription).
-    pub fn new(host: H, leader_stream: LeaderEventStream) -> Self {
+    /// `leader_subscriber` is taken from the host (typically via
+    /// `StandaloneHost::take_leader_subscriber`). It is re-subscribable: every
+    /// call to [`ConsensusDriver::leadership_events`] mints a fresh, live stream
+    /// that synchronously yields the current leadership state, so repeated
+    /// subscriptions are well-defined rather than a one-shot take.
+    pub fn new(host: H, leader_subscriber: LeaderEventSubscriber) -> Self {
         Self {
             host,
-            leader_stream: Mutex::new(Some(leader_stream)),
+            leader_subscriber,
         }
     }
 
@@ -76,25 +79,24 @@ where
     H: PaxosHighWaterHost,
 {
     fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
-        let raw = self.leader_stream.lock().take();
+        // Mint a fresh stream on every call. The subscriber's first poll yields
+        // the channel's current state synchronously (the trait's first-item
+        // contract), so a second subscriber sees the live leadership state
+        // rather than an empty stream.
+        let stream = self.leader_subscriber.subscribe();
         let omnipaxos = self.host.omnipaxos();
-        match raw {
-            Some(stream) => {
-                let mapped = stream.map(move |state| match state {
-                    LeaderState::Leader { .. } => {
-                        // Re-derive epoch from the host's view of the
-                        // current ballot. This is what fence checks see.
-                        let ballot = omnipaxos.lock().get_promise();
-                        LeaderState::Leader {
-                            epoch: encode_epoch(ballot),
-                        }
-                    }
-                    other => other,
-                });
-                Box::pin(mapped)
+        let mapped = stream.map(move |state| match state {
+            LeaderState::Leader { .. } => {
+                // Re-derive epoch from the host's view of the current ballot.
+                // This is what fence checks see.
+                let ballot = omnipaxos.lock().get_promise();
+                LeaderState::Leader {
+                    epoch: encode_epoch(ballot),
+                }
             }
-            None => Box::pin(futures::stream::empty()),
-        }
+            other => other,
+        });
+        Box::pin(mapped)
     }
 
     async fn load_high_water(&self) -> Result<u64, ConsensusError> {
@@ -135,6 +137,7 @@ mod tests {
     use super::*;
     use crate::log_entry::HighWaterCommand;
     use omnipaxos::OmniPaxos;
+    use parking_lot::Mutex;
     use std::sync::Arc;
     use tsoracle_paxos_toolkit::lifecycle::leader_event_channel;
     use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
@@ -194,8 +197,8 @@ mod tests {
     #[tokio::test]
     async fn persist_with_stale_epoch_returns_fenced() {
         let host = StubHost::new();
-        let (_sender, stream) = leader_event_channel();
-        let driver = PaxosDriver::new(host, stream);
+        let (_sender, subscriber) = leader_event_channel();
+        let driver = PaxosDriver::new(host, subscriber);
 
         let stale_epoch = Epoch(0xDEAD_BEEF);
         let result = driver.persist_high_water(42, stale_epoch).await;
@@ -216,8 +219,8 @@ mod tests {
         let current_ballot = host.omnipaxos().lock().get_promise();
         let current_epoch = encode_epoch(current_ballot);
 
-        let (_sender, stream) = leader_event_channel();
-        let driver = PaxosDriver::new(host, stream);
+        let (_sender, subscriber) = leader_event_channel();
+        let driver = PaxosDriver::new(host, subscriber);
 
         // The range guard must run before the Advance is appended to the log,
         // so an out-of-range fence value is never durably committed. StubHost's
@@ -248,8 +251,8 @@ mod tests {
         let current_ballot = host.omnipaxos().lock().get_promise();
         let current_epoch = encode_epoch(current_ballot);
 
-        let (_sender, stream) = leader_event_channel();
-        let driver = PaxosDriver::new(host, stream);
+        let (_sender, subscriber) = leader_event_channel();
+        let driver = PaxosDriver::new(host, subscriber);
 
         let result = driver.persist_high_water(99, current_epoch).await;
         // StubHost::submit_advance returns Ok(at_least).
@@ -257,23 +260,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leadership_events_is_take_once() {
+    async fn leadership_events_resubscribes_on_each_call() {
         let host = StubHost::new();
-        let (_sender, stream) = leader_event_channel();
-        let driver = PaxosDriver::new(host, stream);
+        let (sender, subscriber) = leader_event_channel();
+        let driver = PaxosDriver::new(host, subscriber);
 
-        // First call returns a real stream.
-        let _first = driver.leadership_events();
-        // Second call returns an empty stream that closes immediately.
+        // Drive the channel to a leader state so a fresh subscription has a
+        // non-`Unknown` current value to surface synchronously.
+        sender
+            .send(LeaderState::Leader { epoch: Epoch(7) })
+            .unwrap();
+
+        // The first subscription yields the current leader state...
+        let mut first = driver.leadership_events();
+        assert!(
+            matches!(first.next().await, Some(LeaderState::Leader { .. })),
+            "first subscription must yield the current leader state",
+        );
+
+        // ...and a SECOND subscription is NOT a silent blackout: it re-derives
+        // a fresh stream that synchronously yields the current state too. The
+        // pre-fix driver `take()`s the stream once and returns `stream::empty()`
+        // here, so this would observe `None`.
         let mut second = driver.leadership_events();
-        assert!(second.next().await.is_none());
+        assert!(
+            matches!(second.next().await, Some(LeaderState::Leader { .. })),
+            "a second subscription must re-derive a live stream, not blackout",
+        );
     }
 
     #[tokio::test]
     async fn load_high_water_delegates_to_host() {
         let host = StubHost::new();
-        let (_sender, stream) = leader_event_channel();
-        let driver = PaxosDriver::new(host, stream);
+        let (_sender, subscriber) = leader_event_channel();
+        let driver = PaxosDriver::new(host, subscriber);
         assert_eq!(driver.load_high_water().await.unwrap(), 0);
     }
 }

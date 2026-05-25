@@ -15,7 +15,9 @@
 pub mod events;
 pub mod state;
 
-pub use events::{LeaderEventSender, LeaderEventStream, SendError, leader_event_channel};
+pub use events::{
+    LeaderEventSender, LeaderEventStream, LeaderEventSubscriber, SendError, leader_event_channel,
+};
 pub use state::LeadershipState;
 pub use tsoracle_core::TsoPeer;
 
@@ -70,7 +72,7 @@ where
     peers: Vec<TsoPeer>,
     tick_interval: Duration,
     leader_sender: LeaderEventSender,
-    leader_stream: Option<LeaderEventStream>,
+    leader_subscriber: Option<LeaderEventSubscriber>,
     apply_notify: Arc<Notify>,
     handle: Option<JoinHandle<()>>,
     sender_handle: Option<JoinHandle<()>>,
@@ -98,14 +100,14 @@ where
         peers: Vec<TsoPeer>,
         tick_interval: Duration,
     ) -> Self {
-        let (leader_sender, leader_stream) = leader_event_channel();
+        let (leader_sender, leader_subscriber) = leader_event_channel();
         Self {
             omnipaxos,
             my_node_id,
             peers,
             tick_interval,
             leader_sender,
-            leader_stream: Some(leader_stream),
+            leader_subscriber: Some(leader_subscriber),
             apply_notify: Arc::new(Notify::new()),
             handle: None,
             sender_handle: None,
@@ -114,10 +116,18 @@ where
         }
     }
 
-    /// Take ownership of the leader-event stream. Returns `None` if already taken.
+    /// Take ownership of the leader-event subscriber. Returns `None` if already
+    /// taken.
+    ///
+    /// The runner keeps only the [`LeaderEventSender`] after this hand-off, not
+    /// a receiver, so the consumer that holds the returned subscriber is the
+    /// sole owner of the channel's receiver side. Dropping it (and every stream
+    /// it minted) closes the channel, which is the runner's drop-based shutdown
+    /// signal. The subscriber itself is re-subscribable, so a consumer can mint
+    /// fresh streams without coming back to the runner.
     #[must_use]
-    pub fn take_leader_stream(&mut self) -> Option<LeaderEventStream> {
-        self.leader_stream.take()
+    pub fn take_leader_subscriber(&mut self) -> Option<LeaderEventSubscriber> {
+        self.leader_subscriber.take()
     }
 
     /// Notification fired once per tick, after outbound messages have been
@@ -536,10 +546,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn take_leader_stream_is_once_only() {
+    async fn take_leader_subscriber_is_once_only() {
         let mut runner = build_runner(1);
-        assert!(runner.take_leader_stream().is_some());
-        assert!(runner.take_leader_stream().is_none());
+        assert!(runner.take_leader_subscriber().is_some());
+        assert!(runner.take_leader_subscriber().is_none());
     }
 
     #[tokio::test]
@@ -572,7 +582,11 @@ mod tests {
         // observes leader = None, emits LeaderState::Unknown via the
         // leader-event channel, and calls notify_waiters().
         let mut runner = build_runner(1);
-        let mut stream = runner.take_leader_stream().expect("stream").into_pin();
+        let mut stream = runner
+            .take_leader_subscriber()
+            .expect("subscriber")
+            .subscribe()
+            .into_pin();
         runner.start(Arc::new(NoopSink));
 
         // First yielded value is the initial Unknown.
@@ -666,19 +680,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn tick_loop_exits_when_leader_stream_dropped() {
+    async fn tick_loop_exits_when_leader_subscriber_dropped() {
         // The tick loop emits every leadership transition through the
-        // leader-event channel. Once every subscriber has dropped the stream,
+        // leader-event channel. Once every receiver is gone,
         // `LeaderEventSender::send` returns `SendError::Closed`, and the loop
         // must exit on its own rather than spin forever emitting into a closed
-        // channel. Take the stream and drop it before starting, so the first
-        // tick's leader-event send observes the closed channel and breaks —
-        // without anyone firing the shutdown signal. This is the only path
-        // that ends the loop here, so the task finishing before we call
-        // `stop()` is proof the closed-channel arm ran.
+        // channel. Take the subscriber and drop it before starting (it has
+        // minted no stream, so it is the sole receiver), so the first tick's
+        // leader-event send observes the closed channel and breaks — without
+        // anyone firing the shutdown signal. This is the only path that ends
+        // the loop here, so the task finishing before we call `stop()` is proof
+        // the closed-channel arm ran.
         let mut runner = build_runner(1);
-        let stream = runner.take_leader_stream().expect("stream");
-        drop(stream);
+        let subscriber = runner.take_leader_subscriber().expect("subscriber");
+        drop(subscriber);
         runner.start(Arc::new(NoopSink));
 
         let exited = wait_until(Duration::from_secs(1), || {
@@ -691,7 +706,7 @@ mod tests {
         .await;
         assert!(
             exited,
-            "tick loop must exit once the leader-event stream is dropped",
+            "tick loop must exit once the leader-event subscriber is dropped",
         );
 
         // `stop()` remains safe to call after the task has already exited.

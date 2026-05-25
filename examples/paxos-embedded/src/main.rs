@@ -128,9 +128,9 @@ async fn main() -> anyhow::Result<()> {
             .snapshot_policy(SnapshotPolicy::disabled())
             .build()
             .context("build StandaloneHost")?;
-        let leader_stream = host
-            .take_leader_stream()
-            .context("leader stream is fresh")?;
+        let leader_subscriber = host
+            .take_leader_subscriber()
+            .context("leader subscriber is fresh")?;
 
         let sink = Arc::new(MeshSink {
             network: network.clone(),
@@ -138,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
         host.start(sink).context("host not already running")?;
 
         // ---- Driver + tsoracle server ----
-        let driver = Arc::new(PaxosDriver::new(host, leader_stream));
+        let driver = Arc::new(PaxosDriver::new(host, leader_subscriber));
         let server = TsoServer::builder().consensus_driver(driver).build()?;
 
         let (tso_shutdown_tx, tso_shutdown_rx) = oneshot::channel::<()>();

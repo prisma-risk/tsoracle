@@ -29,7 +29,7 @@ use omnipaxos::messages::Message;
 use omnipaxos::storage::Storage;
 use parking_lot::Mutex;
 use tsoracle_consensus::{AdvancePayload, ConsensusError};
-use tsoracle_paxos_toolkit::lifecycle::{LeaderEventStream, MessageSink, PaxosRunner, TsoPeer};
+use tsoracle_paxos_toolkit::lifecycle::{LeaderEventSubscriber, MessageSink, PaxosRunner, TsoPeer};
 
 use crate::apply::{ApplyEngine, ApplyTask};
 use crate::host::PaxosHighWaterHost;
@@ -45,7 +45,7 @@ where
     my_node_id: u64,
     barrier_seq: AtomicU64,
     runner: PaxosRunner<HighWaterCommand, S>,
-    leader_stream: Mutex<Option<LeaderEventStream>>,
+    leader_subscriber: Mutex<Option<LeaderEventSubscriber>>,
     /// Apply state + snapshot policy + the drain/snapshot step. Drives the
     /// synchronous stepping path and the barrier-linearized reads directly,
     /// and the async apply path via a clone moved into the spawned task.
@@ -103,7 +103,7 @@ where
         barrier_timeout: Duration,
     ) -> Self {
         let mut runner = PaxosRunner::new(omnipaxos.clone(), my_node_id, peers, tick_interval);
-        let leader_stream = runner.take_leader_stream();
+        let leader_subscriber = runner.take_leader_subscriber();
 
         // Resume the barrier-nonce counter above any seq this node already
         // used in a prior process lifetime. `barrier_seq` is process-local
@@ -135,7 +135,7 @@ where
             my_node_id,
             barrier_seq: AtomicU64::new(recovered_seq),
             runner,
-            leader_stream: Mutex::new(leader_stream),
+            leader_subscriber: Mutex::new(leader_subscriber),
             engine,
             task: None,
             apply_cursor: Arc::new(Mutex::new(recovery_cursor)),
@@ -143,10 +143,13 @@ where
         }
     }
 
-    /// Take ownership of the leader-event stream. Returns `None` if
-    /// already taken. The driver consumes this at construction.
-    pub fn take_leader_stream(&self) -> Option<LeaderEventStream> {
-        self.leader_stream.lock().take()
+    /// Take ownership of the leader-event subscriber. Returns `None` if
+    /// already taken. The driver consumes this at construction and re-derives a
+    /// fresh stream from it on every `leadership_events` call. The host retains
+    /// no receiver after this hand-off, so the runner's drop-based shutdown
+    /// still fires once the driver (and any stream it minted) is dropped.
+    pub fn take_leader_subscriber(&self) -> Option<LeaderEventSubscriber> {
+        self.leader_subscriber.lock().take()
     }
 
     /// Borrow the OmniPaxos handle for direct interaction.
