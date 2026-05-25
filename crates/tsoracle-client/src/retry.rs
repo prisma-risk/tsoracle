@@ -223,15 +223,22 @@ pub(crate) async fn issue_rpc(
                 last_err = Some(ClientError::Rpc(status));
                 continue;
             }
+            AttemptOutcome::NoLeaderYet(status) => {
+                // Task 1: behave like HintRejected for now (record the status,
+                // advance without charging the budget). A later task turns this
+                // into the election signal that drives the ride-out re-poll.
+                last_err = Some(ClientError::Rpc(status));
+                continue;
+            }
             AttemptOutcome::HintRejected(status) => {
-                // A NOT_LEADER whose hint we could not act on — absent or
-                // malformed trailer, or a hinted endpoint dropped by the
-                // TLS-downgrade guard — is not evidence the cached leader is
-                // wrong, only that this peer could not redirect us. Leave the
-                // cache intact (clearing it stampedes every coalesced caller
-                // back onto a cold worklist on each flap) and advance the
-                // worklist without charging the attempt budget (issue #340),
-                // preserving the status to surface once exhausted.
+                // A NOT_LEADER whose hint we could not act on — malformed
+                // trailer, or a hinted endpoint dropped by the TLS-downgrade
+                // guard — is not evidence the cached leader is wrong, only
+                // that this peer could not redirect us. Leave the cache intact
+                // (clearing it stampedes every coalesced caller back onto a
+                // cold worklist on each flap) and advance the worklist without
+                // charging the attempt budget (issue #340), preserving the
+                // status to surface once exhausted.
                 last_err = Some(ClientError::Rpc(status));
                 continue;
             }
@@ -283,6 +290,12 @@ enum AttemptOutcome {
     },
     StaleLeaderHint(tonic::Status),
     HintRejected(tonic::Status),
+    /// A reachable peer returned `FAILED_PRECONDITION` with **no** leader-hint
+    /// trailer: it cannot redirect us because no leader is known yet. Distinct
+    /// from `HintRejected` (malformed trailer / TLS-downgrade-guard drop, which
+    /// are deterministic and must keep failing fast) so the retry loop can ride
+    /// out an in-progress election. Carries the originating status as `last_err`.
+    NoLeaderYet(tonic::Status),
     Err(ClientError),
 }
 
@@ -465,13 +478,18 @@ fn classify_not_leader_hint(
             (hint.leader_endpoint, epoch)
         }
         LeaderHintLookup::Absent => {
+            // No leader-hint trailer: the peer is up but no leader is known
+            // yet (the election signature). Return early as its own outcome so
+            // the retry loop can ride out the election — distinct from the
+            // malformed / guard-dropped cases below, which stay `HintRejected`
+            // and keep failing fast.
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 endpoint = %endpoint,
                 "tsoracle-client: FAILED_PRECONDITION without leader-hint trailer; \
-                 contacted peer cannot redirect us",
+                 contacted peer cannot redirect us (no leader yet)",
             );
-            (None, None)
+            return AttemptOutcome::NoLeaderYet(status);
         }
         LeaderHintLookup::Malformed => {
             #[cfg(feature = "metrics")]
@@ -758,18 +776,34 @@ mod tests {
         status
     }
 
-    /// A `FAILED_PRECONDITION` carrying no trailer at all surfaces as
-    /// `HintRejected` so the retry loop preserves the status to return
-    /// to the caller once the worklist is exhausted. Covers the
-    /// `LeaderHintLookup::Absent` arm.
+    /// A FAILED_PRECONDITION with NO leader-hint trailer (a follower that does
+    /// not yet know a leader — the election signature) classifies as
+    /// `NoLeaderYet`, distinct from a malformed/guard-dropped hint
+    /// (`HintRejected`). Pins the split that lets the retry loop ride out an
+    /// election without also riding out deterministic bad-hint rejections.
     #[test]
-    fn classify_absent_hint_returns_hint_rejected() {
+    fn absent_hint_classifies_as_no_leader_yet() {
+        let pool = ChannelPool::new(vec!["peer:1".into()], None, false, RetryPolicy::default());
+        let status = tonic::Status::failed_precondition("electing, no leader yet");
+        match classify_not_leader_hint(&pool, "peer:1", status) {
+            AttemptOutcome::NoLeaderYet(s) => {
+                assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+            }
+            other => panic!("absent hint must be NoLeaderYet, got {other:?}"),
+        }
+    }
+
+    /// A `FAILED_PRECONDITION` carrying no trailer at all surfaces as
+    /// `NoLeaderYet` (the election signature: the peer is up but no leader is
+    /// known yet). Covers the `LeaderHintLookup::Absent` arm.
+    #[test]
+    fn classify_absent_hint_returns_no_leader_yet() {
         enable_tracing();
         let pool = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
         let status = tonic::Status::failed_precondition("not leader");
         match classify_not_leader_hint(&pool, "a:1", status) {
-            AttemptOutcome::HintRejected(_) => {}
-            other => panic!("expected HintRejected, got {other:?}"),
+            AttemptOutcome::NoLeaderYet(_) => {}
+            other => panic!("expected NoLeaderYet, got {other:?}"),
         }
     }
 
@@ -940,13 +974,13 @@ mod tests {
     }
 
     /// A NOT_LEADER answer that carries no actionable hint (here: no trailer
-    /// at all → `AttemptOutcome::HintRejected`) must leave the cached leader
+    /// at all → `AttemptOutcome::NoLeaderYet`) must leave the cached leader
     /// in place. The cached leader is not evidence-wrong just because the
     /// contacted peer could not redirect us; clearing it stampedes every
     /// coalesced caller back onto a cold worklist on each NOT_LEADER flap.
     ///
     /// Drives the real `issue_rpc` loop against a loopback fake server so the
-    /// `attempt → classify_not_leader_hint → HintRejected` path — and the
+    /// `attempt → classify_not_leader_hint → NoLeaderYet` path — and the
     /// loop's reaction to it — is exercised end to end, not stubbed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hint_rejected_preserves_cached_leader() {
@@ -962,7 +996,7 @@ mod tests {
             ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
             {
                 // No `tsoracle-leader-hint-bin` trailer → LeaderHintLookup::Absent
-                // → AttemptOutcome::HintRejected in the retry loop.
+                // → AttemptOutcome::NoLeaderYet in the retry loop.
                 Err(tonic::Status::failed_precondition("not leader"))
             }
         }
@@ -1017,8 +1051,7 @@ mod tests {
         assert_eq!(
             pool.cached_leader().as_deref(),
             Some(endpoint.as_str()),
-            "HintRejected (absent/malformed/TLS-rejected hint) must not \
-             invalidate the cached leader",
+            "NoLeaderYet (absent hint) must not invalidate the cached leader",
         );
     }
 
