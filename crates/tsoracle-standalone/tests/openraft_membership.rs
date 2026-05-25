@@ -22,6 +22,9 @@ use tsoracle_standalone::{
     DriverConfig, MemberAddr, MemberRole, NewMember, OpenraftConfig, RaftTuning, build,
 };
 
+/// Bind an ephemeral port, read its address, then release it so the node can
+/// rebind it on boot. TOCTOU-tolerant in practice (same trick the build and
+/// smoke tests use): the window is tiny and the test owns the loopback range.
 async fn lease_port() -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

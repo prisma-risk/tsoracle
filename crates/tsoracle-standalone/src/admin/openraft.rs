@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use openraft::Raft;
 use openraft::async_runtime::watch::WatchReceiver;
-use openraft::error::{ClientWriteError, ForwardToLeader, RaftError};
+use openraft::error::{ChangeMembershipError, ClientWriteError, ForwardToLeader, RaftError};
 use tokio::sync::Mutex;
 use tsoracle_driver_openraft::{HighWaterStateMachine, OpenraftPeer, TypeConfig};
 
@@ -37,6 +37,12 @@ fn map_write_error(err: RaftError<TypeConfig, ClientWriteError<TypeConfig>>) -> 
                 .map(|node| node.admin_endpoint)
                 .filter(|endpoint| !endpoint.is_empty()),
         },
+        // A promote whose target stopped being a learner between our metrics
+        // snapshot and the log apply (e.g. concurrently removed) — surface the
+        // typed NotMember rather than an opaque driver string.
+        RaftError::APIError(ClientWriteError::ChangeMembershipError(
+            ChangeMembershipError::LearnerNotFound(learner),
+        )) => AdminError::NotMember(learner.node_id),
         other => AdminError::Driver(other.to_string()),
     }
 }
@@ -53,6 +59,16 @@ fn voters_without(current: &BTreeSet<u64>, id: u64) -> BTreeSet<u64> {
     let mut next = current.clone();
     next.remove(&id);
     next
+}
+
+/// The voter ids of a membership view. Derived from an already-read view so a
+/// mutating op reads `raft.metrics()` once, under its `op_lock`.
+fn voter_ids(view: &MembershipView) -> BTreeSet<u64> {
+    view.members
+        .iter()
+        .filter(|entry| entry.role == MemberRole::Voter)
+        .map(|entry| entry.id)
+        .collect()
 }
 
 /// openraft-backed membership admin. Holds a clone of the `Raft` handle and a
@@ -96,15 +112,6 @@ impl OpenraftMembershipAdmin {
             leader: metrics.current_leader,
         }
     }
-
-    fn current_voters(&self) -> BTreeSet<u64> {
-        self.raft
-            .metrics()
-            .borrow_watched()
-            .membership_config
-            .voter_ids()
-            .collect()
-    }
 }
 
 #[async_trait]
@@ -144,7 +151,7 @@ impl MembershipAdmin for OpenraftMembershipAdmin {
             Some(entry) if entry.role == MemberRole::Voter => return Ok(()), // idempotent
             _ => {}
         }
-        let next = voters_with(&self.current_voters(), id);
+        let next = voters_with(&voter_ids(&view), id);
         self.raft
             .change_membership(next, false)
             .await
@@ -159,7 +166,7 @@ impl MembershipAdmin for OpenraftMembershipAdmin {
         if !view.members.iter().any(|entry| entry.id == id) {
             return Ok(());
         }
-        let voters = self.current_voters();
+        let voters = voter_ids(&view);
         // Quorum guard: never remove the last voter.
         if voters.contains(&id) && voters.len() <= 1 {
             return Err(AdminError::WouldLoseQuorum);
@@ -227,5 +234,15 @@ mod tests {
             }
             other => panic!("expected NotLeader, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn learner_not_found_maps_to_not_member() {
+        use openraft::error::LearnerNotFound;
+        let err: RaftError<TypeConfig, ClientWriteError<TypeConfig>> =
+            RaftError::APIError(ClientWriteError::ChangeMembershipError(
+                ChangeMembershipError::LearnerNotFound(LearnerNotFound { node_id: 7 }),
+            ));
+        assert!(matches!(map_write_error(err), AdminError::NotMember(7)));
     }
 }
