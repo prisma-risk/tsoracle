@@ -243,3 +243,125 @@ async fn admin_grpc_list_and_add_learner() {
     node2.shutdown().await;
     node1.shutdown().await;
 }
+
+/// Regression for the staged-rollout workflow: `promote` (and `remove`) rebuild
+/// the voter set with openraft `change_membership(.., retain = false)`, which
+/// deletes only *demoted voters* — a standing learner that is not part of the
+/// change must survive. Stage two learners, promote one, and assert the other
+/// is still in the membership as a learner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn coexisting_learner_survives_a_promote() {
+    let dir1 = tempdir().unwrap();
+    let dir2 = tempdir().unwrap();
+    let dir3 = tempdir().unwrap();
+    let raft1 = lease_port().await;
+    let raft2 = lease_port().await;
+    let raft3 = lease_port().await;
+
+    let mut members = BTreeMap::new();
+    members.insert(
+        1,
+        MemberAddr {
+            raft_addr: raft1.to_string(),
+            service_endpoint: "127.0.0.1:1".into(),
+            admin_endpoint: "127.0.0.1:11".into(),
+        },
+    );
+    let node1 = build(DriverConfig::Openraft(OpenraftConfig {
+        id: 1,
+        raft_addr: raft1,
+        raft_dir: dir1.path().join("raft"),
+        bootstrap: true,
+        initial_membership: Some(members),
+        tuning: fast_tuning(),
+        peer_tls: None,
+        admin_listen: None,
+    }))
+    .await
+    .expect("build node 1");
+
+    let mut events = node1.driver.leadership_events();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(state) = events.next().await {
+            if matches!(state, LeaderState::Leader { .. }) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("node 1 elected");
+    drop(events);
+
+    let build_follower = |id: u64, raft_addr, raft_dir| {
+        build(DriverConfig::Openraft(OpenraftConfig {
+            id,
+            raft_addr,
+            raft_dir,
+            bootstrap: false,
+            initial_membership: None,
+            tuning: fast_tuning(),
+            peer_tls: None,
+            admin_listen: None,
+        }))
+    };
+    let node2 = build_follower(2, raft2, dir2.path().join("raft"))
+        .await
+        .expect("build node 2");
+    let node3 = build_follower(3, raft3, dir3.path().join("raft"))
+        .await
+        .expect("build node 3");
+
+    // Stage two learners.
+    node1
+        .admin
+        .add_learner(NewMember {
+            id: 2,
+            raft_addr: raft2.to_string(),
+            service_endpoint: "127.0.0.1:2".into(),
+            admin_endpoint: "127.0.0.1:22".into(),
+        })
+        .await
+        .expect("add learner 2");
+    node1
+        .admin
+        .add_learner(NewMember {
+            id: 3,
+            raft_addr: raft3.to_string(),
+            service_endpoint: "127.0.0.1:3".into(),
+            admin_endpoint: "127.0.0.1:33".into(),
+        })
+        .await
+        .expect("add learner 3");
+
+    // Promote only node 2; node 3 must remain a learner, not be evicted.
+    node1.admin.promote(2).await.expect("promote 2");
+
+    let view = node1.admin.list_members().await.expect("list");
+    assert_eq!(
+        view.members.len(),
+        3,
+        "all three nodes remain in membership"
+    );
+    assert_eq!(
+        view.members
+            .iter()
+            .find(|member| member.id == 2)
+            .unwrap()
+            .role,
+        MemberRole::Voter,
+        "node 2 was promoted to voter"
+    );
+    assert_eq!(
+        view.members
+            .iter()
+            .find(|member| member.id == 3)
+            .unwrap()
+            .role,
+        MemberRole::Learner,
+        "node 3 stays a learner across node 2's promotion"
+    );
+
+    node3.shutdown().await;
+    node2.shutdown().await;
+    node1.shutdown().await;
+}
