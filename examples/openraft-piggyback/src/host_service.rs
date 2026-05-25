@@ -78,6 +78,14 @@ pub struct HostPeer {
     pub addr: String,
 }
 
+impl tsoracle_driver_openraft::ServiceEndpoint for HostPeer {
+    // The piggyback KV demo never redirects tsoracle clients, so it carries no
+    // client endpoint.
+    fn service_endpoint(&self) -> Option<&str> {
+        None
+    }
+}
+
 declare_raft_types_ext! {
     pub HostTypeConfig:
         Node            = HostPeer,
@@ -354,5 +362,17 @@ impl OpenraftHighWaterHost for PiggybackHost {
             }
             Err(e) => Err(ConsensusError::TransientDriver(Box::new(e))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn host_peer_has_no_service_endpoint() {
+        use tsoracle_driver_openraft::ServiceEndpoint;
+        let peer = super::HostPeer {
+            addr: "host-1:7000".to_string(),
+        };
+        assert_eq!(peer.service_endpoint(), None);
     }
 }
