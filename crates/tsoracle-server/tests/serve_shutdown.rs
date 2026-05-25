@@ -28,7 +28,24 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::{Epoch, SystemClock};
-use tsoracle_server::{Server, ServerError, test_fakes::InMemoryDriver};
+use tsoracle_server::{
+    Server, ServerError,
+    test_fakes::{InMemoryDriver, StallableDriver},
+};
+
+/// Spin until the leader-watch fence has entered `persist_high_water` (and, with
+/// the driver stalled from call index 0, is now parked there). Polling the
+/// driver's call counter makes the "watch task is wedged mid-fence" precondition
+/// deterministic rather than timing-dependent.
+async fn wait_until_persist_started(driver: &StallableDriver) {
+    for _ in 0..2_000 {
+        if driver.persist_call_count() >= 1 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("fence never reached persist_high_water within the polling window");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_with_listener_returns_ok_when_user_shutdown_fires() {
@@ -176,6 +193,88 @@ async fn serve_with_listener_translates_watch_panic_to_server_error() {
         }
         other => panic!("expected WatchPanic, got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_returns_within_grace_when_a_driver_call_hangs() {
+    // Regression for the shutdown-stall hazard: the leader-watch fence observes
+    // its cooperative-cancel signal only at `select!` boundaries, never inside a
+    // fence attempt. A `persist_high_water` that never returns (the driver trait
+    // places no latency bound) therefore parks the watch task upstream of any
+    // cancel-observing await, so dropping the cancel sender cannot stop it. Left
+    // unbounded, `serve_inner` would block process exit until the kubelet
+    // escalates to SIGKILL. With a configured `shutdown_grace`, the serve path
+    // must abort the wedged task once the grace elapses and return promptly.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let driver = Arc::new(StallableDriver::new());
+    // Stall every persist from call index 0: the fence's own persist wedges.
+    driver.stall_from(0);
+    driver.become_leader(Epoch(1));
+
+    let server = Server::builder()
+        .consensus_driver(driver.clone())
+        .clock(Arc::new(SystemClock))
+        .shutdown_grace(Duration::from_millis(200))
+        .build()
+        .unwrap();
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serve_task = tokio::spawn(async move {
+        server
+            .serve_with_listener(listener, async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    // The fence must be parked in the stalled persist before we ask to stop, so
+    // the cancel genuinely arrives while a driver call is in flight.
+    wait_until_persist_started(&driver).await;
+    shutdown_tx.send(()).unwrap();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(3), serve_task)
+        .await
+        .expect("serve must return after the grace elapses even though the driver is wedged")
+        .expect("spawned task panicked");
+    assert!(
+        outcome.is_ok(),
+        "a shutdown that forcibly aborts a wedged watch task reports Ok, got {outcome:?}"
+    );
+
+    // Release the held persist so the (now-aborted) future tears down cleanly.
+    driver.release();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_guard_shutdown_returns_within_grace_when_a_driver_call_hangs() {
+    // The embedder-facing analogue: `WatchGuard::shutdown` awaits the same watch
+    // task. A wedged `persist_high_water` must not block an embedder's shutdown
+    // either — the grace bounds the cooperative wait, then the task is aborted.
+    let driver = Arc::new(StallableDriver::new());
+    driver.stall_from(0);
+    driver.become_leader(Epoch(1));
+
+    let server = Server::builder()
+        .consensus_driver(driver.clone())
+        .clock(Arc::new(SystemClock))
+        .shutdown_grace(Duration::from_millis(200))
+        .build()
+        .unwrap();
+
+    let (_routes, guard) = server.into_router().expect("into_router must succeed");
+
+    wait_until_persist_started(&driver).await;
+
+    let outcome = tokio::time::timeout(Duration::from_secs(3), guard.shutdown())
+        .await
+        .expect("WatchGuard::shutdown must return after the grace elapses even when wedged");
+    assert!(
+        outcome.is_ok(),
+        "a forced abort on shutdown reports Ok (the stop was requested), got {outcome:?}"
+    );
+
+    driver.release();
 }
 
 /// Driver whose `leadership_events()` stream resolves to `None` immediately,
