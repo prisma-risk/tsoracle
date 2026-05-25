@@ -36,6 +36,11 @@ pub enum CodecError {
     /// `postcard` failed to deserialize the framed body.
     #[error("decode failed: {0}")]
     Decode(#[source] postcard::Error),
+    /// The body decoded successfully but `extra` bytes remained unconsumed.
+    /// For a versioned on-disk format this signals corruption — e.g. a partial
+    /// overwrite that left stale tail bytes — rather than a clean record.
+    #[error("trailing bytes: {extra} unconsumed after a valid body")]
+    TrailingBytes { extra: usize },
 }
 
 /// Encode `value` as `[version | postcard(value)]`.
@@ -56,7 +61,10 @@ pub fn encode<T: Serialize>(version: u8, value: &T) -> Result<Vec<u8>, CodecErro
 ///
 /// Returns [`CodecError::Version`] when the leading byte differs from
 /// `expected_version` — a stale reader fails loudly instead of parsing old
-/// bytes against a new struct layout.
+/// bytes against a new struct layout. Returns [`CodecError::TrailingBytes`]
+/// when the body decodes but leaves surplus bytes unconsumed: for a versioned
+/// format that exists to catch drift, garbage appended to a valid record is a
+/// corruption signal, not something to silently discard.
 pub fn decode<T: DeserializeOwned>(expected_version: u8, bytes: &[u8]) -> Result<T, CodecError> {
     let (first, rest) = bytes.split_first().ok_or(CodecError::Empty)?;
     if *first != expected_version {
@@ -65,7 +73,13 @@ pub fn decode<T: DeserializeOwned>(expected_version: u8, bytes: &[u8]) -> Result
             actual: *first,
         });
     }
-    postcard::from_bytes(rest).map_err(CodecError::Decode)
+    let (value, remainder) = postcard::take_from_bytes(rest).map_err(CodecError::Decode)?;
+    if !remainder.is_empty() {
+        return Err(CodecError::TrailingBytes {
+            extra: remainder.len(),
+        });
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -129,6 +143,22 @@ mod tests {
         assert!(matches!(
             decode::<Sample>(1, truncated),
             Err(CodecError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        let original = Sample {
+            idx: 7,
+            name: "trailing".into(),
+        };
+        let mut bytes = encode(1, &original).expect("encode");
+        // Simulate a partial overwrite that left stale tail bytes behind: a
+        // valid body followed by garbage postcard never consumes.
+        bytes.extend_from_slice(&[0xAB, 0xCD, 0xEF]);
+        assert!(matches!(
+            decode::<Sample>(1, &bytes),
+            Err(CodecError::TrailingBytes { extra: 3 })
         ));
     }
 

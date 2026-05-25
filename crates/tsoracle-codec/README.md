@@ -9,8 +9,8 @@ Both consensus toolkits (`tsoracle-paxos-toolkit`, `tsoracle-openraft-toolkit`) 
 ## What's in the box
 
 - `encode(version, value)` — serializes `value` with `postcard` and prepends `version`, yielding `[version | postcard(value)]`.
-- `decode(expected_version, bytes)` — checks the leading byte against `expected_version` (returning `CodecError::Version` on mismatch) before deserializing the body.
-- `CodecError` — `Empty`, `Version { expected, actual }`, `Encode(postcard::Error)`, `Decode(postcard::Error)`. Encode and decode failures are kept distinct, and the underlying `postcard::Error` is carried as the error source (no `From` conversion) so a stray `?` never silently becomes a `CodecError`.
+- `decode(expected_version, bytes)` — checks the leading byte against `expected_version` (returning `CodecError::Version` on mismatch) before deserializing the body, and rejects any bytes left unconsumed past a valid body with `CodecError::TrailingBytes` rather than silently discarding them.
+- `CodecError` — `Empty`, `Version { expected, actual }`, `Encode(postcard::Error)`, `Decode(postcard::Error)`, `TrailingBytes { extra }`. Encode and decode failures are kept distinct, and the underlying `postcard::Error` is carried as the error source (no `From` conversion) so a stray `?` never silently becomes a `CodecError`. `TrailingBytes` flags surplus bytes after an otherwise-valid body — for a format that exists to catch drift, garbage appended by a partial overwrite is a corruption signal, not noise to drop.
 
 The schema-version *number* is deliberately **not** owned here. `version` is a parameter, so each consumer keeps its own `SCHEMA_VERSION` constant and evolves its on-disk format independently of the others.
 
