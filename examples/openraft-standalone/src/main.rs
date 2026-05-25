@@ -58,7 +58,8 @@ async fn main() -> Result<()> {
         initial_membership: members,
         tuning: RaftTuning::default(),
     });
-    let node = build(cfg).await?;
+    let mut node = build(cfg).await?;
+    let drain = node.take_drain();
     let server = Server::builder()
         .consensus_driver(node.driver.clone())
         .build()?;
@@ -66,9 +67,13 @@ async fn main() -> Result<()> {
         "tsoracle openraft node {} on http://{}",
         cli.id, cli.tso_addr
     );
-    server
-        .serve_with_shutdown(cli.tso_addr, tsoracle_server::shutdown_signal())
-        .await?;
+    let shutdown = async move {
+        tsoracle_server::shutdown_signal().await;
+        if let Some(drain) = drain {
+            drain.await;
+        }
+    };
+    server.serve_with_shutdown(cli.tso_addr, shutdown).await?;
     node.shutdown().await;
     Ok(())
 }

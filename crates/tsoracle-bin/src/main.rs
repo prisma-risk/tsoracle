@@ -171,9 +171,10 @@ async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
         .with_env_filter(EnvFilter::try_new(&common.log).unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let node: Standalone = tsoracle_standalone::build(cfg)
+    let mut node: Standalone = tsoracle_standalone::build(cfg)
         .await
         .context("driver bootstrap")?;
+    let drain = node.take_drain();
     let server = Server::builder()
         .consensus_driver(node.driver.clone())
         .window_ahead(common.window_ahead)
@@ -189,8 +190,16 @@ async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
     println!("serving on {local_addr}");
     tracing::info!(addr = %local_addr, "tsoracle serving");
 
+    // On drain, run the driver's pre-shutdown step (openraft: leadership
+    // handoff) BEFORE the gRPC server stops accepting, then let serve drain.
+    let shutdown = async move {
+        tsoracle_server::shutdown_signal().await;
+        if let Some(drain) = drain {
+            drain.await;
+        }
+    };
     let result = server
-        .serve_with_listener(listener, tsoracle_server::shutdown_signal())
+        .serve_with_listener(listener, shutdown)
         .await
         .context("serve");
     node.shutdown().await;

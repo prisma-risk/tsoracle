@@ -36,7 +36,8 @@ async fn main() -> Result<()> {
         data_dir: cli.data_dir,
         tick_interval: Duration::from_millis(20),
     });
-    let node = build(cfg).await?;
+    let mut node = build(cfg).await?;
+    let drain = node.take_drain();
     let server = Server::builder()
         .consensus_driver(node.driver.clone())
         .build()?;
@@ -44,9 +45,13 @@ async fn main() -> Result<()> {
         "tsoracle paxos node {} on http://{}",
         cli.node_id, cli.tso_listen
     );
-    server
-        .serve_with_shutdown(cli.tso_listen, tsoracle_server::shutdown_signal())
-        .await?;
+    let shutdown = async move {
+        tsoracle_server::shutdown_signal().await;
+        if let Some(drain) = drain {
+            drain.await;
+        }
+    };
+    server.serve_with_shutdown(cli.tso_listen, shutdown).await?;
     node.shutdown().await;
     Ok(())
 }
