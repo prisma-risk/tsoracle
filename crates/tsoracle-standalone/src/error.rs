@@ -39,6 +39,12 @@ pub enum StandaloneError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to bind admin server on {addr}: {source}")]
+    AdminBind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("driver bootstrap failed: {0}")]
     Bootstrap(Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid configuration: {0}")]

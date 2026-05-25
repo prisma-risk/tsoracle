@@ -71,6 +71,7 @@ async fn add_learner_promote_then_remove() {
         initial_membership: Some(members),
         tuning: fast_tuning(),
         peer_tls: None,
+        admin_listen: None,
     }))
     .await
     .expect("build node 1");
@@ -95,6 +96,7 @@ async fn add_learner_promote_then_remove() {
         initial_membership: None,
         tuning: fast_tuning(),
         peer_tls: None,
+        admin_listen: None,
     }))
     .await
     .expect("build node 2");
@@ -145,6 +147,98 @@ async fn add_learner_promote_then_remove() {
     .await
     .expect("node 2 did not disappear from membership within the budget");
     assert_eq!(removed.members.len(), 1, "only node 1 remains");
+
+    node2.shutdown().await;
+    node1.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_grpc_list_and_add_learner() {
+    use tsoracle_standalone::admin_proto::membership_admin_client::MembershipAdminClient;
+    use tsoracle_standalone::admin_proto::{AddLearnerRequest, ListMembersRequest};
+
+    let dir1 = tempdir().unwrap();
+    let dir2 = tempdir().unwrap();
+    let raft1 = lease_port().await;
+    let raft2 = lease_port().await;
+    let admin_addr = lease_port().await;
+
+    let mut members = BTreeMap::new();
+    members.insert(
+        1,
+        MemberAddr {
+            raft_addr: raft1.to_string(),
+            service_endpoint: "127.0.0.1:1".into(),
+            admin_endpoint: admin_addr.to_string(),
+        },
+    );
+    let node1 = build(DriverConfig::Openraft(OpenraftConfig {
+        id: 1,
+        raft_addr: raft1,
+        raft_dir: dir1.path().join("raft"),
+        bootstrap: true,
+        initial_membership: Some(members),
+        tuning: fast_tuning(),
+        peer_tls: None,
+        admin_listen: Some(admin_addr),
+    }))
+    .await
+    .expect("build node 1");
+
+    let mut events = node1.driver.leadership_events();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(state) = events.next().await {
+            if matches!(state, LeaderState::Leader { .. }) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("elected");
+    drop(events);
+
+    let node2 = build(DriverConfig::Openraft(OpenraftConfig {
+        id: 2,
+        raft_addr: raft2,
+        raft_dir: dir2.path().join("raft"),
+        bootstrap: false,
+        initial_membership: None,
+        tuning: fast_tuning(),
+        peer_tls: None,
+        admin_listen: None,
+    }))
+    .await
+    .expect("build node 2");
+
+    let mut client = MembershipAdminClient::connect(format!("http://{admin_addr}"))
+        .await
+        .expect("connect admin");
+
+    let view = client
+        .list_members(ListMembersRequest {})
+        .await
+        .expect("list")
+        .into_inner();
+    assert_eq!(view.members.len(), 1);
+
+    let resp = client
+        .add_learner(AddLearnerRequest {
+            id: 2,
+            raft_addr: raft2.to_string(),
+            service_endpoint: "127.0.0.1:2".into(),
+            admin_endpoint: "127.0.0.1:22".into(),
+        })
+        .await
+        .expect("add_learner rpc")
+        .into_inner();
+    assert!(resp.ok, "add_learner ok, got error kind {}", resp.error);
+
+    let view = client
+        .list_members(ListMembersRequest {})
+        .await
+        .expect("list2")
+        .into_inner();
+    assert_eq!(view.members.len(), 2);
 
     node2.shutdown().await;
     node1.shutdown().await;

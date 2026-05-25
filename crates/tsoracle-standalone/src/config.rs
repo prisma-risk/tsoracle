@@ -82,6 +82,9 @@ pub struct OpenraftConfig {
     pub initial_membership: Option<BTreeMap<u64, MemberAddr>>,
     pub tuning: RaftTuning,
     pub peer_tls: Option<PeerTlsConfig>,
+    /// Bind address for the membership-admin gRPC server. `None` serves no
+    /// admin surface.
+    pub admin_listen: Option<std::net::SocketAddr>,
 }
 
 #[derive(Debug, Clone)]

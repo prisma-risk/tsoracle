@@ -207,15 +207,30 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
     // OpenraftDriver::new returns Arc<Self> — do NOT wrap again.
     let driver = OpenraftDriver::new(host);
 
+    let admin: std::sync::Arc<dyn crate::admin::MembershipAdmin> = std::sync::Arc::new(
+        crate::admin::openraft::OpenraftMembershipAdmin::new(raft_for_admin),
+    );
+
+    let admin_transport = match cfg.admin_listen {
+        Some(listen) => {
+            let (cancel, join) = crate::admin::service::serve_admin(admin.clone(), listen)
+                .await
+                .map_err(|source| StandaloneError::AdminBind {
+                    addr: listen,
+                    source,
+                })?;
+            TransportHandle::new(cancel, join)
+        }
+        None => TransportHandle::noop(),
+    };
+
     Ok(Standalone {
         driver: driver as Arc<dyn ConsensusDriver>,
         transport: TransportHandle::new(cancel_tx, join),
         drain: Some(Box::pin(async move {
             handoff::graceful_leader_handoff(&raft_for_drain, my_id).await
         })),
-        admin: std::sync::Arc::new(crate::admin::openraft::OpenraftMembershipAdmin::new(
-            raft_for_admin,
-        )),
-        admin_transport: crate::TransportHandle::noop(),
+        admin,
+        admin_transport,
     })
 }

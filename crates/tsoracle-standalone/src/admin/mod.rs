@@ -16,6 +16,9 @@
 #[cfg(feature = "openraft")]
 pub(crate) mod openraft;
 
+#[cfg(feature = "openraft")]
+pub(crate) mod service;
+
 use async_trait::async_trait;
 
 /// A node's role in the current membership.

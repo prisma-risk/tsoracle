@@ -133,6 +133,7 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
                         args.peer_tls_key,
                         args.peer_tls_ca,
                     )?,
+                    admin_listen: None,
                 });
                 run_serve(args.common, cfg).await
             }
