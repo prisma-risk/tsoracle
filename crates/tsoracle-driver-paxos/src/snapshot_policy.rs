@@ -44,6 +44,19 @@ impl SnapshotPolicy {
         Self::every(0)
     }
 
+    /// Rebase the snapshot baseline to `decided_idx`.
+    ///
+    /// `every` starts the baseline at 0, which is correct for a fresh log but
+    /// wrong after a restart: a node reopening its log at a decided index far
+    /// past `every_n_decided` would satisfy `decided_idx >= 0 + N` on its first
+    /// post-recovery check and snapshot spuriously. Seeding the baseline to the
+    /// recovered decided index makes the next snapshot fire `every_n_decided`
+    /// entries past the restart point instead. Called once at recovery; a
+    /// disabled policy is unaffected (it never fires regardless of baseline).
+    pub fn rebase(&mut self, decided_idx: u64) {
+        self.last_snapshot_at = decided_idx;
+    }
+
     /// Decide whether to trigger a snapshot for the given decided index.
     ///
     /// Updates internal state to remember the last triggered index so
@@ -101,6 +114,32 @@ mod tests {
     #[test]
     fn default_is_disabled() {
         let mut policy = SnapshotPolicy::default();
+        assert!(!policy.should_snapshot(u64::MAX));
+    }
+
+    #[test]
+    fn rebase_suppresses_spurious_first_trigger_after_restart() {
+        // Simulates a restart at a decided index far past the interval. A
+        // freshly-constructed `every(100)` has `last_snapshot_at = 0`, so its
+        // first check would fire (5000 >= 0 + 100) and snapshot spuriously.
+        // Rebasing the baseline to the recovered index suppresses that.
+        let mut policy = SnapshotPolicy::every(100);
+        policy.rebase(5_000);
+        assert!(
+            !policy.should_snapshot(5_000),
+            "must not snapshot on the first decision after recovery",
+        );
+        assert!(!policy.should_snapshot(5_099));
+        assert!(
+            policy.should_snapshot(5_100),
+            "the every-N cadence resumes relative to the rebased baseline",
+        );
+    }
+
+    #[test]
+    fn rebase_on_disabled_policy_stays_disabled() {
+        let mut policy = SnapshotPolicy::disabled();
+        policy.rebase(5_000);
         assert!(!policy.should_snapshot(u64::MAX));
     }
 }
