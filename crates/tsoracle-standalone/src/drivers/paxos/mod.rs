@@ -159,6 +159,7 @@ mod tests {
             tso_peers: BTreeMap::new(),
             data_dir: std::path::PathBuf::from("/this/path/must/not/be/touched"),
             tick_interval: Duration::from_millis(20),
+            peer_tls: None,
         };
         match build_paxos(cfg).await {
             Err(StandaloneError::Config(_)) => {}

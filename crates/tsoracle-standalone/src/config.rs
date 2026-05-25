@@ -45,6 +45,19 @@ pub struct FileConfig {
     pub state_dir: PathBuf,
 }
 
+/// mTLS material for the peer transport (PEM file paths, read at build()).
+/// Presence on a driver config turns the peer transport into mutual TLS:
+/// `cert`/`key` is this node's identity (used as both the peer-server identity
+/// and the peer-client identity when dialing); `ca` verifies connecting peers.
+/// The CA MUST be cluster-dedicated — anyone holding a cert it signed can join
+/// replication.
+#[derive(Debug, Clone)]
+pub struct PeerTlsConfig {
+    pub cert: PathBuf,
+    pub key: PathBuf,
+    pub ca: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenraftConfig {
     pub id: u64,
@@ -55,6 +68,7 @@ pub struct OpenraftConfig {
     /// (membership recovers from raft state, #408).
     pub initial_membership: Option<BTreeMap<u64, MemberAddr>>,
     pub tuning: RaftTuning,
+    pub peer_tls: Option<PeerTlsConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +82,7 @@ pub struct PaxosConfig {
     pub tso_peers: BTreeMap<u64, String>,
     pub data_dir: PathBuf,
     pub tick_interval: Duration,
+    pub peer_tls: Option<PeerTlsConfig>,
 }
 
 pub enum DriverConfig {

@@ -101,6 +101,7 @@ mod openraft_driver {
                 election_min_ms: 150,
                 election_max_ms: 300,
             },
+            peer_tls: None,
         }
     }
 
@@ -154,6 +155,7 @@ mod openraft_driver {
             bootstrap: true,
             initial_membership: None,
             tuning: RaftTuning::default(),
+            peer_tls: None,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -178,6 +180,7 @@ mod openraft_driver {
             bootstrap: false,
             initial_membership: Some(members),
             tuning: RaftTuning::default(),
+            peer_tls: None,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -202,6 +205,7 @@ mod openraft_driver {
             bootstrap: true,
             initial_membership: Some(members),
             tuning: RaftTuning::default(),
+            peer_tls: None,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -268,6 +272,7 @@ mod paxos_driver {
             tso_peers,
             data_dir: dir.path().join("paxos"),
             tick_interval: Duration::from_millis(20),
+            peer_tls: None,
         };
 
         let mut node = build(DriverConfig::Paxos(cfg))
@@ -293,6 +298,7 @@ mod paxos_driver {
             tso_peers: BTreeMap::new(),
             data_dir: std::path::PathBuf::from("/this/path/must/not/be/touched"),
             tick_interval: Duration::from_millis(20),
+            peer_tls: None,
         };
         assert!(matches!(
             build(DriverConfig::Paxos(cfg)).await,
@@ -319,6 +325,7 @@ mod paxos_driver {
             tso_peers: BTreeMap::new(),
             data_dir: dir.path().join("paxos"),
             tick_interval: Duration::from_millis(20),
+            peer_tls: None,
         };
         assert!(matches!(
             build(DriverConfig::Paxos(cfg)).await,

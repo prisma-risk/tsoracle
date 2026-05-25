@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
         tso_peers: parse_peer_map(&cli.tso_peers).map_err(Error::msg)?,
         data_dir: cli.data_dir,
         tick_interval: Duration::from_millis(20),
+        peer_tls: None,
     });
     let mut node = build(cfg).await?;
     let drain = node.take_drain();

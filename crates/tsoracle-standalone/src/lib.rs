@@ -22,7 +22,8 @@ use tsoracle_consensus::ConsensusDriver;
 
 mod config;
 pub use config::{
-    DriverConfig, FileConfig, MemberAddr, OpenraftConfig, PaxosConfig, RaftTuning, parse_peer_map,
+    DriverConfig, FileConfig, MemberAddr, OpenraftConfig, PaxosConfig, PeerTlsConfig, RaftTuning,
+    parse_peer_map,
 };
 
 mod drivers;

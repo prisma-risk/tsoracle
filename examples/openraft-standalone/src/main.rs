@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
         bootstrap: cli.bootstrap,
         initial_membership: members,
         tuning: RaftTuning::default(),
+        peer_tls: None,
     });
     let mut node = build(cfg).await?;
     let drain = node.take_drain();

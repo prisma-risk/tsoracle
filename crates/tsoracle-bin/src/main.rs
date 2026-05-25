@@ -117,6 +117,7 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
                         election_min_ms: args.election_min_ms,
                         election_max_ms: args.election_max_ms,
                     },
+                    peer_tls: None,
                 });
                 run_serve(args.common, cfg).await
             }
@@ -138,6 +139,7 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
                         .map_err(anyhow::Error::msg)?,
                     data_dir: args.data_dir,
                     tick_interval: args.tick_interval,
+                    peer_tls: None,
                 });
                 run_serve(args.common, cfg).await
             }
