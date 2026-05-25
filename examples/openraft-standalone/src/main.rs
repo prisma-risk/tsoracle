@@ -20,7 +20,9 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tsoracle_server::Server;
-use tsoracle_standalone::{DriverConfig, MemberAddr, OpenraftConfig, RaftTuning, build};
+use tsoracle_standalone::{
+    DriverConfig, MemberAddr, OpenraftConfig, PeerTlsConfig, RaftTuning, build,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "openraft-standalone")]
@@ -38,6 +40,12 @@ struct Cli {
     /// id=raft_host:port/service_host:port,... (only with --bootstrap)
     #[arg(long)]
     members: Option<String>,
+    #[arg(long)]
+    peer_tls_cert: Option<std::path::PathBuf>,
+    #[arg(long)]
+    peer_tls_key: Option<std::path::PathBuf>,
+    #[arg(long)]
+    peer_tls_ca: Option<std::path::PathBuf>,
 }
 
 fn parse_members(input: &str) -> Result<BTreeMap<u64, MemberAddr>> {
@@ -62,6 +70,13 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let cli = Cli::parse();
     let members = cli.members.as_deref().map(parse_members).transpose()?;
+    let peer_tls = match (cli.peer_tls_cert, cli.peer_tls_key, cli.peer_tls_ca) {
+        (None, None, None) => None,
+        (Some(cert), Some(key), Some(ca)) => Some(PeerTlsConfig { cert, key, ca }),
+        _ => {
+            anyhow::bail!("--peer-tls-cert, --peer-tls-key, --peer-tls-ca must all be set together")
+        }
+    };
     let cfg = DriverConfig::Openraft(OpenraftConfig {
         id: cli.id,
         raft_addr: cli.raft_addr,
@@ -69,6 +84,7 @@ async fn main() -> Result<()> {
         bootstrap: cli.bootstrap,
         initial_membership: members,
         tuning: RaftTuning::default(),
+        peer_tls,
     });
     let mut node = build(cfg).await?;
     let drain = node.take_drain();

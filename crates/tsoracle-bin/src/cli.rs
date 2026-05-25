@@ -30,7 +30,7 @@ pub struct Cli {
 pub enum Cmd {
     /// Run the timestamp oracle server with a selected driver.
     #[command(subcommand)]
-    Serve(ServeCmd),
+    Serve(Box<ServeCmd>),
     /// Initialize a fresh file-driver state directory at a seeded high-water.
     Init(InitArgs),
 }
@@ -60,6 +60,15 @@ pub struct CommonServeArgs {
     /// Log level.
     #[arg(long, default_value = "info")]
     pub log: String,
+    /// PEM server certificate chain for the client gRPC API (enables TLS).
+    #[arg(long)]
+    pub tls_cert: Option<std::path::PathBuf>,
+    /// PEM private key for `--tls-cert`.
+    #[arg(long)]
+    pub tls_key: Option<std::path::PathBuf>,
+    /// PEM CA to verify CLIENT certificates (enables client mTLS on the API).
+    #[arg(long)]
+    pub tls_client_ca: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -96,6 +105,15 @@ pub struct OpenraftArgs {
     pub election_min_ms: u64,
     #[arg(long, default_value = "2000")]
     pub election_max_ms: u64,
+    /// PEM node certificate for the peer transport (enables peer mTLS; needs all three).
+    #[arg(long)]
+    pub peer_tls_cert: Option<std::path::PathBuf>,
+    /// PEM private key for `--peer-tls-cert`.
+    #[arg(long)]
+    pub peer_tls_key: Option<std::path::PathBuf>,
+    /// PEM CA (cluster-dedicated) to verify connecting peers.
+    #[arg(long)]
+    pub peer_tls_ca: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -119,6 +137,15 @@ pub struct PaxosArgs {
     pub data_dir: PathBuf,
     #[arg(long, value_parser = parse_duration, default_value = "20ms")]
     pub tick_interval: Duration,
+    /// PEM node certificate for the peer transport (enables peer mTLS; needs all three).
+    #[arg(long)]
+    pub peer_tls_cert: Option<std::path::PathBuf>,
+    /// PEM private key for `--peer-tls-cert`.
+    #[arg(long)]
+    pub peer_tls_key: Option<std::path::PathBuf>,
+    /// PEM CA (cluster-dedicated) to verify connecting peers.
+    #[arg(long)]
+    pub peer_tls_ca: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser, Debug)]

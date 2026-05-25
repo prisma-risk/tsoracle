@@ -22,7 +22,8 @@ use tsoracle_consensus::ConsensusDriver;
 
 mod config;
 pub use config::{
-    DriverConfig, FileConfig, MemberAddr, OpenraftConfig, PaxosConfig, RaftTuning, parse_peer_map,
+    DriverConfig, FileConfig, MemberAddr, OpenraftConfig, PaxosConfig, PeerTlsConfig, RaftTuning,
+    parse_peer_map,
 };
 
 mod drivers;
@@ -35,6 +36,9 @@ pub use error::StandaloneError;
 
 mod transport;
 pub use transport::TransportHandle;
+
+#[cfg(any(feature = "openraft", feature = "paxos"))]
+pub(crate) mod peer_tls;
 
 /// A constructed, running standalone node: the consensus driver plus the
 /// background peer-transport task (if any). The caller (the bin) owns the

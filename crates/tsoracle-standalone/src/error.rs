@@ -32,4 +32,10 @@ pub enum StandaloneError {
     Bootstrap(Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid configuration: {0}")]
     Config(String),
+    #[error("failed to load TLS material from {path}: {source}")]
+    Tls {
+        path: std::path::PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }

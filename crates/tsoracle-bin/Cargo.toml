@@ -27,6 +27,7 @@ clap                  = { workspace = true }
 tokio                 = { workspace = true, features = ["signal"] }
 tracing               = { workspace = true }
 tracing-subscriber    = { workspace = true }
+tonic                 = { workspace = true, features = ["tls-aws-lc"] }
 tsoracle-core         = { path = "../tsoracle-core", version = "0.2.2" }
 tsoracle-server       = { path = "../tsoracle-server", version = "0.2.5" }
 tsoracle-standalone   = { path = "../tsoracle-standalone", version = "0.1.0", default-features = false }
@@ -38,6 +39,7 @@ tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "0.1.7" }
 async-trait        = { workspace = true }
 futures            = { workspace = true }
 parking_lot        = { workspace = true }
+rcgen              = { workspace = true }
 tokio-stream       = { workspace = true }
 tempfile           = { workspace = true }
 tokio              = { workspace = true, features = ["process"] }

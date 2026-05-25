@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{Error, Result};
 use clap::Parser;
 use tsoracle_server::Server;
-use tsoracle_standalone::{DriverConfig, PaxosConfig, build, parse_peer_map};
+use tsoracle_standalone::{DriverConfig, PaxosConfig, PeerTlsConfig, build, parse_peer_map};
 
 #[derive(Parser, Debug)]
 #[command(name = "paxos-standalone")]
@@ -34,12 +34,25 @@ struct Cli {
     tso_peers: String,
     #[arg(long)]
     data_dir: std::path::PathBuf,
+    #[arg(long)]
+    peer_tls_cert: Option<std::path::PathBuf>,
+    #[arg(long)]
+    peer_tls_key: Option<std::path::PathBuf>,
+    #[arg(long)]
+    peer_tls_ca: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let cli = Cli::parse();
+    let peer_tls = match (cli.peer_tls_cert, cli.peer_tls_key, cli.peer_tls_ca) {
+        (None, None, None) => None,
+        (Some(cert), Some(key), Some(ca)) => Some(PeerTlsConfig { cert, key, ca }),
+        _ => {
+            anyhow::bail!("--peer-tls-cert, --peer-tls-key, --peer-tls-ca must all be set together")
+        }
+    };
     let cfg = DriverConfig::Paxos(PaxosConfig {
         node_id: cli.node_id,
         peer_listen: cli.listen,
@@ -47,6 +60,7 @@ async fn main() -> Result<()> {
         tso_peers: parse_peer_map(&cli.tso_peers).map_err(Error::msg)?,
         data_dir: cli.data_dir,
         tick_interval: Duration::from_millis(20),
+        peer_tls,
     });
     let mut node = build(cfg).await?;
     let drain = node.take_drain();

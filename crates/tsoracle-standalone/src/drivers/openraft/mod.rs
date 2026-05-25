@@ -111,7 +111,12 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         .map_err(|e| StandaloneError::Config(e.to_string()))?,
     );
 
-    let network = PeerFactory::new();
+    let peer_tls = match &cfg.peer_tls {
+        Some(p) => Some(crate::peer_tls::build_peer_tls(p)?),
+        None => None,
+    };
+
+    let network = PeerFactory::new(peer_tls.as_ref().map(|m| m.client.clone()));
     let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
         cfg.id,
         config,
@@ -132,15 +137,28 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
     let peer_service = peer_server(raft.clone())
         .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
+    let mut builder = tonic::transport::Server::builder()
+        .max_concurrent_streams(MAX_CONCURRENT_STREAMS)
+        .max_frame_size(MAX_FRAME_SIZE);
+    if let Some(material) = &peer_tls {
+        builder = builder
+            .tls_config(material.server.clone())
+            .map_err(|source| StandaloneError::Tls {
+                path: cfg
+                    .peer_tls
+                    .as_ref()
+                    .map(|p| p.cert.clone())
+                    .unwrap_or_default(),
+                source: Box::new(source),
+            })?;
+    }
+    let router = builder.add_service(peer_service);
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(async move {
         let shutdown = async {
             let _ = cancel_rx.await;
         };
-        if let Err(e) = tonic::transport::Server::builder()
-            .max_concurrent_streams(MAX_CONCURRENT_STREAMS)
-            .max_frame_size(MAX_FRAME_SIZE)
-            .add_service(peer_service)
+        if let Err(e) = router
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
             .await
         {

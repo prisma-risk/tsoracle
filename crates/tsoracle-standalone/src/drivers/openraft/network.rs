@@ -43,7 +43,7 @@ use openraft::raft::{
 };
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use tokio::sync::Mutex;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig};
 
 use tsoracle_driver_openraft::{OpenraftPeer as Node, TypeConfig};
 type NodeId = u64;
@@ -107,19 +107,15 @@ async fn evict<V>(pool: &Arc<Mutex<HashMap<(NodeId, String), V>>>, target: NodeI
 
 pub struct PeerFactory {
     pool: Pool,
+    tls: Option<ClientTlsConfig>,
 }
 
 impl PeerFactory {
-    pub fn new() -> Self {
+    pub fn new(tls: Option<ClientTlsConfig>) -> Self {
         Self {
             pool: Arc::new(Mutex::new(HashMap::new())),
+            tls,
         }
-    }
-}
-
-impl Default for PeerFactory {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -131,6 +127,7 @@ impl RaftNetworkFactory<TypeConfig> for PeerFactory {
             target,
             addr: node.addr.clone(),
             pool: self.pool.clone(),
+            tls: self.tls.clone(),
         }
     }
 }
@@ -143,6 +140,7 @@ pub struct PeerNetwork {
     target: NodeId,
     addr: String,
     pool: Pool,
+    tls: Option<ClientTlsConfig>,
 }
 
 impl PeerNetwork {
@@ -155,10 +153,21 @@ impl PeerNetwork {
                 return Ok(client.clone());
             }
         }
-        let url = format!("http://{}", self.addr);
-        let client = RaftPeerServiceClient::connect(url)
-            .await
-            .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?;
+        let channel = match &self.tls {
+            Some(tls) => Channel::from_shared(format!("https://{}", self.addr))
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?
+                .tls_config(tls.clone())
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?
+                .connect()
+                .await
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?,
+            None => Channel::from_shared(format!("http://{}", self.addr))
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?
+                .connect()
+                .await
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?,
+        };
+        let client = RaftPeerServiceClient::new(channel);
         self.pool.lock().await.insert(key, client.clone());
         Ok(client)
     }
@@ -486,6 +495,206 @@ pub fn server<SM: Send + Sync + 'static>(
     raft: openraft::Raft<TypeConfig, SM>,
 ) -> RaftPeerServiceServer<PeerServiceImpl<SM>> {
     RaftPeerServiceServer::new(PeerServiceImpl { raft })
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+    use crate::config::PeerTlsConfig;
+    use crate::peer_tls::build_peer_tls;
+    use std::sync::Arc;
+    use tonic::transport::{Certificate, ClientTlsConfig, Identity};
+
+    // --- cert helpers (rcgen 0.13) ---
+    struct Certs {
+        ca_pem: String,
+        node_cert: String,
+        node_key: String,
+        other_leaf_cert: String,
+        other_leaf_key: String,
+    }
+
+    fn mint() -> Certs {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        let mk_ca = |name: &str| {
+            let key = KeyPair::generate().unwrap();
+            let mut p = CertificateParams::new(vec![name.to_string()]).unwrap();
+            p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            let cert = p.self_signed(&key).unwrap();
+            (cert, key)
+        };
+        let (ca, ca_key) = mk_ca("tso-ca");
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf_params =
+            CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()]).unwrap();
+        let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+        let (other_ca, other_ca_key) = mk_ca("other-ca");
+        let other_key = KeyPair::generate().unwrap();
+        let other_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+        let other_leaf = other_params
+            .signed_by(&other_key, &other_ca, &other_ca_key)
+            .unwrap();
+        Certs {
+            ca_pem: ca.pem(),
+            node_cert: leaf.pem(),
+            node_key: leaf_key.serialize_pem(),
+            other_leaf_cert: other_leaf.pem(),
+            other_leaf_key: other_key.serialize_pem(),
+        }
+    }
+
+    fn node_material(c: &Certs, dir: &std::path::Path) -> crate::peer_tls::PeerTlsMaterial {
+        let cert = dir.join("n.crt");
+        let key = dir.join("n.key");
+        let ca = dir.join("ca.crt");
+        std::fs::write(&cert, &c.node_cert).unwrap();
+        std::fs::write(&key, &c.node_key).unwrap();
+        std::fs::write(&ca, &c.ca_pem).unwrap();
+        build_peer_tls(&PeerTlsConfig { cert, key, ca }).unwrap()
+    }
+
+    // Minimal stub server (handlers never called — only the TLS handshake is).
+    #[derive(Clone)]
+    struct Stub;
+
+    #[tonic::async_trait]
+    impl proto::raft_peer_service_server::RaftPeerService for Stub {
+        async fn append_entries(
+            &self,
+            _: tonic::Request<proto::RaftMessage>,
+        ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+            Err(tonic::Status::unimplemented("stub"))
+        }
+        async fn vote(
+            &self,
+            _: tonic::Request<proto::RaftMessage>,
+        ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+            Err(tonic::Status::unimplemented("stub"))
+        }
+        async fn snapshot(
+            &self,
+            _: tonic::Request<tonic::Streaming<proto::SnapshotChunk>>,
+        ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+            Err(tonic::Status::unimplemented("stub"))
+        }
+        async fn transfer_leader(
+            &self,
+            _: tonic::Request<proto::RaftMessage>,
+        ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+            Err(tonic::Status::unimplemented("stub"))
+        }
+    }
+
+    async fn spawn_stub(server_tls: tonic::transport::ServerTlsConfig) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .tls_config(server_tls)
+                .unwrap()
+                .add_service(proto::raft_peer_service_server::RaftPeerServiceServer::new(
+                    Stub,
+                ))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        addr
+    }
+
+    fn make_net(addr: std::net::SocketAddr, tls: Option<ClientTlsConfig>) -> PeerNetwork {
+        PeerNetwork {
+            target: 2,
+            addr: addr.to_string(),
+            pool: Arc::new(Mutex::new(HashMap::new())),
+            tls,
+        }
+    }
+
+    // `Channel::connect()` is lazy — the TLS handshake happens on the first RPC.
+    // We therefore attempt a real RPC (append_entries) and check whether it fails
+    // at the transport level (tonic Status) vs. at the stub handler (Unimplemented).
+    // A successful mTLS handshake produces Unimplemented; a rejected one produces
+    // a connection-level error (Unavailable / Unknown).
+    async fn probe(net: PeerNetwork) -> tonic::Code {
+        match net.client().await {
+            Err(_) => tonic::Code::Unavailable,
+            Ok(mut c) => {
+                match c
+                    .append_entries(tonic::Request::new(proto::RaftMessage {
+                        payload: Vec::new(),
+                    }))
+                    .await
+                {
+                    Ok(_) => tonic::Code::Ok,
+                    Err(s) => s.code(),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_node_cert_connects() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = mint();
+        let m = node_material(&c, dir.path());
+        let addr = spawn_stub(m.server.clone()).await;
+        // Stub returns Unimplemented — handshake succeeded.
+        assert_eq!(
+            probe(make_net(addr, Some(m.client.clone()))).await,
+            tonic::Code::Unimplemented
+        );
+    }
+
+    #[tokio::test]
+    async fn no_client_cert_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = mint();
+        let m = node_material(&c, dir.path());
+        let addr = spawn_stub(m.server.clone()).await;
+        let no_id = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(&c.ca_pem))
+            .domain_name("localhost");
+        let code = probe(make_net(addr, Some(no_id))).await;
+        assert_ne!(
+            code,
+            tonic::Code::Unimplemented,
+            "server must reject a client with no cert"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_ca_client_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = mint();
+        let m = node_material(&c, dir.path());
+        let addr = spawn_stub(m.server.clone()).await;
+        let wrong = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(&c.ca_pem))
+            .identity(Identity::from_pem(&c.other_leaf_cert, &c.other_leaf_key))
+            .domain_name("localhost");
+        let code = probe(make_net(addr, Some(wrong))).await;
+        assert_ne!(
+            code,
+            tonic::Code::Unimplemented,
+            "server must reject a cert from a foreign CA"
+        );
+    }
+
+    #[tokio::test]
+    async fn plaintext_against_tls_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = mint();
+        let m = node_material(&c, dir.path());
+        let addr = spawn_stub(m.server.clone()).await;
+        let code = probe(make_net(addr, None)).await;
+        assert_ne!(
+            code,
+            tonic::Code::Unimplemented,
+            "plaintext must not reach a TLS-only server"
+        );
+    }
 }
 
 #[cfg(test)]

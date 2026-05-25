@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Some(Cmd::Init(args)) => run_init(args.state_dir, args.seed_physical_ms),
-        Some(Cmd::Serve(serve)) => dispatch_serve(serve).await,
+        Some(Cmd::Serve(serve)) => dispatch_serve(*serve).await,
         // Bare `tsoracle` defaults to `serve file` when file is compiled in.
         None => {
             #[cfg(feature = "file")]
@@ -117,6 +117,11 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
                         election_min_ms: args.election_min_ms,
                         election_max_ms: args.election_max_ms,
                     },
+                    peer_tls: peer_tls_config(
+                        args.peer_tls_cert,
+                        args.peer_tls_key,
+                        args.peer_tls_ca,
+                    )?,
                 });
                 run_serve(args.common, cfg).await
             }
@@ -138,6 +143,11 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
                         .map_err(anyhow::Error::msg)?,
                     data_dir: args.data_dir,
                     tick_interval: args.tick_interval,
+                    peer_tls: peer_tls_config(
+                        args.peer_tls_cert,
+                        args.peer_tls_key,
+                        args.peer_tls_ca,
+                    )?,
                 });
                 run_serve(args.common, cfg).await
             }
@@ -166,6 +176,57 @@ fn run_init(_state_dir: std::path::PathBuf, _seed_physical_ms: u64) -> Result<()
     Err(not_compiled_in("file"))
 }
 
+/// Assemble the client-API server TLS config from flags (server-auth + optional
+/// client mTLS). `Ok(None)` when no TLS flags are given (plaintext). Eagerly
+/// validated: `from_pem` is lazy and the server applies tls only inside serve()
+/// (after bind + "serving on"), so we dry-run the acceptor build here.
+fn client_tls_config(
+    common: &CommonServeArgs,
+) -> anyhow::Result<Option<tonic::transport::ServerTlsConfig>> {
+    match (&common.tls_cert, &common.tls_key) {
+        (None, None) => {
+            if common.tls_client_ca.is_some() {
+                anyhow::bail!("--tls-client-ca requires --tls-cert and --tls-key");
+            }
+            Ok(None)
+        }
+        (Some(cert), Some(key)) => {
+            let cert_pem =
+                std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+            let key_pem = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
+            let mut tls = tonic::transport::ServerTlsConfig::new()
+                .identity(tonic::transport::Identity::from_pem(&cert_pem, &key_pem));
+            if let Some(ca) = &common.tls_client_ca {
+                let ca_pem = std::fs::read(ca).with_context(|| format!("read {}", ca.display()))?;
+                tls = tls.client_ca_root(tonic::transport::Certificate::from_pem(&ca_pem));
+            }
+            tonic::transport::Server::builder()
+                .tls_config(tls.clone())
+                .context("invalid client-API TLS configuration")?;
+            Ok(Some(tls))
+        }
+        _ => anyhow::bail!("--tls-cert and --tls-key must be provided together"),
+    }
+}
+
+/// Assemble the peer `PeerTlsConfig` from the all-or-nothing flag trio.
+#[cfg(any(feature = "openraft", feature = "paxos"))]
+fn peer_tls_config(
+    cert: Option<std::path::PathBuf>,
+    key: Option<std::path::PathBuf>,
+    ca: Option<std::path::PathBuf>,
+) -> anyhow::Result<Option<tsoracle_standalone::PeerTlsConfig>> {
+    match (cert, key, ca) {
+        (None, None, None) => Ok(None),
+        (Some(cert), Some(key), Some(ca)) => {
+            Ok(Some(tsoracle_standalone::PeerTlsConfig { cert, key, ca }))
+        }
+        _ => anyhow::bail!(
+            "--peer-tls-cert, --peer-tls-key, and --peer-tls-ca must all be set together"
+        ),
+    }
+}
+
 async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(&common.log).unwrap_or_else(|_| EnvFilter::new("info")))
@@ -175,12 +236,15 @@ async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
         .await
         .context("driver bootstrap")?;
     let drain = node.take_drain();
-    let server = Server::builder()
+    let tls = client_tls_config(&common)?;
+    let mut builder = Server::builder()
         .consensus_driver(node.driver.clone())
         .window_ahead(common.window_ahead)
-        .failover_advance(common.failover_advance)
-        .build()
-        .context("server build")?;
+        .failover_advance(common.failover_advance);
+    if let Some(tls) = tls {
+        builder = builder.tls_config(tls);
+    }
+    let server = builder.build().context("server build")?;
 
     let listener = tokio::net::TcpListener::bind(common.listen)
         .await

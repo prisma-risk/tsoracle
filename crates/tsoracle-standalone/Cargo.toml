@@ -15,12 +15,14 @@ openraft = [
     "dep:tsoracle-driver-openraft", "dep:tsoracle-openraft-toolkit",
     "dep:openraft", "dep:rocksdb", "dep:tonic", "dep:tonic-prost",
     "dep:prost", "dep:postcard", "dep:tokio-stream", "dep:async-trait", "dep:futures",
+    "tonic/tls-aws-lc",
 ]
 paxos    = [
     "dep:tsoracle-driver-paxos", "dep:tsoracle-paxos-toolkit",
     "dep:omnipaxos", "dep:rocksdb", "dep:tonic", "dep:tonic-prost",
     "dep:prost", "dep:postcard", "dep:parking_lot", "dep:tokio-stream",
     "dep:async-trait",
+    "tonic/tls-aws-lc",
 ]
 
 [dependencies]
@@ -61,5 +63,6 @@ postcard    = { workspace = true, optional = true }
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
+rcgen    = { workspace = true }
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
