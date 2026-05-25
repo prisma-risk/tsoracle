@@ -156,3 +156,179 @@ where
 {
     PaxosPeerServiceServer::new(PaxosPeerServiceImpl { omnipaxos })
 }
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+    use crate::config::PeerTlsConfig;
+    use crate::peer_tls::build_peer_tls;
+    use tonic::transport::{Certificate, ClientTlsConfig, Identity};
+
+    // --- cert helpers (rcgen 0.13) ---
+    struct Certs {
+        ca_pem: String,
+        node_cert: String,
+        node_key: String,
+        other_leaf_cert: String,
+        other_leaf_key: String,
+    }
+
+    fn mint() -> Certs {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        let mk_ca = |name: &str| {
+            let key = KeyPair::generate().unwrap();
+            let mut p = CertificateParams::new(vec![name.to_string()]).unwrap();
+            p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            let cert = p.self_signed(&key).unwrap();
+            (cert, key)
+        };
+        let (ca, ca_key) = mk_ca("tso-ca");
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf_params =
+            CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()]).unwrap();
+        let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+        let (other_ca, other_ca_key) = mk_ca("other-ca");
+        let other_key = KeyPair::generate().unwrap();
+        let other_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+        let other_leaf = other_params
+            .signed_by(&other_key, &other_ca, &other_ca_key)
+            .unwrap();
+        Certs {
+            ca_pem: ca.pem(),
+            node_cert: leaf.pem(),
+            node_key: leaf_key.serialize_pem(),
+            other_leaf_cert: other_leaf.pem(),
+            other_leaf_key: other_key.serialize_pem(),
+        }
+    }
+
+    fn node_material(c: &Certs, dir: &std::path::Path) -> crate::peer_tls::PeerTlsMaterial {
+        let cert = dir.join("n.crt");
+        let key = dir.join("n.key");
+        let ca = dir.join("ca.crt");
+        std::fs::write(&cert, &c.node_cert).unwrap();
+        std::fs::write(&key, &c.node_key).unwrap();
+        std::fs::write(&ca, &c.ca_pem).unwrap();
+        build_peer_tls(&PeerTlsConfig { cert, key, ca }).unwrap()
+    }
+
+    // Minimal stub server (handlers never called — only the TLS handshake is).
+    #[derive(Clone)]
+    struct Stub;
+
+    #[tonic::async_trait]
+    impl proto::paxos_peer_service_server::PaxosPeerService for Stub {
+        async fn send(
+            &self,
+            _: tonic::Request<proto::PaxosMessage>,
+        ) -> Result<tonic::Response<proto::Ack>, tonic::Status> {
+            Ok(tonic::Response::new(proto::Ack {}))
+        }
+    }
+
+    async fn spawn_stub(server_tls: tonic::transport::ServerTlsConfig) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .tls_config(server_tls)
+                .unwrap()
+                .add_service(proto::paxos_peer_service_server::PaxosPeerServiceServer::new(Stub))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        addr
+    }
+
+    fn make_sink(addr: std::net::SocketAddr, tls: Option<ClientTlsConfig>) -> PeerSink {
+        PeerSink::new(
+            std::collections::HashMap::from([(2u64, addr.to_string())]),
+            tls,
+        )
+    }
+
+    // `Channel::connect()` is lazy — the TLS handshake happens on the first RPC.
+    // We issue a real `send` RPC to force the handshake and check the status code.
+    // A successful mTLS handshake produces Ok (the stub returns Ack {}); a rejected
+    // handshake means `client()` returns None after the failed dial.
+    async fn probe(sink: PeerSink) -> tonic::Code {
+        match sink.client(2).await {
+            None => tonic::Code::Unavailable,
+            Some(mut c) => {
+                match c
+                    .send(tonic::Request::new(proto::PaxosMessage {
+                        payload: Vec::new(),
+                    }))
+                    .await
+                {
+                    Ok(_) => tonic::Code::Ok,
+                    Err(s) => s.code(),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_node_cert_connects() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = mint();
+        let m = node_material(&c, dir.path());
+        let addr = spawn_stub(m.server.clone()).await;
+        // Stub returns Ok(Ack {}) — handshake succeeded.
+        assert_eq!(
+            probe(make_sink(addr, Some(m.client.clone()))).await,
+            tonic::Code::Ok
+        );
+    }
+
+    #[tokio::test]
+    async fn no_client_cert_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = mint();
+        let m = node_material(&c, dir.path());
+        let addr = spawn_stub(m.server.clone()).await;
+        let no_id = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(&c.ca_pem))
+            .domain_name("localhost");
+        let code = probe(make_sink(addr, Some(no_id))).await;
+        assert_ne!(
+            code,
+            tonic::Code::Ok,
+            "server must reject a client with no cert"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_ca_client_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = mint();
+        let m = node_material(&c, dir.path());
+        let addr = spawn_stub(m.server.clone()).await;
+        let wrong = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(&c.ca_pem))
+            .identity(Identity::from_pem(&c.other_leaf_cert, &c.other_leaf_key))
+            .domain_name("localhost");
+        let code = probe(make_sink(addr, Some(wrong))).await;
+        assert_ne!(
+            code,
+            tonic::Code::Ok,
+            "server must reject a cert from a foreign CA"
+        );
+    }
+
+    #[tokio::test]
+    async fn plaintext_against_tls_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = mint();
+        let m = node_material(&c, dir.path());
+        let addr = spawn_stub(m.server.clone()).await;
+        let code = probe(make_sink(addr, None)).await;
+        assert_ne!(
+            code,
+            tonic::Code::Ok,
+            "plaintext must not reach a TLS-only server"
+        );
+    }
+}
