@@ -50,11 +50,14 @@ where
     /// the prior server before starting the replacement) is well-defined, while
     /// a *concurrent* second subscription fails closed.
     leader_subscriber: LeaderEventSubscriber,
-    /// Mints a unique, monotonically increasing id for every
+    /// Source of holder generation ids for every
     /// [`ConsensusDriver::leadership_events`] acquisition attempt, starting at
-    /// `1` (so `0` is reserved as the "slot free" sentinel). Unique ids are what
-    /// make the lease's release ABA-proof: a slot released and re-acquired holds
-    /// a *different* generation, so a stale lease can never free a newer holder.
+    /// `1` (so `0` is reserved as the "slot free" sentinel). Minted via
+    /// [`PaxosDriver::mint_generation`], which skips the `0` the `fetch_add`
+    /// yields once per `2^64`-wide overflow so the sentinel is never handed out
+    /// as a holder. Distinct live generations are what make the lease's release
+    /// ABA-proof: a slot released and re-acquired holds a *different* generation,
+    /// so a stale lease can never free a newer holder.
     next_generation: AtomicU64,
     /// Single-active-stream lease slot. `0` means free; any other value is the
     /// id of the generation currently holding a live stream.
@@ -96,6 +99,25 @@ where
     pub fn host(&self) -> &H {
         &self.host
     }
+
+    /// Mint the next holder generation, skipping the reserved `0` sentinel.
+    ///
+    /// `fetch_add` wraps silently on overflow, so once every `2^64` acquisitions
+    /// the counter returns `0`. Handing `0` out as a holder generation would
+    /// turn the acquiring `compare_exchange(0, my_generation)` into
+    /// `compare_exchange(0, 0)`: a no-op store that "succeeds" while leaving the
+    /// slot visibly free, so a concurrent second subscription could also acquire
+    /// a live stream and defeat the single-active lease. Skipping the sentinel
+    /// keeps the invariant "every minted generation is non-zero" intact; the
+    /// extra `fetch_add` fires at most once per wrap, never on the hot path.
+    fn mint_generation(&self) -> u64 {
+        loop {
+            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+            if generation != 0 {
+                return generation;
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -123,7 +145,7 @@ where
         // restart), but the rejection is now counted on
         // `tsoracle.leadership_stream.rejected.total` so the stuck node is an
         // alertable signal rather than a single log line.
-        let my_generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let my_generation = self.mint_generation();
         if let Err(active_generation) = self.active_generation.compare_exchange(
             0,
             my_generation,
@@ -490,6 +512,54 @@ mod tests {
             );
             drop(stream);
         }
+    }
+
+    /// Generation ids are minted with `fetch_add`, which wraps silently on
+    /// overflow. The reserved `0` sentinel ("slot free") must never be handed
+    /// out as a holder generation: if it were, the acquiring
+    /// `compare_exchange(0, my_generation)` becomes `compare_exchange(0, 0)`,
+    /// which "succeeds" while leaving the slot visibly free. A concurrent second
+    /// subscription would then also acquire a live stream, silently defeating
+    /// the single-active lease that stops two `Server`s built from one
+    /// `Arc<PaxosDriver>` from seeding allocators and issuing overlapping
+    /// timestamps.
+    #[tokio::test]
+    async fn leadership_events_never_mints_the_zero_sentinel_on_counter_wrap() {
+        let host = StubHost::new();
+        let (sender, subscriber) = leader_event_channel();
+        let driver = PaxosDriver::new(host, subscriber);
+        sender
+            .send(LeaderState::Leader { epoch: Epoch(7) })
+            .unwrap();
+
+        // Drive the generation counter to the brink of overflow, then consume
+        // the last pre-wrap id so the *next* `fetch_add` wraps the counter to 0
+        // — the value that, if minted as a holder generation, collides with the
+        // free sentinel.
+        driver.next_generation.store(u64::MAX, Ordering::SeqCst);
+        drop(driver.leadership_events()); // mints u64::MAX, wraps counter to 0
+
+        // The next acquisition's `fetch_add` returns 0. A correct mint must skip
+        // the sentinel so this live stream still occupies the lease slot.
+        let mut first = driver.leadership_events();
+        assert!(
+            matches!(first.next().await, Some(LeaderState::Leader { .. })),
+            "the post-wrap subscription must still yield a live stream",
+        );
+        assert_ne!(
+            driver.active_generation.load(Ordering::SeqCst),
+            0,
+            "a live stream must occupy the lease slot; minting the 0 sentinel \
+             would leave it visibly free",
+        );
+
+        // ...and because the slot is genuinely occupied, a concurrent second
+        // subscription fails closed instead of handing out a second live stream.
+        let mut second = driver.leadership_events();
+        assert!(
+            second.next().await.is_none(),
+            "a concurrent second subscription after counter wrap must fail closed",
+        );
     }
 
     #[tokio::test]
