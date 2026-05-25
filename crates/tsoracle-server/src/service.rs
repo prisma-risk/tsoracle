@@ -341,6 +341,28 @@ mod tests {
         assert_eq!(invalid_window.code(), tonic::Code::Internal);
         assert!(invalid_window.message().contains("fence_floor 9"));
         assert!(invalid_window.message().contains("committed_ceiling 4"));
+
+        let logical_oor = core_status(CoreError::LogicalRangeOutOfRange {
+            logical_start: 5,
+            count: 11,
+        });
+        assert_eq!(logical_oor.code(), tonic::Code::OutOfRange);
+        assert!(logical_oor.message().contains("logical range [5, +11)"));
+        assert!(logical_oor.message().contains("18-bit"));
+
+        let extension_overflow = core_status(CoreError::WindowExtensionOverflow {
+            floor: 7,
+            now_ms: 8,
+            ahead_ms: u64::MAX,
+        });
+        assert_eq!(extension_overflow.code(), tonic::Code::Internal);
+        assert!(extension_overflow.message().contains("floor 7"));
+        assert!(extension_overflow.message().contains("now_ms 8"));
+        assert!(
+            extension_overflow
+                .message()
+                .contains(&format!("ahead_ms {}", u64::MAX))
+        );
     }
 
     #[test]

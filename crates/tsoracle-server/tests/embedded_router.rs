@@ -234,6 +234,47 @@ async fn watch_guard_shutdown_returns_ok_and_poisons() {
     );
 }
 
+/// #334: `WatchGuard::abort()` is the escape hatch for embedders that cannot
+/// await a cooperative `shutdown()` — it hard-aborts the leader-watch task.
+/// Unlike drop/`shutdown()`, abort bypasses the cooperative cancel arm, so it
+/// makes no promise to poison serving state (the task "may be torn down
+/// mid-fence"). What it *does* guarantee is that the task is gone: a live task
+/// would publish `Serving` on a later leadership gain, so after abort we prove
+/// the task is dead by showing that a subsequent `become_leader` never drives
+/// the Serving transition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_guard_abort_stops_the_task() {
+    let driver = Arc::new(InMemoryDriver::new());
+
+    let tsoracle = Server::builder()
+        .consensus_driver(driver.clone())
+        .build()
+        .unwrap();
+
+    let mut state_rx = tsoracle.subscribe();
+    let (router, leader_watch) = tsoracle
+        .into_router()
+        .expect("into_router is infallible without the reflection feature");
+
+    let _booted = boot_router(router).await;
+
+    // Abort while still NotServing (no leader yet), then let the runtime tear
+    // the task down before we probe it.
+    leader_watch.abort();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A live watch task would react to this leadership gain by publishing
+    // Serving within milliseconds; the aborted task cannot, so the transition
+    // must never arrive. The 2 s ceiling is far above a healthy transition.
+    driver.become_leader(Epoch(1));
+    let serving =
+        tokio::time::timeout(Duration::from_secs(2), wait_until_serving(&mut state_rx)).await;
+    assert!(
+        serving.is_err(),
+        "an aborted watch task must not transition to Serving on a later leadership gain",
+    );
+}
+
 /// Driver whose `leadership_events()` stream yields one `Leader` event and
 /// then ends after the test signals `eof_gate`. The two-phase shape lets the
 /// test pin the Serving → NotServing transition deterministically; modelling

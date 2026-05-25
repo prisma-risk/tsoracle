@@ -225,6 +225,17 @@ mod tests {
     use tsoracle_paxos_toolkit::lifecycle::leader_event_channel;
     use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
 
+    /// Install a process-global `TRACE` subscriber so the driver's
+    /// `tracing::warn!` sites format their fields under test instead of
+    /// short-circuiting. Idempotent across tests (see the client crate's twin).
+    fn enable_tracing() {
+        use tracing_subscriber::filter::LevelFilter;
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(LevelFilter::TRACE)
+            .with_test_writer()
+            .try_init();
+    }
+
     // A minimal stub host for tests that need to construct a PaxosDriver
     // without booting a real cluster. The omnipaxos handle is real but
     // never ticked; current_high_water / submit_advance return errors.
@@ -275,6 +286,22 @@ mod tests {
         async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError> {
             Ok(at_least)
         }
+    }
+
+    /// `host()` hands back a reference to the wrapped host — the seam piggyback
+    /// embedders use to reach their own state machine alongside the high-water
+    /// one. Proven by the shared `omnipaxos` handle surviving the move into the
+    /// driver.
+    #[tokio::test]
+    async fn host_accessor_returns_the_wrapped_host() {
+        let host = StubHost::new();
+        let omnipaxos_handle = host.omnipaxos();
+        let (_sender, subscriber) = leader_event_channel();
+        let driver = PaxosDriver::new(host, subscriber);
+        assert!(
+            Arc::ptr_eq(&driver.host().omnipaxos(), &omnipaxos_handle),
+            "host() must return the same host the driver was constructed with",
+        );
     }
 
     #[tokio::test]
@@ -376,6 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn leadership_events_second_concurrent_subscription_fails_closed() {
+        enable_tracing();
         let host = StubHost::new();
         let (sender, subscriber) = leader_event_channel();
         let driver = PaxosDriver::new(host, subscriber);

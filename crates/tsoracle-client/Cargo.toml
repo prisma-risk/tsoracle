@@ -38,6 +38,7 @@ tsoracle-core  = { path = "../tsoracle-core", version = "0.2.2" }
 tsoracle-proto = { path = "../tsoracle-proto", version = "0.2.1" }
 
 [dev-dependencies]
-metrics-util = { workspace = true }
-proptest     = { workspace = true }
-tokio        = { workspace = true, features = ["test-util"] }
+metrics-util       = { workspace = true }
+proptest           = { workspace = true }
+tokio              = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }

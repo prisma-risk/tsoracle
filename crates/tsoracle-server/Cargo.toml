@@ -52,6 +52,10 @@ tsoracle-failpoint = { workspace = true }
 tokio        = { workspace = true, features = ["test-util"] }
 metrics-util = { workspace = true }
 tsoracle-core = { path = "../tsoracle-core", version = "0.2.2", features = ["test-clock"] }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true }
 
 [[test]]
 name = "e2e"

@@ -548,6 +548,21 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::Instant;
 
+    /// Install a process-global `TRACE`-level subscriber so the retry loop's
+    /// `tracing::{debug,warn}!` sites evaluate and format their fields under
+    /// test. With no subscriber installed those macros short-circuit before the
+    /// field expressions run, so the formatting code never executes (and a typo
+    /// in a `%endpoint` Display field or a renamed variable would go unnoticed).
+    /// Idempotent across tests: `try_init` installs the global default once and
+    /// returns `Err` (ignored) for every later caller, so any test may call it.
+    fn enable_tracing() {
+        use tracing_subscriber::filter::LevelFilter;
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(LevelFilter::TRACE)
+            .with_test_writer()
+            .try_init();
+    }
+
     /// Aggressive policy used by the unit tests to keep them fast.
     /// `per_attempt_deadline` is the dominant cost — the integration
     /// tests cover wall-clock behaviour against real (unreachable)
@@ -585,6 +600,7 @@ mod tests {
     /// continue path that's not reached by the happy-path integration tests.
     #[tokio::test]
     async fn unreachable_endpoints_surface_last_error() {
+        enable_tracing();
         let pool = ChannelPool::new(
             vec!["http://127.0.0.1:1".into()],
             None,
@@ -602,6 +618,7 @@ mod tests {
     /// the policy.
     #[test]
     fn plaintext_hint_policy_matches_scheme_and_tls_state() {
+        enable_tracing();
         let tls = ChannelPool::new(vec!["a:1".into()], None, true, RetryPolicy::default());
         let plain = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
 
@@ -747,6 +764,7 @@ mod tests {
     /// `LeaderHintLookup::Absent` arm.
     #[test]
     fn classify_absent_hint_returns_hint_rejected() {
+        enable_tracing();
         let pool = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
         let status = tonic::Status::failed_precondition("not leader");
         match classify_not_leader_hint(&pool, "a:1", status) {
@@ -761,6 +779,7 @@ mod tests {
     /// decode-failures metric. Covers `LeaderHintLookup::Malformed`.
     #[test]
     fn classify_malformed_hint_returns_hint_rejected() {
+        enable_tracing();
         use tonic::metadata::{BinaryMetadataValue, MetadataKey};
         let pool = ChannelPool::new(vec!["a:1".into()], None, false, RetryPolicy::default());
         let mut status = tonic::Status::failed_precondition("not leader");
@@ -854,6 +873,7 @@ mod tests {
     /// continues without mutating the cache.
     #[test]
     fn classify_stale_epoch_hint_returns_stale_leader_hint() {
+        enable_tracing();
         let pool = ChannelPool::new(
             vec!["a:1".into(), "b:1".into()],
             None,
@@ -907,6 +927,7 @@ mod tests {
     /// hint just wasn't usable.
     #[test]
     fn classify_plaintext_hint_under_tls_returns_hint_rejected() {
+        enable_tracing();
         let pool = ChannelPool::new(vec!["a:1".into()], None, true, RetryPolicy::default());
         let status = make_status_with_hint(tsoracle_proto::v1::LeaderHint {
             leader_endpoint: Some("http://attacker:1".into()),
@@ -1106,6 +1127,7 @@ mod tests {
     /// given one. The assertion is the wall-clock bound on the whole pair.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connect_and_rpc_share_one_per_attempt_deadline() {
+        enable_tracing();
         use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
 
         struct HangingServer;
@@ -1242,6 +1264,7 @@ mod tests {
     /// connector runs exactly once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn application_error_preserves_cached_channel() {
+        enable_tracing();
         use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
 
         struct InternalServer;
@@ -1485,6 +1508,7 @@ mod tests {
     /// surface a misleading `NoReachableEndpoints`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn redirect_chain_exceeding_cap_is_bounded() {
+        enable_tracing();
         use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
 
         // Always redirect to a fresh, unvisited endpoint (epoch-less, so it is
@@ -1780,6 +1804,154 @@ mod tests {
                 .any(|endpoint| endpoint.contains("live")),
             "the live endpoint must be dialed; dialed = {:?}",
             dialed.lock().unwrap(),
+        );
+    }
+
+    /// A connect that outlasts the per-attempt deadline is cut off by the outer
+    /// `tokio::time::timeout`, surfacing as `DeadlineExceeded` from the
+    /// connect-phase timeout arm — a path distinct from a connector that
+    /// *returns* an error (which the unreachable-endpoint tests already cover).
+    /// Virtual time (`start_paused`) fires the 100 ms budget deterministically
+    /// with no real wall-clock wait.
+    #[tokio::test(start_paused = true)]
+    async fn connect_exceeding_per_attempt_deadline_surfaces_deadline_exceeded() {
+        enable_tracing();
+        // Parks far longer than the per-attempt deadline, so the outer timeout
+        // wins and the connector future is cancelled before it ever resolves.
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                unreachable!("the per-attempt timeout must cancel this connect")
+            })
+        });
+        let policy = RetryPolicy {
+            max_attempts: 1,
+            per_attempt_deadline: Duration::from_millis(100),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["slow:1".into()], Some(connector), false, policy);
+        match issue_rpc(&pool, 1).await {
+            Err(ClientError::Rpc(status)) => assert_eq!(
+                status.code(),
+                tonic::Code::DeadlineExceeded,
+                "a connect that overran the per-attempt budget must surface DeadlineExceeded",
+            ),
+            other => panic!("expected an RPC DeadlineExceeded error, got {other:?}"),
+        }
+    }
+
+    /// When the `overall_deadline` elapses *between* attempts — here consumed by
+    /// a backoff sleep the clamp pins to the remaining budget — the loop must
+    /// stop before starting the next attempt, even though endpoints are still
+    /// queued and `max_attempts` has headroom. Virtual time trips the deadline
+    /// deterministically. Covers the `budget.next_attempt() == None` break,
+    /// which the fast-failing unreachable tests skip past.
+    #[tokio::test(start_paused = true)]
+    async fn overall_deadline_stops_loop_between_attempts() {
+        enable_tracing();
+        // Each dial fails transport-class (Unavailable) with no delay, which
+        // triggers a backoff. `base_backoff` dwarfs the overall budget, so the
+        // clamp pins the first sleep to the ~100 ms remaining; the next
+        // `next_attempt()` then sees the deadline reached with `b`/`c` unvisited.
+        let connector: Arc<crate::transport::ChannelConnector> = Arc::new(|_endpoint: &str| {
+            Box::pin(async move { Err(ClientError::Rpc(tonic::Status::unavailable("dead"))) })
+        });
+        let policy = RetryPolicy {
+            max_attempts: 10,
+            per_attempt_deadline: Duration::from_millis(50),
+            overall_deadline: Duration::from_millis(100),
+            base_backoff: Duration::from_secs(60),
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(
+            vec!["a:1".into(), "b:1".into(), "c:1".into()],
+            Some(connector),
+            false,
+            policy,
+        );
+        match issue_rpc(&pool, 1).await {
+            Err(ClientError::Rpc(status)) => assert_eq!(
+                status.code(),
+                tonic::Code::Unavailable,
+                "the loop must surface the last transport error once the overall \
+                 deadline cuts it short",
+            ),
+            other => panic!("expected the last transport error, got {other:?}"),
+        }
+    }
+
+    /// A server that answers with a structurally valid gRPC message whose
+    /// payload fails `decode_get_ts_response` (here: a `count` that disagrees
+    /// with the requested count) surfaces as a non-transport `Err` and must NOT
+    /// evict the channel — the connection is healthy, only the payload was
+    /// wrong. Covers the decode-error arm in `attempt`, which early-returns
+    /// before the transport-eviction tail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_response_payload_surfaces_error_without_evicting() {
+        enable_tracing();
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct WrongCountServer;
+
+        #[tonic::async_trait]
+        impl TsoService for WrongCountServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                // The test requests count = 1, but the server claims 9: the
+                // client's decoder rejects the mismatch over a healthy channel.
+                Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
+                    physical_ms: 1,
+                    logical_start: 0,
+                    count: 9,
+                    epoch_hi: 0,
+                    epoch_lo: 0,
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(WrongCountServer))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connector = counting_connector(connect_count.clone(), move || {
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .expect("valid endpoint")
+                .connect_lazy()
+        });
+        let pool = ChannelPool::new(
+            vec!["server:1".into()],
+            Some(connector),
+            false,
+            short_policy(),
+        );
+
+        let budget = Duration::from_secs(2);
+        let first = attempt(&pool, "server:1", 1, budget).await;
+        assert!(
+            matches!(first, AttemptOutcome::Err(_)),
+            "a malformed payload must surface as Err, got {first:?}",
+        );
+        let _second = attempt(&pool, "server:1", 1, budget).await;
+        assert_eq!(
+            connect_count.load(Ordering::SeqCst),
+            1,
+            "a decode error leaves the channel cached (the connection is healthy); \
+             the second attempt must reuse it rather than re-dial",
         );
     }
 }
