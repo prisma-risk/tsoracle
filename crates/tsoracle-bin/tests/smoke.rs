@@ -178,3 +178,39 @@ async fn wait_until_responsive(client: &Client, budget: Duration) -> Result<(), 
         }
     }
 }
+
+/// A build without the paxos feature must reject `serve paxos` with the
+/// friendly "not included in this build" message, not a clap parse error.
+#[tokio::test]
+async fn serve_paxos_errors_when_feature_compiled_out() {
+    // CARGO_BIN_EXE_tsoracle points at the test build of the binary. The
+    // workspace default includes paxos, so this test only asserts the message
+    // shape when the feature is OFF; gate it accordingly.
+    #[cfg(not(feature = "paxos"))]
+    {
+        let exe = env!("CARGO_BIN_EXE_tsoracle");
+        let output = tokio::process::Command::new(exe)
+            .args([
+                "serve",
+                "paxos",
+                "--node-id",
+                "1",
+                "--peer-listen",
+                "127.0.0.1:0",
+                "--peers",
+                "1=127.0.0.1:1",
+                "--tso-peers",
+                "1=127.0.0.1:2",
+                "--data-dir",
+                "/tmp/x",
+            ])
+            .output()
+            .await
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("does not include the paxos driver"),
+            "stderr: {stderr}"
+        );
+    }
+}
