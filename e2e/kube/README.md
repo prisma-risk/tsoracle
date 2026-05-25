@@ -37,3 +37,16 @@ kind delete cluster --name tsoracle-e2e
 ## Scope
 
 This lane currently covers cold-start formation and graceful rolling-restart (rollout steps 2–3). Network partition + PVC reattach (step 4) and a nightly schedule (step 5) are follow-ups. The `openraft-standalone` example now handles SIGTERM (via `tsoracle_server::shutdown_signal()`, #406), so the graceful-rollout assertion exercises the real cooperative-shutdown path.
+
+## Deploying to EKS (staging)
+
+The kind flow above is fully local. To deploy the same `openraft-standalone` cluster onto the real **staging** EKS cluster (arm64, real EBS) for a manual smoke test, the Kubernetes manifests live in the **infra** repo at `k8s/tsoracle-e2e/`; this repo only builds and pushes the images.
+
+Prerequisites: AWS credentials, the `staging` kube context, and the ECR repositories created once via `terraform apply` in `infra/terraform/shared-artifacts`.
+
+```sh
+# build + push the arm64 node and driver images to ECR
+./e2e/kube/push-to-ecr.sh
+```
+
+Then follow `infra/k8s/tsoracle-e2e/README.md` for apply, assertions, and teardown. Unlike the kind lane (side-loaded images, `imagePullPolicy: IfNotPresent`), the EKS overlay uses `imagePullPolicy: Always` against ECR.

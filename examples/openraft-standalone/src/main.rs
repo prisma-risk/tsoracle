@@ -19,6 +19,7 @@
 //! `--bootstrap` flag goes on exactly one node at first cluster init.
 
 mod network;
+mod shutdown;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -226,7 +227,15 @@ async fn main() -> anyhow::Result<()> {
         "tsoracle openraft node {} on http://{}",
         cli.id, cli.tso_addr
     );
-    tso.serve_with_shutdown(cli.tso_addr, tsoracle_server::shutdown_signal())
-        .await?;
+    // On drain, hand off leadership before the gRPC server stops accepting, so
+    // peers don't wait out an election timeout. Best-effort: if this node is
+    // not the leader (or the handoff times out) it simply drains normally.
+    let raft_for_shutdown = raft.clone();
+    let my_id = cli.id;
+    let shutdown = async move {
+        tsoracle_server::shutdown_signal().await;
+        shutdown::graceful_leader_handoff(&raft_for_shutdown, my_id).await;
+    };
+    tso.serve_with_shutdown(cli.tso_addr, shutdown).await?;
     Ok(())
 }
