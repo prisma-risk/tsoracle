@@ -719,7 +719,15 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    // Runs under tokio virtual time (`start_paused`). The whole topology — the
+    // in-process `MemNetwork`, the per-node runner `interval` ticks, election,
+    // and `wait_for_leader`'s poll `sleep` — advances in simulated time, and so
+    // does the completion guard below. The tonic servers serve over real
+    // loopback but have no peer connections (peers talk via `MemNetwork`), so a
+    // healthy graceful drain finishes the instant its shutdown oneshot fires.
+    // `start_paused` implies the current-thread runtime; the storage and paxos
+    // work is short and cooperative, so a single worker is sufficient.
+    #[tokio::test(start_paused = true)]
     async fn shutdown_completes_server_tasks() {
         let topology = PaxosTopology::spawn(3, Duration::from_millis(1000))
             .await
@@ -727,21 +735,20 @@ mod tests {
         let server_handles = topology.server_handles;
         // Fire the per-node shutdown signals.
         Box::new(topology.controller).shutdown().await;
-        // Each server task must complete within a generous window after its
-        // shutdown oneshot fires. The window only guards against a genuine
-        // hang — `shutdown` failing to trigger the server's drain path — which
-        // never completes regardless of how long we wait; a healthy drain
-        // finishes in milliseconds. It is sized at 30s (not 5s) because the
-        // libtest harness runs this file's many `multi_thread` topology tests
-        // concurrently, each demanding 4 workers, so on an oversubscribed CI
-        // runner the spawned drain task can be scheduling-starved well past a
-        // few seconds of wall-clock without anything being wrong.
+        // Liveness guard, not a latency assertion. Each server task must drain
+        // and complete once its shutdown oneshot fires; a `shutdown` that failed
+        // to trigger the drain path would leave the task running forever. Under
+        // virtual time the timeout only elapses when the runtime goes idle with
+        // the handle unfinished — i.e. a genuine hang — so it can never trip on
+        // CI scheduling starvation (the old wall-clock bound's flake), and the
+        // bound is simulated time that costs no wall clock. Any finite value
+        // distinguishes "drained" from "hung".
         for (idx, handle) in server_handles.into_iter().enumerate() {
             match tokio::time::timeout(Duration::from_secs(30), handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(join_err)) => panic!("server task {idx} did not exit cleanly: {join_err:?}"),
                 Err(_elapsed) => {
-                    panic!("server task {idx} did not complete within 30s after shutdown")
+                    panic!("server task {idx} did not complete after shutdown (drain hung?)")
                 }
             }
         }
