@@ -124,6 +124,14 @@ pub enum CoreError {
         fence_floor: u64,
         committed_ceiling: u64,
     },
+    #[error(
+        "window extension overflow: max(floor {floor}, now_ms {now_ms}) + ahead_ms {ahead_ms} exceeds u64::MAX"
+    )]
+    WindowExtensionOverflow {
+        floor: u64,
+        now_ms: u64,
+        ahead_ms: u64,
+    },
 }
 
 /// The result of a `try_commit_window_extension` that passed range validation.
@@ -388,9 +396,13 @@ impl Allocator {
                 let floor = committed_high_water
                     .checked_add(1)
                     .ok_or(CoreError::PhysicalMsOutOfRange(*committed_high_water))?;
-                let requested = core::cmp::max(floor, now_ms)
-                    .checked_add(ahead_ms)
-                    .ok_or(CoreError::PhysicalMsOutOfRange(u64::MAX))?;
+                let requested = core::cmp::max(floor, now_ms).checked_add(ahead_ms).ok_or(
+                    CoreError::WindowExtensionOverflow {
+                        floor,
+                        now_ms,
+                        ahead_ms,
+                    },
+                )?;
                 if requested > PHYSICAL_MS_MAX {
                     return Err(CoreError::PhysicalMsOutOfRange(requested));
                 }
@@ -644,6 +656,26 @@ mod tests {
         assert_eq!(
             allocator.try_prepare_window_extension(PHYSICAL_MS_MAX, 1),
             Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 2))
+        );
+    }
+
+    #[test]
+    fn prepare_window_extension_overflow_names_all_operands() {
+        // A saturated clock (SystemClock::now_ms saturates to u64::MAX) plus any
+        // non-zero ahead_ms overflows max(floor, now_ms) + ahead_ms. The error
+        // must name the three real operands so the log points at the clock, not
+        // a phantom "someone passed an absurd physical_ms".
+        let mut allocator = Allocator::new();
+        allocator
+            .try_on_leadership_gained(1_000, 1_000, Epoch(1))
+            .unwrap();
+        assert_eq!(
+            allocator.try_prepare_window_extension(u64::MAX, 1),
+            Err(CoreError::WindowExtensionOverflow {
+                floor: 1_001,
+                now_ms: u64::MAX,
+                ahead_ms: 1,
+            })
         );
     }
 
