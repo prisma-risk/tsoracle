@@ -1,0 +1,27 @@
+{{- if and .Values.networkPolicy.enabled (ne .Values.driver "file") }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tsoracle.peerService" . }}
+  labels:
+    {{- include "tsoracle.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tsoracle
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tsoracle
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: peer
+    - ports:
+        - protocol: TCP
+          port: tso
+{{- end }}
