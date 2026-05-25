@@ -81,7 +81,6 @@ nix                = { version = "0.30", default-features = false, features = ["
 omnipaxos          = "0.2"
 omnipaxos_storage  = "0.2"
 parking_lot        = "0.12"
-pastey             = "0.2"
 proptest           = "1"
 prost              = "0.14"
 rand               = { version = "0.9", default-features = false, features = ["std", "std_rng"] }

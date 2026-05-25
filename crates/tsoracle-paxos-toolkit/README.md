@@ -4,7 +4,6 @@ Reusable glue for building services on top of [OmniPaxos](https://github.com/har
 
 ## What's in the box
 
-- `declare_omnipaxos_types_ext!` — wraps the upstream `OmniPaxos` type declarations with curated defaults so consumers supply only the slots that actually vary (entry type, application data).
 - `RocksdbStorage<T>` — generic `omnipaxos::storage::Storage` implementation backed by RocksDB. Passes OmniPaxos's bundled storage conformance suite; `T: omnipaxos::storage::Entry` is the host's log entry type.
 - Lifecycle helpers: `PaxosRunner<T, S>` (the tick task + apply task lifecycle wrapper), the `MessageSink<T>` outbound trait, `LeadershipState`, the leader-event stream (`LeaderEventStream` + `LeaderEventSender`), and the `Peer` struct used for follower-redirect endpoints.
 - Test fakes (feature-gated): `MemNetwork<T>` for in-process clusters, `PartitionController` for chaos coverage, `MemStorage<T>` for storage-free smoke tests.

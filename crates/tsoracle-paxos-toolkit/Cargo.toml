@@ -30,7 +30,6 @@ futures            = { workspace = true }
 metrics            = { workspace = true, optional = true }
 omnipaxos          = { workspace = true, features = ["serde"] }
 parking_lot        = { workspace = true }
-pastey             = { workspace = true }
 rocksdb            = { workspace = true, optional = true, features = ["multi-threaded-cf"] }
 serde              = { workspace = true }
 thiserror          = { workspace = true }
@@ -61,11 +60,6 @@ required-features = ["test-fakes"]
 [[test]]
 name              = "lifecycle"
 path              = "tests/lifecycle.rs"
-required-features = ["test-fakes"]
-
-[[test]]
-name              = "macro_smoke"
-path              = "tests/macro_smoke.rs"
 required-features = ["test-fakes"]
 
 [[test]]
