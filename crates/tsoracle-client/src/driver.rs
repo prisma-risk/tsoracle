@@ -216,7 +216,8 @@ fn chunk_queue(queue: &mut VecDeque<Waiter>) -> Vec<(u32, VecDeque<Waiter>)> {
 
     while let Some(w) = queue.pop_front() {
         if w.count == 0 || w.count > MAX_TIMESTAMPS_PER_RPC {
-            let _ = w.respond.send(Err(ClientError::InvalidCount(w.count)));
+            let count = w.count;
+            reply_to_waiter(w, Err(ClientError::InvalidCount(count)));
             continue;
         }
         let fits = current_total
@@ -295,6 +296,33 @@ fn set_in_flight_gauge(state: u8) {
     let _ = state;
 }
 
+/// Hand one waiter its outcome over its `oneshot` channel.
+///
+/// `oneshot::Sender::send` fails only when the paired receiver has been
+/// dropped, which here means exactly one thing: the caller dropped its
+/// `Driver::request` future — a client-side timeout or cancellation — before
+/// the result arrived. There is nothing left to deliver, so dropping the
+/// outcome is correct; but the drop is counted via [`record_abandoned_waiter`]
+/// so a cancellation storm is observable instead of silently swallowed.
+/// Routing every delivery through this one helper also makes it structurally
+/// impossible to add a new send site that forgets the metric.
+#[inline]
+fn reply_to_waiter(waiter: Waiter, outcome: Result<Vec<Timestamp>, ClientError>) {
+    if waiter.respond.send(outcome).is_err() {
+        record_abandoned_waiter();
+    }
+}
+
+/// Count one waiter whose result could not be delivered because the caller
+/// already dropped its `Driver::request` future. Compiled away to a no-op
+/// without the `metrics` feature, matching the gauges above, so the hot path
+/// carries no recorder cost when no metrics feature is installed.
+#[inline]
+fn record_abandoned_waiter() {
+    #[cfg(feature = "metrics")]
+    metrics::counter!("tsoracle.client.driver.abandoned_waiters.total").increment(1);
+}
+
 /// Deliver one chunk's RPC outcome to its waiters.
 ///
 /// `expected` is the count the driver passed to the RPC. If the server
@@ -316,9 +344,10 @@ fn deliver(
                     range.count(),
                 );
                 while let Some(w) = waiters.pop_front() {
-                    let _ = w
-                        .respond
-                        .send(Err(ClientError::Rpc(tonic::Status::internal(msg.clone()))));
+                    reply_to_waiter(
+                        w,
+                        Err(ClientError::Rpc(tonic::Status::internal(msg.clone()))),
+                    );
                 }
                 return;
             }
@@ -331,12 +360,12 @@ fn deliver(
                     "chunk_queue established total == sum(count); a short slice means \
                      either chunk_queue or the response-length check above is wrong"
                 );
-                let _ = w.respond.send(Ok(slice));
+                reply_to_waiter(w, Ok(slice));
             }
         }
         Err(e) => {
             while let Some(w) = waiters.pop_front() {
-                let _ = w.respond.send(Err(clone_client_error(&e)));
+                reply_to_waiter(w, Err(clone_client_error(&e)));
             }
         }
     }
@@ -1008,6 +1037,79 @@ mod tests {
                     assert_eq!(total_rpc, total_requested, "rpc-side total {total_rpc} != requested {total_requested}");
                 });
             }
+        }
+    }
+
+    /// A failed `respond.send` — the caller dropped its `Driver::request`
+    /// future before the result arrived — must bump
+    /// `tsoracle.client.driver.abandoned_waiters.total`, so a cancellation
+    /// storm is observable rather than silently swallowed. A live receiver
+    /// must leave the counter untouched.
+    ///
+    /// The helper is driven directly on the test thread (not through a spawned
+    /// `driver_task`) because `metrics::with_local_recorder` installs a
+    /// *thread-local* recorder; an emission from another worker thread would
+    /// not be captured.
+    #[cfg(feature = "metrics")]
+    mod abandoned_waiter_metric {
+        use super::*;
+        use metrics_util::{
+            MetricKind,
+            debugging::{DebugValue, DebuggingRecorder},
+        };
+
+        type RecordedMetric = (
+            metrics_util::CompositeKey,
+            Option<metrics::Unit>,
+            Option<metrics::SharedString>,
+            DebugValue,
+        );
+
+        const METRIC: &str = "tsoracle.client.driver.abandoned_waiters.total";
+
+        fn counter(snapshot: &[RecordedMetric], name: &str) -> u64 {
+            for (composite, _unit, _desc, value) in snapshot {
+                if composite.kind() == MetricKind::Counter && composite.key().name() == name {
+                    if let DebugValue::Counter(n) = value {
+                        return *n;
+                    }
+                }
+            }
+            0
+        }
+
+        #[test]
+        fn dropped_receiver_increments_counter() {
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            metrics::with_local_recorder(&recorder, || {
+                let (respond, rx) = oneshot::channel();
+                // The caller gave up: its receiver is gone before delivery.
+                drop(rx);
+                reply_to_waiter(Waiter { count: 1, respond }, Ok(Vec::new()));
+            });
+            assert_eq!(
+                counter(&snapshotter.snapshot().into_vec(), METRIC),
+                1,
+                "a send to a dropped receiver must count exactly one abandoned waiter",
+            );
+        }
+
+        #[test]
+        fn live_receiver_does_not_increment_counter() {
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            metrics::with_local_recorder(&recorder, || {
+                // The receiver stays alive for the whole delivery, so the send
+                // succeeds and nothing is abandoned.
+                let (respond, _rx) = oneshot::channel();
+                reply_to_waiter(Waiter { count: 1, respond }, Ok(Vec::new()));
+            });
+            assert_eq!(
+                counter(&snapshotter.snapshot().into_vec(), METRIC),
+                0,
+                "a delivery to a live receiver must not count an abandoned waiter",
+            );
         }
     }
 }

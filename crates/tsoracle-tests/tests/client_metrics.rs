@@ -17,6 +17,13 @@
 //! least once. Scenarios are sequenced inside one test binary because the
 //! `metrics` recorder slot is process-global; running each scenario as its
 //! own `#[tokio::test]` would race on `install()`.
+//!
+//! One documented client signal is deliberately not exercised here:
+//! `tsoracle.client.driver.abandoned_waiters.total` fires only when a caller
+//! drops its `get_ts()` future *after* the driver has dispatched but *before*
+//! delivery — a race that is timing-dependent to force end to end. It has
+//! deterministic unit coverage in `tsoracle_client::driver` instead, where the
+//! delivery helper is driven directly against a dropped receiver.
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
