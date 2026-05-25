@@ -551,9 +551,9 @@ mod record_codec_tests {
     }
 
     #[test]
-    fn schema_version_is_three() {
+    fn schema_version_is_four() {
         // Pinned so a future layout change re-confirms the bump deliberately;
-        // v3 widened the openraft driver's OpenraftPeer membership node.
-        assert_eq!(crate::codec::SCHEMA_VERSION, 3);
+        // v4 widened the openraft driver's OpenraftPeer with admin_endpoint.
+        assert_eq!(crate::codec::SCHEMA_VERSION, 4);
     }
 }

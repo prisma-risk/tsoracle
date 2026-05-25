@@ -188,6 +188,7 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
                         OpenraftPeer {
                             addr: m.raft_addr,
                             service_endpoint: m.service_endpoint,
+                            admin_endpoint: String::new(),
                         },
                     )
                 })

@@ -250,6 +250,7 @@ impl RaftTopology {
                 OpenraftPeer {
                     addr: format!("mem-node-{id_u64}"),
                     service_endpoint: String::new(),
+                    admin_endpoint: String::new(),
                 },
             );
         }
