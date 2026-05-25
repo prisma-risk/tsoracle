@@ -29,7 +29,7 @@ use omnipaxos::messages::Message;
 use omnipaxos::storage::Storage;
 use parking_lot::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig};
 use tracing::warn;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_paxos_toolkit::lifecycle::MessageSink;
@@ -47,13 +47,15 @@ use proto::{Ack, PaxosMessage};
 pub struct PeerSink {
     addrs: Arc<HashMap<u64, String>>,
     pool: AsyncMutex<HashMap<u64, PaxosPeerServiceClient<Channel>>>,
+    tls: Option<ClientTlsConfig>,
 }
 
 impl PeerSink {
-    pub fn new(addrs: HashMap<u64, String>) -> Self {
+    pub fn new(addrs: HashMap<u64, String>, tls: Option<ClientTlsConfig>) -> Self {
         Self {
             addrs: Arc::new(addrs),
             pool: AsyncMutex::new(HashMap::new()),
+            tls,
         }
     }
 
@@ -63,9 +65,25 @@ impl PeerSink {
             return Some(client.clone());
         }
         let endpoint = self.addrs.get(&target)?;
-        let url = format!("http://{endpoint}");
-        match PaxosPeerServiceClient::connect(url).await {
-            Ok(client) => {
+        let channel = match &self.tls {
+            Some(tls) => {
+                tonic::transport::Channel::from_shared(format!("https://{endpoint}"))
+                    .ok()?
+                    .tls_config(tls.clone())
+                    .ok()?
+                    .connect()
+                    .await
+            }
+            None => {
+                tonic::transport::Channel::from_shared(format!("http://{endpoint}"))
+                    .ok()?
+                    .connect()
+                    .await
+            }
+        };
+        match channel {
+            Ok(channel) => {
+                let client = PaxosPeerServiceClient::new(channel);
                 pool.insert(target, client.clone());
                 Some(client)
             }

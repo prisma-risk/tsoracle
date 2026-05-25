@@ -46,6 +46,11 @@ fn open_rocksdb(dir: &std::path::Path) -> Result<Arc<DB>, StandaloneError> {
 }
 
 pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, StandaloneError> {
+    let peer_tls = match &cfg.peer_tls {
+        Some(p) => Some(crate::peer_tls::build_peer_tls(p)?),
+        None => None,
+    };
+
     // Validate self identity (spec: Lifecycle): a node absent from its own
     // ClusterConfig.nodes can never be elected.
     if !cfg.peers.contains_key(&cfg.node_id) {
@@ -95,13 +100,26 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
             source,
         })?;
     let peer_service = peer_server(omnipaxos.clone());
+    let mut builder = tonic::transport::Server::builder();
+    if let Some(material) = &peer_tls {
+        builder = builder
+            .tls_config(material.server.clone())
+            .map_err(|source| StandaloneError::Tls {
+                path: cfg
+                    .peer_tls
+                    .as_ref()
+                    .map(|p| p.cert.clone())
+                    .unwrap_or_default(),
+                source: Box::new(source),
+            })?;
+    }
+    let router = builder.add_service(peer_service);
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(async move {
         let shutdown = async {
             let _ = cancel_rx.await;
         };
-        if let Err(err) = tonic::transport::Server::builder()
-            .add_service(peer_service)
+        if let Err(err) = router
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
             .await
         {
@@ -115,7 +133,7 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
         .filter(|(id, _)| **id != cfg.node_id)
         .map(|(id, endpoint)| TsoPeer {
             node_id: *id,
-            endpoint: format!("http://{endpoint}"),
+            endpoint: endpoint.clone(),
         })
         .collect();
     let mut host = StandaloneHost::builder()
@@ -130,7 +148,10 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
         .take_leader_subscriber()
         .ok_or_else(|| StandaloneError::Bootstrap("leader subscriber unavailable".into()))?;
 
-    let sink = Arc::new(PeerSink::new(cfg.peers.into_iter().collect()));
+    let sink = Arc::new(PeerSink::new(
+        cfg.peers.into_iter().collect(),
+        peer_tls.as_ref().map(|m| m.client.clone()),
+    ));
     host.start(sink)
         .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?;
 
