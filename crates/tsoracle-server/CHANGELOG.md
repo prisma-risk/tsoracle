@@ -4,6 +4,35 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.4...tsoracle-server-v0.2.5) - 2026-05-25
+
+### Added
+
+- *(core)* return CommitOutcome from try_commit_window_extension ([#365](https://github.com/prisma-risk/tsoracle/pull/365))
+- *(server)* add Server::subscribe() and demote state_rx to pub(crate) ([#317](https://github.com/prisma-risk/tsoracle/pull/317))
+- extract shared tsoracle-failpoint crate ([#306](https://github.com/prisma-risk/tsoracle/pull/306))
+
+### Fixed
+
+- *(server)* stop leader-watch task cooperatively via WatchGuard ([#392](https://github.com/prisma-risk/tsoracle/pull/392))
+- *(core)* name all operands on window-extension overflow ([#384](https://github.com/prisma-risk/tsoracle/pull/384))
+- *(server)* count offered load in get_ts.requests.total, rename success counter ([#382](https://github.com/prisma-risk/tsoracle/pull/382))
+- *(core)* make WindowGrant valid-by-construction so first/last can't panic ([#363](https://github.com/prisma-risk/tsoracle/pull/363))
+
+### Other
+
+- *(server)* extract ServingCore for lock/step-down invariants ([#394](https://github.com/prisma-risk/tsoracle/pull/394))
+- reflect paxos stress topology in README and stress-testing guide ([#388](https://github.com/prisma-risk/tsoracle/pull/388))
+- *(server)* drop parked state_rx; read/publish via state_tx ([#385](https://github.com/prisma-risk/tsoracle/pull/385))
+- *(server)* extract DST harness into tsoracle-server-testkit ([#371](https://github.com/prisma-risk/tsoracle/pull/371))
+- *(server)* emit leader-transition counter after state changes in run_leader_watch ([#328](https://github.com/prisma-risk/tsoracle/pull/328))
+- *(server)* extract shared serve_inner from the two serve paths ([#322](https://github.com/prisma-risk/tsoracle/pull/322))
+- *(server)* document extension_lock/extension_gate lock-ordering at fence site ([#316](https://github.com/prisma-risk/tsoracle/pull/316))
+- *(server)* drop BuildError::InvalidLeaderHintKey runtime check ([#100](https://github.com/prisma-risk/tsoracle/pull/100)) ([#313](https://github.com/prisma-risk/tsoracle/pull/313))
+- *(client)* run the e2e + freshness client tests under turmoil DST ([#309](https://github.com/prisma-risk/tsoracle/pull/309))
+- *(server)* run the extension-stampede single-flight test under turmoil DST ([#307](https://github.com/prisma-risk/tsoracle/pull/307))
+- *(server)* run timing-fragile fence/churn tests under turmoil DST ([#305](https://github.com/prisma-risk/tsoracle/pull/305))
+
 ## [0.2.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.3...tsoracle-server-v0.2.4) - 2026-05-24
 
 ### Fixed

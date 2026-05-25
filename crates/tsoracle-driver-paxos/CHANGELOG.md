@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v0.2.2...tsoracle-driver-paxos-v0.2.3) - 2026-05-25
+
+### Added
+
+- *(consensus)* give the high-water advance rule a single home via AdvancePayload::merge ([#369](https://github.com/prisma-risk/tsoracle/pull/369))
+- *(paxos)* surface snapshot and async-persistence failures as health metrics ([#367](https://github.com/prisma-risk/tsoracle/pull/367))
+- *(core)* lift a shared TsoPeer type into tsoracle-core ([#266](https://github.com/prisma-risk/tsoracle/pull/266)) ([#325](https://github.com/prisma-risk/tsoracle/pull/325))
+- *(consensus)* unify HighWaterCommand advance naming across backends ([#323](https://github.com/prisma-risk/tsoracle/pull/323))
+
+### Fixed
+
+- *(driver-paxos)* re-subscribe leadership_events instead of take-once ([#262](https://github.com/prisma-risk/tsoracle/pull/262)) ([#396](https://github.com/prisma-risk/tsoracle/pull/396))
+- *(driver-paxos)* reject double-start with AlreadyRunning instead of a debug-only assert ([#380](https://github.com/prisma-risk/tsoracle/pull/380))
+- *(driver-paxos)* rebase snapshot baseline at recovery to avoid spurious post-restart snapshot ([#375](https://github.com/prisma-risk/tsoracle/pull/375))
+- *(driver-paxos)* bound StandaloneHost barrier waits with a deadline and apply-task liveness ([#364](https://github.com/prisma-risk/tsoracle/pull/364))
+- *(consensus)* reject out-of-range high-water advance before persisting ([#360](https://github.com/prisma-risk/tsoracle/pull/360))
+- *(driver-paxos)* seed the apply cursor from the recovery fold instead of re-draining from 0 ([#330](https://github.com/prisma-risk/tsoracle/pull/330))
+
+### Other
+
+- *(driver-paxos)* extract ApplyEngine + ApplyTask from StandaloneHost ([#327](https://github.com/prisma-risk/tsoracle/pull/327))
+- make the remaining real-time consensus-harness tests deterministic ([#326](https://github.com/prisma-risk/tsoracle/pull/326))
+- *(driver-paxos)* convert the blocking-driver harness tests to deterministic stepping ([#318](https://github.com/prisma-risk/tsoracle/pull/318))
+- *(driver-paxos)* deterministic step-driver for the paxos harness (+ convert the steppable tests) ([#312](https://github.com/prisma-risk/tsoracle/pull/312))
+
 ## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v0.2.1...tsoracle-driver-paxos-v0.2.2) - 2026-05-24
 
 ### Added

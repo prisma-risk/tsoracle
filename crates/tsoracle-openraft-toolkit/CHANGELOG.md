@@ -4,6 +4,26 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.7...tsoracle-openraft-toolkit-v0.1.8) - 2026-05-25
+
+### Added
+
+- extract the version-prefixed postcard codec into a shared tsoracle-codec crate ([#324](https://github.com/prisma-risk/tsoracle/pull/324))
+- *(openraft-toolkit)* promote leadership stream by-value entry to stable API ([#310](https://github.com/prisma-risk/tsoracle/pull/310))
+- extract shared tsoracle-failpoint crate ([#306](https://github.com/prisma-risk/tsoracle/pull/306))
+
+### Fixed
+
+- *(openraft-toolkit)* version-frame the log-store meta column ([#331](https://github.com/prisma-risk/tsoracle/pull/331)) ([#390](https://github.com/prisma-risk/tsoracle/pull/390))
+- *(deps)* remove unused production dependencies ([#378](https://github.com/prisma-risk/tsoracle/pull/378))
+
+### Other
+
+- reflect paxos stress topology in README and stress-testing guide ([#388](https://github.com/prisma-risk/tsoracle/pull/388))
+- *(openraft-toolkit)* range-delete truncate/purge instead of per-key loop ([#373](https://github.com/prisma-risk/tsoracle/pull/373))
+- make the remaining real-time consensus-harness tests deterministic ([#326](https://github.com/prisma-risk/tsoracle/pull/326))
+- *(openraft-toolkit)* remove unused MetaLabel::LastMembership ([#311](https://github.com/prisma-risk/tsoracle/pull/311))
+
 ## [0.1.7](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.6...tsoracle-openraft-toolkit-v0.1.7) - 2026-05-24
 
 ### Added

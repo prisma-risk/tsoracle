@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle"
-version      = "0.1.9"
+version      = "0.1.10"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -27,13 +27,13 @@ clap                  = { workspace = true }
 tokio                 = { workspace = true, features = ["signal"] }
 tracing               = { workspace = true }
 tracing-subscriber    = { workspace = true }
-tsoracle-core         = { path = "../tsoracle-core", version = "0.2.1" }
-tsoracle-server       = { path = "../tsoracle-server", version = "0.2.4" }
-tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "0.1.6" }
+tsoracle-core         = { path = "../tsoracle-core", version = "0.2.2" }
+tsoracle-server       = { path = "../tsoracle-server", version = "0.2.5" }
+tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "0.1.7" }
 
 [dev-dependencies]
-tsoracle-client    = { path = "../tsoracle-client", version = "0.2.2" }
-tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.6" }
+tsoracle-client    = { path = "../tsoracle-client", version = "0.2.3" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.7" }
 async-trait        = { workspace = true }
 futures            = { workspace = true }
 parking_lot        = { workspace = true }

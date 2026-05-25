@@ -4,6 +4,27 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.2.2...tsoracle-driver-openraft-v0.2.3) - 2026-05-25
+
+### Added
+
+- *(consensus)* give the high-water advance rule a single home via AdvancePayload::merge ([#369](https://github.com/prisma-risk/tsoracle/pull/369))
+- *(core)* lift a shared TsoPeer type into tsoracle-core ([#266](https://github.com/prisma-risk/tsoracle/pull/266)) ([#325](https://github.com/prisma-risk/tsoracle/pull/325))
+- *(consensus)* unify HighWaterCommand advance naming across backends ([#323](https://github.com/prisma-risk/tsoracle/pull/323))
+- *(openraft-toolkit)* promote leadership stream by-value entry to stable API ([#310](https://github.com/prisma-risk/tsoracle/pull/310))
+
+### Fixed
+
+- *(openraft-toolkit)* version-frame the log-store meta column ([#331](https://github.com/prisma-risk/tsoracle/pull/331)) ([#390](https://github.com/prisma-risk/tsoracle/pull/390))
+- *(deps)* remove unused production dependencies ([#378](https://github.com/prisma-risk/tsoracle/pull/378))
+- *(consensus)* reject out-of-range high-water advance before persisting ([#360](https://github.com/prisma-risk/tsoracle/pull/360))
+
+### Other
+
+- *(fuzz)* fuzz the openraft meta-column bare-postcard decode ([#372](https://github.com/prisma-risk/tsoracle/pull/372))
+- *(fuzz)* fuzz the full openraft Entry log record ([#368](https://github.com/prisma-risk/tsoracle/pull/368))
+- *(driver-openraft)* run the harness tests under tokio virtual time ([#319](https://github.com/prisma-risk/tsoracle/pull/319))
+
 ## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.2.1...tsoracle-driver-openraft-v0.2.2) - 2026-05-24
 
 ### Added
