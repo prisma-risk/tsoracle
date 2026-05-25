@@ -115,10 +115,11 @@ pub(crate) async fn run_leader_watch(
                 #[cfg(feature = "metrics")]
                 let fence_started_at = std::time::Instant::now();
 
-                // Clear serving so new GetTs requests return NOT_LEADER until the
-                // fence republishes Serving below.
-                server.core.publish_not_serving(None, None);
-                server.core.clear_allocator();
+                // Enter the fence: clear the allocator and publish NotServing so
+                // new GetTs requests return NOT_LEADER until the fence
+                // republishes Serving below. `enter_fencing` clears *before* it
+                // publishes (invariant 2), so the order cannot be inverted here.
+                server.core.enter_fencing();
 
                 // Count the transition after the clear above, not on the fence's
                 // success path below: a Leader event is "observed" the moment we
@@ -296,18 +297,14 @@ pub(crate) async fn run_leader_watch(
                 leader_endpoint,
                 leader_epoch,
             } => {
-                server.core.clear_allocator();
-                server
-                    .core
-                    .publish_not_serving(leader_endpoint, leader_epoch);
+                server.core.step_down(leader_endpoint, leader_epoch);
                 // Emit after the NotServing publish so a blocking recorder
                 // cannot delay the safety state change.
                 #[cfg(feature = "metrics")]
                 metrics::counter!("tsoracle.leader_transition.total").increment(1);
             }
             LeaderState::Unknown => {
-                server.core.clear_allocator();
-                server.core.publish_not_serving(None, None);
+                server.core.step_down(None, None);
                 // Emit after the NotServing publish so a blocking recorder
                 // cannot delay the safety state change.
                 #[cfg(feature = "metrics")]
