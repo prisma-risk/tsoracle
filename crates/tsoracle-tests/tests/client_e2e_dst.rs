@@ -15,7 +15,7 @@
 //! These drive the *high-level* `tsoracle_client::Client` — its coalescing
 //! driver, retry loop, leader-hint redirect, and channel pool — over turmoil's
 //! simulated network, by handing `ClientBuilder::channel_connector` a closure
-//! that dials each endpoint through `test_support::dst::sim_channel`. No change
+//! that dials each endpoint through `tsoracle_server_testkit::sim_channel`. No change
 //! to the published client crate is needed: the connector hook already exists,
 //! and tonic's lazy `Channel` keeps the `!Send` turmoil IO on the sim's
 //! connection task while exposing a `Send` handle to the driver.
@@ -29,7 +29,7 @@ use tsoracle_client::{Client, ClientBuilder, ClientError};
 use tsoracle_core::{Clock, Epoch};
 use tsoracle_server::Server;
 use tsoracle_server::test_fakes::InMemoryDriver;
-use tsoracle_server::test_support::dst::{into_sim_parts, serve, sim_channel};
+use tsoracle_server_testkit::{into_sim_parts, serve, sim_channel};
 
 const PORT: u16 = 9_999;
 const EPOCH_BASE_MS: u64 = 1_700_000_000_001;
