@@ -349,6 +349,11 @@ impl ChannelPool {
     ) -> Result<(TsoServiceClient<Channel>, Arc<OnceCell<Channel>>), ClientError> {
         let cell = {
             let mut guard = self.channels.lock();
+            // A brand-new endpoint is the *only* event that can push the
+            // non-configured count over the cap; a cache hit reuses an existing
+            // slot, leaving the map size unchanged. Captured before the insert
+            // so the cap sweep below runs only when a slot is actually added.
+            let inserted = !guard.contains_key(endpoint);
             let slot = guard
                 .entry(endpoint.to_string())
                 .or_insert_with(|| PooledChannel {
@@ -356,13 +361,20 @@ impl ChannelPool {
                     last_used: Instant::now(),
                 });
             // Refresh recency on every lookup (cache hit included) so the
-            // endpoint dialed on each request stays most-recently-used, then
-            // reclaim any non-configured slot that pushed us over the cap. The
-            // freshly-touched slot is the most-recently-used, so it is never
-            // its own victim (issue #341).
+            // endpoint dialed on each request stays most-recently-used (issue
+            // #341); this must stay unconditional even though the sweep below
+            // is gated on insertion.
             slot.last_used = Instant::now();
             let cell = slot.cell.clone();
-            self.enforce_hint_cap(&mut guard, endpoint);
+            // Reclaim any non-configured slot that pushed us over the cap, but
+            // only on a real insert: on a cache hit the count is unchanged and
+            // was already trimmed to `<= MAX_HINT_CHANNELS` by the insert that
+            // seated this slot, so the O(n) sweep would be a no-op under the
+            // map lock. The freshly-touched slot is the most-recently-used, so
+            // it is never its own victim.
+            if inserted {
+                self.enforce_hint_cap(&mut guard, endpoint);
+            }
             cell
         };
 
