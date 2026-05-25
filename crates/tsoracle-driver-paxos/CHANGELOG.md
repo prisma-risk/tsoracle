@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v0.2.3...tsoracle-driver-paxos-v0.3.0) - 2026-05-25
+
+### Fixed
+
+- *(driver-paxos)* never mint the 0 lease sentinel on generation-counter wrap ([#442](https://github.com/prisma-risk/tsoracle/pull/442))
+- *(paxos)* seed barrier-nonce recovery from the durable log, not the non-synced decided_idx ([#427](https://github.com/prisma-risk/tsoracle/pull/427))
+- *(driver-paxos)* classify append rejections by variant, not opaque string ([#425](https://github.com/prisma-risk/tsoracle/pull/425))
+- *(driver-paxos)* make the single-active leadership lease observable and ABA-proof ([#416](https://github.com/prisma-risk/tsoracle/pull/416))
+- *(paxos-toolkit)* [**breaking**] enforce PaxosRunner::start guard in release builds ([#412](https://github.com/prisma-risk/tsoracle/pull/412))
+- *(driver-paxos)* enforce single active leadership stream via Drop-released lease ([#403](https://github.com/prisma-risk/tsoracle/pull/403))
+
+### Other
+
+- raise library coverage to 95.5% with targeted tests ([#414](https://github.com/prisma-risk/tsoracle/pull/414))
+
 ## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v0.2.2...tsoracle-driver-paxos-v0.2.3) - 2026-05-25
 
 ### Added

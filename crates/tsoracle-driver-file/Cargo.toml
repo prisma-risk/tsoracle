@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle-driver-file"
-version      = "0.1.7"
+version      = "0.1.8"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -30,8 +30,8 @@ libc               = "0.2"
 thiserror          = { workspace = true }
 tokio              = { workspace = true }
 tokio-stream       = { workspace = true }
-tsoracle-core      = { path = "../tsoracle-core", version = "0.2.2" }
-tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.7" }
+tsoracle-core      = { path = "../tsoracle-core", version = "0.2.3" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.8" }
 tsoracle-failpoint = { workspace = true }
 
 [dev-dependencies]

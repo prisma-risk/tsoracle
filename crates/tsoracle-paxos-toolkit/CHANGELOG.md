@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.2.3...tsoracle-paxos-toolkit-v0.3.0) - 2026-05-25
+
+### Added
+
+- *(paxos-toolkit)* [**breaking**] drop unused declare_omnipaxos_types_ext! macro and pastey dep ([#429](https://github.com/prisma-risk/tsoracle/pull/429))
+
+### Fixed
+
+- *(server)* enforce LeaderState::Follower driver contracts with a debug guard ([#439](https://github.com/prisma-risk/tsoracle/pull/439))
+- *(paxos-toolkit)* [**breaking**] enforce PaxosRunner::start guard in release builds ([#412](https://github.com/prisma-risk/tsoracle/pull/412))
+- *(paxos-toolkit)* keep RocksdbStorage cursor on out-of-range empty truncate ([#401](https://github.com/prisma-risk/tsoracle/pull/401))
+
 ## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v0.2.2...tsoracle-paxos-toolkit-v0.2.3) - 2026-05-25
 
 ### Added

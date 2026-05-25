@@ -13,7 +13,7 @@ name = "kube-e2e-driver"
 path = "src/main.rs"
 
 [dependencies]
-tsoracle-client = { path = "../../../crates/tsoracle-client", version = "0.2.3" }
+tsoracle-client = { path = "../../../crates/tsoracle-client", version = "0.2.4" }
 anyhow          = { workspace = true }
 clap            = { workspace = true }
 tokio           = { workspace = true }

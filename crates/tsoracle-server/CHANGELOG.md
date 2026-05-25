@@ -4,6 +4,27 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.5...tsoracle-server-v0.2.6) - 2026-05-25
+
+### Added
+
+- *(server)* add public shutdown_signal() and wire the cluster examples to it ([#406](https://github.com/prisma-risk/tsoracle/pull/406))
+
+### Fixed
+
+- *(server)* enforce LeaderState::Follower driver contracts with a debug guard ([#439](https://github.com/prisma-risk/tsoracle/pull/439))
+- *(server)* close the serving gate synchronously when the WatchGuard drops ([#422](https://github.com/prisma-risk/tsoracle/pull/422))
+- *(server)* bound graceful shutdown so a hung driver call can't stall exit ([#420](https://github.com/prisma-risk/tsoracle/pull/420))
+- *(server)* make the clear-before-publish invariant unbypassable in the fence ([#411](https://github.com/prisma-risk/tsoracle/pull/411))
+
+### Other
+
+- *(server)* add non-cloning is_serving() for the hot-path gate ([#436](https://github.com/prisma-risk/tsoracle/pull/436))
+- *(server)* consolidate consensus-error classification into one classifier ([#424](https://github.com/prisma-risk/tsoracle/pull/424))
+- *(server)* resolve broken intra-doc link to Server in operations guide ([#421](https://github.com/prisma-risk/tsoracle/pull/421))
+- cover remaining reachable branches (95.5% -> 95.8%) ([#418](https://github.com/prisma-risk/tsoracle/pull/418))
+- raise library coverage to 95.5% with targeted tests ([#414](https://github.com/prisma-risk/tsoracle/pull/414))
+
 ## [0.2.5](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.4...tsoracle-server-v0.2.5) - 2026-05-25
 
 ### Added
