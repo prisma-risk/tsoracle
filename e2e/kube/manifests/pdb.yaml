@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tsoracle
+  labels:
+    app.kubernetes.io/name: tsoracle
+spec:
+  # A 3-node raft cluster tolerates one member down. minAvailable: 2 keeps
+  # voluntary disruptions (node drains, rollouts) from breaking quorum.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tsoracle
