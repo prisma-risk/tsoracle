@@ -548,4 +548,11 @@ mod record_codec_tests {
         let err = decode_record::<Rec>(&[0xFF, 5]).expect_err("must reject");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
+
+    #[test]
+    fn schema_version_is_three() {
+        // Pinned so a future layout change re-confirms the bump deliberately;
+        // v3 widened the openraft driver's OpenraftPeer membership node.
+        assert_eq!(crate::codec::SCHEMA_VERSION, 3);
+    }
 }
