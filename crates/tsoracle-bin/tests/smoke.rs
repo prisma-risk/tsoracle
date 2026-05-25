@@ -179,6 +179,64 @@ async fn wait_until_responsive(client: &Client, budget: Duration) -> Result<(), 
     }
 }
 
+/// A single-node openraft cluster bootstraps, elects itself leader, and serves
+/// timestamps through the shipped `serve openraft` path.
+#[cfg(feature = "openraft")]
+#[tokio::test]
+async fn serve_openraft_single_node_serves_after_bootstrap() {
+    let binary_path = env!("CARGO_BIN_EXE_tsoracle");
+    let raft_dir = tempdir().unwrap();
+    let listen_addr = bind_unused().await;
+    let raft_addr = bind_unused().await;
+
+    let mut child = Command::new(binary_path)
+        .arg("serve")
+        .arg("openraft")
+        .arg("--id")
+        .arg("1")
+        .arg("--listen")
+        .arg(listen_addr.to_string())
+        .arg("--raft-addr")
+        .arg(raft_addr.to_string())
+        .arg("--raft-dir")
+        .arg(raft_dir.path())
+        .arg("--bootstrap")
+        .arg("--members")
+        .arg(format!("1={raft_addr}/{listen_addr}"))
+        .arg("--log")
+        .arg("warn")
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let readiness = wait_until_accepting(listen_addr, Duration::from_secs(15));
+    tokio::pin!(readiness);
+    tokio::select! {
+        result = &mut readiness => {
+            result.expect("binary did not start accepting connections");
+        }
+        child_result = child.wait() => {
+            let status = child_result.expect("wait on child failed");
+            panic!("binary exited before accepting connections: status={status}");
+        }
+    }
+
+    let client = Client::connect(vec![listen_addr.to_string()])
+        .await
+        .unwrap();
+    // A single-node raft still needs one election timeout to promote to leader
+    // before get_ts can succeed; give it a generous budget.
+    wait_until_responsive(&client, Duration::from_secs(15))
+        .await
+        .expect("openraft node never became responsive after starting to accept");
+
+    let ts1 = client.get_ts().await.unwrap();
+    let ts2 = client.get_ts().await.unwrap();
+    assert!(ts2 > ts1, "ts2 {ts2:?} > ts1 {ts1:?}");
+
+    child.kill().await.unwrap();
+}
+
 /// A build without the paxos feature must reject `serve paxos` with the
 /// friendly "not included in this build" message, not a clap parse error.
 #[tokio::test]
