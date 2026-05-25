@@ -74,9 +74,10 @@ async fn recovered_barrier_ledger_does_not_satisfy_a_fresh_read_after_restart() 
     assert!(reader_decided_before >= 8);
 
     // Phase B: stop the follower and rebuild it from disk. Its `barrier_seq`
-    // resets to 0 in construction, but `new()` folds the recovered suffix and
-    // resumes the counter to the durable ledger's `reader -> 7`; the recovered
-    // high-water is 100. Stepping the cluster lets the rebuilt node fold.
+    // resets to 0 in construction, but `new()` resumes the counter to `reader
+    // -> 7` by scanning the durable log for this node's highest barrier seq,
+    // while the recovery fold restores the high-water to 100. Stepping the
+    // cluster lets the rebuilt node fold.
     cluster.stop_node(reader_id).await;
     cluster.rebuild_rocksdb_node(reader_id);
     assert_eq!(

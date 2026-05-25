@@ -3392,6 +3392,7 @@ dependencies = [
  "tracing-subscriber",
  "tsoracle-consensus",
  "tsoracle-core",
+ "tsoracle-failpoint",
  "tsoracle-paxos-toolkit",
  "tsoracle-yieldpoint",
 ]

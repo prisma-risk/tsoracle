@@ -176,6 +176,65 @@ where
     decided_idx
 }
 
+/// Highest `Barrier { node, seq }` sequence `node` has ever appended that is
+/// still recoverable from the durable log — scanned across the snapshotted
+/// prefix and the *entire accepted suffix*, not just the decided prefix.
+///
+/// This is the recovery seed for the host's barrier-nonce counter, and it must
+/// not be derived from `decided_idx`. Log entries are fsynced on append
+/// (`batch_sync`), but `set_decided_idx` is not (`batch_async`), so a crash can
+/// recover a `decided_idx` below a barrier that is in fact durably logged. That
+/// barrier is invisible to a decided-only fold (`read_decided_suffix` /
+/// `applied_barrier_seq`) yet the apply task will still fold it once the
+/// cluster re-confirms the decision — at which point a nonce minted from the
+/// under-counted seed could be falsely satisfied by it before the read's own
+/// barrier is folded. Scanning the accepted suffix instead yields a ceiling
+/// that survives a lost `decided_idx`: every `(node, seq)` the log can still
+/// surface is `<=` the seed, so the next minted nonce is strictly greater.
+///
+/// Including not-yet-decided entries can only raise the seed, never lower it.
+/// A higher seed is always safe — the nonce is an opaque monotonic counter, so
+/// skipping values is harmless — whereas a lower one reopens the collision. An
+/// undecided entry that a later leader truncates simply leaves a gap in the
+/// nonce space, which costs nothing.
+pub fn max_logged_barrier_seq<S>(
+    omnipaxos: &Arc<Mutex<OmniPaxos<HighWaterCommand, S>>>,
+    node: u64,
+) -> u64
+where
+    S: Storage<HighWaterCommand> + Send + 'static,
+{
+    // `read_entries(..)` spans `0..accepted_idx`: a leading `Snapshotted` entry
+    // when a prefix has been compacted, then every accepted entry — `Decided`
+    // up to `decided_idx` and `Undecided` above it. All three carry the durable
+    // command, so the same `(node, seq)` fold covers each.
+    let entries = omnipaxos.lock().read_entries(..);
+    let mut max_seq = 0u64;
+    for entry in entries.into_iter().flatten() {
+        match entry {
+            LogEntry::Decided(HighWaterCommand::Barrier {
+                node: appended,
+                seq,
+            })
+            | LogEntry::Undecided(HighWaterCommand::Barrier {
+                node: appended,
+                seq,
+            }) => {
+                if appended == node {
+                    max_seq = max_seq.max(seq);
+                }
+            }
+            LogEntry::Snapshotted(snapshotted) => {
+                if let Some(seq) = snapshotted.snapshot.applied_barriers.get(&node) {
+                    max_seq = max_seq.max(*seq);
+                }
+            }
+            _ => {}
+        }
+    }
+    max_seq
+}
+
 /// Maybe trigger a snapshot via the given policy. Called by the host's
 /// apply task after each successful drain.
 pub fn maybe_snapshot<S>(
@@ -582,6 +641,96 @@ mod drain_tests {
             3,
             "the second drain must NOT re-apply already-cursored entries",
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn max_logged_barrier_seq_is_zero_on_an_empty_log() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+        // Nothing appended: the accepted suffix is empty, so there is no seq to
+        // recover and the seed starts the nonce counter at 0.
+        assert_eq!(max_logged_barrier_seq(&leader_handle(&cluster), 1), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn max_logged_barrier_seq_is_scoped_to_the_queried_node() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+        {
+            let leader = leader_handle(&cluster);
+            let mut handle = leader.lock();
+            handle
+                .append(HighWaterCommand::Barrier { node: 1, seq: 5 })
+                .expect("append");
+            handle
+                .append(HighWaterCommand::Barrier { node: 2, seq: 9 })
+                .expect("append");
+        }
+        drive_until(
+            &mut cluster,
+            |state| {
+                state
+                    .nodes
+                    .iter()
+                    .all(|node| node.omnipaxos.lock().get_decided_idx() >= 2)
+            },
+            500,
+        )
+        .await;
+
+        let handle = leader_handle(&cluster);
+        // The ceiling is per-appending-node: node 2's higher seq must not lift
+        // node 1's seed, or two nodes' independent counters would trample.
+        assert_eq!(max_logged_barrier_seq(&handle, 1), 5);
+        assert_eq!(max_logged_barrier_seq(&handle, 2), 9);
+        assert_eq!(max_logged_barrier_seq(&handle, 3), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn max_logged_barrier_seq_recovers_a_compacted_barrier_from_the_snapshot() {
+        let mut cluster = build_cluster(3);
+        drive_to_leader_election(&mut cluster).await;
+        {
+            let leader = leader_handle(&cluster);
+            let mut handle = leader.lock();
+            handle
+                .append(HighWaterCommand::Advance(AdvancePayload { at_least: 10 }))
+                .expect("append");
+            handle
+                .append(HighWaterCommand::Barrier { node: 1, seq: 4 })
+                .expect("append");
+            handle
+                .append(HighWaterCommand::Advance(AdvancePayload { at_least: 20 }))
+                .expect("append");
+        }
+        drive_until(
+            &mut cluster,
+            |state| {
+                state
+                    .nodes
+                    .iter()
+                    .all(|node| node.omnipaxos.lock().get_decided_idx() >= 3)
+            },
+            500,
+        )
+        .await;
+
+        // Compact past the barrier so its only durable trace is the snapshot's
+        // per-node ledger, not a live log entry.
+        let handle = leader_handle(&cluster);
+        handle
+            .lock()
+            .snapshot(Some(2), false)
+            .expect("snapshot up to the decided index");
+        assert!(
+            handle.lock().get_compacted_idx() >= 2,
+            "the barrier at index 1 must be compacted away",
+        );
+
+        // The scan must still recover it through the `Snapshotted` ledger;
+        // otherwise an idle node whose barriers were all compacted would
+        // re-seed its nonce from 0 and reopen the false-satisfy.
+        assert_eq!(max_logged_barrier_seq(&handle, 1), 4);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

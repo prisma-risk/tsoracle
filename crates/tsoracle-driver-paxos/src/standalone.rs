@@ -105,30 +105,38 @@ where
         let mut runner = PaxosRunner::new(omnipaxos.clone(), my_node_id, peers, tick_interval);
         let leader_subscriber = runner.take_leader_subscriber();
 
-        // Resume the barrier-nonce counter above any seq this node already
-        // used in a prior process lifetime. `barrier_seq` is process-local
-        // and resets to 0 on restart, but the `applied_barriers` ledger is
-        // durable — restored from decided-log replay and snapshot transfer.
-        // `current_high_water` waits for `applied_barrier_seq(self) >=
-        // minted_seq`; minting from 0 would hand back a seq a recovered
-        // `(self, old_seq)` entry already satisfies, letting the read return
-        // before its own barrier is applied and seeding the new leader's
-        // allocator below the prior ceiling. Folding the recovered decided
-        // suffix here learns this node's highest durable seq and lifts the
-        // counter above it, so a freshly minted seq can only be satisfied by
-        // this lifetime's own barrier.
+        // Resume the barrier-nonce counter above any seq this node already used
+        // in a prior process lifetime. `barrier_seq` is process-local and
+        // resets to 0 on restart; `current_high_water` waits for
+        // `applied_barrier_seq(self) >= minted_seq`, so minting from 0 would
+        // hand back a seq a recovered `(self, old_seq)` entry already satisfies,
+        // letting the read return before its own barrier is applied and seeding
+        // the new leader's allocator below the prior ceiling.
         //
-        // The same recovery fold also yields the recovered decided index, which
-        // seeds `apply_cursor`: whichever drive path runs (sync stepping or the
-        // spawned apply task) resumes from where this fold left off rather than
-        // re-draining the whole decided log from 0. The fold is idempotent (max
-        // over advances and per-node seqs), so the worst the old cursor-from-0
-        // behaviour did was redundant work; seeding the cursor here removes that
-        // O(decided-log) startup cost on long-lived nodes.
+        // The seed is the highest `(self, seq)` recoverable from the *durable
+        // log* — see [`max_logged_barrier_seq`]. It deliberately does NOT come
+        // from the recovered decided fold (`applied_barrier_seq` after
+        // `recover`): `set_decided_idx` is a non-synced write, so a crash can
+        // recover a `decided_idx` below a barrier that is still durably logged.
+        // A decided-only seed would miss that barrier, yet the apply task will
+        // fold it once the decision is re-confirmed — reopening the exact
+        // false-satisfy this counter exists to prevent. Scanning the accepted
+        // suffix instead bounds the nonce above every barrier the log can still
+        // surface, lost `decided_idx` or not.
+        //
+        // The recovery fold still runs, for the other recovered state it is the
+        // right source for: the in-memory high-water, the `applied_barriers`
+        // ledger, and the recovered decided index that seeds `apply_cursor` so
+        // whichever drive path runs (sync stepping or the spawned apply task)
+        // resumes from where the fold left off rather than re-draining the
+        // decided log from 0. The fold is idempotent (max over advances and
+        // per-node seqs), so the worst the old cursor-from-0 behaviour did was
+        // redundant work; seeding the cursor here removes that O(decided-log)
+        // startup cost on long-lived nodes.
         let engine = ApplyEngine::new(policy);
         let mut recovery_cursor = 0u64;
         engine.recover(&omnipaxos, &mut recovery_cursor);
-        let recovered_seq = engine.applied_barrier_seq(my_node_id);
+        let recovered_seq = crate::state_machine::max_logged_barrier_seq(&omnipaxos, my_node_id);
 
         Self {
             omnipaxos,
@@ -706,6 +714,91 @@ mod tests {
             *host.apply_cursor.lock(),
             recovered_decided,
             "apply cursor must be seeded at the recovered decided index, not re-drained from 0",
+        );
+    }
+
+    /// A node that crashes after a `Barrier` is fsynced into the log but
+    /// before the *non-synced* `set_decided_idx` write that records its
+    /// decision recovers a `decided_idx` below that barrier. The barrier still
+    /// lives in the durable log; only the decided-index bump was lost. Seeding
+    /// the barrier-nonce counter from the recovered decided fold would learn
+    /// nothing about that barrier's seq, so a freshly minted post-restart nonce
+    /// could collide with it — and the recovered `(self, seq)` would falsely
+    /// satisfy the new read before its own barrier was folded. The seed must
+    /// instead come from the actual durable log contents, so the next nonce is
+    /// strictly greater than any `(self, seq)` the log can still surface.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn barrier_seq_seed_survives_a_lost_decided_suffix() {
+        use omnipaxos::ballot_leader_election::Ballot;
+        use omnipaxos::storage::Storage as _;
+        use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
+        use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
+
+        const MY_NODE: u64 = 1;
+        const DURABLE_BARRIER_SEQ: u64 = 9;
+
+        // Stage the post-crash storage shape directly. A promise must be
+        // present or OmniPaxos's failure-recovery load treats the store as
+        // empty and ignores the staged log and decided index.
+        let mut storage = MemStorage::<HighWaterCommand>::new();
+        storage
+            .set_promise(Ballot::with(1, 1, 0, MY_NODE))
+            .expect("set promise");
+        storage
+            .append_entries(vec![
+                HighWaterCommand::Advance(AdvancePayload { at_least: 100 }),
+                HighWaterCommand::Barrier {
+                    node: MY_NODE,
+                    seq: DURABLE_BARRIER_SEQ,
+                },
+            ])
+            .expect("append durable log");
+        // decided_idx covers only the Advance at index 0; the barrier at index
+        // 1 is durably logged but its decided bump was the write that was lost.
+        storage
+            .set_decided_idx(1)
+            .expect("persist stale decided idx");
+
+        let cluster_config = ClusterConfig {
+            configuration_id: 1,
+            nodes: vec![1, 2, 3],
+            flexible_quorum: None,
+        };
+        let server_config = ServerConfig {
+            pid: MY_NODE,
+            ..Default::default()
+        };
+        let omnipaxos = OmniPaxosConfig {
+            cluster_config,
+            server_config,
+        }
+        .build(storage)
+        .expect("build omnipaxos over staged storage");
+        let handle = Arc::new(Mutex::new(omnipaxos));
+
+        // The decided view really does hide the barrier: the old decided-fold
+        // seed would have learned nothing about seq 9.
+        assert_eq!(
+            handle.lock().get_decided_idx(),
+            1,
+            "fixture must keep the barrier past the recovered decided_idx",
+        );
+
+        let host = StandaloneHost::new(
+            handle,
+            MY_NODE,
+            Vec::new(),
+            Duration::from_millis(2),
+            SnapshotPolicy::disabled(),
+            DEFAULT_BARRIER_TIMEOUT,
+        );
+
+        let seed = host.barrier_seq.load(Ordering::SeqCst);
+        assert!(
+            seed >= DURABLE_BARRIER_SEQ,
+            "seed {seed} must cover the durable barrier seq {DURABLE_BARRIER_SEQ}, \
+             so the next minted nonce ({}) cannot collide with a recovered barrier",
+            seed + 1,
         );
     }
 
