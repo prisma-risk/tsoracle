@@ -51,6 +51,42 @@ pub enum CoreError {
     },
 }
 
+/// The result of a `try_commit_window_extension` that passed range validation.
+///
+/// A commit either raises the durable bound or is dropped for one of three
+/// benign, expected reasons. Collapsing both into `Ok(())` left a caller that
+/// just paid for a `persist_high_water` round-trip unable to tell "I raised the
+/// bound" from "I silently dropped your durably-persisted value." This type
+/// preserves the distinction so the server can log/metric the dropped commits —
+/// a leading indicator of epoch churn or persist reordering.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// The durable bound advanced to this value.
+    Applied(u64),
+    /// The bound did not move; see [`IgnoreReason`] for why.
+    Ignored(IgnoreReason),
+}
+
+/// Why a [`CommitOutcome::Ignored`] commit left the durable bound unchanged.
+///
+/// All three are benign and expected under normal failover: the epoch-fencing
+/// design of `try_commit_window_extension` deliberately drops late commits from
+/// a superseded epoch rather than erroring, and the monotonic bound rejects a
+/// value that does not advance. They are kept apart so a caller can distinguish
+/// epoch churn ([`NotLeader`](Self::NotLeader) / [`EpochMismatch`](Self::EpochMismatch))
+/// from persist reordering ([`NotAdvanced`](Self::NotAdvanced)).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IgnoreReason {
+    /// The allocator is no longer a leader, so the commit has no window to raise.
+    NotLeader,
+    /// The allocator leads a different epoch than the commit targeted; the
+    /// commit is a late persist from a superseded epoch, fenced out.
+    EpochMismatch { expected: Epoch, current: Epoch },
+    /// The allocator still leads the targeted epoch, but the persisted value did
+    /// not exceed the current bound, so the monotonic bound rejects it.
+    NotAdvanced { persisted: u64, committed: u64 },
+}
+
 #[derive(Debug)]
 enum State {
     NotLeader,
@@ -295,28 +331,47 @@ impl Allocator {
     /// The `expected_epoch` argument fences out late-arriving commits from a
     /// prior leader epoch: if the allocator is no longer at this epoch (either
     /// it has lost leadership or a new leader took over), the commit is
-    /// silently dropped. Combined with the server's drain barrier, this
-    /// guarantees a late persist from epoch N cannot raise the durable bound
-    /// observed by epoch N+M.
+    /// dropped. Combined with the server's drain barrier, this guarantees a
+    /// late persist from epoch N cannot raise the durable bound observed by
+    /// epoch N+M.
+    ///
+    /// Returns [`CommitOutcome`]: `Applied` when the bound advanced, or
+    /// `Ignored` (with the reason) for the three benign drop cases. A value
+    /// exceeding the 46-bit physical ceiling is an invariant violation, not a
+    /// benign drop, so it stays `Err(PhysicalMsOutOfRange)`.
     pub fn try_commit_window_extension(
         &mut self,
         persisted_high_water: u64,
         expected_epoch: Epoch,
-    ) -> Result<(), CoreError> {
+    ) -> Result<CommitOutcome, CoreError> {
         if persisted_high_water > PHYSICAL_MS_MAX {
             return Err(CoreError::PhysicalMsOutOfRange(persisted_high_water));
         }
-        if let State::Leader {
+        let State::Leader {
             epoch,
             committed_high_water,
             ..
         } = &mut self.state
-            && *epoch == expected_epoch
-            && persisted_high_water > *committed_high_water
-        {
-            *committed_high_water = persisted_high_water;
+        else {
+            return Ok(CommitOutcome::Ignored(IgnoreReason::NotLeader));
+        };
+        // Epoch fencing takes precedence over the monotonic check: a late
+        // persist from a superseded epoch must report EpochMismatch even when
+        // its value also fails to advance, so churn is not masked as reordering.
+        if *epoch != expected_epoch {
+            return Ok(CommitOutcome::Ignored(IgnoreReason::EpochMismatch {
+                expected: expected_epoch,
+                current: *epoch,
+            }));
         }
-        Ok(())
+        if persisted_high_water <= *committed_high_water {
+            return Ok(CommitOutcome::Ignored(IgnoreReason::NotAdvanced {
+                persisted: persisted_high_water,
+                committed: *committed_high_water,
+            }));
+        }
+        *committed_high_water = persisted_high_water;
+        Ok(CommitOutcome::Applied(persisted_high_water))
     }
 }
 
@@ -524,9 +579,10 @@ mod tests {
             .try_on_leadership_gained(1000, 1000, Epoch(7))
             .unwrap();
         let target = allocator.try_prepare_window_extension(1000, 3000).unwrap();
-        allocator
-            .try_commit_window_extension(target, Epoch(7))
-            .unwrap();
+        assert_eq!(
+            allocator.try_commit_window_extension(target, Epoch(7)),
+            Ok(CommitOutcome::Applied(target))
+        );
         let grant = allocator.try_grant(1000, 5).unwrap();
         assert_eq!(grant.count, 5);
         assert_eq!(grant.logical_start, 0);
@@ -541,15 +597,39 @@ mod tests {
         allocator
             .try_on_leadership_gained(1000, 1000, Epoch(1))
             .unwrap();
-        allocator
-            .try_commit_window_extension(5000, Epoch(1))
-            .unwrap();
-        allocator
-            .try_commit_window_extension(3000, Epoch(1))
-            .unwrap(); // attempt to regress
+        assert_eq!(
+            allocator.try_commit_window_extension(5000, Epoch(1)),
+            Ok(CommitOutcome::Applied(5000))
+        );
+        // A non-advancing commit reports the values so the caller can tell a
+        // monotonic-bound regression (persist reordering) from epoch churn.
+        assert_eq!(
+            allocator.try_commit_window_extension(3000, Epoch(1)),
+            Ok(CommitOutcome::Ignored(IgnoreReason::NotAdvanced {
+                persisted: 3000,
+                committed: 5000,
+            }))
+        );
         // try_grant up to physical_ms=5000 should still work.
         let grant = allocator.try_grant(4500, 1).unwrap();
         assert_eq!(grant.physical_ms, 4500);
+    }
+
+    #[test]
+    fn commit_with_equal_value_is_ignored_not_applied() {
+        // persist_high_water is monotonic and may *equal* the prepared bound; an
+        // equal value moves nothing, so it is Ignored(NotAdvanced), not Applied.
+        let mut allocator = Allocator::new();
+        allocator
+            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .unwrap();
+        assert_eq!(
+            allocator.try_commit_window_extension(5000, Epoch(1)),
+            Ok(CommitOutcome::Ignored(IgnoreReason::NotAdvanced {
+                persisted: 5000,
+                committed: 5000,
+            }))
+        );
     }
 
     #[test]
@@ -583,10 +663,15 @@ mod tests {
         allocator
             .try_on_leadership_gained(1000, 1000, Epoch(5))
             .unwrap();
-        // A late persist from epoch 4 (the prior leader) — fenced out.
-        allocator
-            .try_commit_window_extension(9_999, Epoch(4))
-            .unwrap();
+        // A late persist from epoch 4 (the prior leader) — fenced out. The
+        // outcome names both epochs so the caller can metric epoch churn.
+        assert_eq!(
+            allocator.try_commit_window_extension(9_999, Epoch(4)),
+            Ok(CommitOutcome::Ignored(IgnoreReason::EpochMismatch {
+                expected: Epoch(4),
+                current: Epoch(5),
+            }))
+        );
         // The allocator's bound did not move; a grant at now=900 clamps to
         // floor=1000, and a request with now=1_100 exhausts the window.
         allocator.try_grant(900, 1).unwrap();
@@ -603,9 +688,10 @@ mod tests {
             .try_on_leadership_gained(1000, 5000, Epoch(1))
             .unwrap();
         allocator.on_leadership_lost();
-        allocator
-            .try_commit_window_extension(9_999, Epoch(1))
-            .unwrap();
+        assert_eq!(
+            allocator.try_commit_window_extension(9_999, Epoch(1)),
+            Ok(CommitOutcome::Ignored(IgnoreReason::NotLeader))
+        );
         assert!(!allocator.is_leader());
     }
 

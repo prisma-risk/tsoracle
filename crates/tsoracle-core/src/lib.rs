@@ -24,7 +24,7 @@ mod timestamp;
 
 pub mod docs;
 
-pub use allocator::{Allocator, CoreError, WindowGrant};
+pub use allocator::{Allocator, CommitOutcome, CoreError, IgnoreReason, WindowGrant};
 pub use bt::Bt;
 pub use clock::{Clock, SystemClock};
 pub use epoch::Epoch;
