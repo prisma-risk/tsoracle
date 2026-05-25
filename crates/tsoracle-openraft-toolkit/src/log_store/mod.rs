@@ -434,18 +434,15 @@ where
 
         let mut batch = WriteBatch::default();
         let (lo, _hi) = self.keys.log_range();
-        let stop_at = self.keys.log_key(log_id.index);
-        let it = self.db.iterator_cf(
-            &cf_log,
-            IteratorMode::From(&lo, rocksdb::Direction::Forward),
-        );
-        for item in it {
-            let (k, _v) = item.map_err(io::Error::other)?;
-            if &*k > stop_at.as_slice() {
-                break;
-            }
-            batch.delete_cf(&cf_log, &k);
-        }
+        // purge removes entries up to AND INCLUDING `log_id.index`, so the
+        // exclusive end is `log_key(index + 1)`. At u64::MAX there is no next
+        // index; `log_end_bound()` covers everything. A single range tombstone
+        // replaces the former per-key delete loop.
+        let end_key = match log_id.index.checked_add(1) {
+            Some(next) => self.keys.log_key(next),
+            None => self.keys.log_end_bound(),
+        };
+        batch.delete_range_cf(&cf_log, &lo, &end_key);
 
         meta::put::<LogIdOf<C>, K>(
             &mut batch,
