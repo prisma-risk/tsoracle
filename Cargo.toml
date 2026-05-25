@@ -95,7 +95,7 @@ tokio              = { version = "1", features = ["macros", "rt-multi-thread", "
 tokio-stream       = { version = "0.1", features = ["sync"] }
 tsoracle-yieldpoint = { path = "crates/tsoracle-yieldpoint", version = "0.1.5" }
 tsoracle-failpoint = { path = "crates/tsoracle-failpoint", version = "0.1.0" }
-tsoracle-codec = { path = "crates/tsoracle-codec", version = "0.1.1" }
+tsoracle-codec = { path = "crates/tsoracle-codec", version = "0.1.2" }
 tonic              = "0.14"
 tonic-prost        = "0.14"
 tonic-prost-build  = "0.14"

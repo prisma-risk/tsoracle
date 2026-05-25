@@ -4,6 +4,13 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.7...tsoracle-consensus-v0.1.8) - 2026-05-25
+
+### Fixed
+
+- *(server)* enforce LeaderState::Follower driver contracts with a debug guard ([#439](https://github.com/prisma-risk/tsoracle/pull/439))
+- *(server)* bound graceful shutdown so a hung driver call can't stall exit ([#420](https://github.com/prisma-risk/tsoracle/pull/420))
+
 ## [0.1.7](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.6...tsoracle-consensus-v0.1.7) - 2026-05-25
 
 ### Added

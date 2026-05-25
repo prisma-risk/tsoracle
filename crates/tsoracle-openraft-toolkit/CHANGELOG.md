@@ -4,6 +4,17 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.8...tsoracle-openraft-toolkit-v0.2.0) - 2026-05-25
+
+### Added
+
+- *(codec)* lift codec_io_error into tsoracle-codec ([#431](https://github.com/prisma-risk/tsoracle/pull/431))
+- *(driver-openraft)* [**breaking**] membership-driven peer addressing ([#408](https://github.com/prisma-risk/tsoracle/pull/408))
+
+### Other
+
+- cover remaining reachable branches (95.5% -> 95.8%) ([#418](https://github.com/prisma-risk/tsoracle/pull/418))
+
 ## [0.1.8](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.7...tsoracle-openraft-toolkit-v0.1.8) - 2026-05-25
 
 ### Added

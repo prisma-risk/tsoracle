@@ -4,6 +4,14 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v0.1.10...tsoracle-v0.1.11) - 2026-05-25
+
+### Added
+
+- *(standalone)* TLS/mTLS for peer transport + client API ([#445](https://github.com/prisma-risk/tsoracle/pull/445))
+- *(standalone)* multi-driver tsoracle-standalone crate + serve file|openraft|paxos CLI ([#438](https://github.com/prisma-risk/tsoracle/pull/438))
+- *(server)* add public shutdown_signal() and wire the cluster examples to it ([#406](https://github.com/prisma-risk/tsoracle/pull/406))
+
 ## [0.1.10](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v0.1.9...tsoracle-v0.1.10) - 2026-05-25
 
 ### Other

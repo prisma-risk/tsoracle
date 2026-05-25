@@ -4,6 +4,28 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.2.3...tsoracle-client-v0.2.4) - 2026-05-25
+
+### Added
+
+- *(client)* count waiters abandoned before delivery ([#437](https://github.com/prisma-risk/tsoracle/pull/437))
+
+### Fixed
+
+- *(client)* bound leader-hint redirects with an absolute cross-pass cap ([#441](https://github.com/prisma-risk/tsoracle/pull/441))
+- *(client)* keep the election signal sticky so a final timeout can't bury NOT_LEADER ([#432](https://github.com/prisma-risk/tsoracle/pull/432))
+- *(client)* ride out a leader election in issue_rpc ([#417](https://github.com/prisma-risk/tsoracle/pull/417))
+- *(client)* defend epoch-less leader cache from backward flap ([#413](https://github.com/prisma-risk/tsoracle/pull/413))
+- *(client)* floor the failed-attempt budget at the worklist size ([#404](https://github.com/prisma-risk/tsoracle/pull/404))
+
+### Other
+
+- *(client)* sweep the hint-channel cap only on insert, not every lookup ([#435](https://github.com/prisma-risk/tsoracle/pull/435))
+- *(client)* split retry.rs god-module into retry/attempt/leader_hint ([#433](https://github.com/prisma-risk/tsoracle/pull/433))
+- *(client)* rename leader_resolved module to channel_pool ([#434](https://github.com/prisma-risk/tsoracle/pull/434))
+- cover remaining reachable branches (95.5% -> 95.8%) ([#418](https://github.com/prisma-risk/tsoracle/pull/418))
+- raise library coverage to 95.5% with targeted tests ([#414](https://github.com/prisma-risk/tsoracle/pull/414))
+
 ## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.2.2...tsoracle-client-v0.2.3) - 2026-05-25
 
 ### Added

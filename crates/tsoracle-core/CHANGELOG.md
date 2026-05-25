@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.2.2...tsoracle-core-v0.2.3) - 2026-05-25
+
+### Fixed
+
+- *(core)* normalize allocator write-back to a packable cursor ([#430](https://github.com/prisma-risk/tsoracle/pull/430))
+
+### Other
+
+- *(core)* extract validate_count to dedup the allocator count guard ([#428](https://github.com/prisma-risk/tsoracle/pull/428))
+
 ## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.2.1...tsoracle-core-v0.2.2) - 2026-05-25
 
 ### Added

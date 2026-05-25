@@ -4,6 +4,22 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.2.3...tsoracle-driver-openraft-v0.3.0) - 2026-05-25
+
+### Added
+
+- *(codec)* lift codec_io_error into tsoracle-codec ([#431](https://github.com/prisma-risk/tsoracle/pull/431))
+- *(driver-openraft)* [**breaking**] membership-driven peer addressing ([#408](https://github.com/prisma-risk/tsoracle/pull/408))
+
+### Fixed
+
+- *(server)* enforce LeaderState::Follower driver contracts with a debug guard ([#439](https://github.com/prisma-risk/tsoracle/pull/439))
+- *(driver-openraft)* make snapshot publish monotone to close build/install TOCTOU ([#426](https://github.com/prisma-risk/tsoracle/pull/426))
+
+### Other
+
+- *(fuzz)* decode the openraft meta corpus through the version frame ([#415](https://github.com/prisma-risk/tsoracle/pull/415))
+
 ## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.2.2...tsoracle-driver-openraft-v0.2.3) - 2026-05-25
 
 ### Added
