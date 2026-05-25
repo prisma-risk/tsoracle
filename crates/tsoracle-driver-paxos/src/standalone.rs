@@ -69,7 +69,20 @@ where
     /// every startup (the two paths can no longer disagree on where recovery
     /// left off).
     apply_cursor: Arc<Mutex<u64>>,
+    /// Upper bound on how long a barrier-linearized read/advance
+    /// ([`Self::current_high_water`], [`Self::submit_advance`]) waits for its
+    /// barrier to be folded before giving up with a retryable
+    /// [`ConsensusError::TransientDriver`]. A backstop against an
+    /// indefinite park when the barrier never decides (quorum loss, lost
+    /// leadership) — not a tight SLA. Apply-task death is surfaced faster than
+    /// this via the engine's liveness signal.
+    barrier_timeout: Duration,
 }
+
+/// Default barrier-wait deadline. Generous relative to the tick cadence
+/// (consensus normally folds a barrier in a handful of ticks), so it fires
+/// only when the barrier genuinely cannot make progress.
+pub const DEFAULT_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl<S> StandaloneHost<S>
 where
@@ -87,6 +100,7 @@ where
         peers: Vec<TsoPeer>,
         tick_interval: Duration,
         policy: SnapshotPolicy,
+        barrier_timeout: Duration,
     ) -> Self {
         let mut runner = PaxosRunner::new(omnipaxos.clone(), my_node_id, peers, tick_interval);
         let leader_stream = runner.take_leader_stream();
@@ -125,6 +139,7 @@ where
             engine,
             task: None,
             apply_cursor: Arc::new(Mutex::new(recovery_cursor)),
+            barrier_timeout,
         }
     }
 
@@ -219,6 +234,56 @@ where
     pub fn deliver(&self, message: Message<HighWaterCommand>) {
         self.runner.handle_incoming(message);
     }
+
+    /// Wait for this node's barrier nonce `seq` to be folded by the apply path,
+    /// then return the resulting high-water. `floor`, when set, additionally
+    /// requires `high_water >= floor` (the `submit_advance` postcondition; a
+    /// read passes `None`).
+    ///
+    /// Bounded three ways so the wait can never park forever (#354):
+    /// - the barrier is folded and the floor (if any) is met — success;
+    /// - the apply task that would fold the barrier has died — fail fast with a
+    ///   non-retryable [`ConsensusError::PermanentDriver`];
+    /// - `barrier_timeout` elapses without progress (quorum loss, lost
+    ///   leadership) — give up with a retryable
+    ///   [`ConsensusError::TransientDriver`] so the caller can react.
+    async fn await_barrier(&self, seq: u64, floor: Option<u64>) -> Result<u64, ConsensusError> {
+        let notifier = self.engine.apply_notifier();
+        let wait = async {
+            loop {
+                // Register as waiter before checking state; otherwise a
+                // notify_waiters that fires between this check and the next
+                // notified().await is lost.
+                let notified = notifier.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+
+                let folded = self.engine.applied_barrier_seq(self.my_node_id) >= seq;
+                let floor_met = match floor {
+                    Some(at_least) => self.engine.high_water() >= at_least,
+                    None => true,
+                };
+                if folded && floor_met {
+                    return Ok(self.engine.high_water());
+                }
+                // The apply task that folds barriers is gone, so no further
+                // progress is possible — fail fast instead of waiting out the
+                // whole deadline. A host driven by the synchronous stepping
+                // path never spawns one, so "never spawned" is not death.
+                if self.engine.apply_task_died() {
+                    return Err(ConsensusError::PermanentDriver(Box::new(ApplyTaskGone)));
+                }
+                notified.await;
+            }
+        };
+
+        match tokio::time::timeout(self.barrier_timeout, wait).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(ConsensusError::TransientDriver(Box::new(
+                BarrierWaitTimeout(self.barrier_timeout),
+            ))),
+        }
+    }
 }
 
 /// Builder for [`StandaloneHost`].
@@ -231,6 +296,7 @@ where
     peers: Vec<TsoPeer>,
     tick_interval: Duration,
     policy: SnapshotPolicy,
+    barrier_timeout: Duration,
 }
 
 impl<S> Default for StandaloneHostBuilder<S>
@@ -244,6 +310,7 @@ where
             peers: Vec::new(),
             tick_interval: Duration::from_millis(20),
             policy: SnapshotPolicy::disabled(),
+            barrier_timeout: DEFAULT_BARRIER_TIMEOUT,
         }
     }
 }
@@ -278,6 +345,13 @@ where
         self
     }
 
+    /// Override the barrier-wait deadline (default [`DEFAULT_BARRIER_TIMEOUT`]).
+    /// See [`StandaloneHost::current_high_water`] / [`StandaloneHost::submit_advance`].
+    pub fn barrier_timeout(mut self, barrier_timeout: Duration) -> Self {
+        self.barrier_timeout = barrier_timeout;
+        self
+    }
+
     pub fn build(self) -> Result<StandaloneHost<S>, BuilderError> {
         let omnipaxos = self.omnipaxos.ok_or(BuilderError::MissingOmnipaxos)?;
         let my_node_id = self.my_node_id.ok_or(BuilderError::MissingNodeId)?;
@@ -287,6 +361,7 @@ where
             self.peers,
             self.tick_interval,
             self.policy,
+            self.barrier_timeout,
         ))
     }
 }
@@ -338,22 +413,12 @@ where
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
             })?;
-        let notifier = self.engine.apply_notifier();
         tsoracle_yieldpoint::yieldpoint!(
             "standalone_host::current_high_water::after_append_before_await"
         );
-        loop {
-            // Register as waiter before checking state; otherwise a
-            // notify_waiters that fires between the previous iteration's
-            // check and the next notified().await is lost.
-            let notified = notifier.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.engine.applied_barrier_seq(self.my_node_id) >= seq {
-                return Ok(self.engine.high_water());
-            }
-            notified.await;
-        }
+        // A read has no floor — any folded value attributable to this barrier
+        // is correct.
+        self.await_barrier(seq, None).await
     }
 
     async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError> {
@@ -392,30 +457,34 @@ where
             .map_err(|err| {
                 ConsensusError::TransientDriver(Box::new(BarrierAppendError(format!("{err:?}"))))
             })?;
-        let notifier = self.engine.apply_notifier();
         tsoracle_yieldpoint::yieldpoint!(
             "standalone_host::submit_advance::after_append_before_await"
         );
-        loop {
-            // Register as waiter before checking state; otherwise a
-            // notify_waiters that fires between the previous iteration's
-            // check and the next notified().await is lost.
-            let notified = notifier.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.engine.applied_barrier_seq(self.my_node_id) >= seq
-                && self.engine.high_water() >= at_least
-            {
-                return Ok(self.engine.high_water());
-            }
-            notified.await;
-        }
+        // Keep the floor postcondition (unique to submit_advance) even in the
+        // corner where a mid-call leadership change drops this Advance while
+        // the barrier still decides under the new leader: there the floor is
+        // unmet, so we keep waiting rather than return a sub-floor value.
+        self.await_barrier(seq, Some(at_least)).await
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("barrier append failed: {0}")]
 struct BarrierAppendError(String);
+
+/// The barrier did not fold within `barrier_timeout`. Retryable: the most
+/// likely cause is transient (quorum loss, a leadership change in flight), and
+/// the caller's epoch fence surfaces a genuine leadership loss separately.
+#[derive(Debug, thiserror::Error)]
+#[error("barrier wait timed out after {0:?}")]
+struct BarrierWaitTimeout(Duration);
+
+/// The apply task that folds barriers has died, so the barrier can never be
+/// folded. Non-retryable: a panicked/stopped apply task does not recover by
+/// retrying the same call.
+#[derive(Debug, thiserror::Error)]
+#[error("apply task is gone; barrier can never be folded")]
+struct ApplyTaskGone;
 
 #[derive(Debug, thiserror::Error)]
 #[error("advance append failed: {0}")]
@@ -554,6 +623,7 @@ mod tests {
             Vec::new(),
             Duration::from_millis(2),
             SnapshotPolicy::disabled(),
+            DEFAULT_BARRIER_TIMEOUT,
         );
 
         assert_eq!(
