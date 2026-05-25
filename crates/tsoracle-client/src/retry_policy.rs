@@ -41,11 +41,14 @@ use std::time::Duration;
 /// latency-sensitive paths).
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
-    /// Maximum number of endpoints `issue_rpc` will attempt before
-    /// returning the last error. Caps leader-hint redirect chains; the
-    /// existing per-endpoint visited-set means the loop already visits
-    /// each endpoint at most once, so this only bites when leader hints
-    /// expand the worklist beyond the configured list.
+    /// Maximum number of *failed* attempts `issue_rpc` will make before
+    /// returning the last error — that is, endpoints dialed that returned
+    /// an error, not total loop iterations. Leader-hint redirects are not
+    /// charged against this budget (they are known discovery progress,
+    /// bounded instead by the per-endpoint visited-set and the
+    /// `overall_deadline`), so a legitimate failover redirect chain can be
+    /// longer than `max_attempts` and still reach the live leader (issue
+    /// #340).
     pub max_attempts: usize,
     /// Wall-clock deadline applied to each `(connect, get_ts)` pair.
     /// Pushed down to `Endpoint::connect_timeout` / `Endpoint::timeout`

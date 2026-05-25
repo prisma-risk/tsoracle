@@ -28,7 +28,13 @@
 //! arriving when the cache has no epoch yet are accepted unconditionally
 //! so a transition-state deployment is not left without leader discovery.
 //!
-//! Three deadlines bound the loop, governed by [`crate::RetryPolicy`]:
+//! Queue bookkeeping (the worklist, the visited-set dedup, and
+//! push-front-on-hint steering) lives in [`crate::worklist::Worklist`];
+//! the deadline arithmetic lives in [`crate::budget`]. This module owns
+//! only the policy decisions.
+//!
+//! Three deadlines bound the loop, governed by [`crate::RetryPolicy`] and
+//! enforced by [`Budget`] / [`PairBudget`]:
 //!
 //! - `per_attempt_deadline`: each `(pool.client, client.get_ts)` pair is
 //!   wrapped in `tokio::time::timeout`. Same value is pushed to the
@@ -37,9 +43,11 @@
 //! - `overall_deadline`: hard wall-clock cap on the whole call. The
 //!   loop exits before starting any attempt that would push past it,
 //!   even when `max_attempts` and the worklist still have headroom.
-//! - `max_attempts`: tighter cap than the visited-set (which already
-//!   prevents revisiting an endpoint). Bites only when leader-hint
-//!   redirects expand the effective worklist.
+//! - `max_attempts`: caps the number of *failed* attempts (dialed
+//!   endpoints that returned an error). Leader-hint redirects are not
+//!   charged against it — they are bounded instead by the worklist
+//!   visited-set and the overall deadline — so a legitimate failover
+//!   redirect chain can still reach the live leader (issue #340).
 //!
 //! Between attempts whose last error is `Unavailable`,
 //! `DeadlineExceeded`, or a transport-layer failure, the loop sleeps a
@@ -55,47 +63,46 @@
 //! channel and its background reconnect task forever). Application errors
 //! such as `Internal` leave the channel cached — the connection is healthy.
 
-use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
-use tokio::time::Instant;
 use tsoracle_core::{Epoch, Timestamp};
 
+use crate::budget::{Budget, PairBudget};
 use crate::error::ClientError;
 use crate::leader_resolved::{ChannelPool, LeaderHintLookup, decode_leader_hint};
 use crate::response::decode_get_ts_response;
 use crate::retry_policy::{is_transport_failure, jittered_backoff, should_backoff};
+use crate::worklist::Worklist;
 
 pub(crate) async fn issue_rpc(
     pool: &ChannelPool,
     count: u32,
 ) -> Result<Vec<Timestamp>, ClientError> {
     let policy = pool.retry_policy().clone();
-    let start = Instant::now();
-    let deadline = start + policy.overall_deadline;
-    let mut worklist: VecDeque<String> = pool.iter_round_robin().into();
-    let mut visited: HashSet<String> = HashSet::new();
+    let budget = Budget::start(&policy);
+    let mut worklist = Worklist::new(pool.iter_round_robin());
     let mut last_err: Option<ClientError> = None;
-    let mut attempt_index: u32 = 0;
+    // Counts only failed attempts (`AttemptOutcome::Err`). Leader-hint
+    // redirects are known progress, not throttled failures, so they neither
+    // consume the `max_attempts` budget nor inflate the backoff exponent
+    // (issue #340); redirects stay bounded by the worklist visited-set and
+    // the overall deadline.
+    let mut failed_attempts: u32 = 0;
 
-    while let Some(endpoint) = worklist.pop_front() {
-        if !visited.insert(endpoint.clone()) {
-            continue;
-        }
-        if attempt_index as usize >= policy.max_attempts {
+    while let Some(endpoint) = worklist.next() {
+        if failed_attempts as usize >= policy.max_attempts {
             break;
         }
-        let now = Instant::now();
-        if now >= deadline {
+        let Some(attempt_budget) = budget.next_attempt() else {
+            // Overall deadline reached; do not start another attempt.
             break;
-        }
-        let attempt_budget = (deadline - now).min(policy.per_attempt_deadline);
+        };
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
             endpoint = %endpoint,
             count,
-            attempt_index,
+            failed_attempts,
             budget_ms = attempt_budget.as_millis() as u64,
             "tsoracle-client: dispatching GetTs to endpoint",
         );
@@ -125,10 +132,9 @@ pub(crate) async fn issue_rpc(
                     hint_epoch = ?hint_epoch,
                     "tsoracle-client: pivoting to hinted leader",
                 );
-                worklist.push_front(hinted_endpoint);
-                // No backoff: a leader hint is known progress, not a
-                // failure to throttle.
-                attempt_index = attempt_index.saturating_add(1);
+                worklist.redirect_to(hinted_endpoint);
+                // No backoff and no budget charge: a leader hint is known
+                // progress, not a failure to throttle (issue #340).
                 continue;
             }
             AttemptOutcome::StaleLeaderHint(status) => {
@@ -138,11 +144,11 @@ pub(crate) async fn issue_rpc(
                 // not that our cache is wrong. Keep the cache and advance
                 // the worklist without backoff (this is still a
                 // FAILED_PRECONDITION redirect attempt — just one we refuse
-                // to follow). Preserve the status as last_err so a worklist
-                // that empties after only stale redirects surfaces the real
+                // to follow), and do not charge the attempt budget (issue
+                // #340). Preserve the status as last_err so a worklist that
+                // empties after only stale redirects surfaces the real
                 // NOT_LEADER, not a misleading NoReachableEndpoints.
                 last_err = Some(ClientError::Rpc(status));
-                attempt_index = attempt_index.saturating_add(1);
                 continue;
             }
             AttemptOutcome::HintRejected(status) => {
@@ -152,19 +158,18 @@ pub(crate) async fn issue_rpc(
                 // wrong, only that this peer could not redirect us. Leave the
                 // cache intact (clearing it stampedes every coalesced caller
                 // back onto a cold worklist on each flap) and advance the
-                // worklist, preserving the status to surface once exhausted.
+                // worklist without charging the attempt budget (issue #340),
+                // preserving the status to surface once exhausted.
                 last_err = Some(ClientError::Rpc(status));
-                attempt_index = attempt_index.saturating_add(1);
                 continue;
             }
             AttemptOutcome::Err(err) => {
                 let should_sleep = should_backoff(&err);
                 last_err = Some(err);
-                attempt_index = attempt_index.saturating_add(1);
+                failed_attempts = failed_attempts.saturating_add(1);
                 if should_sleep {
-                    let backoff = jittered_backoff(policy.base_backoff, attempt_index - 1);
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    let sleep_for = backoff.min(remaining);
+                    let backoff = jittered_backoff(policy.base_backoff, failed_attempts - 1);
+                    let sleep_for = budget.clamp_backoff(backoff);
                     if sleep_for > Duration::ZERO {
                         tokio::time::sleep(sleep_for).await;
                     }
@@ -214,11 +219,12 @@ async fn attempt(
     budget: Duration,
 ) -> AttemptOutcome {
     // `budget` bounds the whole `(connect, get_ts)` pair, not each phase
-    // independently. Anchor one deadline up front so a slow connect eats into
-    // the time left for `get_ts` instead of each phase getting a fresh full
-    // budget — which would let one attempt run for up to `2 * budget` and
-    // overrun `overall_deadline` before `max_attempts` is reached.
-    let pair_deadline = Instant::now() + budget;
+    // independently. `PairBudget` anchors one deadline up front so a slow
+    // connect eats into the time left for `get_ts` instead of each phase
+    // getting a fresh full budget — which would let one attempt run for up to
+    // `2 * budget` and overrun `overall_deadline` before `max_attempts` is
+    // reached.
+    let pair = PairBudget::start(budget);
     // Keep the channel's cell handle for the whole RPC: a transport-class
     // failure below hands this exact cell to `evict_if_current` so the dead
     // channel is dropped without racing a concurrent re-dial (issue #239).
@@ -238,6 +244,7 @@ async fn attempt(
                     error = %err,
                     "tsoracle-client: connect failed; advancing worklist",
                 );
+                // No channel was leased, so there is nothing to evict.
                 return AttemptOutcome::Err(err);
             }
             Err(_) => {
@@ -253,18 +260,48 @@ async fn attempt(
                     budget_ms = budget.as_millis() as u64,
                     "tsoracle-client: connect exceeded per_attempt_deadline",
                 );
+                // No channel was leased, so there is nothing to evict.
                 return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
                     format!("connect exceeded per_attempt_deadline of {budget:?}"),
                 )));
             }
         };
     // Give `get_ts` only what the connect phase left of the pair's budget.
-    // `saturating_duration_since` floors at zero, so a connect that consumed
-    // the whole budget yields an immediate timeout rather than a fresh one.
-    let rpc_budget = pair_deadline.saturating_duration_since(Instant::now());
+    // `PairBudget::remaining` floors at zero, so a connect that consumed the
+    // whole budget yields an immediate timeout rather than a fresh one.
+    let rpc_budget = pair.remaining();
     let rpc = client.get_ts(tsoracle_proto::v1::GetTsRequest { count });
-    let response = match tokio::time::timeout(rpc_budget, rpc).await {
-        Ok(Ok(resp)) => resp,
+    // Each post-connect failure path produces the error here, then falls
+    // through to the single eviction decision below — so the
+    // "transport-class ⇒ evict the cached channel" invariant (issue #239)
+    // lives in exactly one auditable place instead of being duplicated at
+    // each failure site. The success and NOT_LEADER paths return early: a
+    // healthy channel is never evicted.
+    let err = match tokio::time::timeout(rpc_budget, rpc).await {
+        Ok(Ok(response)) => {
+            let inner = response.into_inner();
+            // Capture before `decode_get_ts_response` consumes the message —
+            // it returns only the timestamp vector, but the cache needs the
+            // epoch from the same response to gate future `LeaderHint`
+            // arrivals.
+            let epoch = Epoch::from_wire(inner.epoch_hi, inner.epoch_lo).0;
+            return match decode_get_ts_response(inner, count) {
+                Ok(timestamps) => AttemptOutcome::Ok { timestamps, epoch },
+                Err(err) => {
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!(
+                        "tsoracle.client.retries.total",
+                        "reason" => "decode_error",
+                    )
+                    .increment(1);
+                    // A decode error means the server answered over a healthy
+                    // connection with a malformed payload — not a transport
+                    // failure — so the channel is kept (this early return
+                    // skips the eviction tail).
+                    AttemptOutcome::Err(err)
+                }
+            };
+        }
         Ok(Err(status)) if status.code() == tonic::Code::FailedPrecondition => {
             #[cfg(feature = "metrics")]
             metrics::counter!("tsoracle.client.not_leader.total").increment(1);
@@ -274,7 +311,9 @@ async fn attempt(
                 "reason" => "not_leader",
             )
             .increment(1);
-
+            // NOT_LEADER is an application redirect over a healthy channel,
+            // not a transport failure; classify it and return without
+            // touching the cached channel.
             return classify_not_leader_hint(pool, endpoint, status);
         }
         Ok(Err(status)) => {
@@ -290,15 +329,7 @@ async fn attempt(
                 code = ?status.code(),
                 "tsoracle-client: RPC failed; advancing worklist",
             );
-            let err = ClientError::Rpc(status);
-            // Drop the cached channel only on a transport-class failure: the
-            // connection itself looks dead (issue #239). A non-transport
-            // status (`Internal`, etc.) means the channel is healthy and the
-            // server simply returned an error, so the channel is kept.
-            if is_transport_failure(&err) {
-                pool.evict_if_current(endpoint, &cell);
-            }
-            return AttemptOutcome::Err(err);
+            ClientError::Rpc(status)
         }
         Err(_) => {
             #[cfg(feature = "metrics")]
@@ -313,35 +344,25 @@ async fn attempt(
                 budget_ms = rpc_budget.as_millis() as u64,
                 "tsoracle-client: RPC exceeded its share of per_attempt_deadline",
             );
-            // A timed-out RPC is transport-class (`DeadlineExceeded`): the
-            // channel may be half-open and black-holing — evict so the next
-            // attempt re-dials and re-resolves the endpoint.
-            pool.evict_if_current(endpoint, &cell);
-            return AttemptOutcome::Err(ClientError::Rpc(tonic::Status::deadline_exceeded(
-                format!(
-                    "rpc exceeded its share of per_attempt_deadline \
-                     ({rpc_budget:?} of {budget:?})"
-                ),
-            )));
+            // A timed-out RPC surfaces as `DeadlineExceeded`, which
+            // `is_transport_failure` classifies as transport-class — so the
+            // shared eviction tail below drops the (possibly half-open,
+            // black-holing) channel just as the dedicated arm used to.
+            ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
+                "rpc exceeded its share of per_attempt_deadline \
+                 ({rpc_budget:?} of {budget:?})"
+            )))
         }
     };
-    let inner = response.into_inner();
-    // Capture before `decode_get_ts_response` consumes the message —
-    // it returns only the timestamp vector, but the cache needs the
-    // epoch from the same response to gate future `LeaderHint` arrivals.
-    let epoch = Epoch::from_wire(inner.epoch_hi, inner.epoch_lo).0;
-    match decode_get_ts_response(inner, count) {
-        Ok(timestamps) => AttemptOutcome::Ok { timestamps, epoch },
-        Err(err) => {
-            #[cfg(feature = "metrics")]
-            metrics::counter!(
-                "tsoracle.client.retries.total",
-                "reason" => "decode_error",
-            )
-            .increment(1);
-            AttemptOutcome::Err(err)
-        }
+    // Single eviction point for every post-connect RPC failure: drop the
+    // cached channel only on a transport-class failure (the connection looks
+    // dead — issue #239). A non-transport status (`Internal`, etc.) means the
+    // channel is healthy and the server merely returned an error, so it is
+    // kept.
+    if is_transport_failure(&err) {
+        pool.evict_if_current(endpoint, &cell);
     }
+    AttemptOutcome::Err(err)
 }
 
 /// Decide what `issue_rpc` should do with a `FAILED_PRECONDITION` reply.
@@ -450,6 +471,7 @@ mod tests {
     use crate::RetryPolicy;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::Instant;
 
     /// Aggressive policy used by the unit tests to keep them fast.
     /// `per_attempt_deadline` is the dominant cost — the integration
@@ -1244,6 +1266,116 @@ mod tests {
             connect_count.load(Ordering::SeqCst),
             2,
             "an RPC timeout must evict the channel so the next attempt re-dials",
+        );
+    }
+
+    /// Issue #340: a legitimate leader-hint redirect chain longer than
+    /// `max_attempts` must still reach the live leader. Redirects are
+    /// "known progress, not a failure to throttle" — only failed attempts
+    /// (`AttemptOutcome::Err`) consume the `max_attempts` budget. Here the
+    /// peer redirects three times (more than `max_attempts = 2`) before a
+    /// fourth dial answers with a timestamp; the loop must follow the whole
+    /// chain and return the timestamp rather than surfacing a hint status.
+    ///
+    /// A single backend stands in for the chain: a connector maps every
+    /// hinted endpoint string to one loopback server whose per-call counter
+    /// decides whether to redirect (to a fresh, unvisited endpoint, so the
+    /// worklist keeps advancing) or to succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redirect_chain_longer_than_max_attempts_reaches_leader() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        // Number of NOT_LEADER redirects before the server answers. Strictly
+        // greater than `max_attempts` below, so the old "every outcome bumps
+        // the attempt budget" behaviour would exhaust the budget mid-chain.
+        const REDIRECTS: usize = 3;
+
+        struct RedirectingLeaderChain {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl TsoService for RedirectingLeaderChain {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n < REDIRECTS {
+                    // Hint at a fresh endpoint string (unvisited, so the
+                    // worklist advances) with no epoch (followed
+                    // unconditionally, so this is always an actionable hint).
+                    Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                        leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                        leader_epoch: None,
+                    }))
+                } else {
+                    Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
+                        physical_ms: 1,
+                        logical_start: 0,
+                        count: 1,
+                        epoch_hi: 0,
+                        epoch_lo: 0,
+                    }))
+                }
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(RedirectingLeaderChain {
+                    calls: server_calls,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        // Every hinted endpoint resolves to the one backend; the chain lives
+        // in the server's call counter, not in distinct listeners.
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                }) as Pin<Box<dyn Future<Output = Result<_, _>> + Send>>
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
+
+        let timestamps = issue_rpc(&pool, 1)
+            .await
+            .expect("a redirect chain that ends at a live leader must yield a timestamp");
+        assert_eq!(
+            timestamps.len(),
+            1,
+            "the leader returned exactly one timestamp"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            REDIRECTS + 1,
+            "the loop must dial through all {REDIRECTS} redirects to the leader",
         );
     }
 }
