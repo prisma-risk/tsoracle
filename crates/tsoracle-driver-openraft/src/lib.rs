@@ -28,6 +28,7 @@
 
 pub mod driver;
 pub mod host;
+pub mod log_codec;
 pub mod log_entry;
 pub mod snapshot_store;
 pub mod standalone;
@@ -36,6 +37,7 @@ pub mod type_config;
 
 pub use driver::OpenraftDriver;
 pub use host::OpenraftHighWaterHost;
+pub use log_codec::OpenraftLogCodec;
 pub use log_entry::HighWaterCommand;
 #[cfg(feature = "rocksdb-snapshot-store")]
 pub use snapshot_store::RocksdbSnapshotStore;

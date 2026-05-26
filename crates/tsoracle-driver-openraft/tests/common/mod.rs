@@ -48,7 +48,8 @@ use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 use tokio::time::Instant;
 use tsoracle_driver_openraft::{
-    HighWaterStateMachine, OpenraftDriver, OpenraftPeer, StandaloneHost, TypeConfig,
+    HighWaterStateMachine, OpenraftDriver, OpenraftLogCodec, OpenraftPeer, StandaloneHost,
+    TypeConfig,
 };
 use tsoracle_openraft_toolkit::test_fakes::{MemNetwork, PartitionController};
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
@@ -195,10 +196,11 @@ fn open_rocksdb(dir: &TempDir) -> Arc<DB> {
 fn open_log_and_snapshot_stores(
     db: Arc<DB>,
 ) -> (
-    RocksdbLogStore<TypeConfig, Flat>,
+    RocksdbLogStore<TypeConfig, Flat, OpenraftLogCodec>,
     Arc<dyn tsoracle_driver_openraft::SnapshotStore>,
 ) {
-    let log_store = RocksdbLogStore::open(db.clone(), LOG_CF, META_CF, Flat).unwrap();
+    let log_store: RocksdbLogStore<TypeConfig, Flat, OpenraftLogCodec> =
+        RocksdbLogStore::open(db.clone(), LOG_CF, META_CF, Flat).unwrap();
     let snapshot_store: Arc<dyn tsoracle_driver_openraft::SnapshotStore> =
         Arc::new(tsoracle_driver_openraft::RocksdbSnapshotStore::open(db, SNAP_CF).unwrap());
     (log_store, snapshot_store)

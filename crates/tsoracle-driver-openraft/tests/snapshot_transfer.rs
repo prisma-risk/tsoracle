@@ -47,7 +47,9 @@ use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
 use tokio::time::timeout;
 use tsoracle_driver_openraft::AdvancePayload;
-use tsoracle_driver_openraft::{HighWaterCommand, HighWaterStateMachine, OpenraftPeer, TypeConfig};
+use tsoracle_driver_openraft::{
+    HighWaterCommand, HighWaterStateMachine, OpenraftLogCodec, OpenraftPeer, TypeConfig,
+};
 use tsoracle_openraft_toolkit::test_fakes::MemNetwork;
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 
@@ -74,7 +76,7 @@ fn snapshot_aggressive_config() -> Arc<Config> {
     )
 }
 
-fn open_log_store(dir: &TempDir) -> RocksdbLogStore<TypeConfig, Flat> {
+fn open_log_store(dir: &TempDir) -> RocksdbLogStore<TypeConfig, Flat, OpenraftLogCodec> {
     let mut opts = Options::default();
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);

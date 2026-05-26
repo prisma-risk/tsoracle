@@ -51,7 +51,7 @@ use openraft::{Config, SnapshotPolicy};
 use tokio::time::timeout;
 use tsoracle_consensus::{ConsensusDriver, LeaderState};
 use tsoracle_core::Epoch;
-use tsoracle_driver_openraft::TypeConfig;
+use tsoracle_driver_openraft::{OpenraftLogCodec, TypeConfig};
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 
 use common::{TestCluster, build_single_node_with_config, reopen_node_with_config};
@@ -124,7 +124,7 @@ async fn snapshot_persists_across_restart_when_log_is_purged() {
     // — the recovered SM would just rebuild from log replay. Open a separate
     // log-store view on the same `Arc<DB>` so we can inspect `get_log_state`
     // without disturbing the running raft.
-    let log_inspector: RocksdbLogStore<TypeConfig, Flat> =
+    let log_inspector: RocksdbLogStore<TypeConfig, Flat, OpenraftLogCodec> =
         RocksdbLogStore::open(nodes[0].db.clone(), "raft_log", "raft_meta", Flat).unwrap();
     timeout(Duration::from_secs(5), async {
         let mut inspector = log_inspector;
