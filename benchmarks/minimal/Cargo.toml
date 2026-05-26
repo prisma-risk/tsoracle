@@ -26,10 +26,10 @@ tonic              = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-tsoracle-server    = { path = "../../crates/tsoracle-server", version = "0.2.8", features = ["test-fakes"] }
-tsoracle-client    = { path = "../../crates/tsoracle-client", version = "0.2.5" }
-tsoracle-core      = { path = "../../crates/tsoracle-core", version = "0.2.4" }
-tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.9" }
+tsoracle-server    = { path = "../../crates/tsoracle-server", version = "0.2.9", features = ["test-fakes"] }
+tsoracle-client    = { path = "../../crates/tsoracle-client", version = "0.2.6" }
+tsoracle-core      = { path = "../../crates/tsoracle-core", version = "0.2.5" }
+tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.10" }
 
 console-subscriber = { version = "0.5", optional = true }
 tracing-flame      = { version = "0.2", optional = true }

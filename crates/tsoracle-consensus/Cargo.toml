@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle-consensus"
-version      = "0.1.9"
+version      = "0.1.10"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -25,7 +25,7 @@ rustdoc-args   = ["--cfg", "docsrs"]
 async-trait    = { workspace = true }
 futures        = { workspace = true }
 thiserror      = { workspace = true }
-tsoracle-core  = { path = "../tsoracle-core", version = "0.2.4" }
+tsoracle-core  = { path = "../tsoracle-core", version = "0.2.5" }
 serde          = { workspace = true, optional = true }
 
 [dev-dependencies]

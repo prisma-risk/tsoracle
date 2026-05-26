@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v0.1.2...tsoracle-standalone-v0.1.3) - 2026-05-26
+
+### Fixed
+
+- *(standalone/tests)* hold listener until bind to close port-lease TOCTOU ([#490](https://github.com/prisma-risk/tsoracle/pull/490))
+
+### Other
+
+- *(proto)* expand and correct service/RPC/field comments ([#492](https://github.com/prisma-risk/tsoracle/pull/492))
+
 ## [0.1.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v0.1.1...tsoracle-standalone-v0.1.2) - 2026-05-26
 
 ### Added
