@@ -45,6 +45,8 @@
 //!    [`ServingCore::drain_barrier_write`] and never takes `extension_lock`, so
 //!    it cannot close a lock cycle with an extender.
 
+use std::time::Duration;
+
 use parking_lot::Mutex;
 use tokio::sync::{
     Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
@@ -69,10 +71,14 @@ pub(crate) struct ServingCore {
     /// reloading the high-water, draining all in-flight extensions started under
     /// the prior epoch before it proceeds.
     extension_gate: RwLock<()>,
+    /// Mirrors `Server::window_ahead`; held here so the safe-point accessor
+    /// (`current_max_safe_physical_ms`) does not need a back-reference to
+    /// `Server`.
+    window_ahead: Duration,
 }
 
 impl ServingCore {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(window_ahead: Duration) -> Self {
         let (state_tx, _) = watch::channel(ServingState::NotServing {
             leader_endpoint: None,
             leader_epoch: None,
@@ -82,7 +88,28 @@ impl ServingCore {
             state_tx,
             extension_lock: AsyncMutex::new(()),
             extension_gate: RwLock::new(()),
+            window_ahead,
         }
+    }
+
+    /// Current safe-point in physical-millisecond units, matching the
+    /// `GetCurrentMaxSafeResponse.max_safe_physical_ms` contract: the highest
+    /// physical_ms such that any timestamp issued at or before this physical_ms
+    /// is durably backed by the persisted window. Returns `0` when this node
+    /// is not the leader, or before the leader admits its first window.
+    pub(crate) fn current_max_safe_physical_ms(&self) -> u64 {
+        let Some(persisted) = self.allocator.lock().committed_high_water() else {
+            return 0;
+        };
+        let window_ms = self.window_ahead.as_millis() as u64;
+        persisted.saturating_sub(window_ms + 1)
+    }
+
+    /// Current leader epoch, or `None` when not the leader. Mirrors
+    /// `Allocator::epoch` for the service layer (which holds `Arc<ServingCore>`
+    /// and has no direct allocator handle).
+    pub(crate) fn current_epoch(&self) -> Option<Epoch> {
+        self.allocator.lock().epoch()
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<ServingState> {
@@ -248,7 +275,7 @@ mod tests {
         // lands even when no receiver is subscribed (`receiver_count == 0`). Were
         // a publish site to use `send`, this would be silently dropped and a
         // leaderless-then-leader core could stay NotServing forever.
-        let core = ServingCore::new();
+        let core = ServingCore::new(Duration::from_secs(3));
         assert_eq!(core.state_tx.receiver_count(), 0);
 
         core.step_down(Some("http://new-leader:9000".into()), Some(Epoch(7)));
@@ -271,7 +298,7 @@ mod tests {
         // the read barrier on the current task; if step_down tried to take the
         // write lock it would deadlock here (single-threaded runtime, lock held
         // by us). Reaching the assertion proves it never touches the gate.
-        let core = ServingCore::new();
+        let core = ServingCore::new(Duration::from_secs(3));
         let slot = core.extension_slot().await;
         let _barrier = slot.drain_barrier().await;
 
@@ -289,7 +316,7 @@ mod tests {
         // extension readers to drain. `try_write` is a deterministic probe of
         // that exclusion (no timing): it fails while a read barrier is held and
         // succeeds once it is released.
-        let core = ServingCore::new();
+        let core = ServingCore::new(Duration::from_secs(3));
         let slot = core.extension_slot().await;
         let barrier = slot.drain_barrier().await;
 
@@ -311,7 +338,7 @@ mod tests {
         // A fresh core is NotLeader (no epoch). prepare_extension must surface
         // that as `NotLeader` so the caller emits a redirect, and would_grant is
         // false.
-        let core = ServingCore::new();
+        let core = ServingCore::new(Duration::from_secs(3));
         let slot = core.extension_slot().await;
         assert!(matches!(
             slot.prepare_extension(1, 1_000),
@@ -326,7 +353,7 @@ mod tests {
         // `ServingState`; it must agree with `serving_state`'s variant across
         // every transition. Fresh core is NotServing -> false; publish_serving
         // -> true; step_down -> false again.
-        let core = ServingCore::new();
+        let core = ServingCore::new(Duration::from_secs(3));
         assert!(!core.is_serving(), "fresh core is NotServing");
         assert!(matches!(
             core.serving_state(),
@@ -346,7 +373,7 @@ mod tests {
 
     #[test]
     fn try_grant_without_leadership_is_not_leader() {
-        let core = ServingCore::new();
+        let core = ServingCore::new(Duration::from_secs(3));
         assert!(matches!(core.try_grant(1, 1), Err(CoreError::NotLeader)));
     }
 
@@ -355,7 +382,7 @@ mod tests {
         // try_on_leadership_gained(floor, ceiling, epoch) seeds a serveable
         // window; a grant at the floor returns timestamps stamped with the
         // seeded epoch.
-        let core = ServingCore::new();
+        let core = ServingCore::new(Duration::from_secs(3));
         core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
             .expect("seed must succeed (ceiling >= floor)");
         let grant = core.try_grant(1_000, 1).expect("grant must succeed");
@@ -369,7 +396,7 @@ mod tests {
         // the call site. Seed a serveable window first so the clear is
         // observable, then assert both effects: NotServing with no leader hint,
         // and a now-cleared allocator (try_grant -> NotLeader).
-        let core = ServingCore::new();
+        let core = ServingCore::new(Duration::from_secs(3));
         core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
             .expect("seed must succeed (ceiling >= floor)");
         assert!(core.try_grant(1_000, 1).is_ok(), "seeded core must grant");

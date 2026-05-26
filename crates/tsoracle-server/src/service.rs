@@ -203,7 +203,18 @@ impl TsoService for TsoServiceImpl {
         &self,
         _request: Request<GetCurrentMaxSafeRequest>,
     ) -> Result<Response<GetCurrentMaxSafeResponse>, Status> {
-        Ok(Response::new(GetCurrentMaxSafeResponse::default()))
+        let max_safe_physical_ms = self.server.core.current_max_safe_physical_ms();
+        let (epoch_hi, epoch_lo) = self
+            .server
+            .core
+            .current_epoch()
+            .unwrap_or(Epoch::ZERO)
+            .to_wire();
+        Ok(Response::new(GetCurrentMaxSafeResponse {
+            max_safe_physical_ms,
+            epoch_hi,
+            epoch_lo,
+        }))
     }
 }
 
