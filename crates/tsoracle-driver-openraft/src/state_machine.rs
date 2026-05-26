@@ -111,6 +111,15 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
             // the layout evolves and MIN_READABLE_VERSION/MAX_READABLE_VERSION
             // widen.
             v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
+            // `BASELINE + 1` alias: a test-only harness affordance. The body
+            // is byte-identical to BASELINE — only the version byte changes
+            // — so the activation machinery (gate -> propose -> commit ->
+            // apply -> cell flip) can run end-to-end in a mixed-version e2e
+            // without shipping a real new format. Gated off in production.
+            // The guard derives from BASELINE so a future baseline bump
+            // moves the alias version with no edit here.
+            #[cfg(feature = "e2e-max-readable-next")]
+            v if v == BASELINE_WRITE_VERSION + 1 => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -122,6 +131,8 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
             v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
+            #[cfg(feature = "e2e-max-readable-next")]
+            v if v == BASELINE_WRITE_VERSION + 1 => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -135,6 +146,8 @@ impl VersionedCodec for PersistedSnapshot {
     fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
         match version {
             v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
+            #[cfg(feature = "e2e-max-readable-next")]
+            v if v == BASELINE_WRITE_VERSION + 1 => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -146,6 +159,8 @@ impl VersionedCodec for PersistedSnapshot {
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
             v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
+            #[cfg(feature = "e2e-max-readable-next")]
+            v if v == BASELINE_WRITE_VERSION + 1 => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -1155,6 +1170,78 @@ mod tests {
             )
             .is_err(),
             "a version above the readable max must be rejected"
+        );
+    }
+
+    #[cfg(feature = "e2e-max-readable-next")]
+    #[test]
+    fn e2e_max_readable_next_aliases_to_baseline_bytewise() {
+        // The test-only `e2e-max-readable-next` feature raises
+        // `MAX_READABLE_VERSION` to `BASELINE_WRITE_VERSION + 1` in the
+        // toolkit and adds matching alias arms in this file's
+        // `VersionedCodec` impls that delegate to the baseline body. This
+        // pins the alias contract: a `BASELINE + 1`-stamped envelope is
+        // byte-identical to a BASELINE-stamped one beyond the leading
+        // version byte, and round-trips cross-version. That is what lets
+        // a mixed-version e2e drive a real activation flip from BASELINE
+        // to the next version end-to-end (gate -> propose -> commit ->
+        // apply -> cell flip) without shipping a real new format — the
+        // activation control plane runs because every encoder/decoder
+        // accepts the next version as an alias of BASELINE. Version-
+        // neutral assertions so this test survives a future baseline
+        // bump unchanged.
+        use tsoracle_codec::{decode_framed, encode_framed};
+        use tsoracle_openraft_toolkit::{BASELINE_WRITE_VERSION, MAX_READABLE_VERSION};
+
+        let baseline = BASELINE_WRITE_VERSION;
+        let next = baseline + 1;
+        assert_eq!(
+            MAX_READABLE_VERSION, next,
+            "feature must raise MAX to BASELINE+1"
+        );
+
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 7,
+            last_applied: None,
+            last_membership: StoredMem::default(),
+        };
+
+        let framed_baseline = encode_framed(baseline, &payload).expect("encode baseline");
+        let framed_next = encode_framed(next, &payload).expect("encode next (alias)");
+
+        // Byte-identical except the leading version byte: the alias is
+        // structural, not a real layout change.
+        assert_eq!(framed_baseline[0], baseline);
+        assert_eq!(framed_next[0], next);
+        assert_eq!(
+            &framed_baseline[1..],
+            &framed_next[1..],
+            "alias body must be byte-identical to baseline — only the version byte differs"
+        );
+
+        // Cross-version round-trip: a next-stamped envelope decodes through
+        // the readable range, and a baseline reader can still consume it
+        // because the body is the same shape.
+        let back_baseline: HighWaterStateMachineSnapshot =
+            decode_framed(baseline, next, &framed_baseline).expect("decode baseline");
+        let back_next: HighWaterStateMachineSnapshot =
+            decode_framed(baseline, next, &framed_next).expect("decode next (alias)");
+        assert_eq!(back_baseline, payload);
+        assert_eq!(back_next, payload);
+
+        // The envelope-shape carrier (`PersistedSnapshot`) must alias too
+        // — it is what `build_snapshot` actually emits at the active
+        // write version when the cell flips.
+        let envelope = PersistedSnapshot {
+            meta: SnapMeta::default(),
+            data: framed_next.clone(),
+        };
+        let framed_env_baseline = encode_framed(baseline, &envelope).expect("envelope baseline");
+        let framed_env_next = encode_framed(next, &envelope).expect("envelope next");
+        assert_eq!(
+            &framed_env_baseline[1..],
+            &framed_env_next[1..],
+            "PersistedSnapshot next-version envelope must alias baseline"
         );
     }
 

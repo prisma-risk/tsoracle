@@ -25,6 +25,18 @@ rocksdb-snapshot-store = ["dep:rocksdb"]
 # lifecycle). Off by default so embedders that do not want the `metrics`
 # dependency are unaffected, matching `tsoracle-server`'s `metrics` feature.
 metrics                = ["dep:metrics"]
+# Test-only harness affordance: adds `BASELINE_WRITE_VERSION + 1` alias
+# arms to the per-version codec dispatch (`HighWaterStateMachineSnapshot`
+# / `PersistedSnapshot`) that delegate to the baseline body, and
+# propagates the matching toolkit feature so `MAX_READABLE_VERSION` rises
+# to `BASELINE + 1`. The aliased body is byte-identical to baseline; the
+# only difference is the leading version byte. This lets a mixed-version
+# e2e harness drive a real activation flip from baseline to the next
+# version end-to-end (gate -> propose -> commit -> apply -> cell flip)
+# without shipping a real new format. Off by default; never compiled
+# into production. The arm guard derives from `BASELINE_WRITE_VERSION`
+# so a future baseline bump moves the alias version with no edit here.
+e2e-max-readable-next  = ["tsoracle-openraft-toolkit/e2e-max-readable-next"]
 
 [dependencies]
 async-trait        = { workspace = true }

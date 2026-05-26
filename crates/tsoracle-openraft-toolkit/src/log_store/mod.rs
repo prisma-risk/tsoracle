@@ -266,7 +266,7 @@ fn unframe_with_version(bytes: &[u8]) -> io::Result<(u8, &[u8])> {
         crate::codec::codec_io_error("log-store record decode", crate::codec::CodecError::Empty)
     })?;
     let version = *first;
-    if version < crate::codec::MIN_READABLE_VERSION || version > crate::codec::MAX_READABLE_VERSION
+    if !(crate::codec::MIN_READABLE_VERSION..=crate::codec::MAX_READABLE_VERSION).contains(&version)
     {
         return Err(crate::codec::codec_io_error(
             "log-store record decode",
@@ -700,7 +700,9 @@ mod range_boundary_tests {
 #[cfg(test)]
 mod record_codec_tests {
     use super::{decode_entry_record, encode_entry_record};
-    use crate::codec::{BASELINE_WRITE_VERSION, MAX_READABLE_VERSION, MIN_READABLE_VERSION};
+    use crate::codec::BASELINE_WRITE_VERSION;
+    #[cfg(not(feature = "e2e-max-readable-next"))]
+    use crate::codec::{MAX_READABLE_VERSION, MIN_READABLE_VERSION};
     use crate::declare_raft_types_ext;
     use crate::log_store::DefaultLogStoreCodec;
     use serde::{Deserialize, Serialize};
@@ -764,6 +766,12 @@ mod record_codec_tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
+    // Pinned to BASELINE in the default build; the test-only
+    // `e2e-max-readable-next` feature lifts MAX to `BASELINE + 1`, so
+    // skip the MAX assertion under that feature (covered by
+    // `version_constants_under_e2e_max_readable_next_feature` in
+    // `codec.rs`).
+    #[cfg(not(feature = "e2e-max-readable-next"))]
     #[test]
     fn version_constants_are_at_four() {
         assert_eq!(BASELINE_WRITE_VERSION, 4);
