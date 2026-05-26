@@ -1,8 +1,16 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: tsoracle-e2e
+# 4 workers: 3 for the baseline cluster, +1 for the dynamic-membership lane
+# (issue #487) which scales the StatefulSet to 4 mid-test. The chart's
+# `requiredDuringSchedulingIgnoredDuringExecution` anti-affinity needs a
+# unique node per replica, so without a 4th worker tsoracle-3 sits Pending
+# with "didn't match pod anti-affinity rules" and rollout status times out.
+# The baseline cells (cold-start, soak, sigkill-soak) only use 3; the 4th
+# worker is idle until step 5 begins.
 nodes:
   - role: control-plane
+  - role: worker
   - role: worker
   - role: worker
   - role: worker
