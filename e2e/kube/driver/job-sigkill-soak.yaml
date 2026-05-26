@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tsoracle-e2e-sigkill-soak
+  labels:
+    app.kubernetes.io/name: tsoracle-e2e-driver
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsoracle-e2e-driver
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: tsoracle-e2e-driver:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --mode=sigkill-soak
+            # All replica endpoints (not the Service VIP) so the client has a
+            # known-live peer to fail over to when the leader pod is
+            # force-deleted — matching how a real tsoracle client is
+            # configured (leader-hint failover assumes the client knows every
+            # replica).
+            - --endpoints=tsoracle-0.tsoracle-peer:5051,tsoracle-1.tsoracle-peer:5051,tsoracle-2.tsoracle-peer:5051
+            # Longer than the plain soak: must cover the kubelet's pod
+            # re-creation latency (10-30s) + new pod start + cluster rejoin +
+            # leader re-election after the SIGKILL. 240s leaves ample headroom
+            # above the observed end-to-end recovery window; tune alongside
+            # the orchestrator step in run-assertions.sh.
+            - --duration-secs=240
