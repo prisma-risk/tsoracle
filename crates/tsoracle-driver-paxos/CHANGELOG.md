@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v0.3.0...tsoracle-driver-paxos-v0.3.1) - 2026-05-26
+
+### Fixed
+
+- ship per-crate READMEs to crates.io ([#451](https://github.com/prisma-risk/tsoracle/pull/451))
+
+### Other
+
+- expand copyright header to full Apache 2.0 block and share it via scripts/header.txt ([#449](https://github.com/prisma-risk/tsoracle/pull/449))
+
 ## [0.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v0.2.3...tsoracle-driver-paxos-v0.3.0) - 2026-05-25
 
 ### Fixed

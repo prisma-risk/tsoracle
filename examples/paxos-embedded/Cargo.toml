@@ -13,11 +13,11 @@ name = "paxos-embedded"
 path = "src/main.rs"
 
 [dependencies]
-tsoracle-core          = { path = "../../crates/tsoracle-core", version = "0.2.3" }
-tsoracle-consensus     = { path = "../../crates/tsoracle-consensus", version = "0.1.8" }
-tsoracle-server        = { path = "../../crates/tsoracle-server", version = "0.2.6" }
-tsoracle-driver-paxos  = { path = "../../crates/tsoracle-driver-paxos", version = "0.3.0" }
-tsoracle-paxos-toolkit = { path = "../../crates/tsoracle-paxos-toolkit", version = "0.3.0", default-features = false, features = ["test-fakes"] }
+tsoracle-core          = { path = "../../crates/tsoracle-core", version = "0.2.4" }
+tsoracle-consensus     = { path = "../../crates/tsoracle-consensus", version = "0.1.9" }
+tsoracle-server        = { path = "../../crates/tsoracle-server", version = "0.2.7" }
+tsoracle-driver-paxos  = { path = "../../crates/tsoracle-driver-paxos", version = "0.3.1" }
+tsoracle-paxos-toolkit = { path = "../../crates/tsoracle-paxos-toolkit", version = "0.3.1", default-features = false, features = ["test-fakes"] }
 
 omnipaxos          = { workspace = true, features = ["serde"] }
 async-trait        = { workspace = true }

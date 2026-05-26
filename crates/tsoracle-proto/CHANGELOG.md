@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-proto-v0.2.2...tsoracle-proto-v0.2.3) - 2026-05-26
+
+### Fixed
+
+- ship per-crate READMEs to crates.io ([#451](https://github.com/prisma-risk/tsoracle/pull/451))
+
+### Other
+
+- expand copyright header to full Apache 2.0 block and share it via scripts/header.txt ([#449](https://github.com/prisma-risk/tsoracle/pull/449))
+
 ## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-proto-v0.2.0...tsoracle-proto-v0.2.1) - 2026-05-24
 
 ### Fixed

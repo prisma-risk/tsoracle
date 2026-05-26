@@ -4,6 +4,20 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.2.0...tsoracle-openraft-toolkit-v0.2.1) - 2026-05-26
+
+### Added
+
+- runtime dynamic membership (openraft) — admin trait, gRPC AdminService, tsoracle admin CLI ([#453](https://github.com/prisma-risk/tsoracle/pull/453))
+
+### Fixed
+
+- ship per-crate READMEs to crates.io ([#451](https://github.com/prisma-risk/tsoracle/pull/451))
+
+### Other
+
+- expand copyright header to full Apache 2.0 block and share it via scripts/header.txt ([#449](https://github.com/prisma-risk/tsoracle/pull/449))
+
 ## [0.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.1.8...tsoracle-openraft-toolkit-v0.2.0) - 2026-05-25
 
 ### Added
