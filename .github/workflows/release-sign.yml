@@ -155,3 +155,16 @@ jobs:
             target/package/${{ steps.parse.outputs.crate-file }}.sha256
           if-no-files-found: error
           retention-days: 7
+
+  provenance:
+    needs: build
+    permissions:
+      actions: read       # generator inspects the workflow to record build metadata
+      id-token: write     # OIDC token for Sigstore (Fulcio) keyless signing
+      contents: write     # upload the .intoto.jsonl to the GH Release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a  # v2.1.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.subjects }}
+      provenance-name: ${{ needs.build.outputs.provenance-name }}
+      upload-assets: true
+      upload-tag-name: ${{ needs.build.outputs.tag }}
