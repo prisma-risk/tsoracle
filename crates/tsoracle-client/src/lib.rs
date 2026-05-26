@@ -48,7 +48,7 @@ pub use transport::BoxError;
 
 use std::sync::Arc;
 use std::time::Duration;
-use tsoracle_core::{LOGICAL_MAX, Timestamp};
+use tsoracle_core::{Epoch, LOGICAL_MAX, Timestamp};
 
 /// The server's per-call cap on requested timestamps, fixed by the 18-bit
 /// logical width. Callers asking for more than this can't be served by any
@@ -204,6 +204,41 @@ impl Client {
         }
         self.driver.request(count).await
     }
+
+    /// Read the leader's current safe-point in physical-millisecond units.
+    ///
+    /// Targets the cached leader if known, otherwise the first configured
+    /// endpoint. Followers return `MaxSafe::max_safe_physical_ms == 0` rather
+    /// than erroring, matching the proto contract; pollers needing freshness
+    /// should target the leader endpoint.
+    pub async fn get_current_max_safe(&self) -> Result<MaxSafe, ClientError> {
+        let endpoint = self
+            .pool
+            .cached_leader()
+            .or_else(|| self.pool.iter_round_robin().into_iter().next())
+            .ok_or(ClientError::NoReachableEndpoints)?;
+        let (mut svc, _cell) = self.pool.client_with_cell(&endpoint).await?;
+        let resp = svc
+            .get_current_max_safe(tsoracle_proto::v1::GetCurrentMaxSafeRequest {})
+            .await
+            .map_err(ClientError::Rpc)?;
+        let inner = resp.into_inner();
+        Ok(MaxSafe {
+            max_safe_physical_ms: inner.max_safe_physical_ms,
+            epoch: Epoch::from_wire(inner.epoch_hi, inner.epoch_lo),
+        })
+    }
+}
+
+/// The leader's view of the durable safe-point, returned by
+/// [`Client::get_current_max_safe`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MaxSafe {
+    /// Safe-point in physical-millisecond units; `0` is the cold-start sentinel
+    /// (also the value any follower returns).
+    pub max_safe_physical_ms: u64,
+    /// Leader epoch that issued this view.
+    pub epoch: Epoch,
 }
 
 #[cfg(test)]
