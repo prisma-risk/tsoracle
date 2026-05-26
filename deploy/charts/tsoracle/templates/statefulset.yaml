@@ -48,6 +48,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: PEER_PORT
               value: {{ .Values.ports.peer | quote }}
+            - name: ADMIN_PORT
+              value: {{ .Values.ports.admin | quote }}
             - name: TSO_PORT
               value: {{ .Values.ports.client | quote }}
             - name: DATA_DIR
@@ -69,6 +71,8 @@ spec:
               containerPort: {{ .Values.ports.peer }}
             - name: tso
               containerPort: {{ .Values.ports.client }}
+            - name: admin
+              containerPort: {{ .Values.ports.admin }}
           readinessProbe:
             tcpSocket:
               port: tso
