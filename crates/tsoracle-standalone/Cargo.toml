@@ -15,14 +15,13 @@ file     = ["dep:tsoracle-driver-file"]
 openraft = [
     "dep:tsoracle-driver-openraft", "dep:tsoracle-openraft-toolkit",
     "dep:openraft", "dep:rocksdb", "dep:tonic", "dep:tonic-prost",
-    "dep:prost", "dep:postcard", "dep:tokio-stream", "dep:async-trait", "dep:futures",
+    "dep:prost", "dep:postcard", "dep:tokio-stream", "dep:futures",
     "tonic/tls-aws-lc",
 ]
 paxos    = [
     "dep:tsoracle-driver-paxos", "dep:tsoracle-paxos-toolkit",
     "dep:omnipaxos", "dep:rocksdb", "dep:tonic", "dep:tonic-prost",
     "dep:prost", "dep:postcard", "dep:parking_lot", "dep:tokio-stream",
-    "dep:async-trait",
     "tonic/tls-aws-lc",
 ]
 
@@ -44,7 +43,7 @@ openraft     = { workspace = true, optional = true }
 # `net` is required for tokio_stream::wrappers::TcpListenerStream, used by both
 # HA drivers' bind-before-spawn peer servers (build_openraft / build_paxos).
 tokio-stream = { workspace = true, optional = true, features = ["net"] }
-async-trait  = { workspace = true, optional = true }
+async-trait  = { workspace = true }
 futures      = { workspace = true, optional = true }
 
 # paxos

@@ -201,6 +201,7 @@ mod tests {
                 crate::type_config::OpenraftPeer {
                     addr: "node-2:50052".into(),
                     service_endpoint: "node-2:50051".into(),
+                    admin_endpoint: String::new(),
                 },
             )),
         });
@@ -222,6 +223,7 @@ mod tests {
                 crate::type_config::OpenraftPeer {
                     addr: "node-2:50052".into(),
                     service_endpoint: String::new(),
+                    admin_endpoint: String::new(),
                 },
             )),
         });

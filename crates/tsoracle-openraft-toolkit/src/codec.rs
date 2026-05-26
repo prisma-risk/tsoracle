@@ -50,4 +50,8 @@ pub use tsoracle_codec::{CodecError, codec_io_error, decode, encode};
 /// membership log entries. The bump is global to this toolkit, so a v2 store's
 /// records — for any config, not just the standalone driver — loud-reject when
 /// read against v3 rather than risk a silent misdecode.
-pub const SCHEMA_VERSION: u8 = 3;
+///
+/// v4 widened `OpenraftPeer` further with an `admin_endpoint` field, changing
+/// the postcard layout of membership log entries again. A v3 store's records
+/// loud-reject when read against v4 rather than risk a silent misdecode.
+pub const SCHEMA_VERSION: u8 = 4;

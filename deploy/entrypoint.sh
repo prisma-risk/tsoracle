@@ -9,6 +9,7 @@ set -eu
 : "${DRIVER:?DRIVER must be set (file|openraft|paxos)}"
 : "${TSO_PORT:=50551}"
 : "${PEER_PORT:=51001}"
+: "${ADMIN_PORT:=51002}"
 : "${DATA_DIR:=/data}"
 
 # Optional TLS material (chart mounts a Secret at $TLS_DIR with tls.crt/tls.key/ca.crt).
@@ -52,7 +53,8 @@ openraft|paxos)
     while [ "$i" -lt "$REPLICAS" ]; do
         id=$((i + 1))
         fqdn="${STATEFULSET_NAME}-${i}.${PEER_SERVICE}.${POD_NAMESPACE}.svc.cluster.local"
-        members="${members}${members:+,}${id}=${fqdn}:${PEER_PORT}/${fqdn}:${TSO_PORT}"
+        # TODO(admin-listen): --admin-listen flag wired in the CLI task
+        members="${members}${members:+,}${id}=${fqdn}:${PEER_PORT}/${fqdn}:${TSO_PORT}/${fqdn}:${ADMIN_PORT}"
         peers="${peers}${peers:+,}${id}=${fqdn}:${PEER_PORT}"
         tso_peers="${tso_peers}${tso_peers:+,}${id}=${fqdn}:${TSO_PORT}"
         i=$((i + 1))

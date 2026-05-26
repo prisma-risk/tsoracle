@@ -36,12 +36,15 @@ use crate::log_entry::HighWaterCommand;
 
 /// Peer identity carried in the membership entries.
 ///
-/// Holds two stable addresses, mirroring etcd's peerURLs/clientURLs split:
+/// Holds three stable addresses (etcd's peerURLs/clientURLs split, plus an
+/// admin URL):
 ///
-/// * `addr` — the raft transport address, a scheme-less `host:port` (a DNS name
-///   and port). The peer transport prepends `http://` itself, so a scheme here
-///   would double up.
-/// * `service_endpoint` — the tsoracle gRPC endpoint clients redirect to, as a scheme-less `host:port`. The client applies its own transport scheme (`https://` under TLS, `http://` otherwise); an explicit `http://` here is refused by a TLS client as a downgrade, so leave the scheme off. Empty means "no client redirect".
+/// * `addr` — the raft transport address, a scheme-less `host:port`.
+/// * `service_endpoint` — the tsoracle gRPC endpoint clients redirect to, a
+///   scheme-less `host:port`. Empty means "no client redirect".
+/// * `admin_endpoint` — the membership-admin gRPC endpoint the `tsoracle admin`
+///   CLI redirects to when it reaches a follower, a scheme-less `host:port`.
+///   Empty means "no admin redirect available for this node".
 ///
 /// Widening this struct changes the postcard layout of membership log entries
 /// and therefore requires a `tsoracle_openraft_toolkit::SCHEMA_VERSION` bump.
@@ -49,6 +52,7 @@ use crate::log_entry::HighWaterCommand;
 pub struct OpenraftPeer {
     pub addr: String,
     pub service_endpoint: String,
+    pub admin_endpoint: String,
 }
 
 /// Resolves a membership `Node`'s tsoracle client endpoint for `LeaderHint`
@@ -129,6 +133,7 @@ mod tests {
         let peer = OpenraftPeer {
             addr: "10.0.0.1:50051".to_string(),
             service_endpoint: String::new(),
+            admin_endpoint: "10.0.0.1:50053".to_string(),
         };
         let bytes = postcard::to_stdvec(&peer).expect("serialize");
         let back: OpenraftPeer = postcard::from_bytes(&bytes).expect("deserialize");
@@ -140,6 +145,7 @@ mod tests {
         let peer = OpenraftPeer::default();
         assert_eq!(peer.addr, "");
         assert_eq!(peer.service_endpoint, "");
+        assert_eq!(peer.admin_endpoint, "");
     }
 
     #[test]
@@ -147,6 +153,7 @@ mod tests {
         let peer = OpenraftPeer {
             addr: String::new(),
             service_endpoint: String::new(),
+            admin_endpoint: String::new(),
         };
         let bytes = postcard::to_stdvec(&peer).expect("serialize");
         let back: OpenraftPeer = postcard::from_bytes(&bytes).expect("deserialize");
@@ -155,17 +162,23 @@ mod tests {
 
     #[test]
     fn openraft_peer_pins_field_layout() {
-        // Pins the postcard field order (addr, then service_endpoint) that
-        // membership log entries embed. A reorder or inserted field changes
-        // these bytes and trips this test, guarding the membership record
-        // layout the SCHEMA_VERSION frame versions. postcard encodes each
-        // String as a varint length prefix followed by its UTF-8 bytes.
+        // Pins the postcard field order (addr, service_endpoint, admin_endpoint)
+        // that membership log entries embed. A reorder or inserted field changes
+        // these bytes and trips this test, guarding the membership record layout
+        // the SCHEMA_VERSION frame versions. postcard encodes each String as a
+        // varint length prefix followed by its UTF-8 bytes.
         let peer = OpenraftPeer {
             addr: "a:1".into(),
             service_endpoint: "b:2".into(),
+            admin_endpoint: "c:3".into(),
         };
         let bytes = postcard::to_stdvec(&peer).expect("serialize");
-        assert_eq!(bytes, vec![3, b'a', b':', b'1', 3, b'b', b':', b'2']);
+        assert_eq!(
+            bytes,
+            vec![
+                3, b'a', b':', b'1', 3, b'b', b':', b'2', 3, b'c', b':', b'3'
+            ]
+        );
     }
 
     #[test]
@@ -187,10 +200,11 @@ mod tests {
     }
 
     #[test]
-    fn openraft_peer_round_trips_both_fields() {
+    fn openraft_peer_round_trips_all_fields() {
         let peer = OpenraftPeer {
             addr: "node-1:50052".to_string(),
             service_endpoint: "http://node-1:50051".to_string(),
+            admin_endpoint: "node-1:50053".to_string(),
         };
         let bytes = postcard::to_stdvec(&peer).expect("serialize");
         let back: OpenraftPeer = postcard::from_bytes(&bytes).expect("deserialize");
@@ -203,12 +217,14 @@ mod tests {
         let with = OpenraftPeer {
             addr: "node-1:50052".to_string(),
             service_endpoint: "http://node-1:50051".to_string(),
+            admin_endpoint: String::new(),
         };
         assert_eq!(with.service_endpoint(), Some("http://node-1:50051"));
 
         let without = OpenraftPeer {
             addr: "node-1:50052".to_string(),
             service_endpoint: String::new(),
+            admin_endpoint: String::new(),
         };
         assert_eq!(without.service_endpoint(), None);
     }

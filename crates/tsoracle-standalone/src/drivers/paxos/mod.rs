@@ -138,6 +138,21 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
         }
     });
 
+    let admin_view = crate::admin::MembershipView {
+        members: cfg
+            .peers
+            .iter()
+            .map(|(id, addr)| crate::admin::MemberEntry {
+                id: *id,
+                role: crate::admin::MemberRole::Voter,
+                raft_addr: addr.clone(),
+                service_endpoint: cfg.tso_peers.get(id).cloned().unwrap_or_default(),
+                admin_endpoint: String::new(),
+            })
+            .collect(),
+        leader: None,
+    };
+
     let toolkit_peers: Vec<TsoPeer> = cfg
         .tso_peers
         .iter()
@@ -171,6 +186,8 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
         driver: driver as Arc<dyn ConsensusDriver>,
         transport: TransportHandle::new(cancel_tx, join),
         drain: None,
+        admin: std::sync::Arc::new(crate::admin::UnsupportedAdmin::new(admin_view)),
+        admin_transport: crate::TransportHandle::noop(),
     })
 }
 

@@ -30,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // code for the newly-added proto. Watching both up front avoids that trap.
     println!("cargo:rerun-if-changed=proto/raft_peer.proto");
     println!("cargo:rerun-if-changed=proto/paxos_peer.proto");
+    println!("cargo:rerun-if-changed=proto/admin.proto");
 
     // Compile each enabled driver's peer proto, but only if the file is present.
     // The `.exists()` guard keeps the script green while the protos are being
@@ -39,6 +40,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         && std::path::Path::new("proto/raft_peer.proto").exists()
     {
         protos.push("proto/raft_peer.proto");
+    }
+    if std::env::var_os("CARGO_FEATURE_OPENRAFT").is_some()
+        && std::path::Path::new("proto/admin.proto").exists()
+    {
+        protos.push("proto/admin.proto");
     }
     if std::env::var_os("CARGO_FEATURE_PAXOS").is_some()
         && std::path::Path::new("proto/paxos_peer.proto").exists()

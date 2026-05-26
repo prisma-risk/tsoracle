@@ -23,6 +23,8 @@
 
 //! Driver selection, configuration, and peer transport for a standalone
 //! tsoracle node. See `build`.
+//!
+//! [`Standalone::admin`] is the runtime membership-admin handle ([`MembershipAdmin`]): live for the openraft driver (add a learner, promote it to voter, remove a node, and list members — served over the `--admin-listen` gRPC port), and [`UnsupportedAdmin`] for the file and paxos drivers, which reject every mutating op.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 use std::future::Future;
@@ -45,6 +47,19 @@ pub use drivers::file::init_file_seeded;
 mod error;
 pub use error::StandaloneError;
 
+mod admin;
+pub use admin::{
+    AdminError, MemberEntry, MemberRole, MembershipAdmin, MembershipView, NewMember,
+    UnsupportedAdmin,
+};
+
+/// Generated `tsoracle.admin.v1` gRPC types (client + server). Public so the
+/// `tsoracle admin` CLI can use the client stub.
+#[cfg(feature = "openraft")]
+pub mod admin_proto {
+    tonic::include_proto!("tsoracle.admin.v1");
+}
+
 mod transport;
 pub use transport::TransportHandle;
 
@@ -62,6 +77,11 @@ pub struct Standalone {
     /// client server stops accepting (openraft: graceful leadership handoff;
     /// file/paxos: none). Lazy — it reads live state when awaited at shutdown.
     drain: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    /// Runtime membership administration for this driver.
+    pub admin: Arc<dyn MembershipAdmin>,
+    /// Peer transport for the membership-admin gRPC server (openraft only;
+    /// `noop` for file/paxos in this sub-project).
+    admin_transport: TransportHandle,
 }
 
 impl Standalone {
@@ -76,6 +96,7 @@ impl Standalone {
     /// Cooperatively stop the peer transport. Call off the same shutdown
     /// signal that stops the client gRPC server.
     pub async fn shutdown(mut self) {
+        self.admin_transport.shutdown().await;
         self.transport.shutdown().await;
     }
 }

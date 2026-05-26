@@ -48,7 +48,7 @@ struct Cli {
     raft_dir: std::path::PathBuf,
     #[arg(long)]
     bootstrap: bool,
-    /// id=raft_host:port/service_host:port,... (only with --bootstrap)
+    /// id=raft_host:port/service_host:port/admin_host:port,... (only with --bootstrap)
     #[arg(long)]
     members: Option<String>,
     #[arg(long)]
@@ -62,14 +62,26 @@ struct Cli {
 fn parse_members(input: &str) -> Result<BTreeMap<u64, MemberAddr>> {
     let mut out = BTreeMap::new();
     for entry in input.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-        let (id, addrs) = entry.split_once('=').context("expected id=raft/service")?;
-        let (raft_addr, service_endpoint) =
-            addrs.split_once('/').context("expected raft/service")?;
+        let (id, addrs) = entry
+            .split_once('=')
+            .context("expected id=raft_addr/service_endpoint/admin_endpoint")?;
+        let mut parts = addrs.split('/');
+        let raft_addr = parts.next().filter(|s| !s.is_empty());
+        let service_endpoint = parts.next();
+        let admin_endpoint = parts.next();
+        let (Some(raft_addr), Some(service_endpoint), Some(admin_endpoint)) =
+            (raft_addr, service_endpoint, admin_endpoint)
+        else {
+            anyhow::bail!(
+                "bad member {entry:?}, expected raft_addr/service_endpoint/admin_endpoint"
+            );
+        };
         out.insert(
             id.trim().parse()?,
             MemberAddr {
                 raft_addr: raft_addr.trim().to_string(),
                 service_endpoint: service_endpoint.trim().to_string(),
+                admin_endpoint: admin_endpoint.trim().to_string(),
             },
         );
     }
@@ -96,6 +108,7 @@ async fn main() -> Result<()> {
         initial_membership: members,
         tuning: RaftTuning::default(),
         peer_tls,
+        admin_listen: None,
     });
     let mut node = build(cfg).await?;
     let drain = node.take_drain();

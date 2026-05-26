@@ -51,6 +51,13 @@ pub(crate) fn build_file(cfg: FileConfig) -> Result<Standalone, StandaloneError>
         driver: driver as Arc<dyn ConsensusDriver>,
         transport: TransportHandle::noop(),
         drain: None,
+        admin: std::sync::Arc::new(crate::admin::UnsupportedAdmin::new(
+            crate::admin::MembershipView {
+                members: Vec::new(),
+                leader: None,
+            },
+        )),
+        admin_transport: crate::TransportHandle::noop(),
     })
 }
 

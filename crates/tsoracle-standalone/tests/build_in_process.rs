@@ -97,6 +97,7 @@ mod openraft_driver {
             MemberAddr {
                 raft_addr: raft_addr.to_string(),
                 service_endpoint: service_endpoint.to_string(),
+                admin_endpoint: "127.0.0.1:3".to_string(),
             },
         );
         OpenraftConfig {
@@ -113,6 +114,7 @@ mod openraft_driver {
                 election_max_ms: 300,
             },
             peer_tls: None,
+            admin_listen: None,
         }
     }
 
@@ -167,6 +169,7 @@ mod openraft_driver {
             initial_membership: None,
             tuning: RaftTuning::default(),
             peer_tls: None,
+            admin_listen: None,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -182,6 +185,7 @@ mod openraft_driver {
             MemberAddr {
                 raft_addr: "127.0.0.1:1".into(),
                 service_endpoint: "127.0.0.1:2".into(),
+                admin_endpoint: "127.0.0.1:3".into(),
             },
         );
         let cfg = OpenraftConfig {
@@ -192,6 +196,7 @@ mod openraft_driver {
             initial_membership: Some(members),
             tuning: RaftTuning::default(),
             peer_tls: None,
+            admin_listen: None,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -207,6 +212,7 @@ mod openraft_driver {
             MemberAddr {
                 raft_addr: "127.0.0.1:1".into(),
                 service_endpoint: "127.0.0.1:2".into(),
+                admin_endpoint: "127.0.0.1:3".into(),
             },
         );
         let cfg = OpenraftConfig {
@@ -217,6 +223,7 @@ mod openraft_driver {
             initial_membership: Some(members),
             tuning: RaftTuning::default(),
             peer_tls: None,
+            admin_listen: None,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -238,6 +245,26 @@ mod openraft_driver {
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
             Err(StandaloneError::PeerBind { .. })
+        ));
+    }
+
+    /// The peer listener binds and the node boots, but the admin listener can't
+    /// claim an already-bound address — surfaced as `AdminBind` (distinct from
+    /// the peer listener's `PeerBind`, so the operator sees the right port),
+    /// not a background log line.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admin_bind_conflict_is_a_bind_error() {
+        let dir = tempdir().unwrap();
+        let raft_addr = lease_port().await;
+        // Hold the admin address so the admin server's bind collides with it.
+        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taken = squatter.local_addr().unwrap();
+
+        let mut cfg = single_node_cfg(raft_addr, "127.0.0.1:1", dir.path().join("raft"));
+        cfg.admin_listen = Some(taken);
+        assert!(matches!(
+            build(DriverConfig::Openraft(cfg)).await,
+            Err(StandaloneError::AdminBind { .. })
         ));
     }
 }

@@ -70,6 +70,7 @@ async fn sigterm_triggers_graceful_shutdown() {
     let raft_dir = tempdir().unwrap();
     let raft_addr = lease_port().await;
     let tso_addr = lease_port().await;
+    let admin_addr = lease_port().await;
 
     // Single-node cluster: enough for the tso gRPC server to bind and accept,
     // which is all the SIGTERM path needs.
@@ -81,7 +82,7 @@ async fn sigterm_triggers_graceful_shutdown() {
         .arg("--tso-addr")
         .arg(tso_addr.to_string())
         .arg("--members")
-        .arg(format!("1={raft_addr}/{tso_addr}"))
+        .arg(format!("1={raft_addr}/{tso_addr}/{admin_addr}"))
         .arg("--raft-dir")
         .arg(raft_dir.path())
         .arg("--bootstrap")
