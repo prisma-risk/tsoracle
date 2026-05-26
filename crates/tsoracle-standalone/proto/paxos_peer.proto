@@ -5,15 +5,29 @@ package tsoracle.paxos.peer.v1;
 // Peer-transport service for OmniPaxos.
 //
 // OmniPaxos has a single inbound dispatch point (`handle_incoming`), so one
-// fire-and-forget unary RPC is enough. The payload is a postcard-encoded
-// `omnipaxos::messages::Message<HighWaterCommand>` from the
+// unary RPC is enough for all consensus traffic. The payload is a
+// postcard-encoded `omnipaxos::messages::Message<HighWaterCommand>` from the
 // `tsoracle-driver-paxos` crate.
 service PaxosPeerService {
+  // Deliver one message to the receiver's `OmniPaxos::handle_incoming`. The
+  // response is an empty `Ack`; the client awaits it for delivery
+  // confirmation but does not read any body. Idempotency / replay safety
+  // are handled by OmniPaxos itself — the transport layer has nothing to
+  // dedupe. The server drops its cached client channel on RPC failure so
+  // the next attempt reconnects rather than re-using a half-broken pool
+  // entry.
   rpc Send(PaxosMessage) returns (Ack);
 }
 
 message PaxosMessage {
+  // Postcard-encoded `omnipaxos::messages::Message<HighWaterCommand>`. The
+  // receiver decodes and routes via `OmniPaxos::handle_incoming`; a decode
+  // failure surfaces as `invalid_argument` and closes only this RPC (the
+  // shared OmniPaxos handle is unaffected).
   bytes payload = 1;
 }
 
+// Empty acknowledgement. Returned for every successful `Send`; absence of
+// the response (transport error) is the only failure signal the client
+// reacts to.
 message Ack {}

@@ -4,8 +4,11 @@ package tsoracle.raft.peer.v1;
 
 // Peer-transport service for openraft.
 //
-// AppendEntries / Vote payloads are postcard-encoded openraft messages; we treat
-// them as opaque bytes because openraft's wire types are not protobuf-shaped.
+// AppendEntries / Vote / TransferLeader payloads are postcard-encoded openraft
+// messages; we treat them as opaque bytes because openraft's wire types are
+// not protobuf-shaped. The carrier `RaftMessage.format_version` field describes
+// the encoding version of `payload`; see that field's doc for how a 0 value
+// is interpreted by the receiver.
 //
 // Snapshot is a *client-streaming* RPC. The client sends exactly one
 // `SnapshotChunk { header }` followed by zero or more `SnapshotChunk { data }`
@@ -13,9 +16,20 @@ package tsoracle.raft.peer.v1;
 // `Raft::install_full_snapshot`. The reply is a single postcard-encoded
 // `SnapshotResponse` carried in `RaftMessage.payload`.
 service RaftPeerService {
+  // openraft `AppendEntriesRequest` → `AppendEntriesResponse`, both postcard.
+  // Carries log entries and heartbeats from leader to followers.
   rpc AppendEntries (RaftMessage) returns (RaftMessage);
+  // openraft `VoteRequest` → `VoteResponse`, both postcard. Used for leader
+  // election and pre-vote.
   rpc Vote (RaftMessage) returns (RaftMessage);
+  // Install a full snapshot on the receiver. Client-streaming: exactly one
+  // header chunk, then zero or more data chunks. See the `SnapshotChunk` and
+  // `SnapshotHeader` framing rules below.
   rpc Snapshot (stream SnapshotChunk) returns (RaftMessage);
+  // openraft `TransferLeaderRequest` → empty postcard reply. The caller is
+  // the outgoing leader asking a designated follower to start a new election;
+  // openraft self-wraps the call in `C::timeout`, so the transport need not
+  // impose its own deadline beyond `RPCOption::hard_ttl`.
   rpc TransferLeader (RaftMessage) returns (RaftMessage);
   // Format-migration capability query. The request `RaftMessage.payload` is
   // empty (the query takes no arguments). The reply `RaftMessage.payload` is
@@ -28,23 +42,36 @@ service RaftPeerService {
   rpc Capabilities (RaftMessage) returns (RaftMessage);
 }
 
+// Generic envelope shared by every unary openraft peer RPC. Both the request
+// and reply travel as `RaftMessage`; the meaning of `payload` is determined
+// by the RPC method.
 message RaftMessage {
+  // Postcard-encoded openraft message body. May be empty for RPCs whose
+  // request takes no arguments (currently `Capabilities`).
   bytes payload = 1;
   // Format version of the postcard-encoded `payload`. proto3 default 0 means
   // "absent" (a pre-feature sender) and is interpreted by the receiver as the
   // BASELINE write version. A versioned sender stamps its active write version.
+  // Stored in `u32` so the wire field stays room for future bumps; the value
+  // must fit in `u8` and lie within the receiver's readable range, otherwise
+  // the RPC fails with a typed transport error.
   uint32 format_version = 2;
 }
 
 // One chunk of a snapshot install RPC.
 //
-// Framing rules (enforced by the server):
+// Framing rules (enforced by the server; violations close the stream with
+// `invalid_argument`):
 //   - The FIRST chunk on the stream MUST be `header`.
 //   - Every subsequent chunk MUST be `data`.
-//   - End-of-stream signals the snapshot is complete.
+//   - End-of-stream signals the snapshot is complete; the server then calls
+//     `Raft::install_full_snapshot` and replies with a single `RaftMessage`
+//     carrying the postcard-encoded `SnapshotResponse`.
 message SnapshotChunk {
   oneof kind {
     SnapshotHeader header = 1;
+    // Raw snapshot bytes, in send order. The server concatenates these
+    // without per-chunk framing; chunking is purely a transport concern.
     bytes data = 2;
   }
 }
