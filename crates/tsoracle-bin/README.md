@@ -15,7 +15,7 @@ cargo install tsoracle
 ```bash
 # Single-node, fsync-durable file driver. Listens on 127.0.0.1:50551,
 # persists window state under ./tsoracle-data.
-tsoracle serve
+tsoracle serve file
 
 # Bare `tsoracle` is shorthand for `tsoracle serve file`.
 tsoracle
