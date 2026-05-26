@@ -57,6 +57,9 @@ fn open_rocksdb(dir: &std::path::Path) -> Result<Arc<DB>, StandaloneError> {
 }
 
 pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, StandaloneError> {
+    // Mirror the openraft peer secure-by-default guard (drivers/openraft/mod.rs):
+    // dry-build peer TLS first so a bad PEM surfaces as Tls (operator's
+    // explicit intent) before the routable guard fires.
     let peer_tls = match &cfg.peer_tls {
         Some(p) => Some(crate::peer_tls::build_peer_tls(p)?),
         None => None,

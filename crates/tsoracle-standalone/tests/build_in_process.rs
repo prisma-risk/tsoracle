@@ -517,6 +517,9 @@ mod paxos_driver {
 
     #[tokio::test]
     async fn paxos_peer_insecure_routable_bind_rejected_at_build() {
+        // Mirrors openraft_peer_insecure_routable_bind_rejected_at_build:
+        // guard runs at the top of build_paxos, before open_rocksdb,
+        // so data_dir stays untouched.
         let data_dir = tempdir().unwrap();
         let data_dir_path = data_dir.path().to_path_buf();
         let mut peers = BTreeMap::new();
@@ -555,10 +558,15 @@ mod paxos_driver {
 
     #[tokio::test]
     async fn paxos_peer_loopback_no_tls_allowed() {
+        // Loopback binds are allowed plaintext for local-dev / sidecar.
         let dir = tempdir().unwrap();
         let (peer_listen, peer_lease) = lease_port().await;
         let (absent_peer, absent_lease) = lease_port().await;
-        assert!(peer_listen.ip().is_loopback());
+        assert!(
+            peer_listen.ip().is_loopback(),
+            "lease_port returns loopback"
+        );
+        // peer_tls None, allow_insecure_peer false — loopback carve-out wins.
         let mut peers = BTreeMap::new();
         peers.insert(1, peer_listen.to_string());
         peers.insert(2, absent_peer.to_string());
@@ -577,11 +585,18 @@ mod paxos_driver {
         let node = build(DriverConfig::Paxos(cfg))
             .await
             .expect("loopback + no peer_tls should build");
+        // Don't bother driving consensus — boot was the assertion.
         node.shutdown().await;
     }
 
     #[tokio::test]
     async fn paxos_peer_routable_opt_out_allowed() {
+        // allow_insecure_peer=true opts the routable bind in;
+        // build() must succeed past the guard. We don't drive consensus
+        // (would need a real listener-bind on 0.0.0.0); proving the guard
+        // is bypassed is the assertion, so the test uses 0.0.0.0:0 and
+        // expects either Ok() or a downstream error other than
+        // PeerInsecureRoutable.
         let dir = tempdir().unwrap();
         let mut peers = BTreeMap::new();
         peers.insert(1, "0.0.0.0:0".to_string());
@@ -601,12 +616,16 @@ mod paxos_driver {
             Err(tsoracle_standalone::StandaloneError::PeerInsecureRoutable { .. }) => {
                 panic!("opt-out should bypass the guard")
             }
-            Err(_) => {} // any other error is fine for guard-bypass
+            Err(_) => {
+                // Any other error is acceptable for this guard-bypass test
+                // (we only care that PeerInsecureRoutable did not fire).
+            }
         }
     }
 
     #[tokio::test]
     async fn paxos_peer_routable_with_tls_allowed() {
+        // peer_tls Some(...) bypasses the guard regardless of bind address.
         use tsoracle_standalone::PeerTlsConfig;
         let dir = tempdir().unwrap();
         let (cert, key, ca) = crate::common::write_peer_pems(dir.path());
@@ -628,7 +647,10 @@ mod paxos_driver {
             Err(tsoracle_standalone::StandaloneError::PeerInsecureRoutable { .. }) => {
                 panic!("routable + peer_tls should bypass the guard")
             }
-            Err(_) => {} // any other error is fine
+            Err(_) => {
+                // Any other error is acceptable for this guard-bypass test
+                // (we only care that PeerInsecureRoutable did not fire).
+            }
         }
     }
 }
