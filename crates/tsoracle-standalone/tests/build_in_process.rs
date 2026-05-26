@@ -65,16 +65,26 @@ mod file_driver {
 #[cfg(feature = "openraft")]
 mod openraft_driver {
     use std::collections::BTreeMap;
-    use std::time::Duration;
 
     use tempfile::tempdir;
-    use tokio_stream::StreamExt;
-    use tsoracle_consensus::LeaderState;
     use tsoracle_standalone::{
         DriverConfig, MemberAddr, OpenraftConfig, RaftTuning, StandaloneError, build,
     };
 
+    // The boot-and-drain test below is the only consumer of these imports +
+    // `build_openraft_with_listeners` + `lease_port`. Gating them on
+    // `test-support` keeps the `--no-default-features --features openraft`
+    // build (config-error tests only) warning-clean.
+    #[cfg(feature = "test-support")]
     use crate::common::lease_port;
+    #[cfg(feature = "test-support")]
+    use std::time::Duration;
+    #[cfg(feature = "test-support")]
+    use tokio_stream::StreamExt;
+    #[cfg(feature = "test-support")]
+    use tsoracle_consensus::LeaderState;
+    #[cfg(feature = "test-support")]
+    use tsoracle_standalone::build_openraft_with_listeners;
 
     fn single_node_cfg(
         raft_addr: std::net::SocketAddr,
@@ -114,14 +124,14 @@ mod openraft_driver {
     /// other voter the handoff finds no target and falls through — but the
     /// leader-detection, metrics read, and target-selection path are all
     /// exercised, which the subprocess tests can't reach in this library.
+    #[cfg(feature = "test-support")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_openraft_single_node_boots_and_drains() {
         let dir = tempdir().unwrap();
         let (raft_addr, raft_lease) = lease_port().await;
         let cfg = single_node_cfg(raft_addr, "127.0.0.1:1", dir.path().join("raft"));
 
-        drop(raft_lease);
-        let mut node = build(DriverConfig::Openraft(cfg))
+        let mut node = build_openraft_with_listeners(cfg, raft_lease.into_listener(), None)
             .await
             .expect("build openraft driver");
 
@@ -247,19 +257,23 @@ mod openraft_driver {
     /// claim an already-bound address — surfaced as `AdminBind` (distinct from
     /// the peer listener's `PeerBind`, so the operator sees the right port),
     /// not a background log line.
+    #[cfg(feature = "test-support")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admin_bind_conflict_is_a_bind_error() {
         let dir = tempdir().unwrap();
         let (raft_addr, raft_lease) = lease_port().await;
         // Hold the admin address so the admin server's bind collides with it.
+        // The squatter must STAY bound — that's the point of the test — so we
+        // can't pass an `admin_listener` through the test-support seam; the
+        // build's own `TcpListener::bind(taken)` is exactly what we want to
+        // fail with `AddrInUse`.
         let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let taken = squatter.local_addr().unwrap();
 
         let mut cfg = single_node_cfg(raft_addr, "127.0.0.1:1", dir.path().join("raft"));
         cfg.admin_listen = Some(taken);
-        drop(raft_lease);
         assert!(matches!(
-            build(DriverConfig::Openraft(cfg)).await,
+            build_openraft_with_listeners(cfg, raft_lease.into_listener(), None).await,
             Err(StandaloneError::AdminBind { .. })
         ));
     }
@@ -272,6 +286,10 @@ mod paxos_driver {
 
     use tempfile::tempdir;
     use tsoracle_standalone::{DriverConfig, PaxosConfig, build};
+    // Race-free seam for the boot test; absent under test-support disabled,
+    // and the `peer_bind_conflict` test below doesn't need it anyway.
+    #[cfg(feature = "test-support")]
+    use tsoracle_standalone::build_paxos_with_listeners;
 
     use crate::common::lease_port;
 
@@ -283,12 +301,15 @@ mod paxos_driver {
     /// drive consensus here (the paxos lifecycle is timing-flaky under
     /// coverage, see the test-suite notes); proving bootstrap wired everything
     /// up and that `shutdown()` stops the peer transport is enough.
+    #[cfg(feature = "test-support")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_paxos_boots_and_shuts_down() {
         let dir = tempdir().unwrap();
         let (peer_listen, peer_lease) = lease_port().await;
         // A second voter that we deliberately never start, just to satisfy
-        // OmniPaxos's >1-node requirement.
+        // OmniPaxos's >1-node requirement. `absent_lease` is dropped because
+        // the build never actually binds this peer — the lease just stops
+        // another test from snatching the port we're about to advertise.
         let (absent_peer, absent_lease) = lease_port().await;
         let mut peers = BTreeMap::new();
         peers.insert(1, peer_listen.to_string());
@@ -309,9 +330,8 @@ mod paxos_driver {
             peer_tls: None,
         };
 
-        drop(peer_lease);
         drop(absent_lease);
-        let mut node = build(DriverConfig::Paxos(cfg))
+        let mut node = build_paxos_with_listeners(cfg, peer_lease.into_listener())
             .await
             .expect("build paxos driver");
         assert!(
