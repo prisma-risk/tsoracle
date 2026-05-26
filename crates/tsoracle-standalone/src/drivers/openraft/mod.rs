@@ -70,6 +70,34 @@ fn open_rocksdb(dir: &std::path::Path) -> Result<Arc<DB>, StandaloneError> {
 }
 
 pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, StandaloneError> {
+    build_openraft_inner(cfg, None, None).await
+}
+
+/// Test-only entry point: build with pre-bound `TcpListener`s for the raft
+/// peer port and (optionally) the admin port, bypassing the internal
+/// `TcpListener::bind` calls. Lets a test hold an OS-assigned ephemeral port
+/// continuously from `lease_port()` through `build`, eliminating the
+/// close/rebind race that periodically surfaces as `EADDRINUSE` under
+/// parallel-test load.
+///
+/// Contract: when `admin_listener` is `Some`, `cfg.admin_listen` must also
+/// be `Some` (the listener supplies the bind, but `admin_listen` still drives
+/// the secure-by-default loopback check and is reported on
+/// `Standalone::admin_listen_addr`).
+#[cfg(any(test, feature = "test-support"))]
+pub async fn build_openraft_with_listeners(
+    cfg: OpenraftConfig,
+    raft_listener: tokio::net::TcpListener,
+    admin_listener: Option<tokio::net::TcpListener>,
+) -> Result<Standalone, StandaloneError> {
+    build_openraft_inner(cfg, Some(raft_listener), admin_listener).await
+}
+
+async fn build_openraft_inner(
+    cfg: OpenraftConfig,
+    raft_listener: Option<tokio::net::TcpListener>,
+    admin_listener: Option<tokio::net::TcpListener>,
+) -> Result<Standalone, StandaloneError> {
     // Validate membership/self identity (spec: Lifecycle).
     match (cfg.bootstrap, &cfg.initial_membership) {
         (true, Some(members)) if !members.contains_key(&cfg.id) => {
@@ -227,12 +255,17 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
     .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?;
 
     // Bind the peer listener BEFORE spawning, so bind failures surface here.
-    let listener = tokio::net::TcpListener::bind(cfg.raft_addr)
-        .await
-        .map_err(|source| StandaloneError::PeerBind {
-            addr: cfg.raft_addr,
-            source,
-        })?;
+    // Tests can hand in a `TcpListener` they've held since `lease_port()` to
+    // skip this bind entirely — the close/rebind window is the race source.
+    let listener = match raft_listener {
+        Some(l) => l,
+        None => tokio::net::TcpListener::bind(cfg.raft_addr)
+            .await
+            .map_err(|source| StandaloneError::PeerBind {
+                addr: cfg.raft_addr,
+                source,
+            })?,
+    };
     let peer_service = peer_server(raft.clone(), version_source)
         .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
@@ -315,10 +348,22 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
             capability_source,
         ));
 
-    let (admin_transport, admin_listen_addr) = match cfg.admin_listen {
-        Some(listen) => {
+    let (admin_transport, admin_listen_addr) = match (cfg.admin_listen, admin_listener) {
+        (Some(listen), pre_bound) => {
+            // Use the test-supplied pre-bound listener when present; otherwise
+            // bind here. Keeping the bind adjacent to the spawn preserves the
+            // existing "bind failures surface to the caller" contract.
+            let listener = match pre_bound {
+                Some(l) => l,
+                None => tokio::net::TcpListener::bind(listen)
+                    .await
+                    .map_err(|source| StandaloneError::AdminBind {
+                        addr: listen,
+                        source,
+                    })?,
+            };
             let (cancel, join, bound) =
-                crate::admin::service::serve_admin(admin.clone(), listen, admin_tls_material)
+                crate::admin::service::serve_admin(admin.clone(), listener, admin_tls_material)
                     .await
                     .map_err(|source| StandaloneError::AdminBind {
                         addr: listen,
@@ -326,7 +371,7 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
                     })?;
             (TransportHandle::new(cancel, join), Some(bound))
         }
-        None => (TransportHandle::noop(), None),
+        (None, _) => (TransportHandle::noop(), None),
     };
 
     Ok(Standalone {

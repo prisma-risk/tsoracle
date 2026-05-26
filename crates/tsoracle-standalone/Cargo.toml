@@ -80,11 +80,16 @@ tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 # Without `required-features`, `cargo test -p tsoracle-standalone` (developer
-# default, no `--features test-support`) silently compiles this test file to
+# default, no `--features test-support`) silently compiles these test files to
 # zero test items — the `#![cfg(all(feature = "openraft", feature = "test-support"))]`
-# at the top of the file gates everything out. With this entry, cargo prints a
-# visible "skipped due to required-features" notice instead.
+# at the top of each file gates everything out. With these entries, cargo
+# prints a visible "skipped due to required-features" notice instead.
 [[test]]
 name = "activation_admin_rpc"
 path = "tests/activation_admin_rpc.rs"
+required-features = ["openraft", "test-support"]
+
+[[test]]
+name = "openraft_membership"
+path = "tests/openraft_membership.rs"
 required-features = ["openraft", "test-support"]
