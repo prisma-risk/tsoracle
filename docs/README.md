@@ -16,6 +16,7 @@ For the **API reference**, see [docs.rs/tsoracle-server](https://docs.rs/tsoracl
 - **[Client API and Usage](client-api-and-usage.md)** — `Client` type, `GetTs`/`GetTsBatch`, leader discovery, configuration.
 - **[The Client Driver](the-client-driver.md)** — coalescing vs. pre-fetching, external monotonicity across clients, auto-batching dynamics, `flush_interval` correctly understood.
 - **[Consensus Integration](consensus-integration.md)** — the `ConsensusDriver` trait, per-method recipes, worked openraft example, single-leader requirement.
+- **[Driver Comparison](driver-comparison.md)** — capability matrix and per-feature deep dive across `file`, `openraft`, and `paxos`; operator decision guidance and contributor-facing internals.
 - **[Operations](operations.md)** — sizing `window_ahead`/`failover_advance`, monitoring hooks, deployment topologies, client retry behavior.
 - **[Deployment](deployment.md)** — container images (fat vs lean, multi-arch), Helm chart quick start, values reference, TLS/mTLS setup, and topology notes (file vs openraft vs paxos).
 - **[Testing and Examples](testing-and-examples.md)** — walkthroughs of `embedded-server`, `failover-demo`, `openraft-standalone`, `openraft-piggyback`, plus the workspace testing strategy.
