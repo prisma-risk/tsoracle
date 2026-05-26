@@ -175,10 +175,10 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
     let highest_log_record_byte = log_store
         .highest_log_record_version()
         .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?;
-    let active_write_version = ActiveWriteVersion::new(recover_active_write_version(
-        snapshot_leading_byte,
-        highest_log_record_byte,
-    ));
+    let active_write_version = ActiveWriteVersion::new(
+        recover_active_write_version(snapshot_leading_byte, highest_log_record_byte)
+            .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?,
+    );
 
     // Thread the SAME cell into both writers: the log store stamps appended
     // records, the state machine stamps snapshots, both reading this one cell.
