@@ -26,6 +26,7 @@
 // for the lib's own unit tests; integration tests are separate compilation units.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod capabilities;
 pub mod driver;
 pub mod host;
 pub mod log_codec;
@@ -35,6 +36,9 @@ pub mod standalone;
 pub mod state_machine;
 pub mod type_config;
 
+pub use capabilities::{
+    CapabilitySource, FormatActivationError, NodeCapabilities, all_members_can_read, gather_with,
+};
 pub use driver::OpenraftDriver;
 pub use host::OpenraftHighWaterHost;
 pub use log_codec::OpenraftLogCodec;
