@@ -22,7 +22,6 @@ export default function init(figure) {
     const layoutRadius = Math.min(width, height) / 2 - 90;
 
     const accent = getComputedStyle(figure).getPropertyValue('--accent').trim() || '#FFB000';
-    const fgDim = getComputedStyle(figure).getPropertyValue('--fg-dim').trim() || '#8A8A86';
 
     // Arrowhead marker
     const markerId = 'arrow-' + Math.random().toString(36).slice(2, 8);

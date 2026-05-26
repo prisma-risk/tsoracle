@@ -82,7 +82,6 @@ export default function init(figure) {
         .attr('font-family', 'JetBrainsMono, ui-monospace, monospace')
         .attr('font-size', 16);
 
-    const annotationMaxWidth = 680;
     const annotationCharsPerLine = 68;
 
     function setAnnotationText(text) {
