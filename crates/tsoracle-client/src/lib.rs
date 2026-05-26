@@ -211,22 +211,61 @@ impl Client {
     /// endpoint. Followers return `MaxSafe::max_safe_physical_ms == 0` rather
     /// than erroring, matching the proto contract; pollers needing freshness
     /// should target the leader endpoint.
+    ///
+    /// Single-shot by design — the proto contract is "followers return 0"
+    /// rather than NOT_LEADER, so there is no hint to chase and no worklist
+    /// to drain; a caller polling for freshness retries the next tick rather
+    /// than the next endpoint. The one `(connect, RPC)` pair is bounded by
+    /// [`RetryPolicy::per_attempt_deadline`] (shared across both phases via
+    /// `PairBudget`, exactly like one `get_ts` attempt), and a transport-class
+    /// failure evicts the cached channel so a half-open / black-holing
+    /// connection is dropped before the next poll lands on it.
     pub async fn get_current_max_safe(&self) -> Result<MaxSafe, ClientError> {
         let endpoint = self
             .pool
             .cached_leader()
             .or_else(|| self.pool.iter_round_robin().into_iter().next())
             .ok_or(ClientError::NoReachableEndpoints)?;
-        let (mut svc, _cell) = self.pool.client_with_cell(&endpoint).await?;
-        let resp = svc
-            .get_current_max_safe(tsoracle_proto::v1::GetCurrentMaxSafeRequest {})
-            .await
-            .map_err(ClientError::Rpc)?;
-        let inner = resp.into_inner();
-        Ok(MaxSafe {
-            max_safe_physical_ms: inner.max_safe_physical_ms,
-            epoch: Epoch::from_wire(inner.epoch_hi, inner.epoch_lo),
-        })
+        let budget = self.pool.retry_policy().per_attempt_deadline;
+        // One budget shared across connect + RPC: a slow connect eats into
+        // the RPC's time rather than each phase getting a fresh full budget,
+        // so a single call never runs longer than ~`per_attempt_deadline`.
+        let pair = crate::budget::PairBudget::start(budget);
+        let (mut svc, cell) =
+            match tokio::time::timeout(budget, self.pool.client_with_cell(&endpoint)).await {
+                Ok(Ok(leased)) => leased,
+                // `client_with_cell` already evicts its own cell on a failed
+                // dial, so there is nothing to evict here.
+                Ok(Err(err)) => return Err(err),
+                Err(_) => {
+                    return Err(ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
+                        "connect exceeded per_attempt_deadline of {budget:?}"
+                    ))));
+                }
+            };
+        let rpc_budget = pair.remaining();
+        let rpc = svc.get_current_max_safe(tsoracle_proto::v1::GetCurrentMaxSafeRequest {});
+        let err = match tokio::time::timeout(rpc_budget, rpc).await {
+            Ok(Ok(response)) => {
+                let inner = response.into_inner();
+                return Ok(MaxSafe {
+                    max_safe_physical_ms: inner.max_safe_physical_ms,
+                    epoch: Epoch::from_wire(inner.epoch_hi, inner.epoch_lo),
+                });
+            }
+            Ok(Err(status)) => ClientError::Rpc(status),
+            // A timed-out RPC surfaces as `DeadlineExceeded` (transport-class
+            // per `is_transport_failure`), so the eviction tail below drops the
+            // possibly-half-open channel — matching the `get_ts` attempt path.
+            Err(_) => ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
+                "rpc exceeded its share of per_attempt_deadline \
+                 ({rpc_budget:?} of {budget:?})"
+            ))),
+        };
+        if crate::retry_policy::is_transport_failure(&err) {
+            self.pool.evict_if_current(&endpoint, &cell);
+        }
+        Err(err)
     }
 }
 
@@ -372,6 +411,68 @@ mod tests {
         );
         assert_eq!(builder.retry_policy.base_backoff, policy.base_backoff);
         assert_eq!(builder.retry_policy.leader_ttl, policy.leader_ttl);
+    }
+
+    /// Acceptance criterion for the `get_current_max_safe` deadline fix
+    /// (security finding 8c3ea943): a single-shot call against a
+    /// black-holed endpoint must surface `DeadlineExceeded` within the
+    /// configured `per_attempt_deadline`, not park indefinitely on a
+    /// connector whose future never resolves. Exercised through the
+    /// public `channel_connector` surface — `std::future::pending()`
+    /// guarantees the connect future never completes, so any code path
+    /// without an outer `tokio::time::timeout` hangs until an external
+    /// test timeout kills the runtime. The wall-clock bound is generous
+    /// enough to absorb CI scheduler jitter but well below the OS-level
+    /// TCP timeout, mirroring the structure of the `get_ts`
+    /// equivalent below.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_current_max_safe_returns_within_per_attempt_deadline_when_connector_hangs() {
+        let policy = RetryPolicy {
+            max_attempts: 1,
+            per_attempt_deadline: Duration::from_millis(100),
+            overall_deadline: Duration::from_millis(300),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let client = ClientBuilder::endpoints(vec!["hang:1".into()])
+            .channel_connector(|_endpoint: &str| async {
+                // The future never resolves; only an outer timeout can end
+                // the await. This is the exact attack shape the finding
+                // describes: a user-supplied connector (or a black-holed
+                // peer behind one) for which the caller relied on
+                // `RetryPolicy` to bound the wait.
+                std::future::pending::<Result<tonic::transport::Channel, crate::BoxError>>().await
+            })
+            .retry_policy(policy)
+            .build()
+            .await
+            .expect("builder must accept the policy");
+        // Outer safety timeout: when the fix is missing, `get_current_max_safe`
+        // awaits a never-resolving connector indefinitely, which would hang the
+        // whole test runner rather than fail this case. The 5s ceiling converts
+        // that hang into a clean panic with a diagnostic message. Under a
+        // correctly-deadlined call this outer guard never fires — the inner
+        // future returns in ~100ms, well below the elapsed-time assertion.
+        let outer_safety = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let result = match tokio::time::timeout(outer_safety, client.get_current_max_safe()).await {
+            Ok(r) => r,
+            Err(_) => panic!(
+                "get_current_max_safe failed to honor its own per_attempt_deadline; \
+                 the {outer_safety:?} outer safety net had to fire — this is the \
+                 security finding's exact symptom (channel acquisition or RPC was \
+                 never bounded)",
+            ),
+        };
+        let elapsed = start.elapsed();
+        assert!(
+            result.is_err(),
+            "a hanging connector must surface as Err, got {result:?}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "deadline must short-circuit; took {elapsed:?} (per_attempt_deadline was 100ms)",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
