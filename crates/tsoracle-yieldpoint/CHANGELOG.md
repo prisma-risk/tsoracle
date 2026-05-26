@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-yieldpoint-v0.1.5...tsoracle-yieldpoint-v0.1.6) - 2026-05-26
+
+### Fixed
+
+- ship per-crate READMEs to crates.io ([#451](https://github.com/prisma-risk/tsoracle/pull/451))
+
+### Other
+
+- expand copyright header to full Apache 2.0 block and share it via scripts/header.txt ([#449](https://github.com/prisma-risk/tsoracle/pull/449))
+
 ## [0.1.5](https://github.com/prisma-risk/tsoracle/compare/tsoracle-yieldpoint-v0.1.4...tsoracle-yieldpoint-v0.1.5) - 2026-05-24
 
 ### Fixed
