@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tsoracle-e2e-membership-soak
+  labels:
+    app.kubernetes.io/name: tsoracle-e2e-driver
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsoracle-e2e-driver
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: tsoracle-e2e-driver:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --mode=membership-soak
+            # The three ORIGINAL replica endpoints (not the future tsoracle-3
+            # the orchestrator adds mid-test). After the new node is promoted,
+            # the client reaches it via the leader-hint that any of these
+            # three returns — exercising exactly the redirect path we want.
+            - --endpoints=tsoracle-0.tsoracle-peer:5051,tsoracle-1.tsoracle-peer:5051,tsoracle-2.tsoracle-peer:5051
+            # Longer than the plain soak: must outlast scale-up of the
+            # StatefulSet to 4 + the new pod reaching Ready + `admin
+            # add-learner` blocking until the learner catches up + `promote` +
+            # `remove`, plus headroom for a cooldown window where the
+            # tracker can confirm monotonicity holds AFTER the membership
+            # transitions settle. Tune alongside the orchestrator step in
+            # run-assertions.sh.
+            - --duration-secs=180

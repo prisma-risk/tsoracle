@@ -64,6 +64,39 @@ wait_soak_live() {
     done
 }
 
+# From a `tsoracle admin members` snapshot on stdin, print the id of the
+# first member that is a Voter, is not the cluster leader, and is not
+# EXCLUDE_ID. Used by the membership-soak step to pick the `remove` target
+# after a new voter has been promoted, so the leader stays put and the
+# newly promoted node survives. Exit 1 if no such member exists (the caller
+# should treat that as a hard failure — it means the only voters are the
+# leader and the newly added node, and the test cannot exercise `remove`).
+#
+# Parses the CLI's printed format (crates/tsoracle-bin/src/main.rs:535-543):
+#   leader: <id>
+#     id=<n> role=Voter|Learner raft=... service=... admin=...
+# Field positions are fixed; we read $1 and $2 after the leading-space-
+# induced field shift, so the awk default whitespace tokenization handles
+# both the `leader:` line and the indented member rows uniformly.
+#
+# Args: EXCLUDE_ID
+pick_remove_target() {
+    local exclude_id="$1"
+    awk -v exclude="$exclude_id" '
+        $1 == "leader:" { leader = $2; next }
+        $1 ~ /^id=/ {
+            id_v = $1; sub(/^id=/, "", id_v)
+            role_v = $2; sub(/^role=/, "", role_v)
+            if (role_v == "Voter" && id_v != leader && id_v != exclude) {
+                print id_v
+                found = 1
+                exit
+            }
+        }
+        END { if (!found) exit 1 }
+    '
+}
+
 # Block until POD's tsoracle container reports a specific IMAGE in
 # .status.containerStatuses AND .status.containerStatuses[*].ready=true.
 # Without the image check, an already-Ready baseline pod falsely satisfies

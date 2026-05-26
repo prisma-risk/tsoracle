@@ -36,7 +36,7 @@ kind delete cluster --name tsoracle-e2e
 
 ## Scope
 
-This lane currently covers cold-start formation and graceful rolling-restart (rollout steps 2–3). Network partition + PVC reattach (step 4) and a nightly schedule (step 5) are follow-ups. The `openraft-standalone` example now handles SIGTERM (via `tsoracle_server::shutdown_signal()`, #406), so the graceful-rollout assertion exercises the real cooperative-shutdown path.
+This lane currently covers cold-start formation, graceful rolling-restart, SIGKILL-leader recovery, and dynamic-membership churn (add-learner / promote / remove). The `openraft-standalone` example handles SIGTERM (via `tsoracle_server::shutdown_signal()`, #406), so the graceful-rollout assertion exercises the real cooperative-shutdown path. The dynamic-membership cell (issue #487) is the first end-to-end exercise of the three-address membership model shipped in #453; it drives all admin calls through `kubectl exec LEADER_POD -- tsoracle admin ...` against the loopback `127.0.0.1:51002` admin port the chart binds. Network partition + PVC reattach and a nightly schedule remain follow-ups.
 
 ## Deploying to EKS (staging)
 

@@ -55,6 +55,17 @@ enum Mode {
     /// driver remains a pure observer of monotonicity; the orchestrator picks
     /// the leader and issues the kill.
     SigkillSoak,
+    /// Soak variant for the dynamic-membership assertion (issue #487): sustain
+    /// load with the same zero-monotonicity-violation invariant and the
+    /// graceful [`MAX_SOAK_ERROR_RATE`] budget while the orchestrator scales
+    /// the StatefulSet by one, runs `tsoracle admin add-learner`, `promote`,
+    /// and `remove` against the leader, and verifies the load stays live and
+    /// monotone throughout. Distinct sentinel (`membership-soak: first GetTs
+    /// ok`) so the orchestrator only begins the membership churn after load
+    /// is provably live. openraft-only — paxos returns `AdminError::Unsupported`.
+    /// The driver remains a pure observer; the orchestrator drives every
+    /// membership transition over the loopback admin port via `kubectl exec`.
+    MembershipSoak,
 }
 
 #[derive(Parser, Debug)]
@@ -117,6 +128,9 @@ async fn main() -> Result<()> {
         }
         Mode::SigkillSoak => {
             run_sigkill_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?
+        }
+        Mode::MembershipSoak => {
+            run_membership_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?
         }
     };
     if !passed {
@@ -189,6 +203,18 @@ async fn run_sigkill_soak(endpoints: &[String], duration: Duration) -> Result<bo
         MAX_SIGKILL_SOAK_ERROR_RATE,
     )
     .await
+}
+
+/// Sustain GetTs load while the orchestrator scales the StatefulSet by one,
+/// adds the new replica as a learner (`add-learner` blocks until catch-up),
+/// promotes it to voter, and removes a pre-existing non-leader voter. Same
+/// zero-monotonicity-violation invariant and graceful [`MAX_SOAK_ERROR_RATE`]
+/// budget as [`run_soak`] — none of the membership ops sever an active client
+/// connection (the leader stays leader, the removed voter is not the
+/// leader). The distinct sentinel (`membership-soak: first GetTs ok`) lets
+/// the orchestrator only begin the churn after load is provably live.
+async fn run_membership_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
+    sustain_load(endpoints, duration, "membership-soak", MAX_SOAK_ERROR_RATE).await
 }
 
 /// Shared body of the three soak modes. The `label` is the per-mode prefix
@@ -290,6 +316,25 @@ mod cli_tests {
             "--duration-secs=180",
         ]);
         assert_eq!(cli.mode, Mode::SigkillSoak);
+        assert_eq!(cli.endpoints.len(), 3);
+        assert_eq!(cli.duration_secs, 180);
+    }
+
+    #[test]
+    fn membership_soak_mode_parses() {
+        // Membership-soak shares the soak CLI surface; the orchestrator drives
+        // the add-learner/promote/remove sequence through `kubectl exec
+        // LEADER_POD -- tsoracle admin ... --endpoint http://127.0.0.1:51002`
+        // (the chart's loopback-only admin bind). The endpoints list is the
+        // three original replicas; the new pod tsoracle-3 reaches the client
+        // via leader-hint after promote.
+        let cli = Cli::parse_from([
+            "kube-e2e-driver",
+            "--mode=membership-soak",
+            "--endpoints=a:5051,b:5051,c:5051",
+            "--duration-secs=180",
+        ]);
+        assert_eq!(cli.mode, Mode::MembershipSoak);
         assert_eq!(cli.endpoints.len(), 3);
         assert_eq!(cli.duration_secs, 180);
     }
