@@ -65,6 +65,18 @@ impl StandaloneHost {
             state_machine,
         }
     }
+
+    /// The format version this node currently emits (stamps onto persisted
+    /// records, snapshots, and — in a later phase — peer RPC payloads). Reads
+    /// the shared
+    /// [`ActiveWriteVersion`](tsoracle_openraft_toolkit::ActiveWriteVersion)
+    /// cell via the state machine, which shares the one cell with the log
+    /// store. In this release it is always
+    /// [`BASELINE_WRITE_VERSION`](tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION);
+    /// a successful activation apply (later phase) advances it.
+    pub fn active_write_version(&self) -> u8 {
+        self.state_machine.active_write_version()
+    }
 }
 
 #[async_trait]
@@ -195,5 +207,28 @@ mod tests {
             classify_client_write_error(err),
             ConsensusError::TransientDriver(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn host_active_write_version_delegates_to_the_shared_cell() {
+        // StandaloneHost surfaces the SM's shared cell. Assert the delegation
+        // target (the SM accessor) behaves; the host's accessor is a thin
+        // pass-through to it. Building a full `Raft` in a unit test is heavy
+        // and the live-host tests live in the integration harness; the
+        // _assert_signature line below also gives compile-time evidence that
+        // the host's accessor exists with the right signature.
+        let cell = tsoracle_openraft_toolkit::ActiveWriteVersion::default();
+        let store: std::sync::Arc<dyn crate::snapshot_store::SnapshotStore> =
+            std::sync::Arc::new(crate::snapshot_store::InMemorySnapshotStore::new());
+        let state_machine =
+            HighWaterStateMachine::with_store_and_active_version(store, cell.clone()).expect("sm");
+        assert_eq!(
+            state_machine.active_write_version(),
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION
+        );
+        cell.set(7);
+        assert_eq!(state_machine.active_write_version(), 7);
+        // Compile-time guard that the host accessor exists and returns u8:
+        let _assert_signature: fn(&StandaloneHost) -> u8 = StandaloneHost::active_write_version;
     }
 }

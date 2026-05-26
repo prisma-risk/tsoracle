@@ -25,7 +25,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use tsoracle_driver_openraft::OpenraftEntry;
-use tsoracle_openraft_toolkit::{SCHEMA_VERSION, decode};
+use tsoracle_openraft_toolkit::{BASELINE_WRITE_VERSION, decode};
 
 // Adversarial-bytes safety for the full openraft log record. The log store
 // reads `[version | postcard(Entry<TypeConfig>)]` from the log column family
@@ -39,5 +39,5 @@ use tsoracle_openraft_toolkit::{SCHEMA_VERSION, decode};
 // variable-length `EntryPayload::Membership(Membership<C>)` variant, which the
 // inner-command target never reaches.
 fuzz_target!(|data: &[u8]| {
-    let _ = decode::<OpenraftEntry>(SCHEMA_VERSION, data);
+    let _ = decode::<OpenraftEntry>(BASELINE_WRITE_VERSION, data);
 });

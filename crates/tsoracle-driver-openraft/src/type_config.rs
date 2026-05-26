@@ -47,7 +47,10 @@ use crate::log_entry::HighWaterCommand;
 ///   Empty means "no admin redirect available for this node".
 ///
 /// Widening this struct changes the postcard layout of membership log entries
-/// and therefore requires a `tsoracle_openraft_toolkit::SCHEMA_VERSION` bump.
+/// and therefore requires growing `tsoracle_openraft_toolkit::MAX_READABLE_VERSION`
+/// and advancing `BASELINE_WRITE_VERSION` through an activation barrier (the
+/// historical fix was a global stop-the-world bump; the format-migration
+/// design replaces that with a rolling upgrade).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenraftPeer {
     pub addr: String,
@@ -107,15 +110,15 @@ pub type OpenraftEntry = openraft::type_config::alias::EntryOf<TypeConfig>;
 /// column family on recovery.
 ///
 /// Like the log and snapshot records, the meta singletons are persisted under
-/// the `[SCHEMA_VERSION | postcard]` frame (the meta column was brought under it
-/// in `SCHEMA_VERSION` v2) — see `log_store::meta::read`, which routes
-/// `VoteOf<C>` (label `Vote`) and `LogIdOf<C>` (labels `Committed` and
-/// `LastPurged`) through `log_store::decode_record`, so a foreign version
+/// the `[active write version | postcard]` frame (the meta column was brought
+/// under it in v2) — see `log_store::meta::read`, which routes `VoteOf<C>`
+/// (label `Vote`) and `LogIdOf<C>` (labels `Committed` and `LastPurged`)
+/// through the toolkit's record helpers, so an out-of-range version
 /// loud-rejects instead of silently misdecoding the recovery-critical vote.
 /// Exposed only so the fuzz harness can reconstruct that framed decode
-/// (`tsoracle_openraft_toolkit::decode::<_>(SCHEMA_VERSION, ..)`) against the
-/// concrete meta types; hidden from the public API because nothing else should
-/// depend on the meta representation.
+/// (`tsoracle_openraft_toolkit::decode::<_>(BASELINE_WRITE_VERSION, ..)`)
+/// against the concrete meta types; hidden from the public API because nothing
+/// else should depend on the meta representation.
 #[doc(hidden)]
 pub type OpenraftVote = openraft::type_config::alias::VoteOf<TypeConfig>;
 
@@ -165,7 +168,8 @@ mod tests {
         // Pins the postcard field order (addr, service_endpoint, admin_endpoint)
         // that membership log entries embed. A reorder or inserted field changes
         // these bytes and trips this test, guarding the membership record layout
-        // the SCHEMA_VERSION frame versions. postcard encodes each String as a
+        // the active write version frame versions. postcard encodes each String
+        // as a
         // varint length prefix followed by its UTF-8 bytes.
         let peer = OpenraftPeer {
             addr: "a:1".into(),

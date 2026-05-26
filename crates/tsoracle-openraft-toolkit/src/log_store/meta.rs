@@ -29,8 +29,10 @@
 //! The vote and log-id helpers frame their values through the toolkit's
 //! provider-backed record helpers ([`super::encode_vote_record`] /
 //! [`super::decode_vote_record`] and the log-id analogues), so a
-//! recovery-critical meta record loud-rejects on a version mismatch instead of
-//! misdecoding silently. rocksdb errors are mapped to [`io::Error`] to match
+//! recovery-critical meta record loud-rejects on an out-of-range version
+//! instead of misdecoding silently. The write version comes from the store's
+//! shared [`ActiveWriteVersion`](crate::codec::ActiveWriteVersion) cell,
+//! supplied by the caller. rocksdb errors are mapped to [`io::Error`] to match
 //! the storage trait surface.
 
 use openraft::RaftTypeConfig;
@@ -85,6 +87,7 @@ pub(super) fn put_vote<C, K, Codec>(
     cf: &Arc<BoundColumnFamily<'_>>,
     keys: &K,
     label: MetaLabel,
+    version: u8,
     value: &VoteOf<C>,
 ) -> io::Result<()>
 where
@@ -93,7 +96,7 @@ where
     Codec: LogStoreCodec<C>,
 {
     let key = keys.meta_key(label);
-    let bytes = encode_vote_record::<C, Codec>(value)?;
+    let bytes = encode_vote_record::<C, Codec>(version, value)?;
     batch.put_cf(cf, &key, &bytes);
     Ok(())
 }
@@ -103,6 +106,7 @@ pub(super) fn put_log_id<C, K, Codec>(
     cf: &Arc<BoundColumnFamily<'_>>,
     keys: &K,
     label: MetaLabel,
+    version: u8,
     value: &LogIdOf<C>,
 ) -> io::Result<()>
 where
@@ -111,7 +115,7 @@ where
     Codec: LogStoreCodec<C>,
 {
     let key = keys.meta_key(label);
-    let bytes = encode_log_id_record::<C, Codec>(value)?;
+    let bytes = encode_log_id_record::<C, Codec>(version, value)?;
     batch.put_cf(cf, &key, &bytes);
     Ok(())
 }
@@ -178,17 +182,20 @@ mod tests {
             &cf,
             &keys,
             MetaLabel::Vote,
+            crate::codec::BASELINE_WRITE_VERSION,
             &vote,
         )
         .unwrap();
         db.write(batch).unwrap();
 
-        // On-disk leading byte is SCHEMA_VERSION.
+        // On-disk leading byte is the BASELINE_WRITE_VERSION the caller passed
+        // in (the same version the production log store reads from its shared
+        // ActiveWriteVersion cell).
         let raw = db
             .get_cf(&cf, keys.meta_key(MetaLabel::Vote))
             .unwrap()
             .unwrap();
-        assert_eq!(raw[0], crate::codec::SCHEMA_VERSION);
+        assert_eq!(raw[0], crate::codec::BASELINE_WRITE_VERSION);
 
         let back: Option<VoteOf<MetaConfig>> =
             read_vote::<MetaConfig, Flat, DefaultLogStoreCodec>(&db, &cf, &keys, MetaLabel::Vote)

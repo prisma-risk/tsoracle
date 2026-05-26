@@ -28,7 +28,7 @@
 //! State is one `u64` plus the openraft-required apply-progress metadata
 //! (`last_applied`, `last_membership`). Snapshots are encoded with the toolkit's
 //! version-prefixed codec ([`tsoracle_openraft_toolkit::encode`] /
-//! [`tsoracle_openraft_toolkit::decode`] at [`SCHEMA_VERSION`]) — a leading
+//! [`tsoracle_openraft_toolkit::decode`] at the active write version) — a leading
 //! version byte followed by the postcard body — written through to a
 //! [`SnapshotStore`] so they survive a
 //! process restart. The default store is in-memory
@@ -60,7 +60,10 @@ use serde::{Deserialize, Serialize};
 use tsoracle_codec::{
     VersionedCodec, decode_framed, decode_postcard_exact, encode_framed, encode_postcard,
 };
-use tsoracle_openraft_toolkit::{SCHEMA_VERSION, codec_io_error};
+use tsoracle_openraft_toolkit::{
+    ActiveWriteVersion, BASELINE_WRITE_VERSION, MAX_READABLE_VERSION, MIN_READABLE_VERSION,
+    codec_io_error,
+};
 
 use crate::log_entry::HighWaterCommand;
 use crate::snapshot_store::{InMemorySnapshotStore, SnapshotStore};
@@ -73,9 +76,10 @@ type SnapData = Cursor<Vec<u8>>;
 type StoredMem = StoredMembershipOf<TypeConfig>;
 
 /// Snapshot payload. The persisted/streamed bytes are version-framed as
-/// `[SCHEMA_VERSION | postcard(Self)]`, so decode them through the toolkit codec
-/// ([`tsoracle_openraft_toolkit::decode`] with [`SCHEMA_VERSION`]) rather than
-/// raw `postcard::from_bytes`.
+/// `[active write version | postcard(Self)]`, so decode them through the
+/// toolkit `decode_framed` over the readable range
+/// `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]` rather than raw
+/// `postcard::from_bytes`.
 ///
 /// Exposed at the crate root so callers building tooling around the snapshot
 /// format (e.g. inspectors, migration tools) can decode it without re-deriving
@@ -89,10 +93,10 @@ pub struct HighWaterStateMachineSnapshot {
 
 /// On-disk envelope written to the [`SnapshotStore`]: pairs the openraft
 /// snapshot meta with the version-framed payload, where `data` holds
-/// `[SCHEMA_VERSION | postcard(HighWaterStateMachineSnapshot)]`. Kept private —
-/// embedders that need to inspect persisted snapshots decode the inner `data`
-/// blob through the toolkit codec ([`tsoracle_openraft_toolkit::decode`] with
-/// [`SCHEMA_VERSION`]).
+/// `[active write version | postcard(HighWaterStateMachineSnapshot)]`. Kept
+/// private — embedders that need to inspect persisted snapshots decode the
+/// inner `data` blob through the toolkit `decode_framed` over the readable
+/// range.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSnapshot {
     meta: SnapMeta,
@@ -102,12 +106,14 @@ struct PersistedSnapshot {
 impl VersionedCodec for HighWaterStateMachineSnapshot {
     fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
         match version {
-            // v4: whole-value postcard, byte-identical to the pre-seam frame.
-            // P2 adds older/newer arms here as the layout evolves.
-            v if v == SCHEMA_VERSION => decode_postcard_exact(body),
+            // v4 (BASELINE_WRITE_VERSION): whole-value postcard, byte-identical
+            // to the pre-seam frame. Later phases add older/newer arms here as
+            // the layout evolves and MIN_READABLE_VERSION/MAX_READABLE_VERSION
+            // widen.
+            v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
-                min: SCHEMA_VERSION,
-                max: SCHEMA_VERSION,
+                min: MIN_READABLE_VERSION,
+                max: MAX_READABLE_VERSION,
                 actual: other,
             }),
         }
@@ -115,10 +121,10 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
 
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
-            v if v == SCHEMA_VERSION => encode_postcard(self),
+            v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
-                min: SCHEMA_VERSION,
-                max: SCHEMA_VERSION,
+                min: MIN_READABLE_VERSION,
+                max: MAX_READABLE_VERSION,
                 actual: other,
             }),
         }
@@ -128,10 +134,10 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
 impl VersionedCodec for PersistedSnapshot {
     fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
         match version {
-            v if v == SCHEMA_VERSION => decode_postcard_exact(body),
+            v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
-                min: SCHEMA_VERSION,
-                max: SCHEMA_VERSION,
+                min: MIN_READABLE_VERSION,
+                max: MAX_READABLE_VERSION,
                 actual: other,
             }),
         }
@@ -139,10 +145,10 @@ impl VersionedCodec for PersistedSnapshot {
 
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
-            v if v == SCHEMA_VERSION => encode_postcard(self),
+            v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
-                min: SCHEMA_VERSION,
-                max: SCHEMA_VERSION,
+                min: MIN_READABLE_VERSION,
+                max: MAX_READABLE_VERSION,
                 actual: other,
             }),
         }
@@ -201,6 +207,12 @@ pub struct HighWaterStateMachine {
     /// `core` precisely so the hot `apply` path never serializes against
     /// snapshot I/O — `core` is never held across `store.save`.
     persist: Arc<Mutex<()>>,
+    /// Shared active write version: the version this SM stamps onto snapshots
+    /// it builds and installs. Shares the one cell with the log store (and,
+    /// in a later phase, the wire sender) so all writers emit the same
+    /// version. Mutated only by a successful activation apply (later phase);
+    /// defaults to BASELINE.
+    active_write_version: ActiveWriteVersion,
 }
 
 impl Clone for HighWaterStateMachine {
@@ -209,6 +221,7 @@ impl Clone for HighWaterStateMachine {
             core: Arc::clone(&self.core),
             store: Arc::clone(&self.store),
             persist: Arc::clone(&self.persist),
+            active_write_version: self.active_write_version.clone(),
         }
     }
 }
@@ -249,6 +262,18 @@ impl HighWaterStateMachine {
     /// index 0, and the state machine must already cover those purged entries
     /// or openraft will panic during recovery.
     pub fn with_store(store: Arc<dyn SnapshotStore>) -> io::Result<Self> {
+        Self::with_store_and_active_version(store, ActiveWriteVersion::default())
+    }
+
+    /// Build a state machine backed by `store`, sharing `active_write_version`
+    /// with the log store (and, in a later phase, the wire sender). Bootstrap
+    /// constructs and seeds the cell once, then threads the same clone here
+    /// and into the log store; non-bootstrap callers use
+    /// [`with_store`](Self::with_store), which supplies a fresh BASELINE cell.
+    pub fn with_store_and_active_version(
+        store: Arc<dyn SnapshotStore>,
+        active_write_version: ActiveWriteVersion,
+    ) -> io::Result<Self> {
         let mut core = Core {
             current_value: 0,
             last_applied: None,
@@ -258,10 +283,10 @@ impl HighWaterStateMachine {
         };
         if let Some(bytes) = store.load()? {
             let persisted: PersistedSnapshot =
-                decode_framed(SCHEMA_VERSION, SCHEMA_VERSION, &bytes)
+                decode_framed(MIN_READABLE_VERSION, MAX_READABLE_VERSION, &bytes)
                     .map_err(|e| codec_io_error("persisted snapshot envelope decode", e))?;
             let payload: HighWaterStateMachineSnapshot =
-                decode_framed(SCHEMA_VERSION, SCHEMA_VERSION, &persisted.data)
+                decode_framed(MIN_READABLE_VERSION, MAX_READABLE_VERSION, &persisted.data)
                     .map_err(|e| codec_io_error("persisted snapshot payload decode", e))?;
             core.current_value = payload.current_value;
             core.last_applied = payload.last_applied;
@@ -275,7 +300,13 @@ impl HighWaterStateMachine {
             core: Arc::new(Mutex::new(core)),
             store,
             persist: Arc::new(Mutex::new(())),
+            active_write_version,
         })
+    }
+
+    /// The version this SM currently stamps onto snapshots.
+    pub fn active_write_version(&self) -> u8 {
+        self.active_write_version.get()
     }
 
     /// Read the current high-water value without going through raft.
@@ -370,7 +401,7 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
                 last_membership: core.last_membership.clone(),
                 snapshot_id,
             };
-            let bytes = encode_framed(SCHEMA_VERSION, &payload)
+            let bytes = encode_framed(self.active_write_version.get(), &payload)
                 .map_err(|e| codec_io_error("snapshot payload serialize", e))?;
             (bytes, meta)
         };
@@ -379,7 +410,7 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
             meta: meta.clone(),
             data: snapshot_payload.clone(),
         };
-        let envelope = encode_framed(SCHEMA_VERSION, &persisted)
+        let envelope = encode_framed(self.active_write_version.get(), &persisted)
             .map_err(|e| codec_io_error("snapshot envelope serialize", e))?;
         // Persist + publish through the monotone, serialized commit path. The
         // store write happens BEFORE `current_snapshot` is updated, so a
@@ -467,7 +498,7 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
     ) -> Result<(), io::Error> {
         let bytes = snapshot.into_inner();
         let payload: HighWaterStateMachineSnapshot =
-            decode_framed(SCHEMA_VERSION, SCHEMA_VERSION, &bytes)
+            decode_framed(MIN_READABLE_VERSION, MAX_READABLE_VERSION, &bytes)
                 .map_err(|e| codec_io_error("snapshot payload decode", e))?;
 
         // `meta.last_log_id` is read back by `get_current_snapshot` while
@@ -492,7 +523,7 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
             meta: meta.clone(),
             data: bytes.clone(),
         };
-        let envelope = encode_framed(SCHEMA_VERSION, &persisted)
+        let envelope = encode_framed(self.active_write_version.get(), &persisted)
             .map_err(|e| codec_io_error("snapshot envelope serialize", e))?;
         // Persist, apply the snapshot's state, and publish atomically through
         // the monotone, serialized commit path — the same one `build_snapshot`
@@ -666,9 +697,11 @@ mod tests {
 
         let snap = sm.build_snapshot().await.expect("build_snapshot");
         let bytes = snap.snapshot.into_inner();
-        let payload: HighWaterStateMachineSnapshot =
-            tsoracle_openraft_toolkit::decode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &bytes)
-                .expect("decode snapshot");
+        let payload: HighWaterStateMachineSnapshot = tsoracle_openraft_toolkit::decode(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            &bytes,
+        )
+        .expect("decode snapshot");
         assert_eq!(payload.current_value, 500);
         assert_eq!(payload.last_applied.map(|l| l.index), Some(1));
     }
@@ -699,9 +732,11 @@ mod tests {
             last_applied: Some(log_id(5)),
             last_membership: StoredMem::default(),
         };
-        let bytes =
-            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
-                .expect("serialize payload");
+        let bytes = tsoracle_openraft_toolkit::encode(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            &payload,
+        )
+        .expect("serialize payload");
 
         let meta = SnapMeta {
             last_log_id: payload.last_applied,
@@ -798,6 +833,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn state_machine_defaults_to_baseline_active_write_version() {
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let sm = HighWaterStateMachine::with_store(store).expect("with_store");
+        assert_eq!(
+            sm.active_write_version(),
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn state_machine_reads_the_same_shared_cell() {
+        // The SM and the log store hold clones of ONE cell. A set() on the
+        // cell (a later phase's activation apply will do this) is observed
+        // identically by every clone.
+        let cell = tsoracle_openraft_toolkit::ActiveWriteVersion::default();
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let sm = HighWaterStateMachine::with_store_and_active_version(store, cell.clone())
+            .expect("with_store_and_active_version");
+        assert_eq!(
+            sm.active_write_version(),
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION
+        );
+        cell.set(7);
+        assert_eq!(sm.active_write_version(), 7);
+    }
+
+    #[tokio::test]
     async fn begin_receiving_snapshot_returns_empty_cursor() {
         // openraft hands the returned cursor to the snapshot-receiving network
         // path; the contract is "empty, writable buffer." Anything non-empty
@@ -833,9 +895,11 @@ mod tests {
             meta: SnapMeta::default(),
             data: b"not a postcard payload".to_vec(),
         };
-        let bytes =
-            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &envelope)
-                .unwrap();
+        let bytes = tsoracle_openraft_toolkit::encode(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            &envelope,
+        )
+        .unwrap();
         let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
         store.save(&bytes).unwrap();
         let Err(err) = HighWaterStateMachine::with_store(store) else {
@@ -854,9 +918,11 @@ mod tests {
             last_applied: Some(log_id(10)),
             last_membership: StoredMem::default(),
         };
-        let bytes =
-            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
-                .unwrap();
+        let bytes = tsoracle_openraft_toolkit::encode(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            &payload,
+        )
+        .unwrap();
         let meta = SnapMeta {
             last_log_id: payload.last_applied,
             last_membership: payload.last_membership.clone(),
@@ -882,9 +948,11 @@ mod tests {
             last_applied: Some(last_applied),
             last_membership: StoredMem::default(),
         };
-        let bytes =
-            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
-                .expect("serialize payload");
+        let bytes = tsoracle_openraft_toolkit::encode(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            &payload,
+        )
+        .expect("serialize payload");
         let meta = SnapMeta {
             last_log_id: payload.last_applied,
             last_membership: payload.last_membership.clone(),
@@ -1015,7 +1083,7 @@ mod tests {
 
         let (stale_meta, stale_data) = install_payload(50, log_id(5));
         let envelope = tsoracle_openraft_toolkit::encode(
-            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &PersistedSnapshot {
                 meta: stale_meta.clone(),
                 data: stale_data.clone(),
@@ -1066,9 +1134,11 @@ mod tests {
             last_applied: Some(log_id(5)),
             last_membership: StoredMem::default(),
         };
-        let bytes =
-            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
-                .expect("serialize payload");
+        let bytes = tsoracle_openraft_toolkit::encode(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            &payload,
+        )
+        .expect("serialize payload");
 
         let meta = SnapMeta {
             last_log_id: Some(log_id(6)),
@@ -1185,24 +1255,26 @@ mod tests {
     fn snapshot_payload_versioned_codec_matches_legacy_frame() {
         use tsoracle_codec::{decode_framed, encode_framed};
         // The framed bytes through the new VersionedCodec seam must equal the
-        // legacy `tsoracle_openraft_toolkit::encode(SCHEMA_VERSION, ..)` frame —
+        // legacy `tsoracle_openraft_toolkit::encode(BASELINE_WRITE_VERSION, ..)` frame —
         // proving the on-disk format did not move.
         let payload = HighWaterStateMachineSnapshot {
             current_value: 7,
             last_applied: None,
             last_membership: StoredMembership::default(),
         };
-        let via_seam = encode_framed(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
+        let via_seam = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
             .expect("encode_framed");
-        let legacy =
-            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
-                .expect("legacy encode");
+        let legacy = tsoracle_openraft_toolkit::encode(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            &payload,
+        )
+        .expect("legacy encode");
         assert_eq!(via_seam, legacy);
         assert_eq!(via_seam, vec![4, 7, 0, 0, 0, 0]);
 
         let back: HighWaterStateMachineSnapshot = decode_framed(
-            tsoracle_openraft_toolkit::SCHEMA_VERSION,
-            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &via_seam,
         )
         .expect("decode_framed");
@@ -1214,8 +1286,8 @@ mod tests {
         use tsoracle_codec::{CodecError, decode_framed};
         let framed = vec![0xFFu8, 7, 0, 0, 0, 0];
         let err = decode_framed::<HighWaterStateMachineSnapshot>(
-            tsoracle_openraft_toolkit::SCHEMA_VERSION,
-            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &framed,
         )
         .expect_err("must reject");
@@ -1228,21 +1300,24 @@ mod tests {
     #[test]
     fn snapshot_payload_pins_v4_layout() {
         use tsoracle_codec::encode_framed;
-        // Hand-built v4 frame: [SCHEMA_VERSION | postcard(payload)], now produced
-        // through the VersionedCodec seam that build_snapshot uses. Leading byte
-        // advanced 3 -> 4 when OpenraftPeer gained the admin_endpoint field (a
-        // breaking on-disk change for membership); the postcard body is
-        // unchanged. Body [7, 0, 0, 0, 0] = current_value 7, last_applied None,
-        // then default StoredMembership (None log id + empty configs + empty
-        // nodes). Reordering or inserting a field changes these bytes and trips
-        // this test, forcing a SCHEMA_VERSION bump.
+        // Hand-built v4 frame: [BASELINE_WRITE_VERSION | postcard(payload)],
+        // now produced through the VersionedCodec seam that build_snapshot
+        // uses. Leading byte advanced 3 -> 4 when OpenraftPeer gained the
+        // admin_endpoint field (a breaking on-disk change for membership);
+        // the postcard body is unchanged. Body [7, 0, 0, 0, 0] =
+        // current_value 7, last_applied None, then default StoredMembership
+        // (None log id + empty configs + empty nodes). Reordering or
+        // inserting a field changes these bytes and trips this test, forcing
+        // a deliberate version bump (a future evolution would advance
+        // MAX_READABLE_VERSION + BASELINE_WRITE_VERSION through an
+        // activation barrier rather than the historical stop-the-world bump).
         let payload = HighWaterStateMachineSnapshot {
             current_value: 7,
             last_applied: None,
             last_membership: StoredMembership::default(),
         };
-        let framed =
-            encode_framed(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload).expect("encode");
+        let framed = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
+            .expect("encode");
         assert_eq!(framed, vec![4, 7, 0, 0, 0, 0]);
     }
 
@@ -1250,9 +1325,10 @@ mod tests {
     fn log_entry_pins_v4_layout() {
         use crate::log_codec::OpenraftLogCodec;
         use tsoracle_openraft_toolkit::LogStoreCodec;
-        // The bytes RocksdbLogStore<TypeConfig> persists per entry: SCHEMA_VERSION
-        // byte (prepended by the store) + OpenraftLogCodec entry body — the v4
-        // frame around a Normal entry carrying Advance(AdvancePayload { at_least: 5 })
+        // The bytes RocksdbLogStore<TypeConfig> persists per entry: the
+        // active write version byte (prepended by the store) +
+        // OpenraftLogCodec entry body — the v4 frame around a Normal entry
+        // carrying Advance(AdvancePayload { at_least: 5 })
         // at log id (term 1, node 1, index 1). Body [1,1,1,1,0,5] = leader
         // (term 1, node 1), index 1, EntryPayload::Normal tag (1), Advance
         // variant (0), at_least 5 — byte-identical to the pre-seam layout.
@@ -1262,11 +1338,11 @@ mod tests {
             HighWaterCommand::Advance(AdvancePayload { at_least: 5 }),
         );
         let body = <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_entry(
-            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &entry,
         )
         .expect("encode entry body");
-        let mut framed = vec![tsoracle_openraft_toolkit::SCHEMA_VERSION];
+        let mut framed = vec![tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION];
         framed.extend_from_slice(&body);
         assert_eq!(framed, vec![4, 1, 1, 1, 1, 0, 5]);
     }
@@ -1276,18 +1352,18 @@ mod tests {
         use crate::log_codec::OpenraftLogCodec;
         use tsoracle_openraft_toolkit::LogStoreCodec;
         // The bytes RocksdbLogStore<TypeConfig> persists in the meta column for a
-        // Vote: SCHEMA_VERSION byte + OpenraftLogCodec vote body. Body [7, 3, 1] =
+        // Vote: active write version byte + OpenraftLogCodec vote body. Body [7, 3, 1] =
         // leader (term 7, node 3), committed flag true. A layout change to Vote
         // trips this test. This is the recovery-critical field the framing
         // protects: a foreign version loud-rejects instead of misdecoding.
         let vote: openraft::type_config::alias::VoteOf<TypeConfig> =
             openraft::Vote::new_committed(7, 3);
         let body = <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_vote(
-            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &vote,
         )
         .expect("encode vote body");
-        let mut framed = vec![tsoracle_openraft_toolkit::SCHEMA_VERSION];
+        let mut framed = vec![tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION];
         framed.extend_from_slice(&body);
         assert_eq!(framed, vec![4, 7, 3, 1]);
     }

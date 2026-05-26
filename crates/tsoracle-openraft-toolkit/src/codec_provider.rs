@@ -50,8 +50,9 @@ use tsoracle_codec::{CodecError, decode_postcard_exact, encode_postcard};
 ///
 /// Every method operates on the bare body (the bytes after the leading version
 /// byte); the toolkit adds and validates that version byte itself. `version` is
-/// passed through so a provider can dispatch a per-version body layout in a
-/// later phase; in P1b the only version in play is the current `SCHEMA_VERSION`.
+/// passed through so a provider can dispatch a per-version body layout as the
+/// readable range widens; today the only version in play is the current
+/// [`BASELINE_WRITE_VERSION`](crate::codec::BASELINE_WRITE_VERSION).
 ///
 /// The methods take no `self`: a `Codec` is a pure type-level marker selected
 /// at the `RocksdbLogStore<C, K, Codec>` type parameter, never an instance.
