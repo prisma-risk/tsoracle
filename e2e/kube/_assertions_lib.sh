@@ -43,6 +43,17 @@ wait_soak_live() {
             echo "$job: load is live (sentinel: $sentinel)"
             return 0
         fi
+        # Short-circuit on Job failure (image pull / driver panic / cluster
+        # unreachable). Without this check, an immediately-failing Job sits
+        # for the full TIMEOUT_S before surfacing as "never became live",
+        # delaying diagnosis by up to a minute.
+        local failed
+        failed="$(kubectl get job "$job" -o jsonpath='{.status.failed}' 2>/dev/null || true)"
+        if [ -n "$failed" ] && [ "$failed" != "0" ]; then
+            echo "$job: FAILED before sentinel '$sentinel' appeared"
+            kubectl logs "job/$job" || true
+            return 1
+        fi
         if [ "$elapsed" -ge "$timeout" ]; then
             echo "$job: never became live (sentinel: $sentinel)"
             kubectl logs "job/$job" || true
