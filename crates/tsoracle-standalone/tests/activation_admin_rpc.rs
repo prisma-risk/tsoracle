@@ -150,10 +150,11 @@ async fn not_leader_maps_to_not_leader_without_endpoint() {
 
 #[tokio::test]
 async fn target_out_of_u8_range_rejected_with_invalid_argument() {
-    // The handler should reject before ever calling the admin trait, so the
-    // configured result is unreached. Park an Unsupported in the slot — if
-    // the handler ever does call us this test will fail later by reading
-    // the wrong kind back rather than panicking on the take().
+    // The handler should reject before ever calling the admin trait. Park an
+    // Unsupported in the slot purely as a safe fallback for the take() guard
+    // — if the handler regressed and called through, it would return
+    // Ok(Response { error: Unsupported }) and expect_err() below would panic
+    // immediately, making the regression unambiguous.
     let h = handler(ProgrammableAdmin::new(Err(AdminError::Unsupported)));
     let err = h
         .activate_format(Request::new(ActivateFormatRequest { target: 300 }))
