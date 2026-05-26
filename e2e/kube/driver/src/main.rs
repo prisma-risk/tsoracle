@@ -38,15 +38,15 @@ enum Mode {
     /// Hammer one client for a fixed duration; emit a sentinel on first success.
     Soak,
     /// Soak variant for the mixed-version rollout: sustain load with the same
-    /// zero-monotonicity-violation invariant and 0.5% error tolerance while the
-    /// orchestrator rolls a subset of replicas to the next image and drives
+    /// zero-monotonicity-violation invariant and 0.05% error tolerance while
+    /// the orchestrator rolls a subset of replicas to the next image and drives
     /// activation. Prints a distinct sentinel (`mixed-version-soak: first GetTs
     /// ok`) so the orchestrator only perturbs the cluster after load is provably
     /// live. The driver itself is a pure observer of monotonicity — it does not
     /// perform the rollout or the activation; the orchestrator does.
     MixedVersionSoak,
     /// Soak variant for the SIGKILL-leader assertion (issue #485): sustain load
-    /// with the same zero-monotonicity-violation invariant but a looser final
+    /// with the same zero-monotonicity-violation invariant and the same final
     /// error tolerance ([`MAX_SIGKILL_SOAK_ERROR_RATE`]) while the orchestrator
     /// force-deletes the current leader pod (`kubectl delete pod ... --force
     /// --grace-period=0`) and waits for the StatefulSet to bring a replacement
@@ -80,17 +80,20 @@ struct Cli {
 /// Soak error budget: monotonicity is the hard invariant (zero tolerance), but
 /// a graceful rolling restart has an irreducible window where an in-flight RPC
 /// to a terminating pod is severed (a transport error the client's retry cannot
-/// always mask, fanned out across coalesced waiters). 0.5% leaves ample room
-/// above the observed teardown rate while still catching a real regression.
-const MAX_SOAK_ERROR_RATE: f64 = 0.005;
+/// always mask, fanned out across coalesced waiters). 0.05% leaves ~18x
+/// headroom above the baseline observed in a local kind run (1 / 37,410 ≈
+/// 0.0027%) while still catching a real regression.
+const MAX_SOAK_ERROR_RATE: f64 = 0.0005;
 
 /// SIGKILL-leader soak error budget. A force-deleted leader severs every
 /// in-flight RPC to that pod at once (no graceful shutdown, no
-/// `transfer_leader`, no draining) and re-election typically takes longer
-/// than a graceful step-down. The budget is looser than [`MAX_SOAK_ERROR_RATE`]
-/// because the client retry cannot mask the simultaneous burst of transport
-/// errors. Placeholder; tune downward against baseline runs per issue #485.
-const MAX_SIGKILL_SOAK_ERROR_RATE: f64 = 0.05;
+/// `transfer_leader`, no draining), so this was expected to require a looser
+/// budget than the graceful soak. In practice the client's retry +
+/// leader-redirect masks the entire kill window: a local kind baseline saw
+/// 0 / 71,261 errors (0.0000%). 0.05% (same as the graceful soak) is the
+/// tightest budget the baseline supports while leaving room for transport-
+/// layer jitter that the test cluster's network might not exhibit.
+const MAX_SIGKILL_SOAK_ERROR_RATE: f64 = 0.0005;
 
 /// A budget generous enough that a single-pod restart's brief re-election is
 /// masked by the client's retry + leader-redirect, so a "final error" really
@@ -174,9 +177,9 @@ async fn run_mixed_version_soak(endpoints: &[String], duration: Duration) -> Res
 
 /// Sustain GetTs load while the orchestrator force-deletes the current leader
 /// pod. Same zero-monotonicity-violation invariant as the other soak modes,
-/// but with the looser [`MAX_SIGKILL_SOAK_ERROR_RATE`] budget because a
-/// SIGKILL severs every in-flight RPC to the leader simultaneously. The
-/// distinct sentinel (`sigkill-soak: first GetTs ok`) lets the orchestrator
+/// against [`MAX_SIGKILL_SOAK_ERROR_RATE`] — which the kind baseline showed
+/// the client's retry + leader-redirect masks entirely (0 errors observed).
+/// The distinct sentinel (`sigkill-soak: first GetTs ok`) lets the orchestrator
 /// only kill the leader after load is provably live.
 async fn run_sigkill_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
     sustain_load(
@@ -191,9 +194,8 @@ async fn run_sigkill_soak(endpoints: &[String], duration: Duration) -> Result<bo
 /// Shared body of the three soak modes. The `label` is the per-mode prefix
 /// used in the first-success sentinel, the per-error log line, and the final-
 /// verdict tracker report — so the orchestrator can grep for the right mode
-/// unambiguously. `max_error_rate` is passed through to the tracker because
-/// the SIGKILL lane needs a looser budget than the graceful rollouts (see
-/// [`MAX_SIGKILL_SOAK_ERROR_RATE`]).
+/// unambiguously. `max_error_rate` is passed through to the tracker so each
+/// mode can pick its own budget against its baseline.
 async fn sustain_load(
     endpoints: &[String],
     duration: Duration,
