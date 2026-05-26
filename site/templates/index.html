@@ -120,7 +120,7 @@ $ tsoracle</pre>
 </section>
 
 <section class="landing-section container-wide" id="get-started">
-    <div class="landing-section__rule">── Get started ──</div>
+    <div class="landing-section__rule">── Obtain ──</div>
     <div class="code-cols">
         <div class="code-col">
             <div class="code-col__title">Standalone binary</div>
@@ -144,12 +144,38 @@ server.serve_with_shutdown(addr, shutdown).await?;</code></pre>
         </div>
     </div>
     <p>The embedded path runs <code>tsoracle-server</code> as a library in your process. See the <a href="{{ config.extra.github_url }}/tree/main/examples/embedded-server">embedded-server example</a> for the runnable version.</p>
+    <p>Other distribution channels: source releases and changelogs on <a href="{{ config.extra.github_url }}/releases">GitHub Releases</a>, the published Rust crates on <a href="{{ config.extra.crates_url }}">crates.io</a>, container images at <code>ghcr.io/prisma-risk/tsoracle</code>, and a Helm chart at <code>ghcr.io/prisma-risk/charts</code>. The full source tree is at <a href="{{ config.extra.github_url }}">github.com/prisma-risk/tsoracle</a> under the Apache-2.0 license.</p>
 </section>
 
 <section class="landing-section container-wide">
     <div class="landing-section__rule">── Hardening ──</div>
     <p>tsoracle is tested with coverage-guided fuzzing on its postcard decoders, failpoint-driven crash tests on the storage and replication paths, and an in-process + multi-process stress harness covering both the openraft and OmniPaxos backends. Fuzz harnesses run nightly; the stress harness runs on every PR.</p>
     <p>Details: <a href="{{ config.extra.github_url }}/tree/main/crates/tsoracle-tests">crates/tsoracle-tests</a> · <a href="{{ config.extra.github_url }}/tree/main/fuzz">fuzz/</a></p>
+</section>
+
+<section class="landing-section container-wide" id="feedback">
+    <div class="landing-section__rule">── Feedback & bug reports ──</div>
+    <p>Bug reports and enhancement proposals are tracked as issues on GitHub. Pick the template that matches what you're reporting:</p>
+    <ul>
+        <li><a href="{{ config.extra.github_url }}/issues/new?template=bug_report.md">Bug report</a> — for a defect with a concrete reproduction. The template walks you through the trace, the affected lines, and a regression test that fails today.</li>
+        <li><a href="{{ config.extra.github_url }}/issues/new?template=work_scope.md">Work scope</a> — for an enhancement or any bounded change (docs, refactor, new component, hardening) with explicit scope and exit criteria.</li>
+    </ul>
+    <p>Browse the existing reports at <a href="{{ config.extra.github_url }}/issues">github.com/prisma-risk/tsoracle/issues</a>. Blank issues are disabled — please use one of the templates so triage stays fast.</p>
+    <p><strong>Security vulnerabilities</strong> follow a separate, private path: please do <em>not</em> open a public issue. Open a <a href="{{ config.extra.github_url }}/security/advisories/new">draft security advisory</a> instead. We acknowledge within 24 hours, triage within 72 hours, and coordinate disclosure within 30 days. The full policy is in <a href="{{ config.extra.github_url }}/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+</section>
+
+<section class="landing-section container-wide" id="contributing">
+    <div class="landing-section__rule">── Contributing ──</div>
+
+    <p>Contributions are welcome — from a one-line clarification to a new <code>ConsensusDriver</code> implementation. The most useful changes are grounded in real use of tsoracle: a bug you hit in deployment, a missing operational hook, an example that fills a documentation gap. For anything larger than a few lines, please open an issue first — aligning on scope before code is faster than redesigning in review. Discussion happens on the issue itself; there is no separate forum or chat.</p>
+
+    <p>The contributor guide — local setup, the checks CI will run on your PR, the panic policy, the release flow — is in <a href="{{ config.extra.github_url }}/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>. In short:</p>
+    <ul>
+        <li>The Rust toolchain is pinned in <code>rust-toolchain.toml</code> — any <code>cargo</code> command installs the right version. You'll also need <code>protoc</code> and LLVM/Clang (<code>libclang</code>) for the proto and RocksDB builds.</li>
+        <li>Match CI before pushing: <code>cargo fmt --all -- --check</code>, <code>cargo clippy --workspace --all-targets --all-features -- -D warnings</code>, <code>cargo test --workspace --all-features</code>. A tracked pre-commit hook runs the first two automatically.</li>
+        <li>Commit messages follow <a href="https://www.conventionalcommits.org/">Conventional Commits</a> (<code>feat:</code>, <code>fix:</code>, <code>chore:</code>, …) — the prefix drives the per-crate semver bump on release-plz.</li>
+    </ul>
+    <p>Looking for somewhere to start? The <a href="{{ config.extra.github_url }}/labels/good%20first%20issue"><code>good first issue</code></a> and <a href="{{ config.extra.github_url }}/labels/help%20wanted"><code>help wanted</code></a> labels list issues that are scoped and well-described for new contributors.</p>
 </section>
 
 <section class="landing-section container-wide">
