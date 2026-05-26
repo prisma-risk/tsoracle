@@ -17,9 +17,25 @@
 # chart's openraft serve invocation binds the admin listener (see the
 # entrypoint.sh `--admin-listen 127.0.0.1:${ADMIN_PORT}` wire-up); without it
 # `tsoracle admin members` inside the pod cannot reach the admin gRPC server.
+#
+# The lane is invoked once per "cell" of the workflow (insecure / TLS — see
+# issue #483). Each cell sets the kubectl context's namespace to its own NS
+# (`kubectl config set-context --current --namespace=...`) so the bare `kubectl
+# ...` calls below auto-target it without needing a `-n` flag everywhere. The
+# RELEASE / JOB_DIR env vars below capture the *other* per-cell knobs:
+#
+#   RELEASE   — Helm release name; drives StatefulSet name + pod ordinal naming
+#               (`<RELEASE>-0`, etc.). Default `tsoracle` (insecure cell).
+#   JOB_DIR   — Directory containing the four Job manifests. Default
+#               `<this dir>/driver` (plaintext driver Jobs). TLS cell points
+#               at `<this dir>/driver/tls` (Jobs that mount the TLS Secret and
+#               dial `https://...`).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+
+RELEASE="${RELEASE:-tsoracle}"
+JOB_DIR="${JOB_DIR:-$here/driver}"
 
 # shellcheck source=./_assertions_lib.sh
 source "$here/_assertions_lib.sh"
@@ -29,9 +45,9 @@ source "$here/_assertions_lib.sh"
 # until the responding node reports a known leader or the timeout elapses —
 # briefly returning "leader: none" mid-election is normal.
 #
-# The query targets tsoracle-0 unconditionally. ListMembers is locally
+# The query targets <RELEASE>-0 unconditionally. ListMembers is locally
 # answerable on any node, so the responder need not BE the leader; if the
-# leader happens to be tsoracle-0, we still get its id back and the subsequent
+# leader happens to be <RELEASE>-0, we still get its id back and the subsequent
 # delete proceeds normally. The admin gRPC server binds 127.0.0.1:${ADMIN_PORT}
 # (default 51002) per the chart's entrypoint.sh — kubectl exec reaches it via
 # loopback without any Service/NetworkPolicy plumbing.
@@ -41,7 +57,7 @@ find_leader_pod() {
         local out leader_id raft_field pod_name
         # `|| true` so the loop survives a transient "Error from server" during
         # admin server startup; the next iteration re-queries.
-        out="$(kubectl exec tsoracle-0 -c tsoracle -- \
+        out="$(kubectl exec "${RELEASE}-0" -c tsoracle -- \
             tsoracle admin members --endpoint "http://127.0.0.1:${admin_port}" \
             2>/dev/null || true)"
         leader_id="$(printf '%s\n' "$out" | awk '/^leader: / { print $2 }')"
@@ -73,18 +89,18 @@ find_leader_pod() {
 }
 
 echo "== step 2: cold-start (each ordinal serves or redirects) =="
-kubectl apply -f "$here/driver/job-cold-start.yaml"
+kubectl apply -f "$JOB_DIR/job-cold-start.yaml"
 wait_job tsoracle-e2e-cold-start 120
 
 echo "== step 3: soak across a graceful rolling restart =="
-kubectl apply -f "$here/driver/job-soak.yaml"
+kubectl apply -f "$JOB_DIR/job-soak.yaml"
 wait_soak_live tsoracle-e2e-soak "soak: first GetTs ok" 60
-kubectl rollout restart statefulset/tsoracle
-kubectl rollout status statefulset/tsoracle --timeout=150s
+kubectl rollout restart "statefulset/${RELEASE}"
+kubectl rollout status "statefulset/${RELEASE}" --timeout=150s
 wait_job tsoracle-e2e-soak 180
 
 echo "== step 4: sigkill-soak (monotonicity across a force-deleted leader) =="
-kubectl apply -f "$here/driver/job-sigkill-soak.yaml"
+kubectl apply -f "$JOB_DIR/job-sigkill-soak.yaml"
 wait_soak_live tsoracle-e2e-sigkill-soak "sigkill-soak: first GetTs ok" 60
 leader_pod="$(find_leader_pod 60)"
 echo "step 4: killing leader pod $leader_pod"
@@ -93,7 +109,7 @@ kubectl delete pod "$leader_pod" --grace-period=0 --force
 # we trust the soak's final verdict; otherwise a flaky pod-recreate would
 # masquerade as a real monotonicity regression. 180s covers the kubelet's
 # pod-recreate latency + image pull (IfNotPresent in CI) + cluster rejoin.
-kubectl rollout status statefulset/tsoracle --timeout=180s
+kubectl rollout status "statefulset/${RELEASE}" --timeout=180s
 wait_job tsoracle-e2e-sigkill-soak 300
 
 echo "== step 5: dynamic-membership soak (add-learner / promote / remove) =="
@@ -104,19 +120,19 @@ echo "== step 5: dynamic-membership soak (add-learner / promote / remove) =="
 peer_port="${PEER_PORT:-5100}"
 tso_port="${TSO_PORT:-5051}"
 admin_port="${ADMIN_PORT:-51002}"
-kubectl apply -f "$here/driver/job-membership-soak.yaml"
+kubectl apply -f "$JOB_DIR/job-membership-soak.yaml"
 wait_soak_live tsoracle-e2e-membership-soak "membership-soak: first GetTs ok" 60
 
-# Scale by one (3 → 4); the existing replicas keep serving while tsoracle-3
-# starts. The pod template was rendered with REPLICAS=3 at helm-install
-# time, so tsoracle-3's entrypoint emits no `--bootstrap` and no
-# `--members` — the new node starts as an empty openraft follower waiting
-# to be add-learner'd. Once Ready (TCP-readiness on the tso port implies
-# the raft listener is also up, both bind in the same process), the leader
-# can dial it at $raft_addr below.
-echo "step 5: scaling StatefulSet to 4 (adding tsoracle-3 as a future learner)"
-kubectl scale statefulset/tsoracle --replicas=4
-kubectl rollout status statefulset/tsoracle --timeout=180s
+# Scale by one (3 → 4); the existing replicas keep serving while
+# <RELEASE>-3 starts. The pod template was rendered with REPLICAS=3 at
+# helm-install time, so the new pod's entrypoint emits no `--bootstrap` and
+# no `--members` — the new node starts as an empty openraft follower
+# waiting to be add-learner'd. Once Ready (TCP-readiness on the tso port
+# implies the raft listener is also up, both bind in the same process),
+# the leader can dial it at $new_raft below.
+echo "step 5: scaling StatefulSet to 4 (adding ${RELEASE}-3 as a future learner)"
+kubectl scale "statefulset/${RELEASE}" --replicas=4
+kubectl rollout status "statefulset/${RELEASE}" --timeout=180s
 
 leader_pod="$(find_leader_pod 60)"
 echo "step 5: current leader = $leader_pod"
@@ -129,9 +145,9 @@ echo "step 5: current leader = $leader_pod"
 # completeness — production deployments that bind admin on 0.0.0.0 with
 # TLS would gain redirect-follow without script changes.
 new_id=4
-new_raft="tsoracle-3.tsoracle-peer:${peer_port}"
-new_svc="tsoracle-3.tsoracle-peer:${tso_port}"
-new_admin="tsoracle-3.tsoracle-peer:${admin_port}"
+new_raft="${RELEASE}-3.${RELEASE}-peer:${peer_port}"
+new_svc="${RELEASE}-3.${RELEASE}-peer:${tso_port}"
+new_admin="${RELEASE}-3.${RELEASE}-peer:${admin_port}"
 echo "step 5: add-learner id=$new_id raft=$new_raft service=$new_svc admin=$new_admin"
 
 # `tsoracle admin add-learner` calls openraft's `add_learner(_, _, blocking=true)`

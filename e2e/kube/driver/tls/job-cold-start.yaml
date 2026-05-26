@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tsoracle-e2e-cold-start
+  labels:
+    app.kubernetes.io/name: tsoracle-e2e-driver
+    app.kubernetes.io/component: tls-cell
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsoracle-e2e-driver
+        app.kubernetes.io/component: tls-cell
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: tsoracle-e2e-driver:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --mode=cold-start
+            # Full FQDN form: SNI on each dial = the FQDN, which matches a SAN
+            # on the chart's fan-SAN leaf cert minted by `gen-certs`. The
+            # plaintext cell uses a shorter `pod.peer-svc:port` form; the TLS
+            # cell can't because the short form's host wouldn't match the cert.
+            - --endpoints=tsoracle-tls-0.tsoracle-tls-peer.e2e-tls.svc.cluster.local:5051,tsoracle-tls-1.tsoracle-tls-peer.e2e-tls.svc.cluster.local:5051,tsoracle-tls-2.tsoracle-tls-peer.e2e-tls.svc.cluster.local:5051
+            - --tls-ca=/etc/tsoracle/tls/ca.crt
+            - --count=5
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/tsoracle/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            # Matches `--set tls.secretName=tsoracle-tls-certs` in the workflow's
+            # TLS-cell helm install. The Job mounts the same trio the chart's
+            # pods mount, so the driver's CA trust root is the cluster's CA.
+            secretName: tsoracle-tls-certs

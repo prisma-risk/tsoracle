@@ -12,8 +12,18 @@ publish                = false
 name = "kube-e2e-driver"
 path = "src/main.rs"
 
+# Generates a test CA + fan-SAN leaf cert for the kube-e2e TLS cell (issue #483).
+# Runs on the workflow runner (not in-cluster) so the CA private key never
+# leaves the build host; only `ca.crt` / `tls.crt` / `tls.key` are copied into
+# a kubernetes.io/tls Secret before `helm install`.
+[[bin]]
+name = "gen-certs"
+path = "src/bin/gen-certs.rs"
+
 [dependencies]
 tsoracle-client = { path = "../../../crates/tsoracle-client", version = "0.2.6" }
 anyhow          = { workspace = true }
 clap            = { workspace = true }
+rcgen           = { workspace = true }
 tokio           = { workspace = true }
+tonic           = { workspace = true }

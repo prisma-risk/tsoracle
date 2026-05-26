@@ -42,7 +42,14 @@ jobs:
       - name: install helm
         run: |
           curl -fsSL https://get.helm.sh/helm-v3.15.0-linux-amd64.tar.gz | tar xz
-      - name: deploy chart
+      # ── insecure cell ─────────────────────────────────────────────────────
+      # Smoke path. `tls.allowInsecurePeer=true` is the explicit opt-out that
+      # the chart's secure-by-default render guard (PR #452) requires for HA
+      # deployments without TLS material. We accept plaintext consensus here
+      # because the goal is exercising the deployment envelope under kube
+      # DNS / Pod-IP rotation, not authentication; the TLS cell below proves
+      # the peer mTLS path. See issue #483.
+      - name: deploy chart (insecure cell)
         run: |
           ./linux-amd64/helm install tsoracle deploy/charts/tsoracle \
             --set image.repository=tsoracle,image.tag=e2e \
@@ -50,17 +57,79 @@ jobs:
             --set ports.client=5051,ports.peer=5100 \
             --set tls.allowInsecurePeer=true \
             --wait --timeout 5m
-      - name: wait for cluster formation (TCP readiness)
+      - name: wait for cluster formation (insecure cell, TCP readiness)
         run: kubectl rollout status statefulset/tsoracle --timeout=300s
-      - name: run e2e assertions (cold-start + soak + sigkill leader + dynamic membership)
+      - name: run e2e assertions — insecure cell (cold-start + soak + sigkill + dynamic membership)
         run: ./e2e/kube/run-assertions.sh
+
+      # ── TLS cell ──────────────────────────────────────────────────────────
+      # Exercises the chart's secure-by-default render guard's *happy path*
+      # (PR #452 — `tls.enabled=true` rendering without the insecure opt-out),
+      # the peer mTLS handshake under realistic kube DNS / Pod-IP rotation,
+      # and cross-pod trust via the cluster-dedicated peer CA model (PR #445).
+      # Runs in its own namespace (`e2e-tls`) of the same kind cluster so the
+      # insecure cell's release is undisturbed; the kubectl context is moved
+      # so run-assertions.sh's bare `kubectl ...` calls auto-target it.
+      # See issue #483.
+      - name: create e2e-tls namespace and switch context
+        run: |
+          kubectl create namespace e2e-tls
+          kubectl config set-context --current --namespace=e2e-tls
+      - name: mint test CA + fan-SAN leaf cert
+        run: |
+          mkdir -p /tmp/tsoracle-tls
+          # `--replicas 4` (not 3) so `tsoracle-tls-3.tsoracle-tls-peer.e2e-tls.svc.cluster.local`
+          # is in the leaf cert's SAN list from the start. The dynamic-
+          # membership step (#487) scales the StatefulSet to 4 mid-soak; a
+          # cert minted for only the initial 3 pods would fail the SNI
+          # check the first time the client is leader-hint-redirected to
+          # the new pod, surfacing as a flake that has nothing to do with
+          # the membership transition the step actually validates.
+          cargo run -q -p kube-e2e-driver --bin gen-certs -- \
+            --out /tmp/tsoracle-tls \
+            --release tsoracle-tls \
+            --namespace e2e-tls \
+            --replicas 4
+      - name: create TLS Secret in e2e-tls namespace
+        run: |
+          kubectl -n e2e-tls create secret generic tsoracle-tls-certs \
+            --from-file=tls.crt=/tmp/tsoracle-tls/tls.crt \
+            --from-file=tls.key=/tmp/tsoracle-tls/tls.key \
+            --from-file=ca.crt=/tmp/tsoracle-tls/ca.crt
+      - name: deploy chart (TLS cell)
+        run: |
+          ./linux-amd64/helm install tsoracle-tls deploy/charts/tsoracle \
+            --namespace e2e-tls \
+            --set image.repository=tsoracle,image.tag=e2e \
+            --set driver=openraft,replicas=3 \
+            --set ports.client=5051,ports.peer=5100 \
+            --set tls.enabled=true \
+            --set tls.secretName=tsoracle-tls-certs \
+            --wait --timeout 5m
+      - name: wait for cluster formation (TLS cell, TCP readiness)
+        run: kubectl rollout status statefulset/tsoracle-tls --timeout=300s
+      - name: run e2e assertions — TLS cell (cold-start + soak + sigkill + dynamic membership)
+        env:
+          RELEASE: tsoracle-tls
+          JOB_DIR: ${{ github.workspace }}/e2e/kube/driver/tls
+        run: ./e2e/kube/run-assertions.sh
+
       - name: dump diagnostics on failure
         if: failure()
         run: |
-          kubectl get pods -o wide || true
-          kubectl describe statefulset/tsoracle || true
-          kubectl logs job/tsoracle-e2e-cold-start || true
-          kubectl logs job/tsoracle-e2e-soak || true
-          kubectl logs job/tsoracle-e2e-sigkill-soak || true
-          kubectl logs job/tsoracle-e2e-membership-soak || true
-          kubectl get events --sort-by=.lastTimestamp || true
+          echo "── insecure cell (namespace: default) ──"
+          kubectl -n default get pods -o wide || true
+          kubectl -n default describe statefulset/tsoracle || true
+          kubectl -n default logs job/tsoracle-e2e-cold-start || true
+          kubectl -n default logs job/tsoracle-e2e-soak || true
+          kubectl -n default logs job/tsoracle-e2e-sigkill-soak || true
+          kubectl -n default logs job/tsoracle-e2e-membership-soak || true
+          kubectl -n default get events --sort-by=.lastTimestamp || true
+          echo "── TLS cell (namespace: e2e-tls) ──"
+          kubectl -n e2e-tls get pods -o wide || true
+          kubectl -n e2e-tls describe statefulset/tsoracle-tls || true
+          kubectl -n e2e-tls logs job/tsoracle-e2e-cold-start || true
+          kubectl -n e2e-tls logs job/tsoracle-e2e-soak || true
+          kubectl -n e2e-tls logs job/tsoracle-e2e-sigkill-soak || true
+          kubectl -n e2e-tls logs job/tsoracle-e2e-membership-soak || true
+          kubectl -n e2e-tls get events --sort-by=.lastTimestamp || true
