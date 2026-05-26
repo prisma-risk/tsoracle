@@ -106,6 +106,7 @@ mod openraft_driver {
             peer_tls: None,
             admin_listen: None,
             admin_tls: None,
+            allow_insecure_peer: false,
         }
     }
 
@@ -163,6 +164,7 @@ mod openraft_driver {
             peer_tls: None,
             admin_listen: None,
             admin_tls: None,
+            allow_insecure_peer: false,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -191,6 +193,7 @@ mod openraft_driver {
             peer_tls: None,
             admin_listen: None,
             admin_tls: None,
+            allow_insecure_peer: false,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -219,6 +222,7 @@ mod openraft_driver {
             peer_tls: None,
             admin_listen: None,
             admin_tls: None,
+            allow_insecure_peer: false,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -307,6 +311,7 @@ mod paxos_driver {
             data_dir: dir.path().join("paxos"),
             tick_interval: Duration::from_millis(20),
             peer_tls: None,
+            allow_insecure_peer: false,
         };
 
         drop(peer_lease);
@@ -335,6 +340,7 @@ mod paxos_driver {
             data_dir: std::path::PathBuf::from("/this/path/must/not/be/touched"),
             tick_interval: Duration::from_millis(20),
             peer_tls: None,
+            allow_insecure_peer: false,
         };
         assert!(matches!(
             build(DriverConfig::Paxos(cfg)).await,
@@ -362,6 +368,7 @@ mod paxos_driver {
             data_dir: dir.path().join("paxos"),
             tick_interval: Duration::from_millis(20),
             peer_tls: None,
+            allow_insecure_peer: false,
         };
         drop(unused_lease);
         assert!(matches!(

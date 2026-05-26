@@ -79,6 +79,7 @@ async fn add_learner_promote_then_remove() {
         peer_tls: None,
         admin_listen: None,
         admin_tls: None,
+        allow_insecure_peer: false,
     }))
     .await
     .expect("build node 1");
@@ -106,6 +107,7 @@ async fn add_learner_promote_then_remove() {
         peer_tls: None,
         admin_listen: None,
         admin_tls: None,
+        allow_insecure_peer: false,
     }))
     .await
     .expect("build node 2");
@@ -193,6 +195,7 @@ async fn admin_grpc_list_and_add_learner() {
         peer_tls: None,
         admin_listen: Some(admin_addr),
         admin_tls: None,
+        allow_insecure_peer: false,
     }))
     .await
     .expect("build node 1");
@@ -220,6 +223,7 @@ async fn admin_grpc_list_and_add_learner() {
         peer_tls: None,
         admin_listen: None,
         admin_tls: None,
+        allow_insecure_peer: false,
     }))
     .await
     .expect("build node 2");
@@ -292,6 +296,7 @@ async fn coexisting_learner_survives_a_promote() {
         peer_tls: None,
         admin_listen: None,
         admin_tls: None,
+        allow_insecure_peer: false,
     }))
     .await
     .expect("build node 1");
@@ -319,6 +324,7 @@ async fn coexisting_learner_survives_a_promote() {
             peer_tls: None,
             admin_listen: None,
             admin_tls: None,
+            allow_insecure_peer: false,
         }))
     };
     drop(lease2);
@@ -411,6 +417,7 @@ async fn admin_insecure_routable_bind_rejected_at_build() {
         peer_tls: None,
         admin_listen: Some(routable),
         admin_tls: None,
+        allow_insecure_peer: false,
     };
 
     let err = match build(DriverConfig::Openraft(cfg)).await {
@@ -480,6 +487,7 @@ async fn shared_ca_for_peer_and_admin_rejected_at_build() {
             key: key_path,
             ca: ca_path,
         }),
+        allow_insecure_peer: false,
     };
 
     let err = match build(DriverConfig::Openraft(cfg)).await {
@@ -574,6 +582,7 @@ async fn admin_mtls_listener_serves_with_matching_client_cert() {
         peer_tls: None,
         admin_listen: Some("127.0.0.1:0".parse().unwrap()),
         admin_tls: Some(admin_tls),
+        allow_insecure_peer: false,
     };
 
     let node = build(DriverConfig::Openraft(cfg))
@@ -652,6 +661,7 @@ async fn admin_mtls_listener_rejects_no_client_cert() {
         peer_tls: None,
         admin_listen: Some("127.0.0.1:0".parse().unwrap()),
         admin_tls: Some(admin_tls),
+        allow_insecure_peer: false,
     };
 
     let node = build(DriverConfig::Openraft(cfg)).await.unwrap();
