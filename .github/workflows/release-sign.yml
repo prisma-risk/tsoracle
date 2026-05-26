@@ -79,6 +79,8 @@ jobs:
         with:
           toolchain: stable
 
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+
       - name: system deps
         uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
         with:
@@ -142,6 +144,7 @@ jobs:
           echo "subjects=$SUBJECTS_B64" >> "$GITHUB_OUTPUT"
           # Also write the sha256 file we'll upload in the attach job.
           printf '%s  %s\n' "$SHA256" "$CRATE_FILE" > "target/package/${CRATE_FILE}.sha256"
+          [ -f "target/package/${CRATE_FILE}.sha256" ] || { echo "::error::sha256 file not written" >&2; exit 1; }
 
       - name: Upload .crate + .sha256 for downstream jobs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
