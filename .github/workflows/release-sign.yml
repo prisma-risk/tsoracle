@@ -139,12 +139,17 @@ jobs:
             exit 1
           fi
           SHA256="$(sha256sum "$CRATE_PATH" | awk '{print $1}')"
-          # SLSA subjects format: JSON array of {name, digest{sha256}}.
-          SUBJECTS_JSON="$(printf '[{"name":"%s","digest":{"sha256":"%s"}}]' "$CRATE_FILE" "$SHA256")"
-          SUBJECTS_B64="$(printf '%s' "$SUBJECTS_JSON" | base64 -w0)"
+          # SLSA generic generator v2.x expects base64-subjects to be the
+          # SHA256SUMS line(s) (`<sha256>  <name>` — two spaces between),
+          # NOT a JSON array. Feeding it JSON triggers the generator binary
+          # to parse the JSON blob as the SHA field and fail with:
+          #   sha: unexpected sha256 hash format for "[{...}]"
+          # Identical content goes into the .sha256 sidecar we upload, so
+          # build the line once and reuse.
+          SHA256SUMS_LINE="$(printf '%s  %s\n' "$SHA256" "$CRATE_FILE")"
+          SUBJECTS_B64="$(printf '%s' "$SHA256SUMS_LINE" | base64 -w0)"
           echo "subjects=$SUBJECTS_B64" >> "$GITHUB_OUTPUT"
-          # Also write the sha256 file we'll upload in the attach job.
-          printf '%s  %s\n' "$SHA256" "$CRATE_FILE" > "target/package/${CRATE_FILE}.sha256"
+          printf '%s\n' "$SHA256SUMS_LINE" > "target/package/${CRATE_FILE}.sha256"
           [ -f "target/package/${CRATE_FILE}.sha256" ] || { echo "::error::sha256 file not written" >&2; exit 1; }
 
       - name: Upload .crate + .sha256 for downstream jobs
