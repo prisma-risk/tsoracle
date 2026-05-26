@@ -27,6 +27,11 @@ use std::io;
 
 use serde::{Serialize, de::DeserializeOwned};
 
+mod versioned;
+pub use versioned::{
+    VersionedCodec, decode_framed, decode_postcard_exact, encode_framed, encode_postcard,
+};
+
 /// Failure modes of the version-prefixed postcard codec.
 ///
 /// `Encode` and `Decode` are kept distinct so a caller can tell which
@@ -54,6 +59,18 @@ pub enum CodecError {
     /// overwrite that left stale tail bytes — rather than a clean record.
     #[error("trailing bytes: {extra} unconsumed after a valid body")]
     TrailingBytes { extra: usize },
+    /// The leading version byte was outside the reader's supported range
+    /// `[min, max]`. Distinct from [`CodecError::Version`] (which a single-version
+    /// reader returns); a multi-version reader uses this to fail loudly on a
+    /// version it has no parser for.
+    #[error("version unsupported: {actual} outside readable range [{min}, {max}]")]
+    VersionUnsupported { min: u8, max: u8, actual: u8 },
+    /// Down-conversion was asked to encode state not representable at `version`
+    /// (a feature-gate violation: a field/behavior introduced at a later version
+    /// is set while encoding an older layout). Fail-loud rather than silently
+    /// dropping the value.
+    #[error("value not representable at version {version}")]
+    NotRepresentable { version: u8 },
 }
 
 /// Encode `value` as `[version | postcard(value)]`.
@@ -111,10 +128,12 @@ pub fn decode<T: DeserializeOwned>(expected_version: u8, bytes: &[u8]) -> Result
 /// enum and so does not use this.)
 pub fn codec_io_error(context: &str, err: CodecError) -> io::Error {
     match err {
-        version_mismatch @ CodecError::Version { .. } => io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{context}: {version_mismatch}"),
-        ),
+        foreign_version @ (CodecError::Version { .. } | CodecError::VersionUnsupported { .. }) => {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{context}: {foreign_version}"),
+            )
+        }
         other => io::Error::other(format!("{context}: {other}")),
     }
 }
@@ -228,6 +247,33 @@ mod tests {
         let io_err = codec_io_error("vote decode", CodecError::Empty);
         assert_ne!(io_err.kind(), io::ErrorKind::InvalidData);
         assert!(io_err.to_string().starts_with("vote decode: "));
+    }
+
+    #[test]
+    fn codec_io_error_maps_version_unsupported_to_invalid_data() {
+        // A multi-version reader's foreign-version rejection must carry the same
+        // `InvalidData` contract as the single-version `Version` mismatch, so the
+        // openraft storage layer can still detect a foreign schema version.
+        let err = CodecError::VersionUnsupported {
+            min: 3,
+            max: 3,
+            actual: 7,
+        };
+        let io_err = codec_io_error("log decode", err);
+        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+        assert!(io_err.to_string().starts_with("log decode: "));
+    }
+
+    #[test]
+    fn codec_io_error_maps_not_representable_to_other_kind() {
+        // An encode-side feature-gate violation is not a foreign-format read, so
+        // it must not masquerade as the `InvalidData` reserved for that case.
+        let io_err = codec_io_error(
+            "snapshot encode",
+            CodecError::NotRepresentable { version: 1 },
+        );
+        assert_ne!(io_err.kind(), io::ErrorKind::InvalidData);
+        assert!(io_err.to_string().starts_with("snapshot encode: "));
     }
 
     use proptest::prelude::*;
