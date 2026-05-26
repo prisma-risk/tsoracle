@@ -14,6 +14,7 @@
 [![stress](https://github.com/prisma-risk/tsoracle/actions/workflows/stress-nightly.yml/badge.svg?branch=main)](https://github.com/prisma-risk/tsoracle/actions/workflows/stress-nightly.yml)
 [![Coverage Status](https://coveralls.io/repos/github/prisma-risk/tsoracle/badge.svg?branch=main)](https://coveralls.io/github/prisma-risk/tsoracle?branch=main)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/prisma-risk/tsoracle/badge)](https://scorecard.dev/viewer/?uri=github.com/prisma-risk/tsoracle)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12991/badge)](https://www.bestpractices.dev/projects/12991)
 
 </div>
 
