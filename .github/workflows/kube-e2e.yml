@@ -48,6 +48,7 @@ jobs:
             --set image.repository=tsoracle,image.tag=e2e \
             --set driver=openraft,replicas=3 \
             --set ports.client=5051,ports.peer=5100 \
+            --set tls.allowInsecurePeer=true \
             --wait --timeout 5m
       - name: wait for cluster formation (TCP readiness)
         run: kubectl rollout status statefulset/tsoracle --timeout=300s
