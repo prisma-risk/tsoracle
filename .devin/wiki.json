@@ -1,25 +1,25 @@
 {
   "repo_notes": [
     {
-      "content": "tsoracle is a distributed timestamp oracle (TSO) for Rust. It hands out 64-bit strictly-monotonic integer timestamps over gRPC, with a pluggable consensus surface (`ConsensusDriver`). The repository is a Cargo workspace; treat each crate under `crates/` as a separate layer of the architecture. The canonical reading order for the system, top-down, is: `tsoracle-proto` (wire format) → `tsoracle-core` (sync window allocator) → `tsoracle-consensus` (driver trait) → `tsoracle-driver-file` and `tsoracle-driver-openraft` (concrete drivers) → `tsoracle-openraft-toolkit` (envelope pattern helpers) → `tsoracle-server` (async tonic server, leader-watch, failover fence) → `tsoracle-client` (leader discovery, request coalescing, reconnection) → `tsoracle-bin` (the standalone `tsoracle` CLI) → `tsoracle-tests` (cross-crate integration/stress harness)."
+      "content": "tsoracle is a distributed timestamp oracle (TSO) for Rust. It hands out 64-bit strictly-monotonic integer timestamps over gRPC, with a pluggable consensus surface (`ConsensusDriver`). The repository is a Cargo workspace; treat each crate under `crates/` as a separate layer of the architecture. The canonical reading order for the system, top-down, is: `tsoracle-proto` (wire format) → `tsoracle-codec` (versioned `[SCHEMA_VERSION|postcard]` envelope used by every persisted/replicated payload) → `tsoracle-core` (sync window allocator) → `tsoracle-consensus` (driver trait) → `tsoracle-driver-file`, `tsoracle-driver-openraft`, and `tsoracle-driver-paxos` (concrete drivers) → `tsoracle-openraft-toolkit` and `tsoracle-paxos-toolkit` (envelope-pattern helpers for each replication library) → `tsoracle-server` (async tonic server, leader-watch, failover fence) → `tsoracle-server-testkit` (in-tree helpers used by server-side tests across crates) → `tsoracle-client` (leader discovery, request coalescing, reconnection, ride-out election) → `tsoracle-standalone` (driver bootstrap and peer transport that the CLI is built on) → `tsoracle-bin` (the standalone `tsoracle` CLI with `serve {file|openraft|paxos}`, `init`, and `admin` subcommands) → `tsoracle-tests` (cross-crate integration/stress harness). The two utility crates `tsoracle-failpoint` (sync injection) and `tsoracle-yieldpoint` (async injection) are dev-time test infrastructure used throughout the workspace."
     },
     {
-      "content": "The maintainer-curated prose documentation in `docs/*.md` is the source of truth for *what to document and how to frame it*. Each file there corresponds to one wiki page in the `pages` list below; prefer quoting and structurally mirroring those docs over re-deriving topics from code. Specifically: `docs/overview.md`, `docs/getting-started.md`, `docs/architecture-deep-dive.md`, `docs/the-allocator.md`, `docs/performance-critical-path.md`, `docs/consensus-integration.md`, `docs/client-api-and-usage.md`, `docs/the-client-driver.md`, `docs/operations.md`, `docs/stress-testing.md`, `docs/failpoint-testing.md`, `docs/testing-and-examples.md`, `docs/key-subsystems.md`, `docs/why-distributed-systems-need-a-tso.md`, `docs/uuidv7-vs-tso.md`."
+      "content": "The maintainer-curated prose documentation in `docs/*.md` is the source of truth for *what to document and how to frame it*. Each file there corresponds to one wiki page in the `pages` list below; prefer quoting and structurally mirroring those docs over re-deriving topics from code. The current set is: `docs/overview.md`, `docs/getting-started.md`, `docs/architecture-deep-dive.md`, `docs/the-allocator.md`, `docs/performance-critical-path.md`, `docs/consensus-integration.md`, `docs/driver-comparison.md`, `docs/client-api-and-usage.md`, `docs/the-client-driver.md`, `docs/operations.md`, `docs/deployment.md`, `docs/format-migration-upgrade.md`, `docs/kubernetes-e2e.md`, `docs/stress-testing.md`, `docs/failpoint-testing.md`, `docs/yieldpoint-testing.md`, `docs/testing-and-examples.md`, `docs/key-subsystems.md`."
     },
     {
-      "content": "Do NOT generate pages from the following paths — they are not user-facing documentation: `docs/superpowers/` (internal agent skill content, must not be referenced anywhere in the wiki), `target/`, `lcov.info`, `.worktrees/`, `.husky/`, `.claude/`, `fuzz/corpus/`, `fuzz/artifacts/`, `assets/` (just logos), `Cargo.lock`. Treat `release-plz.toml`, `deny.toml`, `rust-toolchain.toml`, the `Makefile`, and `ci/` as supporting infrastructure — mention them in the Operations or Contributing context if relevant, but do not give them dedicated pages."
+      "content": "Do NOT generate pages from the following paths — they are not user-facing library documentation: `docs/superpowers/` (internal agent skill content, must not be referenced anywhere in the wiki), `target/`, `lcov.info`, `.worktrees/`, `.husky/`, `.claude/`, `.devin/`, `fuzz/corpus/`, `fuzz/artifacts/`, `assets/` (logos only), `site/` (the standalone Zola site that publishes to tsoracle.rs — its prose lives in `site/content/` and is not part of the library reference wiki), `benchmarks/` (internal harness; covered by the Performance page), `e2e/kube/driver/` and `e2e/kube/*.sh` (Kubernetes assertion driver and shell harness — covered by the Kubernetes E2E page, do not enumerate), `deploy/charts/tsoracle/templates/` (Helm template internals — describe the chart from the Deployment page, do not page each template), `scripts/og-image/`, `Cargo.lock`. Treat `release-plz.toml`, `deny.toml`, `rust-toolchain.toml`, the `Makefile`, the top-level `Dockerfile` (`deploy/Dockerfile`), and `ci/` as supporting infrastructure — mention them in the Deployment, Operations, or Contributing context if relevant, but do not give them dedicated pages."
     },
     {
-      "content": "Two invariants are load-bearing and must be stated correctly anywhere they come up: (1) every issued timestamp is strictly greater than every previously issued one — no duplicates and no regression, including across leader failover and process restart; (2) the packed 64-bit integer space is NOT dense — the logical sequence resets each time `physical_ms` advances, so some integer values are skipped, but the *issued* sequence is still total-ordered and unique. Wording that implies a dense counter is wrong. The mechanism that protects (1) across failover is the 'failover fence' in `tsoracle-server`; the mechanism that protects (1) across restart is the fsync'd high-water-mark written through `ConsensusDriver` before any timestamp inside a window is handed out."
+      "content": "Two invariants are load-bearing and must be stated correctly anywhere they come up: (1) every issued timestamp is strictly greater than every previously issued one — no duplicates and no regression, including across leader failover and process restart; (2) the packed 64-bit integer space is NOT dense — the logical sequence resets each time `physical_ms` advances, so some integer values are skipped, but the *issued* sequence is still total-ordered and unique. Wording that implies a dense counter is wrong. The mechanism that protects (1) across failover is the failover fence in `tsoracle-server` (leader-epoch gated, single-writer leader-watch pipeline); the mechanism that protects (1) across restart is the fsync'd high-water-mark written through `ConsensusDriver` before any timestamp inside a window is handed out."
     },
     {
-      "content": "tsoracle is explicitly not a clock-synchronization system, not a consensus implementation (it consumes one through `ConsensusDriver`), and not a partitioned/multi-shard TSO (one instance issues one monotonic sequence). When DeepWiki is tempted to compare tsoracle to Spanner TrueTime, HLCs, or sharded sequencers, frame those as things that should be *layered over* tsoracle rather than expected inside it. The `docs/why-distributed-systems-need-a-tso.md` and `docs/uuidv7-vs-tso.md` pages exist specifically to handle these comparisons — defer to them."
+      "content": "tsoracle is explicitly not a clock-synchronization system, not a consensus implementation (it consumes one through `ConsensusDriver`), and not a partitioned/multi-shard TSO (one instance issues one monotonic sequence). When the wiki is tempted to compare tsoracle to Spanner TrueTime, HLCs, UUIDv7, or sharded sequencers, frame those as things that should be *layered over* tsoracle rather than expected inside it. The 'What this is, and is not' section of `docs/overview.md` is the authoritative one-paragraph framing for these comparisons; keep the wiki's wording aligned with it rather than re-deriving the boundary."
     },
     {
-      "content": "Examples under `examples/` are pedagogical and each is its own crate (`example-embedded-server`, `example-failover-demo`, `example-openraft-standalone`, `example-openraft-piggyback`, `example-metrics-prometheus`). They are the best entry point for readers who want runnable code. The two openraft examples illustrate the two integration patterns: 'standalone' = dedicated raft for tsoracle alone; 'piggyback' = envelope pattern where the host service's existing openraft carries both its own `AppData` and tsoracle's `HighWaterCommand` on a single log, with one snapshot covering both halves. The toolkit crate `tsoracle-openraft-toolkit` is what makes the piggyback pattern ergonomic."
+      "content": "Examples under `examples/` are pedagogical and each is its own crate. The current set is `embedded-server`, `failover-demo`, `metrics-prometheus`, `openraft-standalone`, `openraft-piggyback`, `paxos-standalone`, `paxos-piggyback`, `paxos-embedded`, and `tls-mtls`. They are the best entry point for readers who want runnable code. Each replicated driver ships in two patterns: 'standalone' = the driver runs its own dedicated consensus instance for tsoracle alone, and 'piggyback' = the host service's existing consensus carries both its own `AppData` and tsoracle's `HighWaterCommand` on a single log/state machine, with one snapshot covering both halves. The toolkit crates `tsoracle-openraft-toolkit` and `tsoracle-paxos-toolkit` are what make the piggyback pattern ergonomic for each library. `paxos-embedded` is the in-process pedagogical analogue of `failover-demo` for the paxos driver. `tls-mtls` demonstrates server-and-client TLS/mTLS in isolation. The driver bootstrap and peer transport plumbing the standalone examples used to inline now lives in `tsoracle-standalone`; the standalone examples and the `tsoracle` CLI both consume it."
     },
     {
-      "content": "Stylistic guidance for generated prose: do not hard-wrap markdown paragraphs (write each paragraph/bullet as one long line); use descriptive identifier names when paraphrasing code (`driver`, `listener`, `dir` — never single-letter stand-ins for nouns); never include AI-attribution trailers, 'Generated with' notices, or references to internal agent skills/plans. Do not invent file paths or APIs — if a symbol can't be located in `crates/*/src/` or the public docs, omit it rather than guessing."
+      "content": "Stylistic guidance for generated prose: do not hard-wrap markdown paragraphs (write each paragraph/bullet as one long line); use descriptive identifier names when paraphrasing code (`driver`, `listener`, `dir` — never single-letter stand-ins for nouns); never include AI-attribution trailers, 'Generated with' notices, or references to internal agent skills/plans. Do not invent file paths or APIs — if a symbol can't be located in `crates/*/src/` or the public docs, omit it rather than guessing. When citing where a feature lives, prefer crate paths (`crates/tsoracle-server/src/`) over commit hashes — commits churn, crate boundaries are stable."
     }
   ],
   "pages": [
@@ -29,12 +29,15 @@
       "page_notes": [
         {
           "content": "Source of truth: `docs/overview.md`. Keep the strict-monotonicity statement AND the 'packed integer space is not dense' caveat together — they always travel as a pair."
+        },
+        {
+          "content": "The 'What this is, and is not' paragraph in `docs/overview.md` is where boundary comparisons (Spanner TrueTime, HLCs, partitioned/sharded TSOs) live. There is no longer a dedicated `why-distributed-systems-need-a-tso.md` or `uuidv7-vs-tso.md` file — those framings were absorbed into the overview."
         }
       ]
     },
     {
       "title": "Getting Started",
-      "purpose": "First-run path for a new user: install the standalone binary (`cargo install tsoracle`), run `tsoracle serve`, and call it from Rust with `tsoracle_client::Client`. Cover the default listen address (`127.0.0.1:50551`) and the on-disk state directory (`./tsoracle-data/`). Show both single-timestamp and batch APIs.",
+      "purpose": "First-run path for a new user: install the standalone binary (`cargo install tsoracle`), run `tsoracle serve` (which defaults to `serve file`), and call it from Rust with `tsoracle_client::Client`. Cover the default listen address (`127.0.0.1:50551`) and the on-disk state directory (`./tsoracle-data/`). Show both single-timestamp and batch APIs, and point to the embedding section for users who want to mount the server inside their own binary.",
       "page_notes": [
         {
           "content": "Source of truth: `docs/getting-started.md` and the Quickstart section of the top-level `README.md`. The Rust snippets in these two should stay in sync; quote them verbatim rather than rewriting."
@@ -46,7 +49,7 @@
       "purpose": "Mid-level architectural tour: how `tsoracle-core` (sync allocator) plugs into `tsoracle-server` (async tonic server) and consumes a `ConsensusDriver` for durability/replication. Cover the request lifecycle from gRPC ingress through the allocator to the consensus driver and back, including where the failover fence sits and where fsync happens.",
       "page_notes": [
         {
-          "content": "Source of truth: `docs/architecture-deep-dive.md` and `docs/key-subsystems.md`. Cross-link to the Allocator child page for the packed-integer format and to Consensus Integration for the driver trait."
+          "content": "Source of truth: `docs/architecture-deep-dive.md` and `docs/key-subsystems.md`. Cross-link to the Allocator child page for the packed-integer format and to Consensus Integration for the driver trait. The `Clock` contract, the `Epoch` type, and the timestamp-packing layout are all called out as top-level sections in `docs/architecture-deep-dive.md`."
         }
       ]
     },
@@ -63,19 +66,39 @@
     {
       "title": "Performance: Critical Path",
       "parent": "Architecture Deep Dive",
-      "purpose": "Explain what is and is not on the per-request critical path: the allocator is sync and lock-protected; the consensus driver is only hit at window-boundary refills (not per timestamp); batching amortizes RPC cost via `get_ts_batch`. Cover the benchmarks under `benchmarks/` and how to run them.",
+      "purpose": "Explain what is and is not on the per-request critical path: the allocator is sync and lock-protected; the consensus driver is only hit at window-boundary refills (not per timestamp); batching amortizes RPC cost via `get_ts_batch`. Cover the benchmarks under `benchmarks/` (the `minimal` and `stress` benches) and how to run them.",
       "page_notes": [
         {
-          "content": "Source of truth: `docs/performance-critical-path.md`. Benchmarks live in `benchmarks/`. Do not claim specific latency numbers unless they are in the doc — hardware-dependent figures rot quickly."
+          "content": "Source of truth: `docs/performance-critical-path.md`. Benchmarks live in `benchmarks/minimal/` and `benchmarks/stress/`. Do not claim specific latency numbers unless they are in the doc — hardware-dependent figures rot quickly."
+        }
+      ]
+    },
+    {
+      "title": "Standalone Bootstrap",
+      "parent": "Architecture Deep Dive",
+      "purpose": "Document `tsoracle-standalone`: the crate that owns per-driver bootstrap, peer transport, peer mTLS, and graceful shutdown wiring. It turns a `DriverConfig` (one of `FileConfig` / `OpenraftConfig` / `PaxosConfig`) into a constructed, running `Arc<dyn ConsensusDriver>` together with the bound-and-spawned peer transport task. This is what the `tsoracle` CLI is built on, and the layer to reach for when a downstream binary wants the CLI's driver bootstrap without re-implementing the plumbing.",
+      "page_notes": [
+        {
+          "content": "Source: `crates/tsoracle-standalone/src/` and its `README.md`. Public surface: `build()`, the `Standalone` struct (driver, `take_drain()` for driver-specific pre-shutdown such as openraft leadership handoff, `shutdown()` for the peer transport), the per-driver `*Config` types, `MemberAddr`, `PeerTlsConfig`, `RaftTuning`, and `parse_peer_map`. The crate is gated by per-driver feature flags (`file`, `openraft`, `paxos`, all on by default)."
         }
       ]
     },
     {
       "title": "Consensus Integration",
-      "purpose": "Document the `ConsensusDriver` trait surface in `tsoracle-consensus` — what a driver must guarantee (durable, linearizable advances of the high-water mark; leader identity), and the contract for `HighWaterCommand`. This is the page a user reads when they want to back tsoracle with a consensus system other than the two we ship.",
+      "purpose": "Document the `ConsensusDriver` trait surface in `tsoracle-consensus` — what a driver must guarantee (durable, linearizable advances of the high-water mark; leader identity with a monotone-per-node epoch), and the contract for `HighWaterCommand`. This is the page a user reads when they want to back tsoracle with a consensus system other than the three we ship.",
       "page_notes": [
         {
-          "content": "Source of truth: `docs/consensus-integration.md`. Trait definition lives in `crates/tsoracle-consensus/src/`. List the two shipped drivers (file, openraft) as cross-links to their child pages; do not duplicate their content here."
+          "content": "Source of truth: `docs/consensus-integration.md`. Trait definition lives in `crates/tsoracle-consensus/src/`. The doc's section headings are `leadership_events`, `load_high_water`, `persist_high_water`, `Choosing a driver`, `Worked example: openraft`, and `Single-leader requirement` — preserve them. List the three shipped drivers (file, openraft, paxos) as cross-links to their child pages; do not duplicate their content here."
+        }
+      ]
+    },
+    {
+      "title": "Driver Comparison",
+      "parent": "Consensus Integration",
+      "purpose": "Side-by-side comparison of the three first-party drivers (`file`, `openraft`, `paxos`): the operator-facing capability matrix (HA, peer mTLS, dynamic membership, graceful handoff, snapshot mechanism, format-migration support), and the contributor-facing implementation comparison (where each feature lives in the corresponding crate). Read this before picking a driver or before tracing how feature X is implemented across drivers.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/driver-comparison.md`. The doc is structured in two parts — 'Operator-facing comparison' (capability matrix) then 'Contributor-facing comparison' (where the code lives). Keep that two-part structure. Do not duplicate the trait contract here — defer to the parent Consensus Integration page."
         }
       ]
     },
@@ -92,17 +115,30 @@
     {
       "title": "Openraft Driver",
       "parent": "Consensus Integration",
-      "purpose": "Document `tsoracle-driver-openraft`: the production-ready replicated `ConsensusDriver` built on `openraft`. Cover cluster bring-up, peer transport (tonic), leader handoff behavior, and the `LeaderHint`-driven follower-redirect path that the client uses.",
+      "purpose": "Document `tsoracle-driver-openraft`: the production-ready replicated `ConsensusDriver` built on `openraft`. Cover cluster bring-up, peer transport (tonic, with peer mTLS via `PeerTlsConfig`), the three-address membership model (raft address, service endpoint, admin endpoint), leader handoff behavior (graceful SIGTERM-triggered transfer to the most-caught-up voter before drain), the `LeaderHint`-driven follower-redirect path with monotone-per-node epoch, and the RocksDB-backed log + snapshot store.",
       "page_notes": [
         {
-          "content": "Source: `crates/tsoracle-driver-openraft/src/`. Runnable reference: `examples/openraft-standalone` (multi-process, three-node cluster on a dedicated openraft)."
+          "content": "Source: `crates/tsoracle-driver-openraft/src/`. Runnable reference: `examples/openraft-standalone` (multi-process, three-node cluster on a dedicated openraft). The driver bootstrap, peer transport, and peer mTLS plumbing live in `tsoracle-standalone` — do not duplicate them here, cross-link to the Standalone Bootstrap page."
+        },
+        {
+          "content": "The openraft driver supports runtime dynamic membership (add learner, promote, remove) via the admin gRPC service exposed on its own `--admin-listen` port. The Dynamic Membership child page is the dedicated reference for that surface; this page should mention it and link, not redocument it."
+        }
+      ]
+    },
+    {
+      "title": "Dynamic Membership",
+      "parent": "Openraft Driver",
+      "purpose": "Document the runtime dynamic-membership surface for the openraft driver: the gRPC `AdminService` (its own listen port, separate from the data-plane and peer ports), optional admin mTLS via `AdminTlsConfig`, and the `tsoracle admin` subcommands — `members`, `add-learner`, `promote`, `remove`, and `activate-format` (the format-version activation gate). Cover the three-address `add-learner` form (raft address, service endpoint, admin endpoint), expected exit codes, and what each command does at the raft layer. The paxos and file drivers return `AdminError::Unsupported`; this page is openraft-only.",
+      "page_notes": [
+        {
+          "content": "Source: the `tsoracle admin` clap surface in `crates/tsoracle-bin/src/cli.rs`, the `AdminService` implementation in `crates/tsoracle-server/src/`, and the openraft driver's admin handlers in `crates/tsoracle-driver-openraft/src/`. The `activate-format` command is the operator-facing trigger described in the Format Migration & Upgrade page; cross-link there for the staged-rollout context rather than duplicating it."
         }
       ]
     },
     {
       "title": "Openraft Toolkit — envelope pattern",
       "parent": "Consensus Integration",
-      "purpose": "Document `tsoracle-openraft-toolkit`: helpers that let a host service's existing openraft carry both the host's own `AppData` and tsoracle's `HighWaterCommand` on a single replicated log, with one snapshot covering both halves. This is the 'piggyback' integration pattern.",
+      "purpose": "Document `tsoracle-openraft-toolkit`: helpers that let a host service's existing openraft carry both the host's own `AppData` and tsoracle's `HighWaterCommand` on a single replicated log, with one snapshot covering both halves. This is the 'piggyback' integration pattern for openraft.",
       "page_notes": [
         {
           "content": "Source: `crates/tsoracle-openraft-toolkit/src/`. Runnable reference: `examples/openraft-piggyback`. Be explicit about the trade-off vs. the standalone pattern: one log/snapshot instead of two, at the cost of coupling tsoracle's availability to the host's raft."
@@ -110,66 +146,86 @@
       ]
     },
     {
-      "title": "Client",
-      "purpose": "Document `tsoracle-client`: the gRPC client used by callers. Cover `Client::connect` with multiple endpoints, leader discovery via `LeaderHint`, automatic reconnection, request coalescing (multiple in-flight `get_ts` calls coalesced into one RPC), and the difference between `get_ts` and `get_ts_batch`. Include the public API surface and a section on internals (driver task, channel multiplexing) for readers integrating the client deeply.",
+      "title": "Paxos Driver",
+      "parent": "Consensus Integration",
+      "purpose": "Document `tsoracle-driver-paxos`: the second replicated `ConsensusDriver`, backed by OmniPaxos via `tsoracle-paxos-toolkit`. Cover the `PaxosHighWaterHost` trait, the turnkey `StandaloneHost` impl (for services that don't already run their own OmniPaxos), the `Epoch ↔ Ballot` encoding (`config_id`/`n`/`pid` packed into a 128-bit `Epoch`), the linearizable-read barrier synced with OmniPaxos's `accepted_idx`, and `SnapshotPolicy` (disabled / every-N-decisions / callback). Members are fixed at startup (no dynamic membership today).",
       "page_notes": [
         {
-          "content": "Sources of truth: `docs/client-api-and-usage.md` (user-facing API) and `docs/the-client-driver.md` (internals). Code: `crates/tsoracle-client/src/`."
+          "content": "Source: `crates/tsoracle-driver-paxos/src/`. Runnable reference: `examples/paxos-standalone` (multi-process), with `examples/paxos-embedded` as the in-process pedagogical version. The driver bootstrap and tonic peer transport live in `tsoracle-standalone` — cross-link rather than duplicate."
+        }
+      ]
+    },
+    {
+      "title": "Paxos Toolkit — envelope pattern",
+      "parent": "Consensus Integration",
+      "purpose": "Document `tsoracle-paxos-toolkit`: the reusable OmniPaxos glue (RocksDB-backed `OmniPaxosStorage`, the `MessageSink` network trait, the toolkit codec, lifecycle helpers) that `tsoracle-driver-paxos` is built on. This is the layer a host service uses when it already runs its own OmniPaxos and wants to piggyback tsoracle's `HighWaterCommand` onto the same log.",
+      "page_notes": [
+        {
+          "content": "Source: `crates/tsoracle-paxos-toolkit/src/`. Runnable reference: `examples/paxos-piggyback`. Mirror the structure of the Openraft Toolkit page (same standalone-vs-piggyback trade-off framing)."
+        }
+      ]
+    },
+    {
+      "title": "Client",
+      "purpose": "Document `tsoracle-client`: the gRPC client used by callers. Cover `Client::connect` with multiple endpoints, leader discovery via `LeaderHint` (with per-node monotone epoch + scheme-less host:port endpoint), automatic reconnection, request coalescing (multiple in-flight `get_ts` calls coalesced into one RPC), the ride-out behavior across leader elections (transient no-leader-yet states do not surface as errors until the overall deadline elapses), and the difference between `get_ts` and `get_ts_batch`. Include the public API surface and a section on internals (driver task, channel multiplexing, retry/attempt/leader-hint module split) for readers integrating the client deeply. Cover the custom-transport hook used to configure TLS/mTLS.",
+      "page_notes": [
+        {
+          "content": "Sources of truth: `docs/client-api-and-usage.md` (user-facing API) and `docs/the-client-driver.md` (internals). Code: `crates/tsoracle-client/src/`. The internals are split across `retry`, `attempt`, `leader_hint`, and `test_support` modules — the public API stays stable across that refactor."
         }
       ]
     },
     {
       "title": "Server",
-      "purpose": "Document `tsoracle-server`: the async tonic server that wires `tsoracle-core` to the network and consumes a `ConsensusDriver`. Cover the `Server::builder` surface, embedding via `Server::into_router` (to mount inside an existing tonic server), and graceful shutdown via `serve_with_shutdown`.",
+      "purpose": "Document `tsoracle-server`: the async tonic server that wires `tsoracle-core` to the network and consumes a `ConsensusDriver`. Cover the `Server::builder` surface, embedding via `Server::into_router` (to mount inside an existing tonic server), graceful shutdown via `serve_with_shutdown` together with the `shutdown_signal()` helper that handles SIGTERM and SIGINT, and the configurable shutdown grace period that bounds how long an in-progress driver task is given to drain.",
       "page_notes": [
         {
-          "content": "Source: `crates/tsoracle-server/src/`. The embedded-host pattern is shown in `examples/embedded-server`."
+          "content": "Source: `crates/tsoracle-server/src/`. The embedded-host pattern is shown in `examples/embedded-server`. Server-side test helpers shared across crates live in `crates/tsoracle-server-testkit/` — mention it for contributors writing new server-side tests, but do not document its internals."
         }
       ]
     },
     {
       "title": "gRPC Service and Wire Format",
       "parent": "Server",
-      "purpose": "Document the gRPC service surface defined in `tsoracle-proto`: the `Timestamp` message, the RPCs (`GetTs`, `GetTsBatch`), and the `LeaderHint` mechanism that lets followers redirect clients to the current leader.",
+      "purpose": "Document the gRPC service surface defined in `tsoracle-proto`: the `Timestamp` message, the RPCs (`GetTs`, `GetTsBatch`), the `LeaderHint` mechanism that lets followers redirect clients to the current leader (carrying a scheme-less `host:port` endpoint and a monotone-per-node epoch), and the additive `format_version` field that supports zero-downtime format migration on the openraft driver.",
       "page_notes": [
         {
-          "content": "Source: `crates/tsoracle-proto/`. Keep this page focused on the wire contract — server-side handling lives in the parent Server page, client-side behavior in the Client page."
+          "content": "Source: `crates/tsoracle-proto/`. Keep this page focused on the wire contract — server-side handling lives in the parent Server page, client-side behavior in the Client page, and the format-version negotiation rules in the Format Migration & Upgrade page."
         }
       ]
     },
     {
       "title": "Failover Fence",
       "parent": "Server",
-      "purpose": "Document the failover fence in `tsoracle-server`: the mechanism that guarantees no two leaders can issue overlapping timestamps across a leadership change. Explain the leader-watch loop, the role of the consensus driver's leader-epoch signal, and why the fence is the linchpin of the strict-monotonicity invariant across failover.",
+      "purpose": "Document the failover fence in `tsoracle-server`: the mechanism that guarantees no two leaders can issue overlapping timestamps across a leadership change. Explain the leader-watch loop, the role of the consensus driver's leader-epoch signal, the single-writer leader-state contract, and why the fence is the linchpin of the strict-monotonicity invariant across failover.",
       "page_notes": [
         {
-          "content": "Source: `crates/tsoracle-server/src/`. The pedagogical reference is `examples/failover-demo`, which simulates leadership changes in-process to show the fence keeping timestamps monotonic."
+          "content": "Source: `crates/tsoracle-server/src/`. The pedagogical reference is `examples/failover-demo` (openraft side) and `examples/paxos-embedded` (paxos side), both of which simulate leadership changes in-process to show the fence keeping timestamps monotonic. `docs/key-subsystems.md` documents the leader-watch pipeline, the failover fence, and the leader-hint trailer as separate sections — keep that structure."
         }
       ]
     },
     {
       "title": "TLS and mTLS",
       "parent": "Server",
-      "purpose": "Document the TLS and mTLS transport configuration on both server and client: how to enable, how identities are provided (file paths vs. in-memory bytes), and what verification mode applies to peer certificates.",
+      "purpose": "Document TLS and mTLS transport configuration end-to-end: client TLS to the data-plane gRPC port, server-side TLS termination, peer mTLS on the consensus transport (openraft raft port and paxos peer port, configured via `PeerTlsConfig`) including the secure-by-default Helm render that fails closed when HA is requested without TLS, and admin mTLS on the openraft admin port (via `AdminTlsConfig`). Cover how identities are provided (file paths vs. in-memory bytes) and what verification mode applies at each layer.",
       "page_notes": [
         {
-          "content": "TLS plumbing landed recently (see commits `b098336` and `04db211`). Source: `crates/tsoracle-server/src/` and `crates/tsoracle-client/src/`. Document only what the public builder API exposes — do not infer flags that don't exist."
+          "content": "Source: `crates/tsoracle-server/src/`, `crates/tsoracle-client/src/`, and `crates/tsoracle-standalone/src/peer_tls.rs` + `admin_tls.rs`. The runnable reference is `examples/tls-mtls`. Document only what the public builder API exposes — do not infer flags that don't exist."
         }
       ]
     },
     {
       "title": "Operations",
-      "purpose": "Operator-facing guide: deployment topologies (single-node-with-fsync vs. replicated-with-openraft), state directory layout, fsync cost characteristics, leader handoff behavior under network partitions, and what to monitor.",
+      "purpose": "Operator-facing guide: deployment topologies (single-node-with-fsync, replicated-with-openraft, replicated-with-paxos), state directory layout, fsync cost characteristics, sizing knobs (`window_ahead`, `failover_advance`), advertised endpoints in multi-node deployments, leader handoff behavior under network partitions, client retry behavior, TLS termination, and what to monitor.",
       "page_notes": [
         {
-          "content": "Source of truth: `docs/operations.md`. Cross-link to Metrics for the observability story."
+          "content": "Source of truth: `docs/operations.md`. The doc's section headings (`Sizing window_ahead`, `Sizing failover_advance`, `Monitoring hooks`, `Advertised endpoints in multi-node deployments`, `Deployment topologies`, `Client retry behavior`, `TLS termination`) should appear as subsections. Cross-link to Metrics for the observability story, Deployment for Helm/image specifics, and Format Migration & Upgrade for the openraft upgrade runbook."
         }
       ]
     },
     {
       "title": "Metrics",
       "parent": "Operations",
-      "purpose": "Document the optional `metrics` feature on `tsoracle-server`: which allocator, leader, and request metrics are emitted through the `metrics` facade, and how to install a recorder (e.g. `metrics-exporter-prometheus`) before the server starts.",
+      "purpose": "Document the optional `metrics` feature on `tsoracle-server`: which allocator, leader, and request metrics are emitted through the `metrics` facade (including `tsoracle.leadership_stream.rejected.total` and the leader-state fields), and how to install a recorder (e.g. `metrics-exporter-prometheus`) before the server starts.",
       "page_notes": [
         {
           "content": "Runnable reference: `examples/metrics-prometheus`. Recorder must be installed *before* `Server::serve_with_shutdown` for early metrics to be captured."
@@ -177,18 +233,38 @@
       ]
     },
     {
-      "title": "Testing",
-      "purpose": "Tour of the test infrastructure: unit tests inside each crate, the cross-crate integration harness in `tsoracle-tests`, fuzzing under `fuzz/`, plus the dedicated stress and failpoint test suites. Explain when a contributor should reach for each layer.",
+      "title": "Deployment",
+      "parent": "Operations",
+      "purpose": "Document the published container image and Helm chart: where the images are hosted, the Helm chart at `deploy/charts/tsoracle`, the values reference (driver selection, peer mTLS knobs, replica count, storage class), the secure-by-default render behavior (HA without TLS fails closed unless `tls.allowInsecurePeer=true`), the included NetworkPolicy (Ingress-only — the chart does not lock down Egress because that would break peer dialing), and supported topologies (single-node, openraft HA, paxos HA).",
       "page_notes": [
         {
-          "content": "Source of truth: `docs/testing-and-examples.md`. Cross-link to the three child pages for the specialized harnesses."
+          "content": "Source of truth: `docs/deployment.md`. Chart files under `deploy/charts/tsoracle/`. Container build is `deploy/Dockerfile` + `deploy/entrypoint.sh`. Cover the values that the chart exposes — do not enumerate every template file."
+        }
+      ]
+    },
+    {
+      "title": "Format Migration and Upgrade",
+      "parent": "Operations",
+      "purpose": "Document the openraft-driver zero-downtime format-migration story: the four version concepts (`MIN_READABLE_VERSION`, `MAX_READABLE_VERSION`, the active write version, `BASELINE_WRITE_VERSION`), the symmetric per-version codec (up- and down-convert with a fail-loud `NotRepresentable`), the all-members capability gate, the apply-keyed activation flip via `ApplyOutcome::FormatActivated/Noop/TargetOutOfRange`, the additive `format_version` wire field, and the four-stage rollout runbook (image bump → broaden read range → activate via `tsoracle admin activate-format` → finalize). The paxos and file drivers use stop-the-world version bumps and are out of scope for this page.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/format-migration-upgrade.md`. The runbook is openraft-only by design — when describing it, do not generalize to the other drivers."
+        }
+      ]
+    },
+    {
+      "title": "Testing",
+      "purpose": "Tour of the test infrastructure: unit tests inside each crate, the cross-crate integration harness in `tsoracle-tests`, fuzzing under `fuzz/`, the dedicated stress harness, failpoint-driven sync injection (`tsoracle-failpoint`), yield-point-driven async injection (`tsoracle-yieldpoint`), and the Kubernetes (kind) end-to-end lane. Explain when a contributor should reach for each layer.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/testing-and-examples.md`. Cross-link to the child pages for each specialized harness. The `tsoracle-failpoint` and `tsoracle-yieldpoint` crates are dev-time test infrastructure; they are mentioned here and detailed in their respective child pages."
         }
       ]
     },
     {
       "title": "Stress Testing",
       "parent": "Testing",
-      "purpose": "Document the stress harness: single-process and multi-process raft topologies, what invariants it asserts (notably strict monotonicity under churn), and how to run it locally.",
+      "purpose": "Document the stress harness: single-process and multi-process raft/paxos topologies, what invariants it asserts (notably strict monotonicity under churn, with monotonicity-hard tolerance bands), and how to run it locally.",
       "page_notes": [
         {
           "content": "Source of truth: `docs/stress-testing.md`. Harness code lives under `crates/tsoracle-tests/`."
@@ -198,29 +274,49 @@
     {
       "title": "Failpoint Testing",
       "parent": "Testing",
-      "purpose": "Document the failpoint-driven crash tests: how failpoints are injected to simulate crashes at specific points (notably around fsync and high-water-mark commits), and what each scenario is designed to prove about crash safety.",
+      "purpose": "Document the sync-injection harness in `tsoracle-failpoint`: how named failpoints are armed and triggered to simulate crashes at specific points (notably around fsync and high-water-mark commits), what each scenario is designed to prove about crash safety, and the trade-off vs. yield-point testing (failpoints suspend the current thread via `std::thread::park` / condvars, which is fine for sync code but blocks a tokio worker when invoked from an async path).",
       "page_notes": [
         {
-          "content": "Source of truth: `docs/failpoint-testing.md`."
+          "content": "Source of truth: `docs/failpoint-testing.md`. Crate: `crates/tsoracle-failpoint/`."
+        }
+      ]
+    },
+    {
+      "title": "Yield-point Testing",
+      "parent": "Testing",
+      "purpose": "Document the async-injection harness in `tsoracle-yieldpoint`: a `tokio::sync::Notify`-backed mechanism keyed by `&'static str` names that lets a test deterministically park an async task at a named site in production code and release it from outside. Cover why it exists (failpoint's `std::thread::park` blocks a tokio worker and can starve the timer driver, which is the case where the injection site is in an async path) and how it is the async sibling of failpoints.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/yieldpoint-testing.md`. Crate: `crates/tsoracle-yieldpoint/`."
+        }
+      ]
+    },
+    {
+      "title": "Kubernetes End-to-End",
+      "parent": "Testing",
+      "purpose": "Document the Kubernetes (kind) end-to-end lane: an opt-in CI lane (manual `workflow_dispatch`) that deploys the published Helm chart against a kind cluster and runs in-cluster Jobs that probe the deployment envelope. Cover what this lane is allowed to test (deployment shape, image entrypoint, chart rendering, NetworkPolicy, soak across rolling restarts) vs. what it intentionally is not (consensus correctness — that is the stress harness's job). Mention the in-cluster `kube-e2e-driver` Job and the assertion shell harness.",
+      "page_notes": [
+        {
+          "content": "Source of truth: `docs/kubernetes-e2e.md`. Driver code: `e2e/kube/driver/`. Assertion harness: `e2e/kube/run-assertions.sh`, `e2e/kube/run-mixed-version-assertions.sh`, `e2e/kube/_assertions_lib.sh`. The driver runs *in-cluster* as Jobs because a host port-forward can't follow `LeaderHint` to pod DNS — preserve that justification."
         }
       ]
     },
     {
       "title": "Fuzzing",
       "parent": "Testing",
-      "purpose": "Document the coverage-guided fuzz targets under `fuzz/`, focused on the `postcard` decoders. Cover how to run a target, where corpora live, and how findings are triaged.",
+      "purpose": "Document the coverage-guided fuzz targets under `fuzz/`, focused on the `postcard` decoders behind the versioned codec envelope. Cover how to run a target, where corpora live, and how findings are triaged. The fuzz crate is workspace-excluded and pinned to nightly via its own `rust-toolchain.toml`.",
       "page_notes": [
         {
-          "content": "Source: `fuzz/`. Do not enumerate corpus contents — corpora are not user-facing artifacts."
+          "content": "Source: `fuzz/`. Do not enumerate corpus contents — corpora are not user-facing artifacts. Fuzz targets must decode through the same `[SCHEMA_VERSION|postcard]` envelope as production code (via `tsoracle-codec`); a target that calls `postcard::from_bytes` directly will be off-by-one on the version byte."
         }
       ]
     },
     {
       "title": "Examples",
-      "purpose": "Index of the runnable examples under `examples/`, each its own crate. Cover all five — `embedded-server`, `failover-demo`, `openraft-standalone`, `openraft-piggyback`, `metrics-prometheus` — with one short paragraph each on what the example demonstrates and the command to run it (`cargo run -p example-<name>`).",
+      "purpose": "Index of the runnable examples under `examples/`, each its own crate. Cover all nine — `embedded-server`, `failover-demo`, `metrics-prometheus`, `openraft-standalone`, `openraft-piggyback`, `paxos-standalone`, `paxos-piggyback`, `paxos-embedded`, `tls-mtls` — with one short paragraph each on what the example demonstrates and the command to run it (`cargo run -p example-<name>`).",
       "page_notes": [
         {
-          "content": "Be explicit about which examples are pedagogical (in-process, single-binary, designed to teach) vs. HA-shaped (multi-process, closer to a real deployment). `failover-demo` and `openraft-piggyback` are in-process; `openraft-standalone` is the multi-process one."
+          "content": "Be explicit about which examples are pedagogical (in-process, single-binary, designed to teach) vs. HA-shaped (multi-process, closer to a real deployment). `failover-demo`, `paxos-embedded`, and `openraft-piggyback`/`paxos-piggyback` are in-process; `openraft-standalone` and `paxos-standalone` are the multi-process ones. `tls-mtls` is a focused server+client TLS/mTLS demo. The standalone examples consume `tsoracle-standalone` for their driver bootstrap and peer transport — they no longer inline that plumbing."
         }
       ]
     }
