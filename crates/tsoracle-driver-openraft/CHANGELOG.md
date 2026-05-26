@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.3.2...tsoracle-driver-openraft-v0.3.3) - 2026-05-26
+
+### Other
+
+- updated the following local packages: tsoracle-core, tsoracle-consensus
+
 ## [0.3.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.3.1...tsoracle-driver-openraft-v0.3.2) - 2026-05-26
 
 ### Added

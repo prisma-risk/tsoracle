@@ -13,11 +13,11 @@ name = "openraft-piggyback"
 path = "src/main.rs"
 
 [dependencies]
-tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.2.4" }
-tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.9" }
-tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.2.8" }
-tsoracle-client          = { path = "../../crates/tsoracle-client", version = "0.2.5" }
-tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.3.2" }
+tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.2.5" }
+tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.10" }
+tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.2.9" }
+tsoracle-client          = { path = "../../crates/tsoracle-client", version = "0.2.6" }
+tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.3.3" }
 tsoracle-openraft-toolkit         = { path = "../../crates/tsoracle-openraft-toolkit", version = "0.2.2", features = ["rocksdb-log-store", "test-fakes"] }
 
 openraft           = { workspace = true }

@@ -1,7 +1,7 @@
 [package]
 name         = "tsoracle-proto"
 description  = "Generated protobuf/gRPC wire types for the timestamp oracle."
-version      = "0.2.3"
+version      = "0.2.4"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true

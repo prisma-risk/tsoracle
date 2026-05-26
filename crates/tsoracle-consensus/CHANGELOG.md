@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.10](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.9...tsoracle-consensus-v0.1.10) - 2026-05-26
+
+### Other
+
+- updated the following local packages: tsoracle-core
+
 ## [0.1.9](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v0.1.8...tsoracle-consensus-v0.1.9) - 2026-05-26
 
 ### Fixed

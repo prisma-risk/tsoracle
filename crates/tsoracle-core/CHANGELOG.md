@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.2.4...tsoracle-core-v0.2.5) - 2026-05-26
+
+### Added
+
+- GetCurrentMaxSafe RPC ([#493](https://github.com/prisma-risk/tsoracle/pull/493))
+
 ## [0.2.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.2.3...tsoracle-core-v0.2.4) - 2026-05-26
 
 ### Fixed
