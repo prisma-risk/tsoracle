@@ -36,6 +36,9 @@ use tracing_subscriber::EnvFilter;
 use tsoracle_server::Server;
 use tsoracle_standalone::{DriverConfig, Standalone};
 
+#[cfg(feature = "openraft")]
+use tsoracle_standalone::admin_proto::{AdminErrorKind, ChangeResponse};
+
 /// Drivers compiled into this build, for the friendly "not included" message.
 #[cfg(any(
     not(feature = "file"),
@@ -392,12 +395,45 @@ fn parse_members(input: &str) -> Result<BTreeMap<u64, tsoracle_standalone::Membe
 }
 
 #[cfg(feature = "openraft")]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum ActivationOutcome {
+    Success,
+    GateRejected(String),
+    NotLeader,
+    TargetOutOfRange(String),
+    Other { kind: String, message: String },
+}
+
+#[cfg(feature = "openraft")]
+fn classify_activation(resp: &ChangeResponse) -> ActivationOutcome {
+    if resp.ok {
+        return ActivationOutcome::Success;
+    }
+    let kind_string = AdminErrorKind::try_from(resp.error)
+        .map(|k| format!("{k:?}"))
+        .unwrap_or_else(|_| resp.error.to_string());
+    match AdminErrorKind::try_from(resp.error) {
+        Ok(AdminErrorKind::MembersBelowTarget) => {
+            ActivationOutcome::GateRejected(resp.message.clone())
+        }
+        Ok(AdminErrorKind::NotLeader) => ActivationOutcome::NotLeader,
+        Ok(AdminErrorKind::TargetOutOfRange) => {
+            ActivationOutcome::TargetOutOfRange(resp.message.clone())
+        }
+        _ => ActivationOutcome::Other {
+            kind: kind_string,
+            message: resp.message.clone(),
+        },
+    }
+}
+
+#[cfg(feature = "openraft")]
 async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
     use cli::AdminCmd;
     use tsoracle_standalone::admin_proto::membership_admin_client::MembershipAdminClient;
     use tsoracle_standalone::admin_proto::{
-        ActivateFormatRequest, AddLearnerRequest, AdminErrorKind, ChangeResponse,
-        ListMembersRequest, MemberRole, PromoteRequest, RemoveNodeRequest,
+        ActivateFormatRequest, AddLearnerRequest, ListMembersRequest, MemberRole, PromoteRequest,
+        RemoveNodeRequest,
     };
 
     // Re-run `op` against the leader if the first call says NOT_LEADER. The
@@ -451,31 +487,29 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
     /// Activation-specific reporter: success / gate-rejection / NOT_LEADER /
     /// local-range-rejection each get their own exit code per the issue #484
     /// contract. Anything else exits 1 via the bubbled `anyhow::Error`.
+    /// The pure classification lives in `classify_activation` so it can be
+    /// unit-tested without forking the process.
     fn report_activation(resp: ChangeResponse) -> Result<()> {
-        if resp.ok {
-            println!("ok");
-            return Ok(());
-        }
-        let kind = AdminErrorKind::try_from(resp.error)
-            .map(|k| format!("{k:?}"))
-            .unwrap_or_else(|_| resp.error.to_string());
-        match AdminErrorKind::try_from(resp.error) {
-            Ok(AdminErrorKind::MembersBelowTarget) => {
-                eprintln!("activate-format: gate rejected: {}", resp.message);
+        match classify_activation(&resp) {
+            ActivationOutcome::Success => {
+                println!("ok");
+                Ok(())
+            }
+            ActivationOutcome::GateRejected(message) => {
+                eprintln!("activate-format: gate rejected: {message}");
                 std::process::exit(2);
             }
-            Ok(AdminErrorKind::NotLeader) => {
+            ActivationOutcome::NotLeader => {
                 eprintln!("activate-format: not the leader");
                 std::process::exit(3);
             }
-            Ok(AdminErrorKind::TargetOutOfRange) => {
-                eprintln!(
-                    "activate-format: target outside local readable range: {}",
-                    resp.message
-                );
+            ActivationOutcome::TargetOutOfRange(message) => {
+                eprintln!("activate-format: target outside local readable range: {message}");
                 std::process::exit(4);
             }
-            _ => anyhow::bail!("activate-format error ({kind}): {}", resp.message),
+            ActivationOutcome::Other { kind, message } => {
+                anyhow::bail!("activate-format error ({kind}): {message}")
+            }
         }
     }
 
@@ -682,4 +716,72 @@ mod admin_client_tls_tests {
     // on disk because admin_client_tls reads + parses them. The integration test
     // in openraft_membership.rs already proves a real cert produces a working
     // channel.
+}
+
+#[cfg(all(test, feature = "openraft"))]
+mod activation_exit_code_tests {
+    use super::{ActivationOutcome, classify_activation};
+    use tsoracle_standalone::admin_proto::{AdminErrorKind, ChangeResponse};
+
+    fn resp(ok: bool, error: AdminErrorKind, message: &str) -> ChangeResponse {
+        ChangeResponse {
+            ok,
+            error: error as i32,
+            leader_admin_endpoint: String::new(),
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn ok_classifies_as_success() {
+        let r = resp(true, AdminErrorKind::Unspecified, "");
+        assert_eq!(classify_activation(&r), ActivationOutcome::Success);
+    }
+
+    #[test]
+    fn members_below_target_classifies_as_gate_rejected() {
+        let r = resp(false, AdminErrorKind::MembersBelowTarget, "blocked");
+        assert!(matches!(
+            classify_activation(&r),
+            ActivationOutcome::GateRejected(s) if s == "blocked"
+        ));
+    }
+
+    #[test]
+    fn not_leader_classifies_as_not_leader() {
+        let r = resp(false, AdminErrorKind::NotLeader, "");
+        assert_eq!(classify_activation(&r), ActivationOutcome::NotLeader);
+    }
+
+    #[test]
+    fn target_out_of_range_classifies_as_target_out_of_range() {
+        let r = resp(false, AdminErrorKind::TargetOutOfRange, "range");
+        assert!(matches!(
+            classify_activation(&r),
+            ActivationOutcome::TargetOutOfRange(s) if s == "range"
+        ));
+    }
+
+    #[test]
+    fn driver_error_classifies_as_other() {
+        let r = resp(false, AdminErrorKind::Driver, "boom");
+        assert!(matches!(
+            classify_activation(&r),
+            ActivationOutcome::Other { kind, message } if kind == "Driver" && message == "boom"
+        ));
+    }
+
+    #[test]
+    fn membership_changed_classifies_as_other() {
+        let r = resp(false, AdminErrorKind::MembershipChanged, "drift");
+        // MembershipChanged is a real activation outcome the operator can
+        // remediate by re-issuing, but it's NOT a script-meaningful safety
+        // rejection (Other → exit 1) — distinct from MembersBelowTarget
+        // (exit 2) and TargetOutOfRange (exit 4). Explicit test so a
+        // future refactor that quietly conflates them is caught.
+        assert!(matches!(
+            classify_activation(&r),
+            ActivationOutcome::Other { .. }
+        ));
+    }
 }
