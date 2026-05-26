@@ -5,7 +5,7 @@
 # stage for RUN to see it.
 ARG FEATURES=""
 
-FROM rust:1-bookworm AS build
+FROM rust:1-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS build
 ARG FEATURES
 WORKDIR /src
 # RocksDB (openraft/paxos toolkits) needs clang+cmake for bindgen; tsoracle-proto
@@ -16,7 +16,7 @@ RUN apt-get update \
 COPY . .
 RUN cargo build --release -p tsoracle --bin tsoracle ${FEATURES:+--no-default-features --features $FEATURES}
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

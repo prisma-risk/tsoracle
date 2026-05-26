@@ -10,6 +10,11 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# LeakSanitizer run only needs to check the code out and build/test;
+# no need for any write scopes on GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   lsan:
     name: workspace tests under LeakSanitizer
@@ -37,12 +42,12 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Install pinned nightly toolchain
         # Match the pin used by fuzz/rust-toolchain.toml so the two nightly
         # jobs share a known-good revision. Bump them together.
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           toolchain: nightly-2026-03-31
           components: rust-src, llvm-tools-preview
