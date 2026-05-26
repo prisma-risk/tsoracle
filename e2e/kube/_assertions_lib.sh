@@ -69,19 +69,29 @@ wait_soak_live() {
 # Without the image check, an already-Ready baseline pod falsely satisfies
 # a "did the new image land" wait.
 #
+# The IMAGE comparison tolerates Kubernetes' canonical-image rewriting:
+# kubelet reports short-form Docker Hub names (e.g. "tsoracle:e2e-next")
+# back as "docker.io/library/tsoracle:e2e-next" in .status.image. We accept
+# either exact match OR a "*/IMAGE" path-boundary suffix match, so a
+# requested "tsoracle:e2e-next" is satisfied by the canonicalized form
+# but NOT by an unrelated "foo-tsoracle:e2e-next".
+#
 # Args: POD IMAGE TIMEOUT_S
 wait_pod_image_and_ready() {
     local pod="$1" image="$2" timeout="$3" elapsed=0
     while true; do
-        local actual_image ready
+        local actual_image ready image_ok=0
         actual_image="$(kubectl get pod "$pod" \
             -o jsonpath='{.status.containerStatuses[?(@.name=="tsoracle")].image}' \
             2>/dev/null || true)"
         ready="$(kubectl get pod "$pod" \
             -o jsonpath='{.status.containerStatuses[?(@.name=="tsoracle")].ready}' \
             2>/dev/null || true)"
-        if [ "$actual_image" = "$image" ] && [ "$ready" = "true" ]; then
-            echo "$pod: on image=$image and Ready"
+        case "$actual_image" in
+            "$image"|*/"$image") image_ok=1 ;;
+        esac
+        if [ "$image_ok" = "1" ] && [ "$ready" = "true" ]; then
+            echo "$pod: on image=$image (reported=$actual_image) and Ready"
             return 0
         fi
         if [ "$elapsed" -ge "$timeout" ]; then
