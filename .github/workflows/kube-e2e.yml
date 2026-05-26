@@ -2,6 +2,11 @@ name: kube-e2e
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - 'e2e/kube/**'
+      - '.github/workflows/kube-e2e.yml'
 
 permissions:
   contents: read
