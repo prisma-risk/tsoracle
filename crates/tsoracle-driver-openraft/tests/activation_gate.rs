@@ -100,25 +100,53 @@ async fn gate_passes_when_target_within_local_max() {
 
 #[tokio::test(start_paused = true)]
 async fn gate_fails_when_target_above_local_max() {
+    // The local-binary range short-circuit fires BEFORE any per-member
+    // check: a target above the local binary's MAX_READABLE_VERSION
+    // can't be read regardless of what peers report, so the gate emits
+    // `TargetOutOfRange` (not `MembersBelowTarget`) without ever
+    // invoking `CapabilitySource::query`. `UnusedSource`'s panic in its
+    // query method enforces that no peer RPC was attempted.
     let (host, _cluster) = single_node_leader_host().await;
     let target = tsoracle_openraft_toolkit::MAX_READABLE_VERSION + 1;
     let err = host
         .run_activation_gate(target, &UnusedSource)
         .await
-        .expect_err("gate fails when the only member cannot read the target");
-    let FormatActivationError::MembersBelowTarget {
+        .expect_err("gate fails when target is above the local readable max");
+    let FormatActivationError::TargetOutOfRange {
         target: returned,
-        incapable,
+        min,
+        max,
     } = err
     else {
-        panic!("expected MembersBelowTarget");
+        panic!("expected TargetOutOfRange, got: {err:?}");
     };
     assert_eq!(returned, target);
-    assert_eq!(incapable.len(), 1);
-    assert_eq!(incapable[0].0, 1);
-    assert_eq!(
-        incapable[0].1,
-        tsoracle_openraft_toolkit::MAX_READABLE_VERSION
+    assert_eq!(min, tsoracle_openraft_toolkit::MIN_READABLE_VERSION);
+    assert_eq!(max, tsoracle_openraft_toolkit::MAX_READABLE_VERSION);
+}
+
+#[tokio::test(start_paused = true)]
+async fn gate_fails_when_target_below_local_min() {
+    // The lower-bound branch of the local-binary range short-circuit:
+    // a target below MIN_READABLE_VERSION is unsupported regardless of
+    // peer capabilities and must be refused at the leader before any
+    // RPC. This is the path the security finding exercised — a
+    // pre-fix gate accepted `target=1` because it only checked the
+    // upper bound.
+    let (host, _cluster) = single_node_leader_host().await;
+    // MIN is at least 1 in any sensible build (compile-time `MIN <=
+    // MAX`); MIN - 1 is therefore always representable.
+    let target = tsoracle_openraft_toolkit::MIN_READABLE_VERSION - 1;
+    let err = host
+        .run_activation_gate(target, &UnusedSource)
+        .await
+        .expect_err("gate fails when target is below the local readable min");
+    assert!(
+        matches!(
+            err,
+            FormatActivationError::TargetOutOfRange { target: returned, .. } if returned == target
+        ),
+        "expected TargetOutOfRange for target below MIN"
     );
 }
 

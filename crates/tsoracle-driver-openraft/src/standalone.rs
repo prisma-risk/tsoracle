@@ -43,6 +43,7 @@ use tsoracle_consensus::ConsensusError;
 
 use crate::capabilities::{
     CapabilitySource, FormatActivationError, NodeCapabilities, all_members_can_read, gather_with,
+    target_in_local_readable_range,
 };
 use crate::host::OpenraftHighWaterHost;
 use crate::log_entry::{HighWaterCommand, SetFormatVersionPayload};
@@ -143,6 +144,21 @@ impl StandaloneHost {
         let (_local_node_id, is_leader, _members) = self.membership_snapshot();
         if !is_leader {
             return Err(FormatActivationError::NotLeader);
+        }
+        // Local-binary range short-circuit BEFORE any peer RPC: an
+        // out-of-range target cannot be made valid by what peers report,
+        // and the apply arm would no-op it anyway. Fail fast with a
+        // clear, operator-actionable error and account the rejection
+        // under the same `rejected_by_gate` counter as the per-member
+        // path — both are "the gate refused this activation".
+        if let Err(err) = target_in_local_readable_range(target) {
+            tracing::warn!(
+                target = target,
+                ?err,
+                "format activation rejected: target outside local readable range"
+            );
+            crate::observability::record_rejected_by_gate();
+            return Err(err);
         }
         let gathered = self.gather_member_capabilities(source).await?;
 
@@ -278,12 +294,25 @@ impl StandaloneHost {
 /// [`FormatActivationError::MembershipChangedSinceGate`]. `Advanced` is
 /// impossible for a `SetFormatVersion` entry but is mapped defensively to
 /// the no-op error rather than silently claiming success.
+/// `FormatActivationTargetOutOfRange` is the apply arm's defense-in-depth
+/// firing — possible only if a buggy or protocol-violating proposal reached
+/// commit despite the gate's `target_in_local_readable_range` short-circuit;
+/// surface it as [`FormatActivationError::TargetOutOfRange`] using the local
+/// binary's range so the operator's remediation matches the gate-rejection
+/// surface.
 fn classify_activation_outcome(
     outcome: ApplyOutcome,
     target: u8,
 ) -> Result<(), FormatActivationError> {
     match outcome {
         ApplyOutcome::FormatActivated { target: applied } if applied == target => Ok(()),
+        ApplyOutcome::FormatActivationTargetOutOfRange { target: applied } => {
+            Err(FormatActivationError::TargetOutOfRange {
+                target: applied,
+                min: tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+                max: tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            })
+        }
         ApplyOutcome::FormatActivated { .. }
         | ApplyOutcome::FormatActivationNoop { .. }
         | ApplyOutcome::Advanced => {
@@ -492,5 +521,23 @@ mod tests {
             err,
             FormatActivationError::MembershipChangedSinceGate { target: 4 }
         ));
+    }
+
+    #[test]
+    fn classify_activation_outcome_maps_target_out_of_range_to_local_range_error() {
+        // Apply-arm defense-in-depth surfaces a distinct outcome variant;
+        // the proposer-side classifier must re-emit it as the
+        // operator-facing `TargetOutOfRange` (carrying the local binary's
+        // range), matching the surface the gate's short-circuit returns.
+        let outcome = ApplyOutcome::FormatActivationTargetOutOfRange { target: 1 };
+        let result = classify_activation_outcome(outcome, 1);
+        match result {
+            Err(FormatActivationError::TargetOutOfRange { target, min, max }) => {
+                assert_eq!(target, 1);
+                assert_eq!(min, tsoracle_openraft_toolkit::MIN_READABLE_VERSION);
+                assert_eq!(max, tsoracle_openraft_toolkit::MAX_READABLE_VERSION);
+            }
+            other => panic!("expected TargetOutOfRange, got: {other:?}"),
+        }
     }
 }

@@ -101,12 +101,23 @@ pub fn all_members_can_read(
 /// re-issue against the leader; `MembersBelowTarget` means upgrade or remove
 /// the named members and re-issue; `MemberUnreachable` means the cluster could
 /// not confirm a member's capability and the gate fails closed rather than
-/// guess.
+/// guess; `TargetOutOfRange` means re-issue with a target the local binary
+/// can actually read or upgrade the binary.
 #[derive(Debug, thiserror::Error)]
 pub enum FormatActivationError {
     /// This node is not the raft leader, so it cannot drive an activation.
     #[error("cannot initiate format activation: this node is not the leader")]
     NotLeader,
+    /// `target` is outside the local binary's readable range
+    /// `[min, max]`. The gate short-circuits here before any peer RPC: an
+    /// out-of-range target is the same answer regardless of peer reports,
+    /// and the operator gets a fast, unambiguous rejection. The same
+    /// surface is used by the apply arm's defense-in-depth — see
+    /// `ApplyOutcome::FormatActivationTargetOutOfRange`.
+    #[error(
+        "format activation to target {target} blocked: target outside local readable range [{min}, {max}]"
+    )]
+    TargetOutOfRange { target: u8, min: u8, max: u8 },
     /// At least one current member cannot read `target`. `incapable` lists the
     /// offending `(node_id, max_readable_version)` pairs for the operator.
     #[error("format activation to target {target} blocked: members below target: {incapable:?}")]
@@ -129,6 +140,25 @@ pub enum FormatActivationError {
     /// e.g. lost leadership, the cluster lost quorum, or a fatal raft error.
     #[error("format activation proposal failed: {0}")]
     ProposalFailed(String),
+}
+
+/// Reject `target` if it is outside the local binary's readable range
+/// `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`.
+///
+/// This is the lower-bound (and symmetric upper-bound) companion to the
+/// per-member [`all_members_can_read`] check. The per-member predicate
+/// guards against any member that cannot read the target; this local check
+/// guards against an unsupported target up front so the activation never
+/// even reaches a peer RPC or the apply arm. A target below MIN would flip
+/// the active write version to a value the encode/decode codec arms reject,
+/// wedging all subsequent log appends and snapshot builds.
+pub fn target_in_local_readable_range(target: u8) -> Result<(), FormatActivationError> {
+    let min = tsoracle_openraft_toolkit::MIN_READABLE_VERSION;
+    let max = tsoracle_openraft_toolkit::MAX_READABLE_VERSION;
+    if !(min..=max).contains(&target) {
+        return Err(FormatActivationError::TargetOutOfRange { target, min, max });
+    }
+    Ok(())
 }
 
 /// Abstracts querying one peer member for its [`NodeCapabilities`]. Implemented
@@ -289,6 +319,97 @@ mod tests {
             rendered.contains('2') && rendered.contains('5'),
             "got: {rendered}"
         );
+    }
+
+    // ---- Local-binary readable-range gate (lower-bound check) ----
+    //
+    // The all-members gate at `all_members_can_read` checks every member's
+    // `max_readable_version >= target` — the upper-bound side. The
+    // lower-bound side is symmetric: `target` must also be at least
+    // `MIN_READABLE_VERSION` of the local binary, otherwise the activation
+    // would flip the cell to a version no member can encode/decode (an
+    // operator-facing footgun and durable-damage hazard). The gate also
+    // short-circuits at the local binary's range before any peer RPC: an
+    // out-of-range target is the same answer regardless of what peers
+    // report, and the operator gets a fast, clear rejection instead of an
+    // unreachable-peer noise tail.
+
+    #[test]
+    fn target_in_local_readable_range_accepts_min() {
+        assert!(
+            target_in_local_readable_range(tsoracle_openraft_toolkit::MIN_READABLE_VERSION).is_ok()
+        );
+    }
+
+    #[test]
+    fn target_in_local_readable_range_accepts_max() {
+        assert!(
+            target_in_local_readable_range(tsoracle_openraft_toolkit::MAX_READABLE_VERSION).is_ok()
+        );
+    }
+
+    #[test]
+    fn target_in_local_readable_range_rejects_zero() {
+        // Target 0 is the worst case: 0 is also the legacy-unframed wire
+        // sentinel, so a 0-stamped record collides with the legacy
+        // interpretation while also failing recovery decode.
+        let err = target_in_local_readable_range(0).expect_err("0 is below MIN");
+        match err {
+            FormatActivationError::TargetOutOfRange { target, min, max } => {
+                assert_eq!(target, 0);
+                assert_eq!(min, tsoracle_openraft_toolkit::MIN_READABLE_VERSION);
+                assert_eq!(max, tsoracle_openraft_toolkit::MAX_READABLE_VERSION);
+            }
+            other => panic!("expected TargetOutOfRange, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn target_in_local_readable_range_rejects_below_min() {
+        // The exact below-min boundary. MIN is at least 1 in any sensible
+        // build (the codec's compile-time assert forbids an empty range),
+        // so MIN - 1 is always a representable u8 and always out of range.
+        let just_below = tsoracle_openraft_toolkit::MIN_READABLE_VERSION - 1;
+        let err = target_in_local_readable_range(just_below).expect_err("MIN-1 is out of range");
+        assert!(matches!(
+            err,
+            FormatActivationError::TargetOutOfRange { target, .. } if target == just_below
+        ));
+    }
+
+    #[test]
+    fn target_in_local_readable_range_rejects_above_max() {
+        // MAX + 1: this case is normally caught by the per-member
+        // `max_readable_version >= target` predicate at the gate, but the
+        // local-binary short-circuit must also reject it so a one-member
+        // cluster (or a misconfigured operator command) fails fast at the
+        // leader before any RPC.
+        let just_above = tsoracle_openraft_toolkit::MAX_READABLE_VERSION.saturating_add(1);
+        if just_above == tsoracle_openraft_toolkit::MAX_READABLE_VERSION {
+            // MAX is u8::MAX (impossible in practice but defended against);
+            // skip rather than spuriously fail.
+            return;
+        }
+        let err = target_in_local_readable_range(just_above).expect_err("MAX+1 is out of range");
+        assert!(matches!(
+            err,
+            FormatActivationError::TargetOutOfRange { target, .. } if target == just_above
+        ));
+    }
+
+    #[test]
+    fn target_out_of_range_error_names_target_and_local_range() {
+        // The operator-facing message must name the offending target AND
+        // the binary's own range, so the remediation is unambiguous: either
+        // re-issue with an in-range target, or upgrade the binary.
+        let err = FormatActivationError::TargetOutOfRange {
+            target: 1,
+            min: 4,
+            max: 4,
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains('1'), "target missing: {rendered}");
+        assert!(rendered.contains('4'), "range missing: {rendered}");
     }
 
     struct FakeSource {

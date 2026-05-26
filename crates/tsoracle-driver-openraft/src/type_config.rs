@@ -99,6 +99,17 @@ pub enum ApplyOutcome {
     /// cell was left untouched and `target` did not take effect. The operator
     /// re-gates and re-issues.
     FormatActivationNoop { target: u8 },
+    /// A `SetFormatVersion` bump applied as a no-op for the apply arm's
+    /// defense-in-depth range check: `target` was outside the LOCAL
+    /// binary's `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]` so the
+    /// shared cell was left untouched. Distinct from
+    /// [`FormatActivationNoop`] because the failure class is "this entry
+    /// should never have been proposed" (a gate bug or a log committed
+    /// by an older binary), not "the membership drifted" — different
+    /// remediation, different counter, different operator surface. The
+    /// gate at proposal time normally prevents this from being committed
+    /// (see `target_in_local_readable_range`).
+    FormatActivationTargetOutOfRange { target: u8 },
 }
 
 /// Per-entry apply result.
@@ -244,6 +255,7 @@ mod tests {
             ApplyOutcome::Advanced,
             ApplyOutcome::FormatActivated { target: 4 },
             ApplyOutcome::FormatActivationNoop { target: 4 },
+            ApplyOutcome::FormatActivationTargetOutOfRange { target: 1 },
         ] {
             let applied = HighWaterApplied {
                 value: 42,

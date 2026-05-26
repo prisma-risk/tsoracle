@@ -171,15 +171,20 @@ async fn format_migration_signals_fire_end_to_end() {
         .expect("activation to MAX_READABLE_VERSION must pass on a single-node leader");
 
     // ---- 4. Gate rejection: target above the local readable max.
+    //         The local-binary range short-circuit fires BEFORE any
+    //         per-member RPC, surfacing `TargetOutOfRange` rather than
+    //         `MembersBelowTarget`. Both increment the same
+    //         `rejected_by_gate` counter, which is what this end-to-end
+    //         metrics test cares about.
     let rejected = host
         .initiate_format_activation(MAX_READABLE_VERSION + 1, &UnusedSource)
         .await;
     assert!(
         matches!(
             rejected,
-            Err(FormatActivationError::MembersBelowTarget { .. })
+            Err(FormatActivationError::TargetOutOfRange { .. })
         ),
-        "target above MAX_READABLE_VERSION must be rejected by the gate"
+        "target above MAX_READABLE_VERSION must be rejected by the gate, got: {rejected:?}"
     );
 
     // ---- Assertions over the recorder snapshot.
