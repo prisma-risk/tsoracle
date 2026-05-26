@@ -120,6 +120,13 @@ echo "== step 5: dynamic-membership soak (add-learner / promote / remove) =="
 peer_port="${PEER_PORT:-5100}"
 tso_port="${TSO_PORT:-5051}"
 admin_port="${ADMIN_PORT:-51002}"
+# Namespace of the current kubectl context; used to compose full pod FQDNs
+# for the new member's three addresses. Required under the TLS cell so the
+# stored addresses match a SAN on the chart's leaf cert (see comment above
+# the new_raft/new_svc/new_admin construction below). Empty for the insecure
+# cell's context — fall back to `default` to keep one code path.
+namespace="$(kubectl config view --minify -o jsonpath='{..namespace}' 2>/dev/null || true)"
+namespace="${namespace:-default}"
 kubectl apply -f "$JOB_DIR/job-membership-soak.yaml"
 wait_soak_live tsoracle-e2e-membership-soak "membership-soak: first GetTs ok" 60
 
@@ -138,16 +145,24 @@ leader_pod="$(find_leader_pod 60)"
 echo "step 5: current leader = $leader_pod"
 
 # Three-address membership: raft (peer transport), service (tsoracle client
-# port for leader-hint redirect), admin (operator gRPC for future ops).
-# Short DNS resolves within the cluster's search path; matches the soak
-# endpoints' form. The admin address is unreachable from the headless
-# Service (admin is not in its port list) but membership stores it for
-# completeness — production deployments that bind admin on 0.0.0.0 with
-# TLS would gain redirect-follow without script changes.
+# port for leader-hint redirect), admin (operator gRPC for future ops). The
+# FQDN form is REQUIRED under the TLS cell: openraft peer transport dials
+# `https://{raft_addr}` (drivers/openraft/network.rs) and the tsoracle client
+# uses {service_endpoint} as the TLS authority on a leader-hint redirect, so
+# both must match a SAN on the chart's leaf cert. `gen-certs` only emits
+# `<release>-<i>.<release>-peer.<ns>.svc.cluster.local` — the short form
+# `<release>-<i>.<release>-peer` is NOT in the SAN list. The insecure cell
+# also constructs the FQDN here; plaintext consensus doesn't require it, but
+# one code path keeps the two cells in sync (cluster DNS resolves the FQDN
+# just as readily as the short form). The admin address is loopback-only at
+# runtime (the chart binds admin on 127.0.0.1) but membership stores it for
+# completeness — production deployments that bind admin on 0.0.0.0 with TLS
+# would gain redirect-follow without script changes.
 new_id=4
-new_raft="${RELEASE}-3.${RELEASE}-peer:${peer_port}"
-new_svc="${RELEASE}-3.${RELEASE}-peer:${tso_port}"
-new_admin="${RELEASE}-3.${RELEASE}-peer:${admin_port}"
+new_host="${RELEASE}-3.${RELEASE}-peer.${namespace}.svc.cluster.local"
+new_raft="${new_host}:${peer_port}"
+new_svc="${new_host}:${tso_port}"
+new_admin="${new_host}:${admin_port}"
 echo "step 5: add-learner id=$new_id raft=$new_raft service=$new_svc admin=$new_admin"
 
 # `tsoracle admin add-learner` calls openraft's `add_learner(_, _, blocking=true)`
