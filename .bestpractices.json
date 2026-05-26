@@ -32,8 +32,8 @@
   "test_most_status": "Met",
   "test_most_justification": "Coverage is measured by cargo-llvm-cov in the `coverage` CI job and uploaded to Coveralls (https://coveralls.io/github/prisma-risk/tsoracle). The most recent measurement is approximately 95% line coverage across the workspace, indicating that most major functionality is exercised by automated tests. Critical paths (consensus drivers, timestamp allocator, leader handoff) are covered by dedicated integration test files and additionally by fuzz harnesses for input-decoder paths.",
 
-  "test_policy_status": "Unmet",
-  "test_policy_justification": "CONTRIBUTING.md documents the required CI checks (cargo fmt, clippy with -D warnings, build, test) that every PR must pass, but does not yet include an explicit written policy line stating that significant new functionality must be accompanied by new tests. The de-facto practice is well established — recent commit history shows tests added with non-trivial changes — but the policy itself is not written down. Action: add a one-sentence test policy to CONTRIBUTING.md.",
+  "test_policy_status": "Met",
+  "test_policy_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/CONTRIBUTING.md#test-policy\n\nCONTRIBUTING.md has an explicit `## Test policy` section requiring that every contribution adding new functionality MUST include automated tests exercising it, and every bug fix MUST include at least one regression test that fails on the unfixed code and passes on the fix. Tests run via `cargo test --workspace --all-features` as a CI required check. Exempt: `docs:`, `refactor:`, `chore:` Conventional Commits prefixes (no runtime behavior change). Enforced at review time, backed by measured workspace line coverage (cargo-llvm-cov → Coveralls, currently ~95%).",
 
   "tests_are_added_status": "Met",
   "tests_are_added_justification": "Recent commit history on the main branch (https://github.com/prisma-risk/tsoracle/commits/main) shows that non-trivial code changes are typically accompanied by tests. Examples from recent months: barrier-seq durable seed (M5), snapshot publish TOCTOU (M4), WatchGuard drop sync stepdown (M3), shutdown stall on hung driver (M2), paxos lease generation wrap, openraft peer RPC deadline — each shipped with the regression test that proved the fix. The CI required-checks gate prevents fixes from landing without tests at the architectural level the change touched.",
@@ -101,8 +101,8 @@
   "report_tracker_status": "Met",
   "report_tracker_justification": "GitHub Issues is the project's issue tracker (https://github.com/prisma-risk/tsoracle/issues). It is publicly readable, supports anyone with a GitHub account filing new issues, supports labeling, milestones, assignment, cross-references to commits/PRs, and search across open and closed history.",
 
-  "tests_documented_added_status": "Unmet",
-  "tests_documented_added_justification": "Same gap as test_policy: CONTRIBUTING.md does not yet explicitly require new functionality to be accompanied by tests. The de-facto practice is consistent (see tests_are_added at the passing level), but the policy is not documented. Action: add a one-sentence policy to CONTRIBUTING.md.",
+  "tests_documented_added_status": "Met",
+  "tests_documented_added_justification": "Met via CONTRIBUTING.md's `## Test policy` section (see test_policy at passing tier for the URL and full text), which states new functionality must include tests and bug fixes must include at least one regression test. The policy is documented in the same file that documents the project's other contribution policies (panic policy, license headers, performance-critical-path rules, Conventional Commits).",
 
   "warnings_strict_status": "Met",
   "warnings_strict_justification": "The project's CI runs `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, treating every warning as a hard error. Library and binary crates additionally carry `#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]` to escalate panicking patterns in non-test code. No `#![allow]` overrides are present at the workspace level, and no workarounds (e.g., `clippy.toml allow-unwrap-in-tests`) are used to silence the lint.",
@@ -215,8 +215,8 @@
   "test_statement_coverage80_status": "Met",
   "test_statement_coverage80_justification": "The project's measured line coverage is approximately 95% via cargo-llvm-cov in the `coverage` CI job, uploaded to Coveralls at https://coveralls.io/github/prisma-risk/tsoracle. This well exceeds the silver-level 80% statement-coverage threshold.",
 
-  "test_policy_mandated_status": "Unmet",
-  "test_policy_mandated_justification": "Same gap as test_policy at passing level — CONTRIBUTING.md does not yet include an explicit written policy that significant new functionality must include tests. Action: add such a one-sentence policy.",
+  "test_policy_mandated_status": "Met",
+  "test_policy_mandated_justification": "CONTRIBUTING.md's `## Test policy` section uses MUST language for both new functionality and bug fixes (see test_policy at passing tier for the URL and full text). The mandate is reinforced by a measured coverage floor (cargo-llvm-cov → Coveralls, currently ~95%); a PR that drops coverage materially without justification will not be merged. Exemptions are limited to commits that do not change runtime behavior (`docs:`, `refactor:`, `chore:`).",
 
   "implement_secure_design_status": "Met",
   "implement_secure_design_justification": "The project implements secure design throughout the codebase (see know_secure_design at passing level for the full list). Additional silver-level evidence: defense-in-depth on the client retry path (per-pass + absolute redirect caps with MAX_TOTAL_LEADER_REDIRECTS=64); fail-closed defaults across the consensus/timestamp critical path; secure-by-default Helm chart guards that refuse to render unauthenticated HA deployments without an explicit opt-out; exhaustive fuzz coverage on input-decode paths; comprehensive SECURITY.md with a 24h/72h/30d response commitment.",
@@ -233,8 +233,8 @@
   "crypto_verification_private_status": "Met",
   "crypto_verification_private_justification": "TLS private keys are not transmitted by the project itself. Operators supply private keys via filesystem paths (in Kubernetes deployment, via mounted Secret volumes), which are kept out of the repository — no .pem private keys are committed; the only test-cert material is generated at runtime by the rcgen crate during integration tests.",
 
-  "signed_releases_status": "Unmet",
-  "signed_releases_justification": "The project does not currently sign its releases with cosign/sigstore or PGP. Container images at ghcr.io are content-addressable by SHA256 digest but not cryptographically signed. Crates published to crates.io are not signed (the registry does not currently support publisher signatures). Action: add cosign-based image signing in .github/workflows/release-images.yml.",
+  "signed_releases_status": "Met",
+  "signed_releases_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/docs/release-signatures.md\n\nEvery per-crate GitHub Release is signed via SLSA v1.0 build provenance (`.intoto.jsonl` attestation) generated by `slsa-framework/slsa-github-generator` and signed transparently through Sigstore (Fulcio + Rekor) — no long-lived signing key. The .github/workflows/release-sign.yml workflow fires on `release: published` (with workflow_dispatch backfill). docs/release-signatures.md documents end-to-end verification with `slsa-verifier verify-artifact` commands, anchored in the Sigstore transparency log. Scope: source crate tarballs (the canonical release artifact, matching crates.io publish); container images at ghcr.io are content-addressable by SHA256 but not yet cosign-signed (follow-up).",
 
   "version_tags_signed_status": "Unmet",
   "version_tags_signed_justification": "release-plz creates lightweight (unsigned) tags for releases. Action: switch release-plz configuration to creating annotated, GPG/SSH-signed tags.",
