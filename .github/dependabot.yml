@@ -10,3 +10,14 @@ updates:
           - "*"
     commit-message:
       prefix: "chore(ci)"
+
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    groups:
+      fuzz:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(fuzz)"
