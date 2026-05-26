@@ -44,6 +44,25 @@ Successful output ends with:
 Verifying artifact tsoracle-0.1.14.crate: PASSED
 ```
 
+### Backfilled releases
+
+The first five 2026-05-26 releases were signed retroactively via the
+`workflow_dispatch` lane of `release-sign.yml`. That trigger fires from
+`refs/heads/main`, not the tag ref, so the SLSA generator records the
+source ref as `main` rather than the tag. For those releases, swap
+`--source-tag` for `--source-branch`:
+
+```sh
+slsa-verifier verify-artifact \
+    --provenance-path tsoracle-0.1.14.crate.intoto.jsonl \
+    --source-uri github.com/prisma-risk/tsoracle \
+    --source-branch main \
+    tsoracle-0.1.14.crate
+```
+
+Releases produced by the auto trigger (every release after the workflow
+landed) use `--source-tag` per the example above.
+
 ## What gets verified
 
 `slsa-verifier` confirms, against the Sigstore transparency log:
