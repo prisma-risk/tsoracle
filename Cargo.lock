@@ -3227,7 +3227,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tsoracle"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3252,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-client"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "futures",
  "metrics",

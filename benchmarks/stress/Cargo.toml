@@ -40,7 +40,7 @@ tonic              = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-tsoracle-client          = { path = "../../crates/tsoracle-client", version = "0.2.6" }
+tsoracle-client          = { path = "../../crates/tsoracle-client", version = "0.2.7" }
 tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.10" }
 tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.2.5" }
 tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.3.3" }

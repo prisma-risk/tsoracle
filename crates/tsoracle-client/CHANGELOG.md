@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.2.6...tsoracle-client-v0.2.7) - 2026-05-26
+
+### Fixed
+
+- *(client)* enforce per_attempt_deadline on get_current_max_safe ([#525](https://github.com/prisma-risk/tsoracle/pull/525))
+
 ## [0.2.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v0.2.5...tsoracle-client-v0.2.6) - 2026-05-26
 
 ### Added

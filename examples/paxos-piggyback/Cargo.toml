@@ -19,7 +19,7 @@ path = "src/lib.rs"
 tsoracle-core          = { path = "../../crates/tsoracle-core", version = "0.2.5" }
 tsoracle-consensus     = { path = "../../crates/tsoracle-consensus", version = "0.1.10" }
 tsoracle-server        = { path = "../../crates/tsoracle-server", version = "0.2.9" }
-tsoracle-client        = { path = "../../crates/tsoracle-client", version = "0.2.6" }
+tsoracle-client        = { path = "../../crates/tsoracle-client", version = "0.2.7" }
 tsoracle-driver-paxos  = { path = "../../crates/tsoracle-driver-paxos", version = "0.3.3" }
 tsoracle-paxos-toolkit = { path = "../../crates/tsoracle-paxos-toolkit", version = "0.3.3", default-features = false, features = ["test-fakes"] }
 
