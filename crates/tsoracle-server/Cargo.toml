@@ -62,6 +62,10 @@ name = "e2e"
 required-features = ["test-support"]
 
 [[test]]
+name = "get_current_max_safe"
+required-features = ["test-support"]
+
+[[test]]
 name = "leader_watch"
 required-features = ["test-fakes"]
 

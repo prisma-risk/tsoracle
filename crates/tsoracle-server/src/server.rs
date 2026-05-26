@@ -174,7 +174,7 @@ impl ServerBuilder {
             window_ahead: self.window_ahead,
             failover_advance: self.failover_advance,
             shutdown_grace: self.shutdown_grace,
-            core: Arc::new(ServingCore::new()),
+            core: Arc::new(ServingCore::new(self.window_ahead)),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: self.tls_config,
         })
@@ -1025,7 +1025,7 @@ mod tests {
         // test runtime no other task can run between the synchronous `drop` and
         // the synchronous `serving_state` read, so observing `NotServing` proves
         // `Drop` closed the gate synchronously rather than the watch task.
-        let core = Arc::new(ServingCore::new());
+        let core = Arc::new(ServingCore::new(Duration::from_secs(3)));
         core.publish_serving();
 
         let handle: tokio::task::JoinHandle<Result<(), ServerError>> =
@@ -1056,7 +1056,7 @@ mod tests {
         // would stay open unless `serve_inner` closes it itself. Seed `Serving`,
         // run the user-shutdown arm with a zero grace (immediate abort), and
         // assert the gate is closed on return.
-        let core = Arc::new(ServingCore::new());
+        let core = Arc::new(ServingCore::new(Duration::from_secs(3)));
         core.publish_serving();
 
         let watch_handle: tokio::task::JoinHandle<Result<(), ServerError>> =

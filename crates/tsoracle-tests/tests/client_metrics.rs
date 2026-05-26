@@ -164,6 +164,15 @@ impl TsoService for MalformedHintService {
             .insert_bin(key, BinaryMetadataValue::from_bytes(garbage));
         Err(status)
     }
+
+    async fn get_current_max_safe(
+        &self,
+        _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+    ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status> {
+        Ok(tonic::Response::new(
+            tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+        ))
+    }
 }
 
 /// Bind a malformed-hint fake server on a random port. Returns its socket

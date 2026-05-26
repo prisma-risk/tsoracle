@@ -285,6 +285,16 @@ mod tests {
                     "unreachable: server should be timed out",
                 ))
             }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -417,6 +427,16 @@ mod tests {
             {
                 Err(tonic::Status::internal("boom"))
             }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -481,6 +501,16 @@ mod tests {
             {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 Err(tonic::Status::internal("unreachable: should be timed out"))
+            }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
             }
         }
 
@@ -554,6 +584,16 @@ mod tests {
                     epoch_hi: 0,
                     epoch_lo: 0,
                 }))
+            }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
             }
         }
 

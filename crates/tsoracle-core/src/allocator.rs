@@ -262,6 +262,19 @@ impl Allocator {
         }
     }
 
+    /// Current committed high-water in physical-millisecond units, or `None`
+    /// when not the leader. The high-water is the upper bound the allocator
+    /// will not exceed without a fresh `try_commit_window_extension`.
+    pub fn committed_high_water(&self) -> Option<u64> {
+        match self.state {
+            State::Leader {
+                committed_high_water,
+                ..
+            } => Some(committed_high_water),
+            State::NotLeader => None,
+        }
+    }
+
     /// Shared count guard for `try_grant` and `would_grant`, kept here so the
     /// two entry points cannot drift. The server's extension single-flight
     /// relies on `would_grant(now_ms, count) == true` implying the retry
@@ -560,6 +573,28 @@ mod tests {
         allocator.on_leadership_lost();
         assert!(!allocator.is_leader());
         assert_eq!(allocator.epoch(), None);
+    }
+
+    #[test]
+    fn committed_high_water_tracks_leader_state_and_extensions() {
+        let mut allocator = Allocator::new();
+        assert_eq!(allocator.committed_high_water(), None);
+
+        allocator
+            .try_on_leadership_gained(1_000, 5_000, Epoch(1))
+            .unwrap();
+        assert_eq!(allocator.committed_high_water(), Some(5_000));
+
+        let target = allocator
+            .try_prepare_window_extension(2_000, 3_000)
+            .unwrap();
+        allocator
+            .try_commit_window_extension(target, Epoch(1))
+            .unwrap();
+        assert_eq!(allocator.committed_high_water(), Some(target));
+
+        allocator.on_leadership_lost();
+        assert_eq!(allocator.committed_high_water(), None);
     }
 
     #[test]
