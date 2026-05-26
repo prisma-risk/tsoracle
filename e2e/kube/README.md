@@ -38,6 +38,27 @@ kind delete cluster --name tsoracle-e2e
 
 This lane currently covers cold-start formation, graceful rolling-restart, SIGKILL-leader recovery, and dynamic-membership churn (add-learner / promote / remove). The `openraft-standalone` example handles SIGTERM (via `tsoracle_server::shutdown_signal()`, #406), so the graceful-rollout assertion exercises the real cooperative-shutdown path. The dynamic-membership cell (issue #487) is the first end-to-end exercise of the three-address membership model shipped in #453; it drives all admin calls through `kubectl exec LEADER_POD -- tsoracle admin ...` against the loopback `127.0.0.1:51002` admin port the chart binds. Network partition + PVC reattach and a nightly schedule remain follow-ups.
 
+## Cells: insecure + TLS
+
+The CI workflow runs the same assertion lane twice against two helm releases in two namespaces of the same kind cluster (issue #483):
+
+- **Insecure cell** (`tsoracle` in `default`) — `tls.allowInsecurePeer=true`. Exercises the deployment envelope (DNS / Pod-IP rotation, lifecycle events) under plaintext consensus. This is the legacy cell that has always been here.
+- **TLS cell** (`tsoracle-tls` in `e2e-tls`) — `tls.enabled=true` plus a Secret minted on the runner by `cargo run -p kube-e2e-driver --bin gen-certs` (a fan-SAN leaf cert covering every pod FQDN, signed by a one-shot test CA). Exercises the chart's secure-by-default render guard's *happy path* (PR #452), peer mTLS under realistic kube DNS rotation, and cross-pod trust via the cluster-dedicated peer CA model (PR #445).
+
+Both cells share `run-assertions.sh`, which reads `RELEASE` and `JOB_DIR` env vars to know which release to drive and which Job manifest set to apply. The TLS cell's Job manifests live in `driver/tls/` and mount the cluster's TLS Secret so the driver client trusts the same CA the cluster's server cert chains to.
+
+To run only the TLS cell locally, after the kind cluster is up:
+
+```sh
+kubectl create namespace e2e-tls
+kubectl config set-context --current --namespace=e2e-tls
+mkdir -p /tmp/tsoracle-tls
+cargo run -p kube-e2e-driver --bin gen-certs -- --out /tmp/tsoracle-tls --release tsoracle-tls --namespace e2e-tls --replicas 3
+kubectl -n e2e-tls create secret generic tsoracle-tls-certs --from-file=tls.crt=/tmp/tsoracle-tls/tls.crt --from-file=tls.key=/tmp/tsoracle-tls/tls.key --from-file=ca.crt=/tmp/tsoracle-tls/ca.crt
+helm install tsoracle-tls deploy/charts/tsoracle -n e2e-tls --set image.repository=tsoracle,image.tag=e2e --set driver=openraft,replicas=3 --set ports.client=5051,ports.peer=5100 --set tls.enabled=true --set tls.secretName=tsoracle-tls-certs --wait --timeout 5m
+RELEASE=tsoracle-tls JOB_DIR=$(pwd)/e2e/kube/driver/tls ./e2e/kube/run-assertions.sh
+```
+
 ## Deploying to EKS (staging)
 
 The kind flow above is fully local. To deploy the same `openraft-standalone` cluster onto the real **staging** EKS cluster (arm64, real EBS) for a manual smoke test, the Kubernetes manifests live in the **infra** repo at `k8s/tsoracle-e2e/`; this repo only builds and pushes the images.

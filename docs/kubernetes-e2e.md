@@ -98,3 +98,19 @@ Recommendation: **do not** make it a stress topology. The stress harness's whole
 1. **A Dockerfile and Helm chart.** Both live in `deploy/`: `deploy/Dockerfile` builds the multi-driver image and `deploy/charts/tsoracle` is the chart used by CI and production.
 2. **SIGTERM handling in the example binaries.** Done (#406): the standalone examples now feed `serve_with_shutdown` the shared `tsoracle_server::shutdown_signal()` future, which resolves on SIGTERM and SIGINT. The graceful rolling-restart assertion in the kube lane exercises this path.
 3. **Optional: `grpc.health.v1.Health`.** Adding the standard gRPC health service would let probes use `grpc_health_probe` and report leader/serving state precisely. Not required for the TCP-based contract above, but a clean follow-up.
+
+## TLS cell
+
+The workflow runs the assertions twice against two helm releases in two namespaces of the same kind cluster — once with plaintext consensus (`tls.allowInsecurePeer=true`, the legacy "insecure cell") and once with `tls.enabled=true` plus minted certs (the "TLS cell"). The TLS cell exists because the chart's secure-by-default render guard from PR #452 forces HA deployments to either opt out explicitly or supply TLS material, and only the latter exercises the peer mTLS path that PR #445 introduced. See issue #483.
+
+The two cells share one kind cluster because `podAntiAffinity` in the chart's StatefulSet keys on `app.kubernetes.io/instance: <Release.Name>` — so an insecure-cell pod and a TLS-cell pod can coexist on the same worker without violating the anti-affinity rule. They live in separate namespaces (`default` and `e2e-tls`) so the same Helm release name isn't needed (and the second `helm install` doesn't trample the first's state).
+
+The chart mounts ONE Secret cluster-wide, so each pod must use the same leaf cert. Per-pod identity (Vault- or cert-manager-style) is out of scope for this fixture. Instead, `cargo run -p kube-e2e-driver --bin gen-certs` (on the GitHub runner, before `helm install`) signs a single leaf cert whose SANs cover *every* pod FQDN (`tsoracle-tls-{0..N-1}.tsoracle-tls-peer.e2e-tls.svc.cluster.local`) plus both Service DNS names. That cert is sufficient because PR #445's peer authorization is CA-based: any cert chaining to the configured peer CA is accepted, and the SNI match on each peer dial is satisfied by the per-pod SAN. The CA private key is discarded after signing (one-shot fixture mint).
+
+The assertion driver (`kube-e2e-driver`) speaks TLS via a `--tls-ca` flag that points at the mounted Secret's `ca.crt`. Bare `host:port` endpoints are rewritten by `tsoracle-client` to `https://host:port` when a `ClientTlsConfig` is set (see `crates/tsoracle-client/src/transport.rs`), so SNI defaults to the host component of each endpoint URL. Job manifests in `e2e/kube/driver/tls/` use the full FQDN form in `--endpoints` (not the shorter `pod.peer-svc:port`) so SNI matches a SAN on the chart's leaf.
+
+What the TLS cell proves that the insecure cell does not:
+
+1. The chart's render guard accepts the happy path (`tls.enabled=true` with `tls.secretName`) without `tls.allowInsecurePeer`.
+2. Peer mTLS handshakes survive rolling restarts and SIGKILL-leader recovery: kube DNS / Pod-IP rotation does not invalidate the per-pod SNI against the fan-SAN leaf.
+3. The driver's TLS client (configured with the cluster's CA) interoperates with the chart's server-auth TLS on the client API, including under leader-redirect across cells.

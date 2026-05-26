@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tsoracle-e2e-soak
+  labels:
+    app.kubernetes.io/name: tsoracle-e2e-driver
+    app.kubernetes.io/component: tls-cell
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsoracle-e2e-driver
+        app.kubernetes.io/component: tls-cell
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: tsoracle-e2e-driver:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --mode=soak
+            # All replica endpoints (not the Service VIP) so the client has a
+            # known-live peer to fail over to when the pod it is bound to is
+            # torn down during the rolling restart — matching how a real
+            # tsoracle client is configured (leader-hint failover assumes the
+            # client knows every replica). Full FQDN form is required so the
+            # TLS handshake's SNI matches a SAN on the chart's leaf cert.
+            - --endpoints=tsoracle-tls-0.tsoracle-tls-peer.e2e-tls.svc.cluster.local:5051,tsoracle-tls-1.tsoracle-tls-peer.e2e-tls.svc.cluster.local:5051,tsoracle-tls-2.tsoracle-tls-peer.e2e-tls.svc.cluster.local:5051
+            - --tls-ca=/etc/tsoracle/tls/ca.crt
+            - --duration-secs=120
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/tsoracle/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: tsoracle-tls-certs

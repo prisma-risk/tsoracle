@@ -23,10 +23,12 @@
 
 mod tracker;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
+use tonic::transport::{Certificate, ClientTlsConfig, Identity};
 use tsoracle_client::{ClientBuilder, RetryPolicy};
 
 use crate::tracker::Tracker;
@@ -86,6 +88,25 @@ struct Cli {
     /// soak: how long to sustain load, in seconds.
     #[arg(long, default_value_t = 120)]
     duration_secs: u64,
+
+    /// CA cert (PEM) used to trust the cluster's client-API server cert.
+    /// Setting this enables TLS on every endpoint; bare `host:port` entries
+    /// in `--endpoints` are dialled as `https://host:port` and SNI matches the
+    /// host component (the chart's leaf cert covers each pod FQDN as a SAN).
+    /// Issue #483 TLS cell: required.
+    #[arg(long)]
+    tls_ca: Option<PathBuf>,
+
+    /// Client identity cert (PEM) for the optional client-mTLS path. Must be
+    /// paired with `--tls-key`. The default chart deployment runs with
+    /// `tls.clientMtls=false`, in which case server-auth alone is sufficient
+    /// and this flag is omitted.
+    #[arg(long, requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+
+    /// Client identity private key (PEM); paired with `--tls-cert`.
+    #[arg(long, requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
 }
 
 /// Soak error budget: monotonicity is the hard invariant (zero tolerance), but
@@ -120,17 +141,23 @@ fn generous_policy() -> RetryPolicy {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let tls = build_tls_config(
+        cli.tls_ca.as_deref(),
+        cli.tls_cert.as_deref(),
+        cli.tls_key.as_deref(),
+    )?;
     let passed = match cli.mode {
-        Mode::ColdStart => run_cold_start(&cli.endpoints, cli.count).await?,
-        Mode::Soak => run_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?,
+        Mode::ColdStart => run_cold_start(&cli.endpoints, cli.count, tls).await?,
+        Mode::Soak => run_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs), tls).await?,
         Mode::MixedVersionSoak => {
-            run_mixed_version_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?
+            run_mixed_version_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs), tls)
+                .await?
         }
         Mode::SigkillSoak => {
-            run_sigkill_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?
+            run_sigkill_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs), tls).await?
         }
         Mode::MembershipSoak => {
-            run_membership_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?
+            run_membership_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs), tls).await?
         }
     };
     if !passed {
@@ -139,15 +166,64 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Build the optional TLS config for the in-cluster driver client. Returns
+/// `Ok(None)` when no TLS flags are set (plaintext smoke path), `Ok(Some(cfg))`
+/// with a CA trust root and, if the `--tls-cert` / `--tls-key` pair was
+/// supplied, a client identity for mTLS.
+///
+/// Files are read eagerly so a bad path fails the Job immediately rather than
+/// surfacing as a confusing "transport error" on the first GetTs — tonic's
+/// `from_pem` constructors do not parse until the channel is actually built,
+/// and even then a malformed PEM tends to surface as a generic connect error.
+fn build_tls_config(
+    ca: Option<&std::path::Path>,
+    cert: Option<&std::path::Path>,
+    key: Option<&std::path::Path>,
+) -> Result<Option<ClientTlsConfig>> {
+    let Some(ca_path) = ca else {
+        // No CA → plaintext. clap's `requires` keeps cert/key from arriving
+        // alone, but a CA-less cert+key would be meaningless: there's no
+        // trust root to validate the server with.
+        if cert.is_some() || key.is_some() {
+            bail!("--tls-cert/--tls-key require --tls-ca (no trust root without a CA)");
+        }
+        return Ok(None);
+    };
+    let ca_pem = std::fs::read(ca_path).with_context(|| format!("read {}", ca_path.display()))?;
+    let mut cfg = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(ca_pem));
+    if let (Some(cert_path), Some(key_path)) = (cert, key) {
+        let cert_pem =
+            std::fs::read(cert_path).with_context(|| format!("read {}", cert_path.display()))?;
+        let key_pem =
+            std::fs::read(key_path).with_context(|| format!("read {}", key_path.display()))?;
+        cfg = cfg.identity(Identity::from_pem(cert_pem, key_pem));
+    }
+    Ok(Some(cfg))
+}
+
+/// Apply an optional TLS config to a `ClientBuilder`. Pulled out so the three
+/// call sites all opt in identically.
+fn apply_tls(builder: ClientBuilder, tls: Option<ClientTlsConfig>) -> ClientBuilder {
+    match tls {
+        Some(cfg) => builder.tls_config(cfg),
+        None => builder,
+    }
+}
+
 /// Probe each ordinal endpoint independently. A fresh single-endpoint client
 /// forces traffic at that specific pod; a follower replies with a leader-hint
 /// the in-cluster client follows. Any endpoint that cannot ultimately produce a
 /// timestamp fails the run, which is what proves all three nodes participate.
-async fn run_cold_start(endpoints: &[String], count: u32) -> Result<bool> {
+async fn run_cold_start(
+    endpoints: &[String],
+    count: u32,
+    tls: Option<ClientTlsConfig>,
+) -> Result<bool> {
     let mut tracker: Tracker<_> = Tracker::new();
     for endpoint in endpoints {
-        let client = ClientBuilder::endpoints(vec![endpoint.clone()])
-            .retry_policy(generous_policy())
+        let builder =
+            ClientBuilder::endpoints(vec![endpoint.clone()]).retry_policy(generous_policy());
+        let client = apply_tls(builder, tls.clone())
             .build()
             .await
             .with_context(|| format!("build client for {endpoint}"))?;
@@ -167,8 +243,12 @@ async fn run_cold_start(endpoints: &[String], count: u32) -> Result<bool> {
 /// Sustain GetTs load across the whole list for `duration`. Prints a sentinel
 /// on the first success so the workflow knows load is live before it restarts
 /// the StatefulSet.
-async fn run_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
-    sustain_load(endpoints, duration, "soak", MAX_SOAK_ERROR_RATE).await
+async fn run_soak(
+    endpoints: &[String],
+    duration: Duration,
+    tls: Option<ClientTlsConfig>,
+) -> Result<bool> {
+    sustain_load(endpoints, duration, "soak", MAX_SOAK_ERROR_RATE, tls).await
 }
 
 /// Sustain GetTs load while the orchestrator performs a mixed-version rolling
@@ -179,12 +259,17 @@ async fn run_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
 /// lets the orchestrator sequence the partial upgrade + activation only after
 /// load is provably live, mirroring how the existing soak lane sequences a
 /// rolling restart.
-async fn run_mixed_version_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
+async fn run_mixed_version_soak(
+    endpoints: &[String],
+    duration: Duration,
+    tls: Option<ClientTlsConfig>,
+) -> Result<bool> {
     sustain_load(
         endpoints,
         duration,
         "mixed-version-soak",
         MAX_SOAK_ERROR_RATE,
+        tls,
     )
     .await
 }
@@ -195,12 +280,17 @@ async fn run_mixed_version_soak(endpoints: &[String], duration: Duration) -> Res
 /// the client's retry + leader-redirect masks entirely (0 errors observed).
 /// The distinct sentinel (`sigkill-soak: first GetTs ok`) lets the orchestrator
 /// only kill the leader after load is provably live.
-async fn run_sigkill_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
+async fn run_sigkill_soak(
+    endpoints: &[String],
+    duration: Duration,
+    tls: Option<ClientTlsConfig>,
+) -> Result<bool> {
     sustain_load(
         endpoints,
         duration,
         "sigkill-soak",
         MAX_SIGKILL_SOAK_ERROR_RATE,
+        tls,
     )
     .await
 }
@@ -213,8 +303,19 @@ async fn run_sigkill_soak(endpoints: &[String], duration: Duration) -> Result<bo
 /// connection (the leader stays leader, the removed voter is not the
 /// leader). The distinct sentinel (`membership-soak: first GetTs ok`) lets
 /// the orchestrator only begin the churn after load is provably live.
-async fn run_membership_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
-    sustain_load(endpoints, duration, "membership-soak", MAX_SOAK_ERROR_RATE).await
+async fn run_membership_soak(
+    endpoints: &[String],
+    duration: Duration,
+    tls: Option<ClientTlsConfig>,
+) -> Result<bool> {
+    sustain_load(
+        endpoints,
+        duration,
+        "membership-soak",
+        MAX_SOAK_ERROR_RATE,
+        tls,
+    )
+    .await
 }
 
 /// Shared body of the three soak modes. The `label` is the per-mode prefix
@@ -227,9 +328,10 @@ async fn sustain_load(
     duration: Duration,
     label: &str,
     max_error_rate: f64,
+    tls: Option<ClientTlsConfig>,
 ) -> Result<bool> {
-    let client = ClientBuilder::endpoints(endpoints.to_vec())
-        .retry_policy(generous_policy())
+    let builder = ClientBuilder::endpoints(endpoints.to_vec()).retry_policy(generous_policy());
+    let client = apply_tls(builder, tls)
         .build()
         .await
         .with_context(|| format!("build {label} client"))?;
@@ -337,5 +439,59 @@ mod cli_tests {
         assert_eq!(cli.mode, Mode::MembershipSoak);
         assert_eq!(cli.endpoints.len(), 3);
         assert_eq!(cli.duration_secs, 180);
+    }
+
+    #[test]
+    fn tls_ca_alone_parses() {
+        // The TLS-cell server-auth-only path: only `--tls-ca` is needed because
+        // the chart default is `tls.clientMtls=false`.
+        let cli = Cli::parse_from([
+            "kube-e2e-driver",
+            "--mode=soak",
+            "--endpoints=a:5051",
+            "--tls-ca=/etc/tsoracle/tls/ca.crt",
+        ]);
+        assert_eq!(
+            cli.tls_ca.as_deref(),
+            Some(std::path::Path::new("/etc/tsoracle/tls/ca.crt"))
+        );
+        assert!(cli.tls_cert.is_none());
+        assert!(cli.tls_key.is_none());
+    }
+
+    #[test]
+    fn tls_cert_without_key_is_rejected() {
+        // Clap's `requires` enforces the all-or-nothing client-mTLS pair so
+        // that an operator who forgets `--tls-key` fails fast at flag-parse
+        // time rather than at first connect.
+        let result = Cli::try_parse_from([
+            "kube-e2e-driver",
+            "--mode=soak",
+            "--endpoints=a:5051",
+            "--tls-ca=/etc/tsoracle/tls/ca.crt",
+            "--tls-cert=/etc/tsoracle/tls/tls.crt",
+        ]);
+        assert!(result.is_err(), "missing --tls-key should fail parse");
+    }
+
+    #[test]
+    fn build_tls_config_returns_none_when_no_flags() {
+        let cfg = build_tls_config(None, None, None).expect("plaintext path");
+        assert!(cfg.is_none());
+    }
+
+    #[test]
+    fn build_tls_config_rejects_cert_without_ca() {
+        // Defense in depth: clap blocks this via `requires`, but a programmatic
+        // caller could still feed cert+key with no CA; bail rather than silently
+        // build a no-trust-root identity-only config.
+        let dir = std::env::temp_dir();
+        let cert = dir.join("nonexistent.crt");
+        let key = dir.join("nonexistent.key");
+        let err = build_tls_config(None, Some(&cert), Some(&key)).unwrap_err();
+        assert!(
+            err.to_string().contains("--tls-ca"),
+            "expected --tls-ca message, got: {err}"
+        );
     }
 }

@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tsoracle-e2e-membership-soak
+  labels:
+    app.kubernetes.io/name: tsoracle-e2e-driver
+    app.kubernetes.io/component: tls-cell
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsoracle-e2e-driver
+        app.kubernetes.io/component: tls-cell
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: tsoracle-e2e-driver:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --mode=membership-soak
+            # The three ORIGINAL replica endpoints (not the future tsoracle-tls-3
+            # the orchestrator adds mid-test). After the new node is promoted,
+            # the client reaches it via the leader-hint that any of these
+            # three returns — exercising exactly the redirect path we want.
+            # Full FQDN form is required so the TLS handshake's SNI matches a
+            # SAN on the chart's leaf cert. tsoracle-tls-3's FQDN is *also*
+            # covered by gen-certs (replicas=4 in the workflow's mint step)
+            # so once it's promoted and the leader-hint redirects to it,
+            # the client-side TLS handshake at that FQDN still validates.
+            - --endpoints=tsoracle-tls-0.tsoracle-tls-peer.e2e-tls.svc.cluster.local:5051,tsoracle-tls-1.tsoracle-tls-peer.e2e-tls.svc.cluster.local:5051,tsoracle-tls-2.tsoracle-tls-peer.e2e-tls.svc.cluster.local:5051
+            - --tls-ca=/etc/tsoracle/tls/ca.crt
+            # Longer than the plain soak: must outlast scale-up of the
+            # StatefulSet to 4 + the new pod reaching Ready + `admin
+            # add-learner` blocking until the learner catches up + `promote` +
+            # `remove`, plus headroom for a cooldown window where the
+            # tracker can confirm monotonicity holds AFTER the membership
+            # transitions settle. Tune alongside the orchestrator step in
+            # run-assertions.sh.
+            - --duration-secs=180
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/tsoracle/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: tsoracle-tls-certs

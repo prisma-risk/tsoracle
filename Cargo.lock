@@ -1455,7 +1455,9 @@ version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
+ "rcgen",
  "tokio",
+ "tonic",
  "tsoracle-client",
 ]
 
