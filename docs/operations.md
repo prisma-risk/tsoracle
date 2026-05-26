@@ -99,4 +99,22 @@ The client gives `FAILED_PRECONDITION` special handling: it parses the `tsoracle
 
 Cert and key shapes follow tonic: `ServerTlsConfig::new().identity(Identity::from_pem(cert, key))` for plain TLS; add `.client_ca_root(Certificate::from_pem(ca))` for mTLS.
 
-The stock `tsoracle` CLI does not currently expose TLS flags. If you need TLS today, embed the library — see [`examples/tls-mtls`](../examples/tls-mtls/) for a runnable starting point.
+The stock `tsoracle` CLI exposes `--peer-tls-{cert,key,ca}` for peer mTLS, `--admin-tls-{cert,key,ca}` for the membership-admin gRPC server, and `--tls-cert / --tls-key / --tls-client-ca` for the client-facing gRPC port. See the [HA driver flag tables](../interface-reference.md#tsoracle-serve-openraft) for the per-flag wiring.
+
+## Peer-port trust boundary
+
+`tsoracle serve openraft --raft-addr` and `tsoracle serve paxos --peer-listen` bind the consensus peer transport. The binary refuses a routable bind without peer TLS unless explicitly opted-out:
+
+- **Loopback** (`127.0.0.0/8`, `::1`) — plaintext allowed. Intended for local-dev and same-pod sidecar callers.
+- **Routable** without `--peer-tls-{cert,key,ca}` — rejected at startup with `PeerInsecureRoutable` before storage is opened.
+- **Routable** with `--peer-tls-{cert,key,ca}` — peer mTLS; the cluster CA is the trust root for both directions.
+- **Routable** with `--allow-insecure-peer` — the secure-by-default guard is opted out. A `tracing::warn!` line emits at startup naming the bind address. Intended only for single-host dev or deployments where peer security is terminated out-of-band (e.g. a service mesh's pod-to-pod mTLS, or a strict NetworkPolicy + dedicated CNI).
+
+### Helm chart composition
+
+The Helm chart's `tls.allowInsecurePeer` value gates **both** layers:
+
+- **Render-time:** `_helpers.tpl` refuses to render a HA driver with `tls.enabled=false` unless `tls.allowInsecurePeer=true` is also set.
+- **Runtime:** when both `tls.enabled=false` and `tls.allowInsecurePeer=true`, the statefulset injects `ALLOW_INSECURE_PEER=true` into the container env, and `entrypoint.sh` translates that to `--allow-insecure-peer` on the binary's argv.
+
+A single intentional opt-in carries through to both layers; the chart will never render a configuration that the binary then crashes on.

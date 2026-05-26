@@ -62,6 +62,7 @@ helm install tso oci://ghcr.io/prisma-risk/charts/tsoracle \
 | `tls.enabled` | `false` | Enable TLS on the client-facing gRPC port. Requires `tls.secretName` to be set. |
 | `tls.secretName` | `""` | Name of a Kubernetes Secret containing `tls.crt`, `tls.key`, and `ca.crt`. |
 | `tls.clientMtls` | `false` | Require client certificates on the API port (mutual TLS). Only meaningful when `tls.enabled=true`. |
+| `tls.allowInsecurePeer` | `false` | HA drivers (`openraft`, `paxos`) refuse to render with `tls.enabled=false` unless this is set. Setting it injects `ALLOW_INSECURE_PEER=true` into the container env, which the entrypoint translates to `--allow-insecure-peer` on the binary — opting out the peer-listener secure-by-default guard at both render and runtime. See [Peer-port trust boundary](operations.md#peer-port-trust-boundary). |
 | `server.windowAhead` | `1s` | How far ahead the allocator extends the high-water on each window extension. See [Sizing window_ahead](operations.md#sizing-window_ahead). |
 | `server.failoverAdvance` | `1s` | How far past `serving_floor` the failover fence advances the high-water on leadership gain. See [Sizing failover_advance](operations.md#sizing-failover_advance). |
 | `server.logLevel` | `info` | Log level passed to the server (`error`, `warn`, `info`, `debug`, `trace`). |
