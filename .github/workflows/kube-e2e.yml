@@ -74,7 +74,18 @@ jobs:
         run: kubectl rollout status statefulset/tsoracle --timeout=300s
       - name: run e2e assertions — insecure cell (cold-start + soak + sigkill + dynamic membership)
         run: ./e2e/kube/run-assertions.sh
-
+      # NetworkPolicy probe: the chart's NetworkPolicy (introduced in PR #452)
+      # restricts the peer port to sibling replicas while leaving the client
+      # `tso` port open. Run from a *different* namespace with non-matching
+      # pod labels to assert peer is DENIED and tso is ALLOWED. kindnet (the
+      # CNI helm/kind-action ships) enforces NetworkPolicy out of the box at
+      # the version pinned by this workflow. See issue #486.
+      - name: NetworkPolicy probe — insecure cell
+        env:
+          TARGET_RELEASE: tsoracle
+          TARGET_NAMESPACE: default
+          PROBE_NAMESPACE: e2e-netpol-probe-insecure
+        run: ./e2e/kube/probe/run-netpol-probe.sh
       # ── TLS cell ──────────────────────────────────────────────────────────
       # Exercises the chart's secure-by-default render guard's *happy path*
       # (PR #452 — `tls.enabled=true` rendering without the insecure opt-out),
@@ -126,6 +137,16 @@ jobs:
           RELEASE: tsoracle-tls
           JOB_DIR: ${{ github.workspace }}/e2e/kube/driver/tls
         run: ./e2e/kube/run-assertions.sh
+      # Same probe as the insecure cell but pointed at the TLS-cell release.
+      # The chart's NetworkPolicy is independent of TLS, so the assertion is
+      # identical: peer denied from outside the StatefulSet, tso allowed.
+      # See issue #486.
+      - name: NetworkPolicy probe — TLS cell
+        env:
+          TARGET_RELEASE: tsoracle-tls
+          TARGET_NAMESPACE: e2e-tls
+          PROBE_NAMESPACE: e2e-netpol-probe-tls
+        run: ./e2e/kube/probe/run-netpol-probe.sh
 
       - name: dump diagnostics on failure
         if: failure()
@@ -146,3 +167,8 @@ jobs:
           kubectl -n e2e-tls logs job/tsoracle-e2e-sigkill-soak || true
           kubectl -n e2e-tls logs job/tsoracle-e2e-membership-soak || true
           kubectl -n e2e-tls get events --sort-by=.lastTimestamp || true
+          echo "── NetworkPolicy probes (#486) ──"
+          kubectl -n e2e-netpol-probe-insecure get pods,jobs -o wide || true
+          kubectl -n e2e-netpol-probe-insecure logs job/tsoracle-e2e-netpol-probe || true
+          kubectl -n e2e-netpol-probe-tls get pods,jobs -o wide || true
+          kubectl -n e2e-netpol-probe-tls logs job/tsoracle-e2e-netpol-probe || true

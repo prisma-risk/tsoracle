@@ -47,6 +47,8 @@ The CI workflow runs the same assertion lane twice against two helm releases in 
 
 Both cells share `run-assertions.sh`, which reads `RELEASE` and `JOB_DIR` env vars to know which release to drive and which Job manifest set to apply. The TLS cell's Job manifests live in `driver/tls/` and mount the cluster's TLS Secret so the driver client trusts the same CA the cluster's server cert chains to.
 
+After each cell's assertion lane, the workflow runs a NetworkPolicy enforcement probe (`probe/run-netpol-probe.sh`) from a separate namespace with non-matching labels to confirm the chart's NetworkPolicy actually denies the peer port and allows the `tso` port from outside the StatefulSet. See `probe/README.md` and issue #486.
+
 To run only the TLS cell locally, after the kind cluster is up:
 
 ```sh
