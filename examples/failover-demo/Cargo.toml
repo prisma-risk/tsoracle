@@ -9,10 +9,10 @@ description            = "tsoracle example: in-process failover fence pedagogy d
 publish                = false
 
 [dependencies]
-tsoracle-core      = { path = "../../crates/tsoracle-core", version = "0.2.5" }
-tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "0.1.10" }
-tsoracle-server    = { path = "../../crates/tsoracle-server", version = "0.2.9", features = ["test-fakes"] }
-tsoracle-proto     = { path = "../../crates/tsoracle-proto", version = "0.2.4" }
+tsoracle-core      = { path = "../../crates/tsoracle-core", version = "1.0.0" }
+tsoracle-consensus = { path = "../../crates/tsoracle-consensus", version = "1.0.0" }
+tsoracle-server    = { path = "../../crates/tsoracle-server", version = "1.0.0", features = ["test-fakes"] }
+tsoracle-proto     = { path = "../../crates/tsoracle-proto", version = "1.0.0" }
 tokio              = { workspace = true, features = ["time"] }
 tonic              = { workspace = true }
 anyhow             = { workspace = true }

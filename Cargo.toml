@@ -54,7 +54,7 @@ default-members = [
 ]
 
 [workspace.package]
-version      = "0.1.4"
+version      = "1.0.0"
 edition      = "2024"
 rust-version = "1.88"
 license      = "Apache-2.0"
@@ -92,9 +92,9 @@ tempfile           = "3"
 thiserror          = "2"
 tokio              = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "fs"] }
 tokio-stream       = { version = "0.1", features = ["sync"] }
-tsoracle-yieldpoint = { path = "crates/tsoracle-yieldpoint", version = "0.1.6" }
-tsoracle-failpoint = { path = "crates/tsoracle-failpoint", version = "0.1.1" }
-tsoracle-codec = { path = "crates/tsoracle-codec", version = "0.1.4" }
+tsoracle-yieldpoint = { path = "crates/tsoracle-yieldpoint", version = "1.0.0" }
+tsoracle-failpoint = { path = "crates/tsoracle-failpoint", version = "1.0.0" }
+tsoracle-codec = { path = "crates/tsoracle-codec", version = "1.0.0" }
 tonic              = "0.14"
 tonic-prost        = "0.14"
 tonic-prost-build  = "0.14"
