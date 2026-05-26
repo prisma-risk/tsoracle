@@ -396,8 +396,8 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
     use cli::AdminCmd;
     use tsoracle_standalone::admin_proto::membership_admin_client::MembershipAdminClient;
     use tsoracle_standalone::admin_proto::{
-        AddLearnerRequest, AdminErrorKind, ChangeResponse, ListMembersRequest, MemberRole,
-        PromoteRequest, RemoveNodeRequest,
+        ActivateFormatRequest, AddLearnerRequest, AdminErrorKind, ChangeResponse,
+        ListMembersRequest, MemberRole, PromoteRequest, RemoveNodeRequest,
     };
 
     // Re-run `op` against the leader if the first call says NOT_LEADER. The
@@ -445,6 +445,37 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
                 .map(|kind| format!("{kind:?}"))
                 .unwrap_or_else(|_| resp.error.to_string());
             anyhow::bail!("admin error ({kind}): {}", resp.message)
+        }
+    }
+
+    /// Activation-specific reporter: success / gate-rejection / NOT_LEADER /
+    /// local-range-rejection each get their own exit code per the issue #484
+    /// contract. Anything else exits 1 via the bubbled `anyhow::Error`.
+    fn report_activation(resp: ChangeResponse) -> Result<()> {
+        if resp.ok {
+            println!("ok");
+            return Ok(());
+        }
+        let kind = AdminErrorKind::try_from(resp.error)
+            .map(|k| format!("{k:?}"))
+            .unwrap_or_else(|_| resp.error.to_string());
+        match AdminErrorKind::try_from(resp.error) {
+            Ok(AdminErrorKind::MembersBelowTarget) => {
+                eprintln!("activate-format: gate rejected: {}", resp.message);
+                std::process::exit(2);
+            }
+            Ok(AdminErrorKind::NotLeader) => {
+                eprintln!("activate-format: not the leader");
+                std::process::exit(3);
+            }
+            Ok(AdminErrorKind::TargetOutOfRange) => {
+                eprintln!(
+                    "activate-format: target outside local readable range: {}",
+                    resp.message
+                );
+                std::process::exit(4);
+            }
+            _ => anyhow::bail!("activate-format error ({kind}): {}", resp.message),
         }
     }
 
@@ -522,6 +553,24 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
                     Box::pin(async move {
                         client
                             .remove_node(RemoveNodeRequest { id })
+                            .await
+                            .map(|r| r.into_inner())
+                    })
+                })
+                .await?,
+            )
+        }
+        AdminCmd::ActivateFormat(args) => {
+            let tls = admin_client_tls(&args.tls)?;
+            let endpoint = args.endpoint.clone();
+            let target = args.target;
+            report_activation(
+                with_redirect(endpoint, tls.as_ref(), move |mut client| {
+                    Box::pin(async move {
+                        client
+                            .activate_format(ActivateFormatRequest {
+                                target: target as u32,
+                            })
                             .await
                             .map(|r| r.into_inner())
                     })
