@@ -4,6 +4,18 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.3.1...tsoracle-driver-openraft-v0.3.2) - 2026-05-26
+
+### Added
+
+- *(openraft-toolkit)* version-neutral e2e-max-readable-next feature ([#468](https://github.com/prisma-risk/tsoracle/pull/468))
+- *(driver-openraft)* format-migration observability and runbook ([#467](https://github.com/prisma-risk/tsoracle/pull/467))
+- *(driver-openraft)* joiner gate and migration-on-next-write tests ([#465](https://github.com/prisma-risk/tsoracle/pull/465))
+- *(driver-openraft)* apply-keyed activation barrier with subset gate ([#464](https://github.com/prisma-risk/tsoracle/pull/464))
+- *(driver-openraft)* add format-activation gate and Capabilities RPC ([#463](https://github.com/prisma-risk/tsoracle/pull/463))
+- *(openraft-toolkit)* add ActiveWriteVersion cell and version constants ([#460](https://github.com/prisma-risk/tsoracle/pull/460))
+- *(openraft-toolkit)* route RocksdbLogStore log/meta codec through LogStoreCodec provider seam ([#459](https://github.com/prisma-risk/tsoracle/pull/459))
+
 ## [0.3.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v0.3.0...tsoracle-driver-openraft-v0.3.1) - 2026-05-26
 
 ### Added

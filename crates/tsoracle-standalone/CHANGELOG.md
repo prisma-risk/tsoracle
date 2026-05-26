@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v0.1.1...tsoracle-standalone-v0.1.2) - 2026-05-26
+
+### Added
+
+- *(openraft-toolkit)* version-neutral e2e-max-readable-next feature ([#468](https://github.com/prisma-risk/tsoracle/pull/468))
+- *(driver-openraft)* add format-activation gate and Capabilities RPC ([#463](https://github.com/prisma-risk/tsoracle/pull/463))
+- *(standalone)* frame openraft peer RPC bodies with format_version ([#461](https://github.com/prisma-risk/tsoracle/pull/461))
+- *(openraft-toolkit)* add ActiveWriteVersion cell and version constants ([#460](https://github.com/prisma-risk/tsoracle/pull/460))
+- *(openraft-toolkit)* route RocksdbLogStore log/meta codec through LogStoreCodec provider seam ([#459](https://github.com/prisma-risk/tsoracle/pull/459))
+
+### Fixed
+
+- *(standalone)* require mTLS for non-loopback admin gRPC bind ([#462](https://github.com/prisma-risk/tsoracle/pull/462))
+
 ## [0.1.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v0.1.0...tsoracle-standalone-v0.1.1) - 2026-05-26
 
 ### Added
