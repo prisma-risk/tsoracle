@@ -38,6 +38,8 @@ cargo install tsoracle
 tsoracle
 ```
 
+Releases are signed with SLSA build provenance — see [Verifying release signatures](docs/release-signatures.md).
+
 Bare `tsoracle` is shorthand for `tsoracle serve file`. The server listens on `127.0.0.1:50551` and persists state under `./tsoracle-data/`.
 
 Then call it from Rust:
