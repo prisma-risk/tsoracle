@@ -495,67 +495,95 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                     },
                 )) => {
                     let target = *target;
-                    // Evaluate the subset against the membership committed as
-                    // of this entry's log position. Apply folds the log in
-                    // index order, so `core.last_membership` is exactly that
-                    // membership (a `Membership` entry at a lower index has
-                    // already updated it; a later one has not). Cover BOTH
-                    // voters and learners: openraft replicates/snapshots
-                    // learners, so an un-gated learner must force a no-op.
-                    let mut core = self.core.lock();
-                    let committed_members: std::collections::BTreeSet<u64> = core
-                        .last_membership
-                        .membership()
-                        .nodes()
-                        .map(|(node_id, _node)| *node_id)
-                        .collect();
-                    let outcome = if committed_members.is_subset(gated_members) {
-                        // Successful (non-no-op) apply: set the
-                        // process-shared active-write-version cell. NO meta
-                        // write — durability is the raft log (deterministic
-                        // replay re-runs this exact check) plus the snapshot
-                        // frame byte.
-                        self.active_write_version.set(target);
-                        // `debug!` not `info!`: this is on the per-entry apply
-                        // hot path (this file carries the
-                        // `#[PerformanceCriticalPath]` marker), so
-                        // info-or-higher logging is banned. The
-                        // operator-visible surface is the `applied` counter
-                        // and the `active_write_version` gauge.
-                        tracing::debug!(
+                    // Defense-in-depth ahead of the subset check: refuse to
+                    // flip the cell to a target outside the LOCAL binary's
+                    // readable range. The gate at proposal time
+                    // (`target_in_local_readable_range` in `capabilities`)
+                    // is the primary safety mechanism, but the apply arm
+                    // re-checks here so an older (buggy) binary's committed
+                    // out-of-range entry cannot poison a fixed binary's
+                    // active write version on replay. Reaching this branch
+                    // means a protocol invariant was already broken; the
+                    // apply pipeline still must not panic (that would tear
+                    // down the leader) — emit a NO-OP outcome and a
+                    // distinct counter so the operator sees it.
+                    if !(MIN_READABLE_VERSION..=MAX_READABLE_VERSION).contains(&target) {
+                        tracing::error!(
                             target = target,
-                            gated_members = ?gated_members,
-                            committed_members = ?committed_members,
-                            "SetFormatVersion applied: active write version flipped"
+                            min = MIN_READABLE_VERSION,
+                            max = MAX_READABLE_VERSION,
+                            "SetFormatVersion apply rejected: target outside local readable range"
                         );
-                        crate::observability::record_applied();
-                        crate::observability::record_active_write_version(target);
-                        ApplyOutcome::FormatActivated { target }
+                        crate::observability::record_noop_target_out_of_range();
+                        let mut core = self.core.lock();
+                        core.last_applied = Some(log_id);
+                        HighWaterApplied {
+                            value: core.current_value,
+                            outcome: ApplyOutcome::FormatActivationTargetOutOfRange { target },
+                        }
                     } else {
-                        // Membership grew an un-gated member between the gate
-                        // and this entry's position. Leave the cell
-                        // untouched; the operator re-gates and re-issues. A
-                        // no-op writes nothing at `target`, so it cannot
-                        // resurrect on restart.
-                        //
-                        // `debug!` not `warn!`: hot path, same rule as the
-                        // success arm above. The operator-visible surface is
-                        // the `noop_membership_subset` counter — a non-zero
-                        // value during an activation means a membership
-                        // change raced the bump.
-                        tracing::debug!(
-                            target = target,
-                            gated_members = ?gated_members,
-                            committed_members = ?committed_members,
-                            "SetFormatVersion no-op: committed membership is not a subset of the gated set"
-                        );
-                        crate::observability::record_noop_membership_subset();
-                        ApplyOutcome::FormatActivationNoop { target }
-                    };
-                    core.last_applied = Some(log_id);
-                    HighWaterApplied {
-                        value: core.current_value,
-                        outcome,
+                        // Evaluate the subset against the membership committed as
+                        // of this entry's log position. Apply folds the log in
+                        // index order, so `core.last_membership` is exactly that
+                        // membership (a `Membership` entry at a lower index has
+                        // already updated it; a later one has not). Cover BOTH
+                        // voters and learners: openraft replicates/snapshots
+                        // learners, so an un-gated learner must force a no-op.
+                        let mut core = self.core.lock();
+                        let committed_members: std::collections::BTreeSet<u64> = core
+                            .last_membership
+                            .membership()
+                            .nodes()
+                            .map(|(node_id, _node)| *node_id)
+                            .collect();
+                        let outcome = if committed_members.is_subset(gated_members) {
+                            // Successful (non-no-op) apply: set the
+                            // process-shared active-write-version cell. NO meta
+                            // write — durability is the raft log (deterministic
+                            // replay re-runs this exact check) plus the snapshot
+                            // frame byte.
+                            self.active_write_version.set(target);
+                            // `debug!` not `info!`: this is on the per-entry apply
+                            // hot path (this file carries the
+                            // `#[PerformanceCriticalPath]` marker), so
+                            // info-or-higher logging is banned. The
+                            // operator-visible surface is the `applied` counter
+                            // and the `active_write_version` gauge.
+                            tracing::debug!(
+                                target = target,
+                                gated_members = ?gated_members,
+                                committed_members = ?committed_members,
+                                "SetFormatVersion applied: active write version flipped"
+                            );
+                            crate::observability::record_applied();
+                            crate::observability::record_active_write_version(target);
+                            ApplyOutcome::FormatActivated { target }
+                        } else {
+                            // Membership grew an un-gated member between the gate
+                            // and this entry's position. Leave the cell
+                            // untouched; the operator re-gates and re-issues. A
+                            // no-op writes nothing at `target`, so it cannot
+                            // resurrect on restart.
+                            //
+                            // `debug!` not `warn!`: hot path, same rule as the
+                            // success arm above. The operator-visible surface is
+                            // the `noop_membership_subset` counter — a non-zero
+                            // value during an activation means a membership
+                            // change raced the bump.
+                            tracing::debug!(
+                                target = target,
+                                gated_members = ?gated_members,
+                                committed_members = ?committed_members,
+                                "SetFormatVersion no-op: committed membership is not a subset of the gated set"
+                            );
+                            crate::observability::record_noop_membership_subset();
+                            ApplyOutcome::FormatActivationNoop { target }
+                        };
+                        core.last_applied = Some(log_id);
+                        HighWaterApplied {
+                            value: core.current_value,
+                            outcome,
+                        }
                     }
                 }
                 EntryPayload::Membership(membership) => {
@@ -799,9 +827,19 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "e2e-max-readable-next")]
     #[tokio::test]
     async fn set_format_version_subset_match_sets_cell() {
+        // The flip is only observable when the local binary's readable
+        // range contains a target distinct from BASELINE. The
+        // `e2e-max-readable-next` test harness raises MAX to
+        // BASELINE + 1; in default builds MIN == MAX == BASELINE, so any
+        // distinct target is out of range and the apply-arm
+        // defense-in-depth (correctly) no-ops it. The behavior pinned by
+        // this test — "subset OK + in-range target ⇒ cell flips" — is
+        // unchanged; only the in-range target is feature-dependent.
         let mut sm = HighWaterStateMachine::new();
+        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 1;
         // Establish membership {1, 2} at index 1.
         apply_one(
             &mut sm,
@@ -815,7 +853,7 @@ mod tests {
             2,
             EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
                 SetFormatVersionPayload {
-                    target: 7,
+                    target,
                     gated_members: BTreeSet::from([1u64, 2u64, 3u64]),
                 },
             )),
@@ -823,8 +861,167 @@ mod tests {
         .await;
         assert_eq!(
             sm.active_write_version(),
-            7,
+            target,
             "cell set on successful subset apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_format_version_subset_match_out_of_range_target_is_apply_noop() {
+        // Mirror of the (feature-gated) "subset match" test but for the
+        // default build: a subset-OK bump whose target is OUT of the
+        // local readable range must be no-op'd by the apply-arm
+        // defense-in-depth, regardless of subset success. Pins the
+        // ordering invariant — the range check runs BEFORE the subset
+        // check, so an OOR target never sneaks through on a gate
+        // committed by an older buggy binary.
+        let mut sm = HighWaterStateMachine::new();
+        let before = sm.active_write_version();
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Membership(voters_membership(&[1, 2])),
+        )
+        .await;
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
+                SetFormatVersionPayload {
+                    target: 7, // out of range under default features.
+                    gated_members: BTreeSet::from([1u64, 2u64, 3u64]),
+                },
+            )),
+        )
+        .await;
+        assert_eq!(
+            sm.active_write_version(),
+            before,
+            "subset-OK + OOR target ⇒ apply-arm defense-in-depth no-op"
+        );
+    }
+
+    // ---- Apply-arm defense-in-depth: out-of-range target is a no-op ----
+    //
+    // The all-members gate at proposal time is the primary safety
+    // mechanism, but the apply arm independently refuses to flip the
+    // shared cell to a target outside the LOCAL binary's
+    // [MIN_READABLE_VERSION, MAX_READABLE_VERSION]. This guards against
+    // two paths the gate cannot:
+    //
+    //   1. Replay of a log committed by an older (buggy) binary that
+    //      let an out-of-range target through. A fixed binary replaying
+    //      that log must NOT propagate the corruption into its in-memory
+    //      cell, since the codec arms reject encode/decode at that
+    //      version and the cluster wedges.
+    //   2. A protocol-violating peer somehow committing such an entry
+    //      (e.g. a forged proposal). The fail-safe at apply contains
+    //      blast radius to "the flip didn't take effect" instead of
+    //      "all subsequent log appends fail".
+    //
+    // The behavior is a NO-OP (cell untouched + `FormatActivationTargetOutOfRange`
+    // outcome), never a panic. The apply pipeline is on the critical
+    // path; refusing to apply would tear the leader down rather than
+    // contain the bad entry.
+
+    #[tokio::test]
+    async fn set_format_version_target_above_max_is_apply_noop() {
+        let mut sm = HighWaterStateMachine::new();
+        let before = sm.active_write_version();
+        // Membership matches the gated set (subset OK) so the only thing
+        // that can hold the flip back is the range check.
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Membership(voters_membership(&[1, 2])),
+        )
+        .await;
+        let above_max = tsoracle_openraft_toolkit::MAX_READABLE_VERSION.saturating_add(1);
+        if above_max == tsoracle_openraft_toolkit::MAX_READABLE_VERSION {
+            return; // MAX == u8::MAX (impossible in practice).
+        }
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
+                SetFormatVersionPayload {
+                    target: above_max,
+                    gated_members: BTreeSet::from([1u64, 2u64]),
+                },
+            )),
+        )
+        .await;
+        assert_eq!(
+            sm.active_write_version(),
+            before,
+            "apply must refuse to flip to a target above MAX_READABLE_VERSION"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_format_version_target_below_min_is_apply_noop() {
+        let mut sm = HighWaterStateMachine::new();
+        let before = sm.active_write_version();
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Membership(voters_membership(&[1, 2])),
+        )
+        .await;
+        // MIN_READABLE_VERSION is at least 1 in any sensible build (the
+        // codec's compile-time `MIN <= MAX` plus the framing layer's
+        // version byte both effectively forbid MIN == 0), so MIN - 1 is
+        // always representable and out of range. This is the bug class
+        // the finding hit: a target below MIN that the (pre-fix) gate
+        // accepted because it only checked the upper bound.
+        let below_min = tsoracle_openraft_toolkit::MIN_READABLE_VERSION - 1;
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
+                SetFormatVersionPayload {
+                    target: below_min,
+                    gated_members: BTreeSet::from([1u64, 2u64]),
+                },
+            )),
+        )
+        .await;
+        assert_eq!(
+            sm.active_write_version(),
+            before,
+            "apply must refuse to flip to a target below MIN_READABLE_VERSION"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_format_version_target_zero_is_apply_noop() {
+        // Target 0 is the worst case: 0 is also the legacy-unframed wire
+        // sentinel, so a 0-stamped record collides with that
+        // interpretation. The apply arm must refuse the flip rather than
+        // let it through (the codec would later reject every encode).
+        let mut sm = HighWaterStateMachine::new();
+        let before = sm.active_write_version();
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Membership(voters_membership(&[1, 2])),
+        )
+        .await;
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
+                SetFormatVersionPayload {
+                    target: 0,
+                    gated_members: BTreeSet::from([1u64, 2u64]),
+                },
+            )),
+        )
+        .await;
+        assert_eq!(
+            sm.active_write_version(),
+            before,
+            "apply must refuse to flip to a 0 target"
         );
     }
 
@@ -918,14 +1115,16 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "e2e-max-readable-next")]
     #[tokio::test]
     async fn successful_activation_survives_replay() {
+        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 1;
         let log = vec![
             (1u64, ReplayEntry::Membership(vec![1, 2])),
             (
                 2u64,
                 ReplayEntry::Bump {
-                    target: 7,
+                    target,
                     gated: vec![1, 2, 3],
                 },
             ),
@@ -933,7 +1132,7 @@ mod tests {
         // Live apply sets the cell.
         let mut live = HighWaterStateMachine::new();
         replay(&mut live, &log).await;
-        assert_eq!(live.active_write_version(), 7);
+        assert_eq!(live.active_write_version(), target);
 
         // "Restart": a fresh SM with a fresh BASELINE-seeded cell, replaying
         // the same committed log, re-establishes target via the re-run
@@ -941,14 +1140,50 @@ mod tests {
         let mut recovered = HighWaterStateMachine::new();
         assert_ne!(
             recovered.active_write_version(),
-            7,
+            target,
             "fresh cell starts at baseline"
         );
         replay(&mut recovered, &log).await;
         assert_eq!(
             recovered.active_write_version(),
-            7,
+            target,
             "replay re-applies the flip"
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_bump_replays_as_noop_across_restart() {
+        // Replay-determinism contract for an out-of-range bump committed
+        // by an older (buggy) binary: every replay reaches the same
+        // state (cell stays at baseline) because the apply arm's range
+        // check uses ONLY the local binary's constants + the entry
+        // data, never timing or per-replay side state. The fix CANNOT
+        // resurrect the bad flip on restart.
+        let log = vec![
+            (1u64, ReplayEntry::Membership(vec![1, 2])),
+            (
+                2u64,
+                ReplayEntry::Bump {
+                    target: 7, // out of range under default features.
+                    gated: vec![1, 2, 3],
+                },
+            ),
+        ];
+        let mut live = HighWaterStateMachine::new();
+        let baseline = live.active_write_version();
+        replay(&mut live, &log).await;
+        assert_eq!(
+            live.active_write_version(),
+            baseline,
+            "live apply no-ops on OOR target"
+        );
+
+        let mut recovered = HighWaterStateMachine::new();
+        replay(&mut recovered, &log).await;
+        assert_eq!(
+            recovered.active_write_version(),
+            baseline,
+            "replay is deterministic: OOR bump stays a no-op across restart"
         );
     }
 
@@ -986,8 +1221,52 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "e2e-max-readable-next")]
     #[tokio::test]
     async fn replay_is_deterministic() {
+        let in_range = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 1;
+        let log = vec![
+            (1u64, ReplayEntry::Membership(vec![1, 2])),
+            (
+                2u64,
+                ReplayEntry::Bump {
+                    target: in_range,
+                    gated: vec![1, 2, 3],
+                },
+            ),
+            // A later bump gated on a set that excludes a now-added member.
+            (3u64, ReplayEntry::Membership(vec![1, 2, 5])),
+            (
+                4u64,
+                ReplayEntry::Bump {
+                    target: in_range,
+                    gated: vec![1, 2],
+                },
+            ),
+        ];
+        let mut first = HighWaterStateMachine::new();
+        replay(&mut first, &log).await;
+        let mut second = HighWaterStateMachine::new();
+        replay(&mut second, &log).await;
+        // Index-2 bump succeeded (membership {1,2} ⊆ {1,2,3}); index-4
+        // bump no-ops (membership {1,2,5} ⊄ {1,2}), so the cell stays at
+        // `in_range`.
+        assert_eq!(first.active_write_version(), in_range);
+        assert_eq!(
+            first.active_write_version(),
+            second.active_write_version(),
+            "two replays of the same committed log yield the same cell"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_is_deterministic_default_features() {
+        // Default-features replay-determinism check: any mix of
+        // out-of-range bumps and membership entries produces the same
+        // cell state across two independent replays, because the apply
+        // arm folds the log deterministically (range check + subset
+        // check are both pure functions of entry data + local binary
+        // constants).
         let log = vec![
             (1u64, ReplayEntry::Membership(vec![1, 2])),
             (
@@ -997,7 +1276,6 @@ mod tests {
                     gated: vec![1, 2, 3],
                 },
             ),
-            // A later bump gated on a set that excludes a now-added member.
             (3u64, ReplayEntry::Membership(vec![1, 2, 5])),
             (
                 4u64,
@@ -1008,12 +1286,11 @@ mod tests {
             ),
         ];
         let mut first = HighWaterStateMachine::new();
+        let baseline = first.active_write_version();
         replay(&mut first, &log).await;
         let mut second = HighWaterStateMachine::new();
         replay(&mut second, &log).await;
-        // Index-2 bump succeeded (membership {1,2} ⊆ {1,2,3}); index-4 bump
-        // no-ops (membership {1,2,5} ⊄ {1,2}), so the cell stays at 7.
-        assert_eq!(first.active_write_version(), 7);
+        assert_eq!(first.active_write_version(), baseline);
         assert_eq!(
             first.active_write_version(),
             second.active_write_version(),

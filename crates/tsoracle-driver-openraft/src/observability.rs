@@ -53,6 +53,15 @@ pub const NOOP_MEMBERSHIP_SUBSET_TOTAL: &str =
 /// Counter: an activation attempt was rejected by the all-members gate (a
 /// member's `max_readable_version` was below the target).
 pub const REJECTED_BY_GATE_TOTAL: &str = "tsoracle.schema.format_version.rejected_by_gate.total";
+/// Counter: a `SetFormatVersion` entry applied as a no-op because `target`
+/// was outside the local binary's
+/// `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]` range. The gate at
+/// proposal time normally prevents this from being committed; a non-zero
+/// value here means an older binary committed an out-of-range bump or a
+/// peer violated protocol, and the apply arm's defense-in-depth contained
+/// it. Distinct from `noop_membership_subset`.
+pub const NOOP_TARGET_OUT_OF_RANGE_TOTAL: &str =
+    "tsoracle.schema.format_version.noop_target_out_of_range.total";
 
 /// Set the active-write-version gauge. Called on a successful apply-flip
 /// and on boot/recovery once the durable active write version is known.
@@ -124,6 +133,15 @@ pub fn record_rejected_by_gate() {
 #[cfg(not(feature = "metrics"))]
 pub fn record_rejected_by_gate() {}
 
+/// Counter: increment when apply is a no-op because `target` is outside
+/// the local binary's readable range (apply-arm defense-in-depth).
+#[cfg(feature = "metrics")]
+pub fn record_noop_target_out_of_range() {
+    metrics::counter!(NOOP_TARGET_OUT_OF_RANGE_TOTAL).increment(1);
+}
+#[cfg(not(feature = "metrics"))]
+pub fn record_noop_target_out_of_range() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +177,10 @@ mod tests {
             REJECTED_BY_GATE_TOTAL,
             "tsoracle.schema.format_version.rejected_by_gate.total"
         );
+        assert_eq!(
+            NOOP_TARGET_OUT_OF_RANGE_TOTAL,
+            "tsoracle.schema.format_version.noop_target_out_of_range.total"
+        );
     }
 
     #[test]
@@ -174,5 +196,6 @@ mod tests {
         record_applied();
         record_noop_membership_subset();
         record_rejected_by_gate();
+        record_noop_target_out_of_range();
     }
 }
