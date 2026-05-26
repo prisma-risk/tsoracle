@@ -6,6 +6,7 @@
 
 <!-- Pre-merge checks. Tick each item before requesting review. -->
 
+- [ ] All commits in this PR carry a `Signed-off-by` trailer per the [DCO requirement](../CONTRIBUTING.md#developer-certificate-of-origin) (use `git commit -s`).
 - [ ]
 
 ## Post-merge follow-ups

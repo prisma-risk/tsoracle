@@ -8,7 +8,40 @@ This project adopts the [Contributor Covenant v2.1](https://www.contributor-cove
 
 ## Licensing of contributions
 
-tsoracle is licensed under [Apache-2.0](LICENSE), and so is every crate published from this repository (`license = "Apache-2.0"` in each `Cargo.toml`). Contributions you submit follow the standard **inbound = outbound** convention: the changes you contribute are offered under the same Apache-2.0 terms as the project itself, per [section 5 of the license](LICENSE) and [GitHub's Terms of Service §D.6](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service#6-contributions-under-repository-license). No separate CLA or DCO sign-off is required — opening a PR is the contribution grant. Every new first-party `.rs` file carries the canonical short license header (see [License headers on Rust source](#license-headers-on-rust-source) below).
+tsoracle is licensed under [Apache-2.0](LICENSE), and so is every crate published from this repository (`license = "Apache-2.0"` in each `Cargo.toml`). Contributions you submit follow the standard **inbound = outbound** convention: the changes you contribute are offered under the same Apache-2.0 terms as the project itself, per [section 5 of the license](LICENSE) and [GitHub's Terms of Service §D.6](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service#6-contributions-under-repository-license). Every new first-party `.rs` file carries the canonical short license header (see [License headers on Rust source](#license-headers-on-rust-source) below).
+
+## Developer Certificate of Origin
+
+The project requires every commit to carry a `Signed-off-by` trailer attesting to the [Developer Certificate of Origin v1.1](https://developercertificate.org/). This is layered on top of the Apache-2.0 inbound = outbound licensing above: the licensing mechanism is unchanged, the sign-off is the explicit per-commit legal-authorization assertion.
+
+The DCO text — abbreviated, see <https://developercertificate.org/> for the canonical version — is:
+
+> By making a contribution to this project, I certify that:
+>
+> (a) The contribution was created in whole or in part by me and I have the right to submit it under the open source license indicated in the file; or
+> (b) The contribution is based upon previous work that, to the best of my knowledge, is covered under an appropriate open source license and I have the right under that license to submit that work with modifications, whether created in whole or in part by me, under the same open source license (unless I am permitted to submit under a different license), as indicated in the file; or
+> (c) The contribution was provided directly to me by some other person who certified (a), (b) or (c) and I have not modified it.
+> (d) I understand and agree that this project and the contribution are public and that a record of the contribution (including all personal information I submit with it, including my sign-off) is maintained indefinitely and may be redistributed consistent with this project and the open source license(s) involved.
+
+### Signing off on commits
+
+Sign off each commit by passing `-s` to `git commit`:
+
+```bash
+git commit -s -m "feat: add feature X"
+```
+
+This appends a trailer:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+The name and email come from your `git config user.name` and `user.email`; use a real name (DCO does not accept pseudonyms or `@users.noreply.github.com` for the email).
+
+### Enforcement
+
+The [DCO GitHub App](https://github.com/apps/dco) is installed on this repository and runs as a required PR check. A PR with any unsigned commit fails the check and cannot be merged. To fix an unsigned commit history, use `git rebase --signoff main` (or `git commit --amend --signoff` for the most recent commit) and force-push to your PR branch.
 
 ## Setup
 
