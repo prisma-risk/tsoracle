@@ -409,9 +409,6 @@ fn classify_activation(resp: &ChangeResponse) -> ActivationOutcome {
     if resp.ok {
         return ActivationOutcome::Success;
     }
-    let kind_string = AdminErrorKind::try_from(resp.error)
-        .map(|k| format!("{k:?}"))
-        .unwrap_or_else(|_| resp.error.to_string());
     match AdminErrorKind::try_from(resp.error) {
         Ok(AdminErrorKind::MembersBelowTarget) => {
             ActivationOutcome::GateRejected(resp.message.clone())
@@ -420,8 +417,15 @@ fn classify_activation(resp: &ChangeResponse) -> ActivationOutcome {
         Ok(AdminErrorKind::TargetOutOfRange) => {
             ActivationOutcome::TargetOutOfRange(resp.message.clone())
         }
-        _ => ActivationOutcome::Other {
-            kind: kind_string,
+        // Decoded enum kinds other than the three script-meaningful ones
+        // (e.g. MembershipChanged, Unsupported, Driver) — surface the enum
+        // debug name. Undecodable integers fall through to the next arm.
+        Ok(k) => ActivationOutcome::Other {
+            kind: format!("{k:?}"),
+            message: resp.message.clone(),
+        },
+        Err(_) => ActivationOutcome::Other {
+            kind: resp.error.to_string(),
             message: resp.message.clone(),
         },
     }
@@ -781,7 +785,8 @@ mod activation_exit_code_tests {
         // future refactor that quietly conflates them is caught.
         assert!(matches!(
             classify_activation(&r),
-            ActivationOutcome::Other { .. }
+            ActivationOutcome::Other { kind, message }
+                if kind == "MembershipChanged" && message == "drift"
         ));
     }
 }
