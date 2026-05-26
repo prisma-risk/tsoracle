@@ -508,7 +508,19 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                     // down the leader) — emit a NO-OP outcome and a
                     // distinct counter so the operator sees it.
                     if !(MIN_READABLE_VERSION..=MAX_READABLE_VERSION).contains(&target) {
-                        tracing::error!(
+                        // `debug!` not `error!`: hot path, same rule as the
+                        // subset arms below. The operator-visible surface
+                        // is the `noop_target_out_of_range` counter — a
+                        // non-zero value means an older binary committed
+                        // an out-of-range bump (or a peer violated
+                        // protocol) and the apply arm's defense-in-depth
+                        // contained it. The gate's `warn!` at
+                        // `run_activation_gate` is the loud, operator-
+                        // facing surface for the in-process path; this
+                        // branch only fires on replay of an already-
+                        // committed entry, where loud logging on every
+                        // restart would just spam.
+                        tracing::debug!(
                             target = target,
                             min = MIN_READABLE_VERSION,
                             max = MAX_READABLE_VERSION,
