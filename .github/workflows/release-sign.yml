@@ -161,7 +161,13 @@ jobs:
     needs: build
     permissions:
       actions: read       # generator inspects the workflow to record build metadata
-      contents: read      # generator job checks out the source for provenance
+      contents: write     # parse-time satisfaction for the generator's upload-assets
+                          # nested job. We gate it off with `upload-assets: false`
+                          # below, so the job is skipped at runtime and the PATCH
+                          # against an immutable release never happens — but GH
+                          # Actions validates the declared permissions of every
+                          # nested job at parse time regardless of `if:` conditions,
+                          # so `contents: read` is rejected at workflow load.
       id-token: write     # OIDC token for Sigstore (Fulcio) keyless signing
     # upload-assets stays false (the default). The generator's upload path
     # PATCHes the release record (target_commitish) via softprops/action-gh-release,
