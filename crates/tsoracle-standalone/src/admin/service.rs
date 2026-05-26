@@ -36,8 +36,8 @@ use crate::admin_proto::membership_admin_server::{
     MembershipAdmin as GrpcAdmin, MembershipAdminServer,
 };
 use crate::admin_proto::{
-    AddLearnerRequest, AdminErrorKind, ChangeResponse, ListMembersRequest, MemberEntry, MemberRole,
-    MembershipView, PromoteRequest, RemoveNodeRequest,
+    ActivateFormatRequest, AddLearnerRequest, AdminErrorKind, ChangeResponse, ListMembersRequest,
+    MemberEntry, MemberRole, MembershipView, PromoteRequest, RemoveNodeRequest,
 };
 
 /// Admin RPCs carry only ids and host:port strings, so a tight decode/encode
@@ -95,6 +95,23 @@ fn change_err(err: AdminError) -> ChangeResponse {
             "would lose quorum".into(),
         ),
         AdminError::Timeout => (AdminErrorKind::Timeout, String::new(), "timed out".into()),
+        AdminError::MembersBelowTarget { target, incapable } => (
+            AdminErrorKind::MembersBelowTarget,
+            String::new(),
+            format!(
+                "format activation to target {target} blocked: members below target: {incapable:?}"
+            ),
+        ),
+        AdminError::TargetOutOfRange { target, min, max } => (
+            AdminErrorKind::TargetOutOfRange,
+            String::new(),
+            format!("format activation: target {target} outside readable range [{min}, {max}]"),
+        ),
+        AdminError::MembershipChangedSinceGate { target } => (
+            AdminErrorKind::MembershipChanged,
+            String::new(),
+            format!("format activation to target {target} no-op: membership changed since gate"),
+        ),
         AdminError::Driver(detail) => (AdminErrorKind::Driver, String::new(), detail),
     };
     ChangeResponse {
@@ -175,6 +192,25 @@ impl GrpcAdmin for AdminServiceImpl {
     ) -> Result<Response<ChangeResponse>, Status> {
         Ok(Response::new(change_response(
             self.admin.remove(req.into_inner().id).await,
+        )))
+    }
+
+    async fn activate_format(
+        &self,
+        req: Request<ActivateFormatRequest>,
+    ) -> Result<Response<ChangeResponse>, Status> {
+        let target_u32 = req.into_inner().target;
+        // proto3 has no uint8; validate that the value fits u8 before
+        // forwarding to the driver layer. Out-of-u8-range is an obvious
+        // client bug — bail with INVALID_ARGUMENT rather than passing a
+        // truncated value into the activation gate.
+        let Ok(target) = u8::try_from(target_u32) else {
+            return Err(Status::invalid_argument(format!(
+                "target {target_u32} does not fit in u8 (0..=255)"
+            )));
+        };
+        Ok(Response::new(change_response(
+            self.admin.activate_format(target).await,
         )))
     }
 }

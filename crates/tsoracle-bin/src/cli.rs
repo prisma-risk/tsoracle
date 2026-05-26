@@ -61,6 +61,13 @@ pub enum AdminCmd {
     Promote(AdminIdArgs),
     /// Remove a node.
     Remove(AdminIdArgs),
+    /// Initiate a format-version activation. Runs the all-members capability
+    /// gate then proposes the bump via raft. Exit codes:
+    /// 0=success, 2=gate-rejected (MEMBERS_BELOW_TARGET),
+    /// 3=NOT_LEADER (this node is a follower),
+    /// 4=local-range-rejected (TARGET_OUT_OF_RANGE — receiving node's
+    /// MAX_READABLE_VERSION < target), 1=other failure.
+    ActivateFormat(ActivateFormatArgs),
 }
 
 #[cfg(feature = "openraft")]
@@ -111,6 +118,24 @@ pub struct AddLearnerArgs {
     pub service_endpoint: String,
     #[arg(long)]
     pub admin_endpoint: String,
+    #[command(flatten)]
+    pub tls: AdminClientTlsArgs,
+}
+
+#[cfg(feature = "openraft")]
+#[derive(Parser, Debug)]
+pub struct ActivateFormatArgs {
+    /// Admin endpoint of any cluster member. `NOT_LEADER` responses for
+    /// activation carry an empty `leader_admin_endpoint` (the underlying
+    /// `FormatActivationError::NotLeader` is a unit variant), so the
+    /// existing `with_redirect` short-circuits and the CLI exits 3 rather
+    /// than auto-redirecting. Re-issue against a known leader.
+    #[arg(long)]
+    pub endpoint: String,
+    /// Target format version. Must be within the local binary's readable
+    /// range and supported by every cluster member.
+    #[arg(long)]
+    pub target: u8,
     #[command(flatten)]
     pub tls: AdminClientTlsArgs,
 }

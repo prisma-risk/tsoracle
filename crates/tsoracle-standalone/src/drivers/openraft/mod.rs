@@ -22,7 +22,7 @@
 //
 
 mod handoff;
-mod network;
+pub(crate) mod network;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -291,13 +291,29 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
     let raft_for_admin = raft.clone();
     let my_id = cfg.id;
 
-    let host = StandaloneHost::new(raft, state_machine_for_host);
-    // OpenraftDriver::new returns Arc<Self> — do NOT wrap again.
-    let driver = OpenraftDriver::new(host);
+    // Wrap host in Arc so both the driver and the membership admin can hold
+    // it. OpenraftDriver has two constructors: `new(host: H)` and
+    // `from_arc(host: Arc<H>)` — use the Arc form here (driver.rs:77).
+    let host = std::sync::Arc::new(StandaloneHost::new(raft, state_machine_for_host));
+    let driver = OpenraftDriver::from_arc(host.clone());
 
-    let admin: std::sync::Arc<dyn crate::admin::MembershipAdmin> = std::sync::Arc::new(
-        crate::admin::openraft::OpenraftMembershipAdmin::new(raft_for_admin),
+    // First production caller of PeerCapabilitySource (it has been
+    // #[allow(dead_code)] in network.rs:273-285 waiting for this wire-up).
+    // The peer TLS config is `Option<PeerTlsMaterial>` (mod.rs:210-211);
+    // extract the client side with `.as_ref().map(|m| m.client.clone())`
+    // — same pattern the existing peer factory uses at mod.rs:216.
+    let capability_source = std::sync::Arc::new(
+        crate::drivers::openraft::network::PeerCapabilitySource::new(
+            peer_tls.as_ref().map(|m| m.client.clone()),
+        ),
     );
+
+    let admin: std::sync::Arc<dyn crate::admin::MembershipAdmin> =
+        std::sync::Arc::new(crate::admin::openraft::OpenraftMembershipAdmin::new(
+            raft_for_admin,
+            host.clone(),
+            capability_source,
+        ));
 
     let (admin_transport, admin_listen_addr) = match cfg.admin_listen {
         Some(listen) => {

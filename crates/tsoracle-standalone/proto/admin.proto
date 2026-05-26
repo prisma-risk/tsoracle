@@ -37,6 +37,16 @@ service MembershipAdmin {
   // commits the removal while still leader, then steps down. Errors:
   // NOT_LEADER, WOULD_LOSE_QUORUM, UNSUPPORTED, DRIVER.
   rpc RemoveNode(RemoveNodeRequest) returns (ChangeResponse);
+  // Initiate a format-version activation to `target`. Runs the all-members
+  // capability gate, proposes the bump via raft, and reports the apply-keyed
+  // outcome. Errors: NOT_LEADER, MEMBERS_BELOW_TARGET (gate rejection),
+  // TARGET_OUT_OF_RANGE (target outside local binary's readable range),
+  // MEMBERSHIP_CHANGED (apply-keyed no-op: gated set drifted by apply time),
+  // UNSUPPORTED (paxos/file), DRIVER. The `NOT_LEADER` response carries an
+  // empty `leader_admin_endpoint` (the underlying gate's `NotLeader` is a
+  // unit variant); the operator (or shell orchestrator) re-issues against a
+  // known leader rather than auto-redirecting.
+  rpc ActivateFormat(ActivateFormatRequest) returns (ChangeResponse);
 }
 
 // A node's role in the current membership.
@@ -92,6 +102,12 @@ message AddLearnerRequest {
 message PromoteRequest { uint64 id = 1; }
 message RemoveNodeRequest { uint64 id = 1; }
 
+message ActivateFormatRequest {
+  // Target format version. proto3 has no uint8, so encoded as uint32; the
+  // handler validates the value fits u8 before forwarding.
+  uint32 target = 1;
+}
+
 // Typed error kinds for `ChangeResponse`. Adding a new variant is backwards
 // compatible: clients that don't recognize a value fall back to the
 // human-readable `message` field. `ok=true` is the authoritative success
@@ -121,6 +137,13 @@ enum AdminErrorKind {
   // Catch-all for an upstream driver error not captured by the typed
   // variants above. `message` carries the driver's error string.
   ADMIN_ERROR_KIND_DRIVER = 7;
+  // Gate rejection: at least one member's max_readable_version < target.
+  ADMIN_ERROR_KIND_MEMBERS_BELOW_TARGET = 8;
+  // Apply-arm defense-in-depth: target outside local readable range.
+  ADMIN_ERROR_KIND_TARGET_OUT_OF_RANGE  = 9;
+  // Apply-keyed no-op: membership drifted out of the gated set by the
+  // entry's own log position. Operator re-gates and re-issues.
+  ADMIN_ERROR_KIND_MEMBERSHIP_CHANGED   = 10;
 }
 
 // Result of a mutating membership RPC. On success: `ok=true`, `error=

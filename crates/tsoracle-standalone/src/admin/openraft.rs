@@ -58,6 +58,36 @@ fn map_write_error(err: RaftError<TypeConfig, ClientWriteError<TypeConfig>>) -> 
     }
 }
 
+/// Map a `FormatActivationError` into an `AdminError` using the dedicated
+/// kinds added above. `NotLeader` is a unit variant in
+/// `FormatActivationError` (see capabilities.rs:107-110), so the resulting
+/// `AdminError::NotLeader.leader_admin_endpoint` is always None — the
+/// CLI cannot auto-redirect to the leader for activation; the operator
+/// (or shell orchestrator) must re-issue against a known leader.
+fn map_activation_error(err: tsoracle_driver_openraft::FormatActivationError) -> AdminError {
+    use tsoracle_driver_openraft::FormatActivationError as FAE;
+    match err {
+        FAE::NotLeader => AdminError::NotLeader {
+            leader_admin_endpoint: None,
+        },
+        FAE::TargetOutOfRange { target, min, max } => {
+            AdminError::TargetOutOfRange { target, min, max }
+        }
+        FAE::MembersBelowTarget { target, incapable } => {
+            AdminError::MembersBelowTarget { target, incapable }
+        }
+        FAE::MemberUnreachable { node_id, detail } => AdminError::Driver(format!(
+            "format activation gate: member {node_id} unreachable: {detail}",
+        )),
+        FAE::MembershipChangedSinceGate { target } => {
+            AdminError::MembershipChangedSinceGate { target }
+        }
+        FAE::ProposalFailed(detail) => {
+            AdminError::Driver(format!("format activation proposal failed: {detail}",))
+        }
+    }
+}
+
 /// The voter set after adding `id`.
 fn voters_with(current: &BTreeSet<u64>, id: u64) -> BTreeSet<u64> {
     let mut next = current.clone();
@@ -82,17 +112,36 @@ fn voter_ids(view: &MembershipView) -> BTreeSet<u64> {
         .collect()
 }
 
-/// openraft-backed membership admin. Holds a clone of the `Raft` handle and a
-/// mutex that serializes mutating ops so two reconfigurations cannot race.
+/// openraft-backed membership admin. Holds a clone of the `Raft` handle
+/// for membership ops, plus an `Arc<StandaloneHost>` + concrete
+/// `Arc<PeerCapabilitySource>` for `activate_format`. We store
+/// `PeerCapabilitySource` CONCRETELY (not as `Arc<dyn CapabilitySource>`)
+/// because `StandaloneHost::initiate_format_activation<S>` has `S: CapabilitySource`
+/// with the default `Sized` bound — a `&dyn` would not satisfy it.
+/// Production has exactly one impl (the peer-RPC dialer), so the
+/// concretization costs nothing.
+///
+/// The mutex serializes mutating membership ops so two reconfigurations
+/// cannot race. Activation does not take this mutex —
+/// `StandaloneHost::initiate_format_activation` is itself apply-keyed
+/// and re-validates membership at the entry's log position.
 pub(crate) struct OpenraftMembershipAdmin {
     raft: Raft<TypeConfig, HighWaterStateMachine>,
+    host: std::sync::Arc<tsoracle_driver_openraft::StandaloneHost>,
+    source: std::sync::Arc<crate::drivers::openraft::network::PeerCapabilitySource>,
     op_lock: Mutex<()>,
 }
 
 impl OpenraftMembershipAdmin {
-    pub(crate) fn new(raft: Raft<TypeConfig, HighWaterStateMachine>) -> Self {
+    pub(crate) fn new(
+        raft: Raft<TypeConfig, HighWaterStateMachine>,
+        host: std::sync::Arc<tsoracle_driver_openraft::StandaloneHost>,
+        source: std::sync::Arc<crate::drivers::openraft::network::PeerCapabilitySource>,
+    ) -> Self {
         Self {
             raft,
+            host,
+            source,
             op_lock: Mutex::new(()),
         }
     }
@@ -195,6 +244,15 @@ impl MembershipAdmin for OpenraftMembershipAdmin {
             .map(|_| ())
             .map_err(map_write_error)
     }
+
+    async fn activate_format(&self, target: u8) -> Result<(), AdminError> {
+        // Activation has its own internal serialization (apply-keyed flip,
+        // membership re-validation at entry log position) — no op_lock here.
+        self.host
+            .initiate_format_activation(target, &*self.source)
+            .await
+            .map_err(map_activation_error)
+    }
 }
 
 #[cfg(test)]
@@ -255,5 +313,85 @@ mod tests {
                 ChangeMembershipError::LearnerNotFound(LearnerNotFound { node_id: 7 }),
             ));
         assert!(matches!(map_write_error(err), AdminError::NotMember(7)));
+    }
+
+    #[test]
+    fn activation_not_leader_maps_to_not_leader_none_endpoint() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::NotLeader) {
+            AdminError::NotLeader {
+                leader_admin_endpoint,
+            } => {
+                assert_eq!(leader_admin_endpoint, None);
+            }
+            other => panic!("expected NotLeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_target_out_of_range_maps_correctly() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::TargetOutOfRange {
+            target: 99,
+            min: 4,
+            max: 5,
+        }) {
+            AdminError::TargetOutOfRange { target, min, max } => {
+                assert_eq!((target, min, max), (99, 4, 5));
+            }
+            other => panic!("expected TargetOutOfRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_members_below_target_maps_preserves_incapable() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::MembersBelowTarget {
+            target: 5,
+            incapable: vec![(1, 4), (3, 4)],
+        }) {
+            AdminError::MembersBelowTarget { target, incapable } => {
+                assert_eq!(target, 5);
+                assert_eq!(incapable, vec![(1u64, 4u8), (3u64, 4u8)]);
+            }
+            other => panic!("expected MembersBelowTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_member_unreachable_maps_to_driver_with_detail() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::MemberUnreachable {
+            node_id: 2,
+            detail: "timeout".into(),
+        }) {
+            AdminError::Driver(s) => {
+                assert!(s.contains("member 2"), "missing node id in {s:?}");
+                assert!(s.contains("timeout"), "missing detail in {s:?}");
+            }
+            other => panic!("expected Driver, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_membership_changed_maps_correctly() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::MembershipChangedSinceGate { target: 5 }) {
+            AdminError::MembershipChangedSinceGate { target } => {
+                assert_eq!(target, 5);
+            }
+            other => panic!("expected MembershipChangedSinceGate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_proposal_failed_maps_to_driver_with_detail() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::ProposalFailed("write failed".into())) {
+            AdminError::Driver(s) => {
+                assert!(s.contains("write failed"), "missing detail in {s:?}");
+            }
+            other => panic!("expected Driver, got {other:?}"),
+        }
     }
 }

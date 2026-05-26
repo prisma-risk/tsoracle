@@ -24,6 +24,18 @@ paxos    = [
     "dep:prost", "dep:postcard", "dep:parking_lot", "dep:tokio-stream",
     "tonic/tls-aws-lc",
 ]
+# Pass through `e2e-max-readable-next` to the openraft driver crate (which
+# propagates it to the toolkit). The `?` makes this a no-op unless
+# `openraft` (or another feature) has already pulled in the optional
+# `tsoracle-driver-openraft` dep — without `?`, bare `crate/feature`
+# syntax on an optional dep would forcibly activate it, silently
+# enabling half of the openraft stack under `--features e2e-max-readable-next`
+# alone.
+e2e-max-readable-next = ["tsoracle-driver-openraft?/e2e-max-readable-next"]
+# Gates `admin::test_support`, a tiny public seam exposing the otherwise
+# `pub(crate)` `AdminServiceImpl` constructor so an integration test can
+# drive the gRPC handler with a fake `MembershipAdmin`. Off in production.
+test-support = []
 
 [dependencies]
 tsoracle-core      = { path = "../tsoracle-core", version = "0.2.5" }
@@ -66,3 +78,13 @@ tonic-prost-build = { workspace = true }
 rcgen    = { workspace = true }
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+# Without `required-features`, `cargo test -p tsoracle-standalone` (developer
+# default, no `--features test-support`) silently compiles this test file to
+# zero test items — the `#![cfg(all(feature = "openraft", feature = "test-support"))]`
+# at the top of the file gates everything out. With this entry, cargo prints a
+# visible "skipped due to required-features" notice instead.
+[[test]]
+name = "activation_admin_rpc"
+path = "tests/activation_admin_rpc.rs"
+required-features = ["openraft", "test-support"]

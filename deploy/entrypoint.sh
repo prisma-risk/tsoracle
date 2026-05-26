@@ -53,7 +53,6 @@ openraft|paxos)
     while [ "$i" -lt "$REPLICAS" ]; do
         id=$((i + 1))
         fqdn="${STATEFULSET_NAME}-${i}.${PEER_SERVICE}.${POD_NAMESPACE}.svc.cluster.local"
-        # TODO(admin-listen): --admin-listen flag wired in the CLI task
         members="${members}${members:+,}${id}=${fqdn}:${PEER_PORT}/${fqdn}:${TSO_PORT}/${fqdn}:${ADMIN_PORT}"
         peers="${peers}${peers:+,}${id}=${fqdn}:${PEER_PORT}"
         tso_peers="${tso_peers}${tso_peers:+,}${id}=${fqdn}:${TSO_PORT}"
@@ -66,10 +65,16 @@ openraft|paxos)
             bootstrap="--bootstrap --members $members"
         fi
         # shellcheck disable=SC2086
+        # Loopback-only admin bind: routable bind would trip the secure-by-default
+        # AdminInsecureRoutable guard (drivers/openraft/mod.rs). The kube-e2e
+        # shell reaches admin via `kubectl exec POD -- ... --endpoint http://127.0.0.1:...`.
+        # Operators who want a routable admin port should add admin TLS material
+        # to this entrypoint and bind 0.0.0.0:${ADMIN_PORT} with mTLS.
         exec tsoracle serve openraft \
             --id "$node_id" \
             --raft-addr "0.0.0.0:${PEER_PORT}" \
             --listen "0.0.0.0:${TSO_PORT}" \
+            --admin-listen "127.0.0.1:${ADMIN_PORT}" \
             --raft-dir "${DATA_DIR}/raft" \
             $peer_tls $client_tls $common $bootstrap
     else
