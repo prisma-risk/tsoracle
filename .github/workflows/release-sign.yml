@@ -172,3 +172,31 @@ jobs:
       # (not a tag ref) on workflow_dispatch. Don't remove this without
       # restructuring the trigger contract.
       upload-tag-name: ${{ needs.build.outputs.tag }}
+
+  attach:
+    name: attach .crate to release
+    needs: [build, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # gh release upload
+    steps:
+      - name: Download crate artifacts
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: crate-artifacts
+          path: artifacts
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          CRATE_FILE: ${{ needs.build.outputs.crate-file }}
+        run: |
+          set -euo pipefail
+          # --clobber: idempotent on re-run; replaces any existing asset of the
+          # same name (e.g. backfill rerun after a workflow change).
+          gh release upload "$TAG" \
+            "artifacts/$CRATE_FILE" \
+            "artifacts/${CRATE_FILE}.sha256" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
