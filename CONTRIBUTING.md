@@ -2,6 +2,14 @@
 
 Thanks for your interest in tsoracle. This guide covers the local setup, the checks CI will run on your PR, and the conventions we follow.
 
+## Code of Conduct
+
+This project adopts the [Contributor Covenant v2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). By participating in the project — issues, PRs, discussions, or any other channel tied to the repo — you agree to uphold it. See [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) for the full text and the private reporting channel.
+
+## Licensing of contributions
+
+tsoracle is licensed under [Apache-2.0](LICENSE), and so is every crate published from this repository (`license = "Apache-2.0"` in each `Cargo.toml`). Contributions you submit follow the standard **inbound = outbound** convention: the changes you contribute are offered under the same Apache-2.0 terms as the project itself, per [section 5 of the license](LICENSE) and [GitHub's Terms of Service §D.6](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service#6-contributions-under-repository-license). No separate CLA or DCO sign-off is required — opening a PR is the contribution grant. Every new first-party `.rs` file carries the canonical short license header (see [License headers on Rust source](#license-headers-on-rust-source) below).
+
 ## Setup
 
 This is a Rust project. The toolchain channel is pinned in [`rust-toolchain.toml`](rust-toolchain.toml); running any `cargo` command will install the matching version for you.
@@ -142,6 +150,19 @@ Example:
 )]
 let key = MetadataKey::from_bytes(KEY.as_bytes()).expect("valid key");
 ```
+
+## License headers on Rust source
+
+Every first-party `.rs` file carries the canonical short license header at the very top — above any `#![...]` inner attributes, since those are part of compilation and not a shebang. The header is checked in CI by the `header-check` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which runs [`scripts/check-ts-header.py`](scripts/check-ts-header.py) across the whole tree. A missing or stale header is a hard build failure.
+
+When you add a new `.rs` file (or land a refactor that moves files around), run:
+
+```bash
+python3 scripts/check-ts-header.py --fix           # repair missing/stale headers in the whole repo
+python3 scripts/check-ts-header.py path/to/file.rs # check (or repair, with --fix) a specific file or directory
+```
+
+The pre-commit hook does **not** check headers — it runs `cargo fmt` and clippy only — so run `--fix` locally before pushing if you've added or moved `.rs` files. The canonical header text lives in a sibling file next to the script so non-Python tooling can read the same string; do not paste a hand-edited variant.
 
 ## Performance-critical-path rules
 
