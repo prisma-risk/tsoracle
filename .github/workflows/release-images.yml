@@ -33,6 +33,10 @@ jobs:
             echo "v=${GITHUB_REF_NAME#tsoracle-v}" >> "$GITHUB_OUTPUT"
           elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             SUFFIX="${SUFFIX:-test-${RUN_ID}}"
+            if ! printf '%s' "$SUFFIX" | grep -Eq '^[A-Za-z0-9_.-]+$'; then
+              echo "Invalid tag_suffix: must match ^[A-Za-z0-9_.-]+\$" >&2
+              exit 1
+            fi
             echo "v=0.0.0-${SUFFIX}" >> "$GITHUB_OUTPUT"
           else
             echo "v=0.0.0-pr${PR_NUM}" >> "$GITHUB_OUTPUT"
@@ -78,8 +82,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push per-arch image
+        env:
+          V: ${{ needs.version.outputs.v }}
         run: |
-          V=${{ needs.version.outputs.v }}
           docker buildx build \
             --platform linux/${{ matrix.arch }} \
             -f deploy/Dockerfile \
@@ -102,8 +107,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create multi-arch manifest list
+        env:
+          V: ${{ needs.version.outputs.v }}
         run: |
-          V=${{ needs.version.outputs.v }}
           IMG=ghcr.io/prisma-risk/tsoracle-${{ matrix.variant }}
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             docker buildx imagetools create \
@@ -122,8 +128,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Push chart
+        env:
+          V: ${{ needs.version.outputs.v }}
         run: |
-          V=${{ needs.version.outputs.v }}
           curl -fsSL https://get.helm.sh/helm-v3.15.0-linux-amd64.tar.gz | tar xz
           ./linux-amd64/helm package deploy/charts/tsoracle --version "$V" --app-version "$V"
           echo "${{ secrets.GITHUB_TOKEN }}" | ./linux-amd64/helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
