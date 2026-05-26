@@ -23,6 +23,8 @@
 
 #![cfg(feature = "openraft")]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -33,21 +35,13 @@ use tsoracle_standalone::{
     DriverConfig, MemberAddr, MemberRole, NewMember, OpenraftConfig, RaftTuning, build,
 };
 
+use common::lease_port;
+
 #[test]
 fn admin_proto_types_exist() {
     // Compiles only if the generated module is present and named as expected.
     let _ = tsoracle_standalone::admin_proto::ChangeResponse::default();
     let _ = tsoracle_standalone::admin_proto::MemberRole::Voter;
-}
-
-/// Bind an ephemeral port, read its address, then release it so the node can
-/// rebind it on boot. TOCTOU-tolerant in practice (same trick the build and
-/// smoke tests use): the window is tiny and the test owns the loopback range.
-async fn lease_port() -> std::net::SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    addr
 }
 
 fn fast_tuning() -> RaftTuning {
@@ -62,8 +56,8 @@ fn fast_tuning() -> RaftTuning {
 async fn add_learner_promote_then_remove() {
     let dir1 = tempdir().unwrap();
     let dir2 = tempdir().unwrap();
-    let raft1 = lease_port().await;
-    let raft2 = lease_port().await;
+    let (raft1, lease1) = lease_port().await;
+    let (raft2, lease2) = lease_port().await;
 
     let mut members = BTreeMap::new();
     members.insert(
@@ -74,6 +68,7 @@ async fn add_learner_promote_then_remove() {
             admin_endpoint: "127.0.0.1:11".into(),
         },
     );
+    drop(lease1);
     let node1 = build(DriverConfig::Openraft(OpenraftConfig {
         id: 1,
         raft_addr: raft1,
@@ -100,6 +95,7 @@ async fn add_learner_promote_then_remove() {
     .expect("node 1 elected");
     drop(events);
 
+    drop(lease2);
     let node2 = build(DriverConfig::Openraft(OpenraftConfig {
         id: 2,
         raft_addr: raft2,
@@ -172,9 +168,9 @@ async fn admin_grpc_list_and_add_learner() {
 
     let dir1 = tempdir().unwrap();
     let dir2 = tempdir().unwrap();
-    let raft1 = lease_port().await;
-    let raft2 = lease_port().await;
-    let admin_addr = lease_port().await;
+    let (raft1, lease1) = lease_port().await;
+    let (raft2, lease2) = lease_port().await;
+    let (admin_addr, admin_lease) = lease_port().await;
 
     let mut members = BTreeMap::new();
     members.insert(
@@ -185,6 +181,8 @@ async fn admin_grpc_list_and_add_learner() {
             admin_endpoint: admin_addr.to_string(),
         },
     );
+    drop(lease1);
+    drop(admin_lease);
     let node1 = build(DriverConfig::Openraft(OpenraftConfig {
         id: 1,
         raft_addr: raft1,
@@ -211,6 +209,7 @@ async fn admin_grpc_list_and_add_learner() {
     .expect("elected");
     drop(events);
 
+    drop(lease2);
     let node2 = build(DriverConfig::Openraft(OpenraftConfig {
         id: 2,
         raft_addr: raft2,
@@ -269,9 +268,9 @@ async fn coexisting_learner_survives_a_promote() {
     let dir1 = tempdir().unwrap();
     let dir2 = tempdir().unwrap();
     let dir3 = tempdir().unwrap();
-    let raft1 = lease_port().await;
-    let raft2 = lease_port().await;
-    let raft3 = lease_port().await;
+    let (raft1, lease1) = lease_port().await;
+    let (raft2, lease2) = lease_port().await;
+    let (raft3, lease3) = lease_port().await;
 
     let mut members = BTreeMap::new();
     members.insert(
@@ -282,6 +281,7 @@ async fn coexisting_learner_survives_a_promote() {
             admin_endpoint: "127.0.0.1:11".into(),
         },
     );
+    drop(lease1);
     let node1 = build(DriverConfig::Openraft(OpenraftConfig {
         id: 1,
         raft_addr: raft1,
@@ -321,9 +321,11 @@ async fn coexisting_learner_survives_a_promote() {
             admin_tls: None,
         }))
     };
+    drop(lease2);
     let node2 = build_follower(2, raft2, dir2.path().join("raft"))
         .await
         .expect("build node 2");
+    drop(lease3);
     let node3 = build_follower(3, raft3, dir3.path().join("raft"))
         .await
         .expect("build node 3");
