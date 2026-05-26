@@ -124,6 +124,23 @@ jobs:
       - name: guard
         run: python3 scripts/check-ts-header.py
 
+  fuzz-lockfile:
+    name: fuzz lockfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+      - name: check fuzz/Cargo.lock is in sync
+        working-directory: fuzz
+        run: |
+          if ! cargo metadata --locked --format-version=1 > /dev/null 2>cargo-metadata.err; then
+            cat cargo-metadata.err
+            echo "::error::fuzz/Cargo.lock is stale. Run 'cargo update -w' (or 'cargo generate-lockfile') in fuzz/ and commit the result."
+            exit 1
+          fi
+
   coverage:
     runs-on: ubuntu-latest
     steps:
