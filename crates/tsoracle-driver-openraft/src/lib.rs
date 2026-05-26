@@ -31,6 +31,7 @@ pub mod driver;
 pub mod host;
 pub mod log_codec;
 pub mod log_entry;
+pub mod observability;
 pub mod snapshot_store;
 pub mod standalone;
 pub mod state_machine;

@@ -20,10 +20,16 @@ default                = ["rocksdb-snapshot-store"]
 # downstream consumers that want a custom snapshot backend can opt out via
 # `default-features = false`.
 rocksdb-snapshot-store = ["dep:rocksdb"]
+# Emit format-migration observability through the `metrics` crate facade
+# (gauges for the version state, counters for the SetFormatVersion
+# lifecycle). Off by default so embedders that do not want the `metrics`
+# dependency are unaffected, matching `tsoracle-server`'s `metrics` feature.
+metrics                = ["dep:metrics"]
 
 [dependencies]
 async-trait        = { workspace = true }
 futures            = { workspace = true }
+metrics            = { workspace = true, optional = true }
 openraft           = { workspace = true }
 postcard           = { workspace = true }
 # `default-features = false` so this crate does not unilaterally pull the
@@ -48,6 +54,7 @@ tsoracle-core      = { path = "../tsoracle-core", version = "0.2.4" }
 [dev-dependencies]
 anyhow           = { workspace = true }
 tsoracle-openraft-toolkit = { path = "../tsoracle-openraft-toolkit", version = "0.2.1", features = ["rocksdb-log-store", "test-fakes"] }
+metrics-util     = { workspace = true }
 proptest         = { workspace = true }
 rocksdb          = { workspace = true }
 tempfile         = { workspace = true }

@@ -296,12 +296,18 @@ impl HighWaterStateMachine {
                 data: persisted.data,
             });
         }
-        Ok(Self {
+        let state_machine = Self {
             core: Arc::new(Mutex::new(core)),
             store,
             persist: Arc::new(Mutex::new(())),
             active_write_version,
-        })
+        };
+        // Format-migration observability: publish the compile-time readable
+        // bounds and the recovered active write version so a freshly-started
+        // node reports its version state before any apply runs.
+        crate::observability::record_readable_bounds(MIN_READABLE_VERSION, MAX_READABLE_VERSION);
+        crate::observability::record_active_write_version(state_machine.active_write_version());
+        Ok(state_machine)
     }
 
     /// The version this SM currently stamps onto snapshots.
@@ -495,6 +501,20 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                         // replay re-runs this exact check) plus the snapshot
                         // frame byte.
                         self.active_write_version.set(target);
+                        // `debug!` not `info!`: this is on the per-entry apply
+                        // hot path (this file carries the
+                        // `#[PerformanceCriticalPath]` marker), so
+                        // info-or-higher logging is banned. The
+                        // operator-visible surface is the `applied` counter
+                        // and the `active_write_version` gauge.
+                        tracing::debug!(
+                            target = target,
+                            gated_members = ?gated_members,
+                            committed_members = ?committed_members,
+                            "SetFormatVersion applied: active write version flipped"
+                        );
+                        crate::observability::record_applied();
+                        crate::observability::record_active_write_version(target);
                         ApplyOutcome::FormatActivated { target }
                     } else {
                         // Membership grew an un-gated member between the gate
@@ -502,6 +522,19 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                         // untouched; the operator re-gates and re-issues. A
                         // no-op writes nothing at `target`, so it cannot
                         // resurrect on restart.
+                        //
+                        // `debug!` not `warn!`: hot path, same rule as the
+                        // success arm above. The operator-visible surface is
+                        // the `noop_membership_subset` counter — a non-zero
+                        // value during an activation means a membership
+                        // change raced the bump.
+                        tracing::debug!(
+                            target = target,
+                            gated_members = ?gated_members,
+                            committed_members = ?committed_members,
+                            "SetFormatVersion no-op: committed membership is not a subset of the gated set"
+                        );
+                        crate::observability::record_noop_membership_subset();
                         ApplyOutcome::FormatActivationNoop { target }
                     };
                     core.last_applied = Some(log_id);

@@ -145,14 +145,49 @@ impl StandaloneHost {
             return Err(FormatActivationError::NotLeader);
         }
         let gathered = self.gather_member_capabilities(source).await?;
+
+        // Format-migration observability: the binding constraint on
+        // activation is the lowest `max_readable_version` across all
+        // current members; publish it every gate run and trace each
+        // member's capability.
+        let min_member_max_readable = gathered
+            .iter()
+            .map(|(_node_id, capability)| capability.max_readable_version)
+            .min()
+            .unwrap_or(tsoracle_openraft_toolkit::MIN_READABLE_VERSION);
+        crate::observability::record_min_member_read_capability(min_member_max_readable);
+        for (node_id, capability) in &gathered {
+            tracing::debug!(
+                node_id = node_id,
+                min_readable_version = capability.min_readable_version,
+                max_readable_version = capability.max_readable_version,
+                active_write_version = capability.active_write_version,
+                "format activation: member capability"
+            );
+        }
+
         match all_members_can_read(target, &gathered) {
-            Some(gated_members) => Ok(gated_members),
+            Some(gated_members) => {
+                tracing::info!(
+                    target = target,
+                    gated_members = ?gated_members,
+                    "format activation gate passed"
+                );
+                Ok(gated_members)
+            }
             None => {
-                let incapable = gathered
+                let incapable: Vec<(u64, u8)> = gathered
                     .iter()
                     .filter(|(_, capabilities)| capabilities.max_readable_version < target)
                     .map(|(node_id, capabilities)| (*node_id, capabilities.max_readable_version))
                     .collect();
+                tracing::warn!(
+                    target = target,
+                    min_member_read_capability = min_member_max_readable,
+                    incapable = ?incapable,
+                    "format activation rejected by all-members gate"
+                );
+                crate::observability::record_rejected_by_gate();
                 Err(FormatActivationError::MembersBelowTarget { target, incapable })
             }
         }
@@ -179,7 +214,14 @@ impl StandaloneHost {
             ))
             .await
         {
-            Ok(resp) => Ok(resp.data.outcome),
+            Ok(resp) => {
+                // The entry committed and applied (client_write blocks
+                // until apply); record both signals here. Apply-keyed
+                // counters (applied / noop) are emitted inside the apply
+                // arm so they reflect the actual subset-check outcome.
+                crate::observability::record_committed();
+                Ok(resp.data.outcome)
+            }
             Err(err) => Err(FormatActivationError::ProposalFailed(err.to_string())),
         }
     }
@@ -211,6 +253,11 @@ impl StandaloneHost {
         // Gate: live-query every current member; returns the exact gated
         // member set on success, or a gate error.
         let gated_members = self.run_activation_gate(target, source).await?;
+
+        // Gate passed — about to propose. The `proposed` counter
+        // increments here so a rejected_by_gate path (handled inside
+        // run_activation_gate) does not also increment proposed.
+        crate::observability::record_proposed();
 
         // Propose the bump carrying the gated set. Apply re-validates the
         // subset at the entry's own log position and sets the shared cell
