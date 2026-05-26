@@ -58,6 +58,7 @@ pub(crate) fn build_file(cfg: FileConfig) -> Result<Standalone, StandaloneError>
             },
         )),
         admin_transport: crate::TransportHandle::noop(),
+        admin_listen_addr: None,
     })
 }
 

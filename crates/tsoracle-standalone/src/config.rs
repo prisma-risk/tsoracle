@@ -71,6 +71,26 @@ pub struct PeerTlsConfig {
     pub ca: PathBuf,
 }
 
+/// mTLS material for the membership-admin gRPC server (PEM file paths,
+/// read at build()). Presence on an `OpenraftConfig` turns the admin port
+/// into mutual TLS: `cert`/`key` is this node's admin-server identity; `ca`
+/// verifies connecting admin clients (operators dialing via `tsoracle admin`).
+///
+/// Security contract: the admin CA MUST be issued from a CA chain independent
+/// of the peer CA. Anyone holding a cert signed by the configured admin CA can
+/// change cluster membership (AddLearner / Promote / RemoveNode). `build`
+/// enforces the trivial form of this — it rejects sharing the same CA file
+/// (by path or by byte content) — but it CANNOT detect two distinct CA files
+/// where one is in the trust chain of the other, or both chained under a
+/// shared root. Issuing the two CAs from independent roots is the operator's
+/// responsibility.
+#[derive(Debug, Clone)]
+pub struct AdminTlsConfig {
+    pub cert: PathBuf,
+    pub key: PathBuf,
+    pub ca: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenraftConfig {
     pub id: u64,
@@ -85,6 +105,10 @@ pub struct OpenraftConfig {
     /// Bind address for the membership-admin gRPC server. `None` serves no
     /// admin surface.
     pub admin_listen: Option<std::net::SocketAddr>,
+    /// mTLS material for the admin gRPC server. `None` means plaintext on
+    /// loopback only; routable `admin_listen` without TLS is rejected at
+    /// build() (see `StandaloneError::AdminInsecureRoutable`).
+    pub admin_tls: Option<AdminTlsConfig>,
 }
 
 #[derive(Debug, Clone)]
