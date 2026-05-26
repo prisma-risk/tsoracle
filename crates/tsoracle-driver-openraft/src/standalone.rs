@@ -45,9 +45,9 @@ use crate::capabilities::{
     CapabilitySource, FormatActivationError, NodeCapabilities, all_members_can_read, gather_with,
 };
 use crate::host::OpenraftHighWaterHost;
-use crate::log_entry::HighWaterCommand;
+use crate::log_entry::{HighWaterCommand, SetFormatVersionPayload};
 use crate::state_machine::HighWaterStateMachine;
-use crate::type_config::{OpenraftPeer, TypeConfig};
+use crate::type_config::{ApplyOutcome, OpenraftPeer, TypeConfig};
 use tsoracle_consensus::AdvancePayload;
 
 /// `OpenraftHighWaterHost` that owns its own raft cluster + state machine.
@@ -158,17 +158,48 @@ impl StandaloneHost {
         }
     }
 
+    /// Propose a `SetFormatVersion` bump and return the apply outcome
+    /// observed through the `client_write` response. The flip (if any) has
+    /// already happened inside the apply by the time this returns — the
+    /// shared cell reads `target` iff the outcome is
+    /// [`ApplyOutcome::FormatActivated`]. NO meta key is written; durability
+    /// is the committed log entry plus the snapshot byte.
+    async fn submit_set_format_version(
+        &self,
+        target: u8,
+        gated_members: BTreeSet<u64>,
+    ) -> Result<ApplyOutcome, FormatActivationError> {
+        match self
+            .raft
+            .client_write(HighWaterCommand::SetFormatVersion(
+                SetFormatVersionPayload {
+                    target,
+                    gated_members,
+                },
+            ))
+            .await
+        {
+            Ok(resp) => Ok(resp.data.outcome),
+            Err(err) => Err(FormatActivationError::ProposalFailed(err.to_string())),
+        }
+    }
+
     /// Operator entry point to begin a format-version activation to `target`
-    /// (interim, library-only). Runs the all-members gate and returns
-    /// `Ok(())` when it passes. A later phase fills the body between the gate
-    /// and this return — it takes the `gated_members` set returned by
-    /// [`run_activation_gate`](Self::run_activation_gate) and proposes a
-    /// `SetFormatVersion { target, gated_members }` entry at the pre-bump
-    /// active write version via `self.raft.client_write(...)`, then keys the
-    /// write-version flip off the successful apply. The function boundary
-    /// `run_activation_gate(target) -> Ok(gated_members)` is the exact seam
-    /// that proposal step builds on; today the gate result is simply not yet
-    /// consumed.
+    /// (interim, library-only).
+    ///
+    /// Runs the all-members gate (which live-queries every current
+    /// voter+learner via `source` for its capabilities) and, on a passing
+    /// gate, proposes a `SetFormatVersion { target, gated_members }` entry
+    /// via `raft.client_write`. The state-machine apply re-validates the
+    /// subset against the membership committed AS OF the entry's own log
+    /// position — apply-keyed, never raw-commit-keyed — and sets the shared
+    /// active-write-version cell only on a successful (non-no-op) apply.
+    ///
+    /// Returns `Ok(())` iff the apply reported
+    /// [`ApplyOutcome::FormatActivated`] (the cell now reads `target`). A
+    /// [`ApplyOutcome::FormatActivationNoop`] surfaces as
+    /// [`FormatActivationError::MembershipChangedSinceGate`] — the operator
+    /// re-gates and re-issues.
     pub async fn initiate_format_activation<S>(
         &self,
         target: u8,
@@ -177,8 +208,40 @@ impl StandaloneHost {
     where
         S: CapabilitySource<Node = OpenraftPeer>,
     {
-        let _gated_members = self.run_activation_gate(target, source).await?;
-        Ok(())
+        // Gate: live-query every current member; returns the exact gated
+        // member set on success, or a gate error.
+        let gated_members = self.run_activation_gate(target, source).await?;
+
+        // Propose the bump carrying the gated set. Apply re-validates the
+        // subset at the entry's own log position and sets the shared cell
+        // ONLY on a successful (non-no-op) apply. We learn which happened
+        // from the returned `ApplyOutcome` — the apply-keyed flip.
+        let outcome = self
+            .submit_set_format_version(target, gated_members)
+            .await?;
+        classify_activation_outcome(outcome, target)
+    }
+}
+
+/// Map a `SetFormatVersion` apply outcome to the activation result.
+///
+/// `FormatActivated { target }` is the apply-keyed flip succeeding (the
+/// shared cell now reads `target`). `FormatActivationNoop` means membership
+/// drifted out of the gated set by the bump's log position; surface as
+/// [`FormatActivationError::MembershipChangedSinceGate`]. `Advanced` is
+/// impossible for a `SetFormatVersion` entry but is mapped defensively to
+/// the no-op error rather than silently claiming success.
+fn classify_activation_outcome(
+    outcome: ApplyOutcome,
+    target: u8,
+) -> Result<(), FormatActivationError> {
+    match outcome {
+        ApplyOutcome::FormatActivated { target: applied } if applied == target => Ok(()),
+        ApplyOutcome::FormatActivated { .. }
+        | ApplyOutcome::FormatActivationNoop { .. }
+        | ApplyOutcome::Advanced => {
+            Err(FormatActivationError::MembershipChangedSinceGate { target })
+        }
     }
 }
 
@@ -333,5 +396,54 @@ mod tests {
         assert_eq!(state_machine.active_write_version(), 7);
         // Compile-time guard that the host accessor exists and returns u8:
         let _assert_signature: fn(&StandaloneHost) -> u8 = StandaloneHost::active_write_version;
+    }
+
+    #[test]
+    fn classify_activation_outcome_maps_success_to_ok() {
+        let result = classify_activation_outcome(ApplyOutcome::FormatActivated { target: 7 }, 7);
+        assert!(matches!(result, Ok(())));
+    }
+
+    #[test]
+    fn classify_activation_outcome_maps_noop_to_membership_changed() {
+        let result =
+            classify_activation_outcome(ApplyOutcome::FormatActivationNoop { target: 7 }, 7);
+        assert!(matches!(
+            result,
+            Err(FormatActivationError::MembershipChangedSinceGate { target: 7 })
+        ));
+    }
+
+    #[test]
+    fn classify_activation_outcome_maps_advanced_to_membership_changed() {
+        // `Advanced` cannot legally come back from a SetFormatVersion entry,
+        // but we map it defensively rather than silently claiming success.
+        let result = classify_activation_outcome(ApplyOutcome::Advanced, 7);
+        assert!(matches!(
+            result,
+            Err(FormatActivationError::MembershipChangedSinceGate { target: 7 })
+        ));
+    }
+
+    #[test]
+    fn classify_activation_outcome_rejects_target_mismatch() {
+        // A reply naming a different target than the proposer asked for is
+        // mapped to the same error — never silently claim success.
+        let result = classify_activation_outcome(ApplyOutcome::FormatActivated { target: 8 }, 7);
+        assert!(matches!(
+            result,
+            Err(FormatActivationError::MembershipChangedSinceGate { target: 7 })
+        ));
+    }
+
+    #[test]
+    fn membership_changed_since_gate_is_a_distinct_variant() {
+        // Pin that the variant is constructible and matchable; it is the
+        // operator-actionable surface for the apply-time no-op.
+        let err = FormatActivationError::MembershipChangedSinceGate { target: 4 };
+        assert!(matches!(
+            err,
+            FormatActivationError::MembershipChangedSinceGate { target: 4 }
+        ));
     }
 }

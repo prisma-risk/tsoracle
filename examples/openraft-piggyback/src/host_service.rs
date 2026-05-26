@@ -259,6 +259,19 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
                         tso: Some(core.high_water),
                     }
                 }
+                EntryPayload::Normal(HostCommand::Tso(HighWaterCommand::SetFormatVersion(_))) => {
+                    // The piggyback example does not own an active-write-version
+                    // cell of its own — the format activation barrier is a no-op
+                    // here. A real piggyback host that cares about the format
+                    // version would forward this entry to its embedded
+                    // `HighWaterStateMachine`'s apply.
+                    let mut core = self.core.lock();
+                    core.last_applied = Some(log_id);
+                    HostApplied {
+                        kv: None,
+                        tso: Some(core.high_water),
+                    }
+                }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
                     core.last_membership = StoredMembership::new(Some(log_id), membership.clone());

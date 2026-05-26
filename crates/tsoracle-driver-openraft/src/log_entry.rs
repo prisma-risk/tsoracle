@@ -33,10 +33,29 @@
 //! with the paxos driver so the "advance" command carries one name and one
 //! field across backends.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use tsoracle_consensus::AdvancePayload;
+
+/// Payload of [`HighWaterCommand::SetFormatVersion`]: the committed activation
+/// barrier that flips the cluster's active write version.
+///
+/// `gated_members` is the exact member set (voters ∪ learners) the leader's
+/// activation gate observed as capable of reading `target` at proposal time.
+/// It travels inside the entry because the state-machine apply cannot perform
+/// a live capability query; apply re-validates that the membership committed
+/// as of this entry's own log position is a subset of `gated_members` before
+/// taking effect. `NodeId` is `u64` (the type config's `Node` id type), so the
+/// set is `BTreeSet<u64>` — a deterministic, ordered, postcard-stable layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetFormatVersionPayload {
+    /// The active write version to flip to on a successful (non-no-op) apply.
+    pub target: u8,
+    /// Voters ∪ learners the leader gated as `target`-readable at proposal time.
+    pub gated_members: BTreeSet<u64>,
+}
 
 /// Commands the state machine knows how to apply.
 ///
@@ -46,6 +65,10 @@ use tsoracle_consensus::AdvancePayload;
 pub enum HighWaterCommand {
     /// Advance the high-water mark to at least `at_least`. Idempotent.
     Advance(AdvancePayload),
+    /// Activate a new active write version, gated on the carried member set.
+    /// Applies as a no-op if the membership at this entry's log position is
+    /// not a subset of `gated_members`.
+    SetFormatVersion(SetFormatVersionPayload),
 }
 
 impl fmt::Display for HighWaterCommand {
@@ -53,6 +76,17 @@ impl fmt::Display for HighWaterCommand {
         match self {
             HighWaterCommand::Advance(AdvancePayload { at_least }) => {
                 write!(f, "Advance {{ at_least: {at_least} }}")
+            }
+            HighWaterCommand::SetFormatVersion(SetFormatVersionPayload {
+                target,
+                gated_members,
+            }) => {
+                let rendered: Vec<String> = gated_members.iter().map(|id| id.to_string()).collect();
+                write!(
+                    f,
+                    "SetFormatVersion {{ target: {target}, gated_members: [{}] }}",
+                    rendered.join(", ")
+                )
             }
         }
     }
@@ -95,6 +129,43 @@ mod tests {
     #[test]
     fn postcard_round_trip_max() {
         let cmd = HighWaterCommand::Advance(AdvancePayload { at_least: u64::MAX });
+        let bytes = postcard::to_stdvec(&cmd).expect("serialize");
+        let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn display_renders_set_format_version() {
+        let cmd = HighWaterCommand::SetFormatVersion(SetFormatVersionPayload {
+            target: 4,
+            gated_members: BTreeSet::from([1u64, 2u64, 3u64]),
+        });
+        assert_eq!(
+            format!("{cmd}"),
+            "SetFormatVersion { target: 4, gated_members: [1, 2, 3] }"
+        );
+    }
+
+    #[test]
+    fn postcard_round_trip_set_format_version() {
+        let cmd = HighWaterCommand::SetFormatVersion(SetFormatVersionPayload {
+            target: 7,
+            gated_members: BTreeSet::from([10u64, 20u64]),
+        });
+        let bytes = postcard::to_stdvec(&cmd).expect("serialize");
+        let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn postcard_round_trip_set_format_version_empty_gate() {
+        // The gated set may legitimately be empty for a degenerate re-issue;
+        // it must still round-trip so the apply-time subset check sees
+        // exactly what the proposer recorded.
+        let cmd = HighWaterCommand::SetFormatVersion(SetFormatVersionPayload {
+            target: 4,
+            gated_members: BTreeSet::new(),
+        });
         let bytes = postcard::to_stdvec(&cmd).expect("serialize");
         let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(back, cmd);

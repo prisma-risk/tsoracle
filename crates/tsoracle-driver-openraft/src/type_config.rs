@@ -76,15 +76,44 @@ impl ServiceEndpoint for OpenraftPeer {
     }
 }
 
+/// What an applied entry did, beyond moving the high-water value.
+///
+/// Returned on every [`HighWaterApplied`] so the proposer's `client_write`
+/// response proves the apply's semantic outcome — specifically whether a
+/// [`crate::log_entry::SetFormatVersionPayload`] bump took effect or applied
+/// as a membership-subset no-op. A bare `Ok` from `client_write` proves the
+/// entry committed and applied, but not that the subset check passed; the
+/// leader's activation flip is keyed off observing
+/// [`ApplyOutcome::FormatActivated`] here — apply-keyed, never commit-keyed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplyOutcome {
+    /// A `Blank`, `Advance`, or `Membership` entry (the active write version
+    /// is untouched).
+    Advanced,
+    /// A `SetFormatVersion` bump applied successfully: the membership at the
+    /// entry's log position was a subset of the gated set, so the shared
+    /// active-write-version cell was set to `target`. NO meta key was written.
+    FormatActivated { target: u8 },
+    /// A `SetFormatVersion` bump applied as a no-op: the membership at the
+    /// entry's log position was NOT a subset of the gated set, so the shared
+    /// cell was left untouched and `target` did not take effect. The operator
+    /// re-gates and re-issues.
+    FormatActivationNoop { target: u8 },
+}
+
 /// Per-entry apply result.
 ///
 /// Returned by the state machine for each replicated entry. The driver reads
 /// `value` from the `client_write` response to confirm the committed value
-/// observed by the apply pipeline.
+/// observed by the apply pipeline; `outcome` proves which apply path ran
+/// (specifically, whether a [`crate::log_entry::HighWaterCommand::SetFormatVersion`]
+/// bump took effect or applied as a no-op).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HighWaterApplied {
     /// The high-water value after this entry's apply.
     pub value: u64,
+    /// The semantic outcome of this entry's apply (see [`ApplyOutcome`]).
+    pub outcome: ApplyOutcome,
 }
 
 declare_raft_types_ext! {
@@ -187,7 +216,10 @@ mod tests {
 
     #[test]
     fn high_water_applied_round_trips() {
-        let applied = HighWaterApplied { value: 12_345 };
+        let applied = HighWaterApplied {
+            value: 12_345,
+            outcome: ApplyOutcome::Advanced,
+        };
         let bytes = postcard::to_stdvec(&applied).expect("serialize");
         let back: HighWaterApplied = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(back, applied);
@@ -196,11 +228,46 @@ mod tests {
     #[test]
     fn high_water_applied_round_trips_zero_and_max() {
         for v in [0u64, u64::MAX] {
-            let applied = HighWaterApplied { value: v };
+            let applied = HighWaterApplied {
+                value: v,
+                outcome: ApplyOutcome::Advanced,
+            };
             let bytes = postcard::to_stdvec(&applied).expect("serialize");
             let back: HighWaterApplied = postcard::from_bytes(&bytes).expect("deserialize");
             assert_eq!(back, applied);
         }
+    }
+
+    #[test]
+    fn apply_outcome_variants_round_trip() {
+        for outcome in [
+            ApplyOutcome::Advanced,
+            ApplyOutcome::FormatActivated { target: 4 },
+            ApplyOutcome::FormatActivationNoop { target: 4 },
+        ] {
+            let applied = HighWaterApplied {
+                value: 42,
+                outcome: outcome.clone(),
+            };
+            let bytes = postcard::to_stdvec(&applied).expect("serialize");
+            let back: HighWaterApplied = postcard::from_bytes(&bytes).expect("deserialize");
+            assert_eq!(back, applied);
+        }
+    }
+
+    #[test]
+    fn apply_outcome_distinguishes_success_from_noop() {
+        let success = ApplyOutcome::FormatActivated { target: 5 };
+        let noop = ApplyOutcome::FormatActivationNoop { target: 5 };
+        assert_ne!(success, noop);
+        assert!(matches!(
+            success,
+            ApplyOutcome::FormatActivated { target: 5 }
+        ));
+        assert!(matches!(
+            noop,
+            ApplyOutcome::FormatActivationNoop { target: 5 }
+        ));
     }
 
     #[test]

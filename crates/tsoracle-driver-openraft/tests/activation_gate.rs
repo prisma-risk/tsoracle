@@ -123,15 +123,19 @@ async fn gate_fails_when_target_above_local_max() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn initiate_format_activation_runs_gate_and_returns_ok_for_now() {
+async fn initiate_format_activation_proposes_and_observes_flip() {
     let (host, _cluster) = single_node_leader_host().await;
+    let target = tsoracle_openraft_toolkit::MAX_READABLE_VERSION;
     // The all-members gate against the only voter (local short-circuit)
-    // passes; the body between the gate and Ok(()) is a later phase's
-    // proposal step.
-    host.initiate_format_activation(
-        tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
-        &UnusedSource,
-    )
-    .await
-    .expect("a passing gate returns Ok in this phase");
+    // passes; the propose step writes `SetFormatVersion` through the raft;
+    // apply re-validates the subset at the entry's log position and (since
+    // committed_members = {1} ⊆ gated_members = {1}) sets the shared cell.
+    // The classifier maps the returned `FormatActivated` outcome to `Ok(())`.
+    host.initiate_format_activation(target, &UnusedSource)
+        .await
+        .expect("a passing gate followed by a successful apply returns Ok");
+    // Verify the apply-keyed flip actually happened: the shared cell now
+    // reads `target` (this is the seam the leader observes through the
+    // `client_write` response).
+    assert_eq!(host.active_write_version(), target);
 }

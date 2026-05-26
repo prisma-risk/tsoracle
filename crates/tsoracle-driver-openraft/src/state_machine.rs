@@ -65,9 +65,9 @@ use tsoracle_openraft_toolkit::{
     codec_io_error,
 };
 
-use crate::log_entry::HighWaterCommand;
+use crate::log_entry::{HighWaterCommand, SetFormatVersionPayload};
 use crate::snapshot_store::{InMemorySnapshotStore, SnapshotStore};
-use crate::type_config::{HighWaterApplied, TypeConfig};
+use crate::type_config::{ApplyOutcome, HighWaterApplied, TypeConfig};
 
 type LogId = LogIdOf<TypeConfig>;
 type SnapMeta = SnapshotMetaOf<TypeConfig>;
@@ -455,15 +455,59 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                     core.last_applied = Some(log_id);
                     HighWaterApplied {
                         value: core.current_value,
+                        outcome: ApplyOutcome::Advanced,
                     }
                 }
-                EntryPayload::Normal(cmd) => {
-                    let HighWaterCommand::Advance(advance) = cmd;
+                EntryPayload::Normal(HighWaterCommand::Advance(advance)) => {
                     let mut core = self.core.lock();
                     core.current_value = advance.merge(core.current_value);
                     core.last_applied = Some(log_id);
                     HighWaterApplied {
                         value: core.current_value,
+                        outcome: ApplyOutcome::Advanced,
+                    }
+                }
+                EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
+                    SetFormatVersionPayload {
+                        target,
+                        gated_members,
+                    },
+                )) => {
+                    let target = *target;
+                    // Evaluate the subset against the membership committed as
+                    // of this entry's log position. Apply folds the log in
+                    // index order, so `core.last_membership` is exactly that
+                    // membership (a `Membership` entry at a lower index has
+                    // already updated it; a later one has not). Cover BOTH
+                    // voters and learners: openraft replicates/snapshots
+                    // learners, so an un-gated learner must force a no-op.
+                    let mut core = self.core.lock();
+                    let committed_members: std::collections::BTreeSet<u64> = core
+                        .last_membership
+                        .membership()
+                        .nodes()
+                        .map(|(node_id, _node)| *node_id)
+                        .collect();
+                    let outcome = if committed_members.is_subset(gated_members) {
+                        // Successful (non-no-op) apply: set the
+                        // process-shared active-write-version cell. NO meta
+                        // write — durability is the raft log (deterministic
+                        // replay re-runs this exact check) plus the snapshot
+                        // frame byte.
+                        self.active_write_version.set(target);
+                        ApplyOutcome::FormatActivated { target }
+                    } else {
+                        // Membership grew an un-gated member between the gate
+                        // and this entry's position. Leave the cell
+                        // untouched; the operator re-gates and re-issues. A
+                        // no-op writes nothing at `target`, so it cannot
+                        // resurrect on restart.
+                        ApplyOutcome::FormatActivationNoop { target }
+                    };
+                    core.last_applied = Some(log_id);
+                    HighWaterApplied {
+                        value: core.current_value,
+                        outcome,
                     }
                 }
                 EntryPayload::Membership(membership) => {
@@ -472,6 +516,7 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                     core.last_applied = Some(log_id);
                     HighWaterApplied {
                         value: core.current_value,
+                        outcome: ApplyOutcome::Advanced,
                     }
                 }
             };
@@ -681,6 +726,251 @@ mod tests {
         assert_eq!(sm.current_value().await, 42);
         let (last, _) = sm.applied_state().await.unwrap();
         assert_eq!(last.map(|l| l.index), Some(2));
+    }
+
+    // ---- SetFormatVersion apply tests ----
+    //
+    // The apply path keys the flip off a successful (non-no-op) apply: the
+    // subset check `committed_members ⊆ gated_members` runs against
+    // `core.last_membership` evaluated at the bump's own log position (apply
+    // folds the log in index order). On a hit the shared cell is set; on a
+    // miss the cell is untouched and a no-op outcome is returned. Direct
+    // cell observation is sufficient since `SetFormatVersionPayload`'s effect
+    // is exactly "did the cell move?"; we don't need to capture the
+    // ApplyOutcome through the responder channel for these checks.
+
+    /// A membership whose voter config is `voters`, as a `Membership` payload.
+    /// The concrete `Membership<NID, N>` type is inferred from the call site
+    /// (e.g. `EntryPayload::Membership(...)` infers it for `TypeConfig`).
+    fn voters_membership(
+        voters: &[u64],
+    ) -> openraft::Membership<u64, crate::type_config::OpenraftPeer> {
+        openraft::Membership::new_with_defaults(
+            vec![voters.iter().copied().collect::<BTreeSet<u64>>()],
+            voters.to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn set_format_version_subset_match_sets_cell() {
+        let mut sm = HighWaterStateMachine::new();
+        // Establish membership {1, 2} at index 1.
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Membership(voters_membership(&[1, 2])),
+        )
+        .await;
+        // Bump gated on a superset of the committed membership → subset holds.
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
+                SetFormatVersionPayload {
+                    target: 7,
+                    gated_members: BTreeSet::from([1u64, 2u64, 3u64]),
+                },
+            )),
+        )
+        .await;
+        assert_eq!(
+            sm.active_write_version(),
+            7,
+            "cell set on successful subset apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_format_version_membership_not_subset_is_noop() {
+        let mut sm = HighWaterStateMachine::new();
+        let before = sm.active_write_version();
+        // Membership {1, 2, 9} at index 1; the gate only covered {1, 2}.
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Membership(voters_membership(&[1, 2, 9])),
+        )
+        .await;
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
+                SetFormatVersionPayload {
+                    target: 7,
+                    gated_members: BTreeSet::from([1u64, 2u64]),
+                },
+            )),
+        )
+        .await;
+        assert_eq!(
+            sm.active_write_version(),
+            before,
+            "no-op must leave the shared cell untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_format_version_covers_learners_not_only_voters() {
+        let mut sm = HighWaterStateMachine::new();
+        let before = sm.active_write_version();
+        // Voter {1}, learner {2}. `new_with_defaults(voter_groups, all_ids)`
+        // treats node ids in `all_ids` but absent from `voter_groups` as
+        // learners. A voter-only gate `{1}` must NOT satisfy the subset —
+        // the learner is a current member and openraft replicates to it,
+        // so an un-gated learner forces a no-op.
+        let membership =
+            openraft::Membership::new_with_defaults(vec![BTreeSet::from([1u64])], [1u64, 2u64]);
+        apply_one(&mut sm, 1, EntryPayload::Membership(membership)).await;
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
+                SetFormatVersionPayload {
+                    target: 7,
+                    gated_members: BTreeSet::from([1u64]),
+                },
+            )),
+        )
+        .await;
+        assert_eq!(
+            sm.active_write_version(),
+            before,
+            "un-gated learner must force a no-op"
+        );
+    }
+
+    // ---- Replay / recovery confirmation tests ----
+    //
+    // These model openraft's deterministic recovery: a fresh state machine
+    // (fresh BASELINE-seeded cell) re-applies the committed log in index
+    // order, so the SetFormatVersion subset check re-runs per entry. A
+    // no-op replays as a no-op (no record was ever written at the higher
+    // version); a success re-establishes the cell.
+
+    #[derive(Clone)]
+    enum ReplayEntry {
+        Membership(Vec<u64>),
+        Bump { target: u8, gated: Vec<u64> },
+    }
+
+    async fn replay(sm: &mut HighWaterStateMachine, log: &[(u64, ReplayEntry)]) {
+        for (index, kind) in log {
+            let payload = match kind {
+                ReplayEntry::Membership(voters) => {
+                    EntryPayload::Membership(voters_membership(voters))
+                }
+                ReplayEntry::Bump { target, gated } => EntryPayload::Normal(
+                    HighWaterCommand::SetFormatVersion(SetFormatVersionPayload {
+                        target: *target,
+                        gated_members: gated.iter().copied().collect(),
+                    }),
+                ),
+            };
+            apply_one(sm, *index, payload).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_activation_survives_replay() {
+        let log = vec![
+            (1u64, ReplayEntry::Membership(vec![1, 2])),
+            (
+                2u64,
+                ReplayEntry::Bump {
+                    target: 7,
+                    gated: vec![1, 2, 3],
+                },
+            ),
+        ];
+        // Live apply sets the cell.
+        let mut live = HighWaterStateMachine::new();
+        replay(&mut live, &log).await;
+        assert_eq!(live.active_write_version(), 7);
+
+        // "Restart": a fresh SM with a fresh BASELINE-seeded cell, replaying
+        // the same committed log, re-establishes target via the re-run
+        // subset check. NO meta key consulted.
+        let mut recovered = HighWaterStateMachine::new();
+        assert_ne!(
+            recovered.active_write_version(),
+            7,
+            "fresh cell starts at baseline"
+        );
+        replay(&mut recovered, &log).await;
+        assert_eq!(
+            recovered.active_write_version(),
+            7,
+            "replay re-applies the flip"
+        );
+    }
+
+    #[tokio::test]
+    async fn noop_bump_never_advances_across_restart() {
+        let log = vec![
+            // Membership has an un-gated member 9; the gate only covered {1, 2}.
+            (1u64, ReplayEntry::Membership(vec![1, 2, 9])),
+            (
+                2u64,
+                ReplayEntry::Bump {
+                    target: 7,
+                    gated: vec![1, 2],
+                },
+            ),
+        ];
+        let mut live = HighWaterStateMachine::new();
+        let baseline = live.active_write_version();
+        replay(&mut live, &log).await;
+        assert_eq!(
+            live.active_write_version(),
+            baseline,
+            "no-op leaves the cell"
+        );
+
+        // Restart: replay the same log; the no-op replays as a no-op (the
+        // subset check fails identically), so the cell stays at baseline.
+        // The committed entry's mere presence never advances the version.
+        let mut recovered = HighWaterStateMachine::new();
+        replay(&mut recovered, &log).await;
+        assert_eq!(
+            recovered.active_write_version(),
+            baseline,
+            "a no-op'd bump cannot resurrect on restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_is_deterministic() {
+        let log = vec![
+            (1u64, ReplayEntry::Membership(vec![1, 2])),
+            (
+                2u64,
+                ReplayEntry::Bump {
+                    target: 7,
+                    gated: vec![1, 2, 3],
+                },
+            ),
+            // A later bump gated on a set that excludes a now-added member.
+            (3u64, ReplayEntry::Membership(vec![1, 2, 5])),
+            (
+                4u64,
+                ReplayEntry::Bump {
+                    target: 8,
+                    gated: vec![1, 2],
+                },
+            ),
+        ];
+        let mut first = HighWaterStateMachine::new();
+        replay(&mut first, &log).await;
+        let mut second = HighWaterStateMachine::new();
+        replay(&mut second, &log).await;
+        // Index-2 bump succeeded (membership {1,2} ⊆ {1,2,3}); index-4 bump
+        // no-ops (membership {1,2,5} ⊄ {1,2}), so the cell stays at 7.
+        assert_eq!(first.active_write_version(), 7);
+        assert_eq!(
+            first.active_write_version(),
+            second.active_write_version(),
+            "two replays of the same committed log yield the same cell"
+        );
     }
 
     // ---- Snapshot tests ----

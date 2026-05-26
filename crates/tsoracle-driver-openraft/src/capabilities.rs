@@ -117,6 +117,18 @@ pub enum FormatActivationError {
     /// A member could not be queried for its capabilities; the gate fails closed.
     #[error("format activation gate failed: member {node_id} unreachable: {detail}")]
     MemberUnreachable { node_id: NodeId, detail: String },
+    /// The membership committed as of the bump's own log position was no
+    /// longer a subset of the set the gate observed — an un-gated member was
+    /// added or promoted between the live gate query and the entry's
+    /// commit/apply, so the bump applied as a no-op. Re-gate and re-issue.
+    #[error(
+        "format activation to target {target} applied as a no-op: membership changed since the gate"
+    )]
+    MembershipChangedSinceGate { target: u8 },
+    /// The proposal (`raft.client_write`) failed before / during commit —
+    /// e.g. lost leadership, the cluster lost quorum, or a fatal raft error.
+    #[error("format activation proposal failed: {0}")]
+    ProposalFailed(String),
 }
 
 /// Abstracts querying one peer member for its [`NodeCapabilities`]. Implemented

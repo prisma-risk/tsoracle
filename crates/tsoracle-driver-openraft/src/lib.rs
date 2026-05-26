@@ -42,7 +42,7 @@ pub use capabilities::{
 pub use driver::OpenraftDriver;
 pub use host::OpenraftHighWaterHost;
 pub use log_codec::OpenraftLogCodec;
-pub use log_entry::HighWaterCommand;
+pub use log_entry::{HighWaterCommand, SetFormatVersionPayload};
 #[cfg(feature = "rocksdb-snapshot-store")]
 pub use snapshot_store::RocksdbSnapshotStore;
 pub use snapshot_store::{InMemorySnapshotStore, SnapshotStore};
@@ -53,6 +53,6 @@ pub use state_machine::{HighWaterStateMachine, HighWaterStateMachineSnapshot};
 pub use tsoracle_consensus::AdvancePayload;
 pub use tsoracle_core::TsoPeer;
 pub use type_config::{
-    HighWaterApplied, OpenraftEntry, OpenraftLogId, OpenraftPeer, OpenraftVote, ServiceEndpoint,
-    TypeConfig,
+    ApplyOutcome, HighWaterApplied, OpenraftEntry, OpenraftLogId, OpenraftPeer, OpenraftVote,
+    ServiceEndpoint, TypeConfig,
 };
