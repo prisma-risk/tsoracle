@@ -1,0 +1,204 @@
+name: release-sign
+
+# Auto: fires when release-plz publishes a per-crate GitHub Release.
+# Manual: backfill for releases that pre-date this workflow, or to re-sign
+# after a workflow change. `inputs.tag` is the existing release's tag name
+# (e.g. `tsoracle-v0.1.14`).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to sign (e.g. tsoracle-v0.1.14)'
+        required: true
+        type: string
+
+# Default to read-only at the workflow level; each job opts in to what it
+# needs. Mirrors the convention in release-plz.yml and release-images.yml.
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Never cancel a signing in flight: a half-signed release (e.g. .crate
+# uploaded but .intoto.jsonl missing) is worse than slow CI. Group by tag
+# so concurrent runs for *different* releases proceed in parallel.
+concurrency:
+  group: release-sign-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: package and hash crate
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      crate: ${{ steps.parse.outputs.crate }}
+      version: ${{ steps.parse.outputs.version }}
+      crate-file: ${{ steps.parse.outputs.crate-file }}
+      provenance-name: ${{ steps.parse.outputs.crate-file }}.intoto.jsonl
+      subjects: ${{ steps.hash.outputs.subjects }}
+    steps:
+      - name: Resolve tag from trigger
+        id: resolve
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          if [ -z "$TAG" ]; then
+            echo "::error::no tag available from release event or workflow_dispatch input" >&2
+            exit 1
+          fi
+          # Cheap shape check; deep validation happens after cargo metadata.
+          if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+-v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
+            echo "::error::tag '$TAG' does not match <crate>-v<semver>" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release exists (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+      - name: Checkout at the release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ steps.resolve.outputs.tag }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+
+      - name: system deps
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
+
+      - name: Parse tag and validate crate
+        id: parse
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Strip the trailing `-v<semver>` to recover the crate name.
+          VERSION="$(printf '%s' "$TAG" | sed -E 's/^.*-v([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?)$/\1/')"
+          CRATE="$(printf '%s' "$TAG" | sed -E 's/-v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$//')"
+          if [ -z "$CRATE" ] || [ -z "$VERSION" ] || [ "$CRATE" = "$TAG" ]; then
+            echo "::error::failed to split tag '$TAG' into <crate>/<version>" >&2
+            exit 1
+          fi
+          # Defensive: confirm the crate name exists as a workspace member at this
+          # commit. A hand-crafted or mis-shaped tag must NOT silently sign a
+          # different crate's tarball.
+          if ! cargo metadata --no-deps --format-version 1 \
+                | python3 -c "import sys,json; names={p['name'] for p in json.load(sys.stdin)['packages']}; sys.exit(0 if '$CRATE' in names else 1)"; then
+            echo "::error::crate '$CRATE' (from tag '$TAG') is not a workspace member at this commit" >&2
+            exit 1
+          fi
+          CRATE_FILE="${CRATE}-${VERSION}.crate"
+          {
+            echo "crate=$CRATE"
+            echo "version=$VERSION"
+            echo "crate-file=$CRATE_FILE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: cargo package
+        env:
+          CRATE: ${{ steps.parse.outputs.crate }}
+        run: |
+          set -euo pipefail
+          # --no-verify: release-plz already ran the verifying publish; re-doing
+          # the verify burns CI time without catching anything new.
+          # --locked: use the lockfile from the tagged commit.
+          cargo package --no-verify --locked -p "$CRATE"
+
+      - name: Compute SLSA subjects
+        id: hash
+        env:
+          CRATE_FILE: ${{ steps.parse.outputs.crate-file }}
+        run: |
+          set -euo pipefail
+          CRATE_PATH="target/package/$CRATE_FILE"
+          if [ ! -f "$CRATE_PATH" ]; then
+            echo "::error::expected packaged crate at $CRATE_PATH, not found" >&2
+            ls -la target/package/ >&2 || true
+            exit 1
+          fi
+          SHA256="$(sha256sum "$CRATE_PATH" | awk '{print $1}')"
+          # SLSA subjects format: JSON array of {name, digest{sha256}}.
+          SUBJECTS_JSON="$(printf '[{"name":"%s","digest":{"sha256":"%s"}}]' "$CRATE_FILE" "$SHA256")"
+          SUBJECTS_B64="$(printf '%s' "$SUBJECTS_JSON" | base64 -w0)"
+          echo "subjects=$SUBJECTS_B64" >> "$GITHUB_OUTPUT"
+          # Also write the sha256 file we'll upload in the attach job.
+          printf '%s  %s\n' "$SHA256" "$CRATE_FILE" > "target/package/${CRATE_FILE}.sha256"
+          [ -f "target/package/${CRATE_FILE}.sha256" ] || { echo "::error::sha256 file not written" >&2; exit 1; }
+
+      - name: Upload .crate + .sha256 for downstream jobs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: crate-artifacts
+          path: |
+            target/package/${{ steps.parse.outputs.crate-file }}
+            target/package/${{ steps.parse.outputs.crate-file }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  provenance:
+    needs: build
+    permissions:
+      actions: read       # generator inspects the workflow to record build metadata
+      id-token: write     # OIDC token for Sigstore (Fulcio) keyless signing
+      contents: write     # upload the .intoto.jsonl to the GH Release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a  # v2.1.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.subjects }}
+      provenance-name: ${{ needs.build.outputs.provenance-name }}
+      upload-assets: true
+      # Explicit on both auto + workflow_dispatch paths: the reusable workflow
+      # falls back to github.ref for the upload tag, which is refs/heads/main
+      # (not a tag ref) on workflow_dispatch. Don't remove this without
+      # restructuring the trigger contract.
+      upload-tag-name: ${{ needs.build.outputs.tag }}
+
+  attach:
+    name: attach .crate to release
+    needs: [build, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # gh release upload
+    steps:
+      - name: Download crate artifacts
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: crate-artifacts
+          path: artifacts
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          CRATE_FILE: ${{ needs.build.outputs.crate-file }}
+        run: |
+          set -euo pipefail
+          # --clobber: idempotent on re-run; replaces any existing asset of the
+          # same name (e.g. backfill rerun after a workflow change). gh does
+          # not retry internally; a transient failure here is safe to re-run.
+          gh release upload "$TAG" \
+            "artifacts/$CRATE_FILE" \
+            "artifacts/${CRATE_FILE}.sha256" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
