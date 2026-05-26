@@ -244,6 +244,31 @@ mod tests {
     }
 
     #[test]
+    fn existing_incompatible_learner_blocks_activation_via_all_members_gate() {
+        // An existing incompatible learner blocks activation until
+        // remediated. There is NO separate "existing-learner block" code
+        // path: the all-members gate already covers learners (the leader
+        // gathers capabilities from voters AND learners read from
+        // `raft.metrics().borrow_watched().membership_config.nodes()`, then
+        // runs this predicate). The toolkit's `learner_meets_active_write_version`
+        // (the joiner gate) refuses NEW learners on admission; this
+        // predicate refuses an activation when an already-admitted member
+        // (voter or learner) cannot read the target. The two together
+        // cover spec §12's joiner-gate and existing-learner-block
+        // requirements without duplicate enforcement.
+        let target = 4u8;
+        let capable_voter = caps(3, 4);
+        let incompatible_learner = caps(3, 3); // max_readable_version < target
+        let reports = vec![(1u64, capable_voter), (2u64, incompatible_learner)];
+        assert_eq!(
+            all_members_can_read(target, &reports),
+            None,
+            "an incompatible already-admitted member (here a learner) must \
+             fail the all-members gate, blocking activation until remediated"
+        );
+    }
+
+    #[test]
     fn gate_on_empty_membership_is_vacuously_satisfied_with_empty_set() {
         // No members → no member can fail the predicate → Some(empty). A real
         // cluster always has at least the local node, but the predicate itself

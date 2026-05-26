@@ -45,8 +45,9 @@ pub use codec::{
 };
 pub use codec_provider::{DefaultLogStoreCodec, LogStoreCodec};
 pub use lifecycle::{
-    BootstrapError, BootstrapMode, LeadershipState, MembershipError, add_learner, bootstrap,
-    change_membership, join, leadership_events, leadership_events_from_metrics,
+    BootstrapError, BootstrapMode, GatedAdmissionError, JoinerGateError, LeadershipState,
+    MembershipError, add_learner, add_learner_gated, bootstrap, change_membership, join,
+    leadership_events, leadership_events_from_metrics, learner_meets_active_write_version,
 };
 
 #[cfg(feature = "rocksdb-log-store")]

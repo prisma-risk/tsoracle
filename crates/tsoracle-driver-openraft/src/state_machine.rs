@@ -973,6 +973,201 @@ mod tests {
         );
     }
 
+    // ---- Snapshot active-write-version stamping (format migration) ----
+    //
+    // These tests pin the contract that the snapshot builder reads the
+    // node's CURRENT active write version (the shared cell) at build time,
+    // rather than a hard-coded constant. Today that is BASELINE_WRITE_VERSION
+    // since no activation has flipped the cell; the assertions are written
+    // against the accessor (`sm.active_write_version()`) so they remain
+    // correct after a real activation moves the cell forward and the next
+    // build emits at the new version.
+
+    #[tokio::test]
+    async fn build_snapshot_stamps_active_write_version() {
+        // The persisted envelope's leading version byte must equal what the
+        // accessor reports — not a literal. This proves the plumbing is
+        // active-version-driven and would catch a regression to a constant.
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let mut sm = HighWaterStateMachine::with_store(store.clone()).expect("with_store");
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 321 })),
+        )
+        .await;
+
+        let active = sm.active_write_version();
+        sm.build_snapshot().await.expect("build_snapshot");
+
+        let envelope_bytes = store.load().expect("load").expect("snapshot present");
+        assert_eq!(
+            envelope_bytes[0], active,
+            "envelope leading version byte must equal the active write version"
+        );
+
+        // The inner payload blob is the on-disk record openraft replays from
+        // on snapshot install; it must be stamped at the active version too
+        // so a follower receiving it can decode against its own version
+        // window.
+        let persisted: PersistedSnapshot = tsoracle_codec::decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            &envelope_bytes,
+        )
+        .expect("decode envelope");
+        assert_eq!(
+            persisted.data[0], active,
+            "inner snapshot payload leading version byte must equal the active write version"
+        );
+    }
+
+    #[tokio::test]
+    async fn old_version_snapshot_is_read_and_reemitted_at_active_version() {
+        // Migration-on-next-write: a snapshot persisted at version V is
+        // readable across the multi-version codec and the next
+        // build_snapshot re-emits at the cluster's ACTIVE write version.
+        //
+        // HONESTY: MIN==MAX==BASELINE today, so there is no genuine lower
+        // production version. This exercises the seam end-to-end at the
+        // only version that exists; the genuine cross-version rewrite
+        // (install vN, flip to vN+1, assert rebuild is vN+1) is the
+        // structural extension a real vN+1 work would make by
+        // parameterizing the installed version.
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+
+        // Persist a snapshot via a first SM instance, then drop it.
+        {
+            let mut writer = HighWaterStateMachine::with_store(store.clone()).expect("writer SM");
+            apply_one(
+                &mut writer,
+                3,
+                EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 777 })),
+            )
+            .await;
+            writer
+                .build_snapshot()
+                .await
+                .expect("build initial snapshot");
+        }
+
+        // Reopen: the recovery path decodes across the readable range and
+        // restores state.
+        let mut sm = HighWaterStateMachine::with_store(store.clone()).expect("reopened SM");
+        assert_eq!(
+            sm.current_value().await,
+            777,
+            "recovered value across reopen"
+        );
+
+        // The next build re-emits at the active write version.
+        let active = sm.active_write_version();
+        apply_one(
+            &mut sm,
+            4,
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 888 })),
+        )
+        .await;
+        sm.build_snapshot().await.expect("rebuild snapshot");
+
+        let rebuilt = store.load().expect("load").expect("snapshot present");
+        assert_eq!(
+            rebuilt[0], active,
+            "rebuilt snapshot must be emitted at the active write version"
+        );
+        let payload: PersistedSnapshot = tsoracle_codec::decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            &rebuilt,
+        )
+        .expect("decode rebuilt envelope");
+        assert_eq!(payload.meta.last_log_id.map(|l| l.index), Some(4));
+    }
+
+    #[test]
+    fn snapshot_codec_accepts_full_readable_range() {
+        // The migration-seam invariant in isolation: the snapshot decoder
+        // must accept any version in [MIN_READABLE_VERSION,
+        // MAX_READABLE_VERSION] and reject anything outside it. This is
+        // what makes an OLD-version on-disk snapshot readable after the
+        // active version moves forward. Asserted against the codec range
+        // directly so it documents the contract even while MIN==MAX today.
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 5,
+            last_applied: Some(log_id(2)),
+            last_membership: StoredMem::default(),
+        };
+        for version in tsoracle_openraft_toolkit::MIN_READABLE_VERSION
+            ..=tsoracle_openraft_toolkit::MAX_READABLE_VERSION
+        {
+            let framed = tsoracle_codec::encode_framed(version, &payload).expect("encode in range");
+            let decoded: HighWaterStateMachineSnapshot = tsoracle_codec::decode_framed(
+                tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+                tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+                &framed,
+            )
+            .expect("decode in range");
+            assert_eq!(decoded, payload);
+        }
+
+        // One past the readable max must be rejected loudly.
+        let above = tsoracle_openraft_toolkit::MAX_READABLE_VERSION.saturating_add(1);
+        let mut framed_above = vec![above];
+        framed_above.extend_from_slice(&tsoracle_codec::encode_postcard(&payload).expect("body"));
+        assert!(
+            tsoracle_codec::decode_framed::<HighWaterStateMachineSnapshot>(
+                tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+                tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+                &framed_above,
+            )
+            .is_err(),
+            "a version above the readable max must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_write_version_survives_reopen_and_drives_writes() {
+        // The durable active write version is recovered on reopen and is
+        // the version stamped onto snapshot writes. On `main` the recovered
+        // value is BASELINE because no activation has flipped it; this
+        // test pins that (a) the accessor is stable across a reopen and
+        // (b) the snapshot write uses exactly that recovered value.
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let recovered_active;
+        {
+            let mut sm = HighWaterStateMachine::with_store(store.clone()).expect("first SM");
+            apply_one(
+                &mut sm,
+                1,
+                EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 55 })),
+            )
+            .await;
+            sm.build_snapshot().await.expect("build_snapshot");
+            recovered_active = sm.active_write_version();
+        }
+
+        let mut reopened = HighWaterStateMachine::with_store(store.clone()).expect("reopened SM");
+        assert_eq!(
+            reopened.active_write_version(),
+            recovered_active,
+            "active write version must be stable across reopen"
+        );
+
+        apply_one(
+            &mut reopened,
+            2,
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 66 })),
+        )
+        .await;
+        reopened.build_snapshot().await.expect("rebuild");
+        let bytes = store.load().expect("load").expect("snapshot present");
+        assert_eq!(
+            bytes[0],
+            reopened.active_write_version(),
+            "rebuilt snapshot stamped with the recovered active write version"
+        );
+    }
+
     // ---- Snapshot tests ----
 
     #[tokio::test]
