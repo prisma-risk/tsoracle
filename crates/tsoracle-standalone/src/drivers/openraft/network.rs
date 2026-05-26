@@ -271,11 +271,6 @@ pub struct PeerCapabilitySource {
 }
 
 impl PeerCapabilitySource {
-    // The only in-workspace caller today is the round-trip test; a later
-    // phase wires this into the production `initiate_format_activation`
-    // path. `pub` is the intended surface — this `allow` documents that and
-    // unblocks the workspace build's `-D warnings` lint.
-    #[allow(dead_code)]
     pub fn new(tls: Option<ClientTlsConfig>) -> Self {
         Self {
             pool: Arc::new(Mutex::new(HashMap::new())),

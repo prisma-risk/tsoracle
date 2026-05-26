@@ -92,6 +92,19 @@ pub enum AdminError {
     /// Wrapped driver error.
     #[error("driver error: {0}")]
     Driver(String),
+    /// Format-activation gate rejection: at least one member can't read the
+    /// target. `incapable` lists `(node_id, max_readable_version)`.
+    #[error("format activation to target {target} blocked: members below target: {incapable:?}")]
+    MembersBelowTarget {
+        target: u8,
+        incapable: Vec<(u64, u8)>,
+    },
+    /// Format-activation target outside local binary's readable range.
+    #[error("format activation: target {target} outside readable range [{min}, {max}]")]
+    TargetOutOfRange { target: u8, min: u8, max: u8 },
+    /// Format-activation apply-keyed no-op: membership changed since gate.
+    #[error("format activation to target {target} no-op: membership changed since gate")]
+    MembershipChangedSinceGate { target: u8 },
 }
 
 /// Runtime membership administration. One impl per driver.
@@ -101,6 +114,12 @@ pub trait MembershipAdmin: Send + Sync {
     async fn add_learner(&self, member: NewMember) -> Result<(), AdminError>;
     async fn promote(&self, id: u64) -> Result<(), AdminError>;
     async fn remove(&self, id: u64) -> Result<(), AdminError>;
+    /// Initiate an all-members format-version activation to `target`. The
+    /// implementation runs the all-members capability gate, proposes the
+    /// bump via raft, and reports the apply-keyed outcome. Returns
+    /// `Unsupported` on drivers without zero-downtime format migration
+    /// (file, paxos).
+    async fn activate_format(&self, target: u8) -> Result<(), AdminError>;
 }
 
 /// Admin handle for drivers without runtime membership (file, and — in this
@@ -128,6 +147,9 @@ impl MembershipAdmin for UnsupportedAdmin {
         Err(AdminError::Unsupported)
     }
     async fn remove(&self, _id: u64) -> Result<(), AdminError> {
+        Err(AdminError::Unsupported)
+    }
+    async fn activate_format(&self, _target: u8) -> Result<(), AdminError> {
         Err(AdminError::Unsupported)
     }
 }
@@ -165,6 +187,15 @@ mod tests {
         ));
         assert!(matches!(
             admin.remove(2).await,
+            Err(AdminError::Unsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unsupported_admin_rejects_activate_format() {
+        let admin = UnsupportedAdmin::new(empty_view());
+        assert!(matches!(
+            admin.activate_format(5).await,
             Err(AdminError::Unsupported)
         ));
     }
