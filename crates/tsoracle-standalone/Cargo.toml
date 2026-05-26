@@ -24,6 +24,10 @@ paxos    = [
     "dep:prost", "dep:postcard", "dep:parking_lot", "dep:tokio-stream",
     "tonic/tls-aws-lc",
 ]
+# Pass through `e2e-max-readable-next` to the openraft driver crate (which
+# propagates it to the toolkit). Only meaningful when `openraft` is also on;
+# cargo's feature unification handles the dependency direction automatically.
+e2e-max-readable-next = ["tsoracle-driver-openraft/e2e-max-readable-next"]
 # Gates `admin::test_support`, a tiny public seam exposing the otherwise
 # `pub(crate)` `AdminServiceImpl` constructor so an integration test can
 # drive the gRPC handler with a fake `MembershipAdmin`. Off in production.
