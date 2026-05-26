@@ -3326,6 +3326,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "metrics",
+ "metrics-util 0.19.1",
  "openraft",
  "parking_lot",
  "postcard",

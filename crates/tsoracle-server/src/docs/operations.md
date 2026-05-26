@@ -36,6 +36,20 @@ The server emits the following signals through the [`metrics`](https://docs.rs/m
 - `tsoracle.not_leader.total` — RPCs rejected with `NOT_LEADER` (counter)
 - `tsoracle.shutdown.watch_aborted.total` — a graceful shutdown had to forcibly abort the leader-watch task because it did not stop within `shutdown_grace`, almost always because a consensus-driver call (`load_high_water` / `persist_high_water`) was wedged; any non-zero value means a shutdown narrowly avoided a SIGKILL stall and warrants investigating driver latency (counter)
 
+### Format migration (openraft driver)
+
+These signals are emitted by `tsoracle-driver-openraft` behind its own `metrics` Cargo feature (off by default, the same posture as the server's `metrics` feature). They track the zero-downtime format-migration activation path: the durable active write version, the read-capability bounds, and the `SetFormatVersion` activation-barrier lifecycle.
+
+- `tsoracle.schema.active_write_version` — the node's current durable active write version: the single format version it now emits when persisting and when sending peer RPCs. Set on boot/recovery and on a successful activation flip. A cluster-wide step from N to N+1 is the visible effect of a completed activation (gauge)
+- `tsoracle.schema.min_readable_version` — compile-time floor: the oldest format version this binary still ships a parser for. Never rises across releases (gauge)
+- `tsoracle.schema.max_readable_version` — compile-time ceiling: the newest format version this binary can read. Only grows across releases; an activation cannot target a version above the lowest member's value (gauge)
+- `tsoracle.schema.min_member_read_capability` — the lowest `max_readable_version` observed across all current members (voters and learners) at the most recent activation gate run; the binding constraint on what version activation may target (gauge)
+- `tsoracle.schema.format_version.proposed.total` — activation gate passed and a `SetFormatVersion` entry was proposed (counter)
+- `tsoracle.schema.format_version.committed.total` — a proposed `SetFormatVersion` entry was observed committed on the Raft log (counter)
+- `tsoracle.schema.format_version.applied.total` — a `SetFormatVersion` entry applied successfully: the membership at its log position was a subset of its gated set, so the durable active write version flipped (counter)
+- `tsoracle.schema.format_version.noop_membership_subset.total` — a `SetFormatVersion` entry applied as a no-op because the committed membership was not a subset of its gated set; the operator re-gates and re-issues. A non-zero value during an activation means a membership change raced the bump (counter)
+- `tsoracle.schema.format_version.rejected_by_gate.total` — an activation attempt was rejected before proposal because a current member's `max_readable_version` was below the target; remediate that member (upgrade or remove) and retry (counter)
+
 The library is exporter-agnostic: embedders install whichever recorder they want (`metrics-exporter-prometheus`, `metrics-exporter-influx`, a custom sink) before constructing the [`Server`]. The example below wires Prometheus over an HTTP listener:
 
 ```toml
