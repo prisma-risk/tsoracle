@@ -2,35 +2,86 @@ syntax = "proto3";
 
 package tsoracle.admin.v1;
 
+// Runtime cluster-membership administration.
+//
+// Implemented only by the openraft driver; the paxos and file drivers return
+// `UNSUPPORTED` for every mutating RPC (ListMembers still works on all
+// drivers and reports a fixed view for paxos/file).
+//
+// `AddLearner`, `Promote` and `RemoveNode` are leader-only. A non-leader
+// returns `ok=false`, `error=NOT_LEADER`, and — when known —
+// `leader_admin_endpoint` set to the leader's admin port; the `tsoracle
+// admin` CLI uses this to one-step re-route the request.
+//
+// All mutating RPCs are idempotent (re-issuing a successful change is a
+// no-op) and are serialized on the server by an internal lock so two
+// reconfigurations cannot race.
 service MembershipAdmin {
+  // Return the membership as this node currently sees it. Answerable by any
+  // node; returns at least its own entry even before the cluster has a
+  // leader.
   rpc ListMembers(ListMembersRequest) returns (MembershipView);
+  // Add a new node as a non-voting learner. Idempotent on `id`: a node
+  // already in the membership is a no-op, even if `raft_addr` /
+  // `service_endpoint` / `admin_endpoint` differ. Blocks until the learner
+  // is registered. Errors: NOT_LEADER, UNSUPPORTED, DRIVER.
   rpc AddLearner(AddLearnerRequest) returns (ChangeResponse);
+  // Promote an existing learner to voter. Idempotent on `id` (already-voter
+  // is a no-op). Errors: NOT_LEADER, NOT_MEMBER, UNSUPPORTED, DRIVER
+  // (including the underlying "learner not caught up" case).
   rpc Promote(PromoteRequest) returns (ChangeResponse);
+  // Remove a member by id (voter or learner). Idempotent on `id` (unknown
+  // ids return ok). The server refuses to remove the last remaining voter
+  // (`WOULD_LOSE_QUORUM`); other quorum-loss shapes are the operator's
+  // responsibility. Removing the current leader is allowed: openraft
+  // commits the removal while still leader, then steps down. Errors:
+  // NOT_LEADER, WOULD_LOSE_QUORUM, UNSUPPORTED, DRIVER.
   rpc RemoveNode(RemoveNodeRequest) returns (ChangeResponse);
 }
 
+// A node's role in the current membership.
 enum MemberRole {
+  // proto3 default. Treated as "unknown role"; the server never emits this.
   MEMBER_ROLE_UNSPECIFIED = 0;
+  // Counted in quorum and may vote in leader elections.
   MEMBER_ROLE_VOTER = 1;
+  // Replicates the log but is not counted in quorum and cannot vote.
   MEMBER_ROLE_LEARNER = 2;
 }
 
+// One member as the queried node understands it. The three addresses are
+// the three planes that participate in the cluster (see also
+// `tsoracle-driver-openraft::OpenraftPeer`):
 message MemberEntry {
+  // Cluster-unique node id. Stable across address changes.
   uint64 id = 1;
+  // Voter or Learner under the current committed membership.
   MemberRole role = 2;
+  // `host:port` of the node's openraft peer transport (consensus traffic).
   string raft_addr = 3;
+  // Scheme-less `host:port` of the node's public `TsoService` endpoint.
+  // What a client uses to issue `GetTs`; also what leader hints carry.
   string service_endpoint = 4;
+  // `host:port` of the node's admin gRPC endpoint. What `NOT_LEADER`
+  // responses redirect to.
   string admin_endpoint = 5;
 }
 
 message ListMembersRequest {}
 
+// Snapshot of the membership at the responding node. `has_leader` + `leader`
+// jointly encode `Option<u64>` (proto3 has no optional uint64): `leader` is
+// meaningful iff `has_leader` is true; consumers must NOT interpret
+// `leader == 0` as "no leader".
 message MembershipView {
   repeated MemberEntry members = 1;
   bool has_leader = 2;
   uint64 leader = 3;
 }
 
+// All three address fields are required by the openraft driver. They are
+// stored in the membership log and surfaced verbatim in subsequent
+// `ListMembers` responses; the server does not parse or canonicalize them.
 message AddLearnerRequest {
   uint64 id = 1;
   string raft_addr = 2;
@@ -41,22 +92,51 @@ message AddLearnerRequest {
 message PromoteRequest { uint64 id = 1; }
 message RemoveNodeRequest { uint64 id = 1; }
 
+// Typed error kinds for `ChangeResponse`. Adding a new variant is backwards
+// compatible: clients that don't recognize a value fall back to the
+// human-readable `message` field. `ok=true` is the authoritative success
+// flag — the wire never carries `error=UNSPECIFIED` with `ok=false`.
 enum AdminErrorKind {
-  ADMIN_ERROR_KIND_UNSPECIFIED = 0; // proto3 default / unset; `ok` is the authoritative success flag
+  // proto3 default / unset. `ok` is the authoritative success flag.
+  ADMIN_ERROR_KIND_UNSPECIFIED = 0;
+  // Mutating RPC reached a follower. `leader_admin_endpoint` carries the
+  // leader's admin port when this node knows it.
   ADMIN_ERROR_KIND_NOT_LEADER = 1;
+  // This driver does not implement runtime membership changes (paxos, file).
   ADMIN_ERROR_KIND_UNSUPPORTED = 2;
+  // `Promote` against an id that is not in the current membership.
   ADMIN_ERROR_KIND_NOT_MEMBER = 3;
+  // Reserved: a learner promotion was rejected because the learner had not
+  // yet caught up. The current openraft impl folds this case into `DRIVER`
+  // with the upstream error text; reserved here so future drivers (or a
+  // future explicit catch-up check) can surface it as a typed kind.
   ADMIN_ERROR_KIND_NOT_CAUGHT_UP = 4;
+  // `RemoveNode` against the last remaining voter. Other quorum-loss
+  // shapes are the operator's responsibility.
   ADMIN_ERROR_KIND_WOULD_LOSE_QUORUM = 5;
+  // Reserved: the membership change did not commit within an internal
+  // deadline. Not currently produced (the openraft impl folds timeouts
+  // into `DRIVER`); reserved for future explicit-deadline plumbing.
   ADMIN_ERROR_KIND_TIMEOUT = 6;
+  // Catch-all for an upstream driver error not captured by the typed
+  // variants above. `message` carries the driver's error string.
   ADMIN_ERROR_KIND_DRIVER = 7;
 }
 
+// Result of a mutating membership RPC. On success: `ok=true`, `error=
+// UNSPECIFIED`, the two string fields empty. On failure: `ok=false`,
+// `error` set to a typed kind, optionally a redirect endpoint and/or a
+// human-readable message.
 message ChangeResponse {
+  // Authoritative success flag. Always check this before reading `error`.
   bool ok = 1;
+  // Typed error kind; meaningful only when `ok=false`.
   AdminErrorKind error = 2;
-  // Set when error == NOT_LEADER and a leader admin endpoint is known.
+  // Set when `error == NOT_LEADER` and a leader admin endpoint is known.
+  // Empty string means "no hint available" (cold start, or no leader yet).
   string leader_admin_endpoint = 3;
-  // Human-readable detail (e.g. the driver error string).
+  // Human-readable detail (e.g. the driver error string for `DRIVER`).
+  // Empty on success. Suitable for surfacing to operators; clients should
+  // dispatch on `error`, not on this string.
   string message = 4;
 }

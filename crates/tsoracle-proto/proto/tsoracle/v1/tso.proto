@@ -1,7 +1,23 @@
 syntax = "proto3";
 package tsoracle.v1;
 
+// Public timestamp-oracle service.
+//
+// Clients call `GetTs` to allocate one or more consecutive timestamps. The
+// service guarantees that successive successful grants are strictly
+// monotonically increasing (within and across calls) for the lifetime of a
+// leader epoch, and that no two grants from any epoch ever overlap.
 service TsoService {
+  // Allocate `count` consecutive timestamps.
+  //
+  // On success the response covers logicals
+  // [logical_start, logical_start + count - 1] at the returned `physical_ms`,
+  // stamped with the leader's `epoch_hi`/`epoch_lo`.
+  //
+  // Only the current leader serves this RPC. A non-leader returns
+  // `FAILED_PRECONDITION` with a `tsoracle-leader-hint-bin` binary metadata
+  // trailer carrying a postcard-encoded `LeaderHint` (see below); clients
+  // re-route to the hinted leader and retry.
   rpc GetTs(GetTsRequest) returns (GetTsResponse);
 }
 
@@ -16,19 +32,27 @@ message GetTsResponse {
   // 18-bit logical counter; the response covers logicals
   // [logical_start, logical_start + count - 1] at this physical_ms.
   uint32 logical_start = 2;
-  // Number of consecutive timestamps allocated.
+  // Number of consecutive timestamps allocated. Equals the request's `count`
+  // on success (the server never returns a partial grant).
   uint32 count = 3;
   // Leader epoch that issued this grant, as a 128-bit value split into two
   // 64-bit halves (epoch_hi is the more significant half). Lexicographic
-  // (epoch_hi, epoch_lo) order equals numeric order.
+  // (epoch_hi, epoch_lo) order equals numeric order. Strictly monotone per
+  // node across leader terms; clients use it to detect a leader handoff
+  // (a smaller epoch after a larger one indicates a stale server).
   uint64 epoch_hi = 4;
   uint64 epoch_lo = 5;
 }
 
 // Carried in the `tsoracle-leader-hint-bin` binary metadata trailer when the
 // server returns FAILED_PRECONDITION from GetTs because it is not currently
-// the leader.
+// the leader. The body is postcard-encoded; the client filters this trailer
+// out before exposing the gRPC `Status` to user code.
 message LeaderHint {
+  // Scheme-less `host:port` of the leader's TsoService endpoint as known to
+  // this node. Absent when the node has no leader information yet (cold start,
+  // or right after a leadership change). The client treats the hint as
+  // advisory: a stale hint costs an extra round trip, not correctness.
   optional string leader_endpoint = 1;
   // Leader epoch as a single nested message, so its presence implies both
   // halves: the hint either carries a complete epoch or none. Bundling the
