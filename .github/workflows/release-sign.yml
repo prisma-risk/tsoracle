@@ -194,7 +194,8 @@ jobs:
         run: |
           set -euo pipefail
           # --clobber: idempotent on re-run; replaces any existing asset of the
-          # same name (e.g. backfill rerun after a workflow change).
+          # same name (e.g. backfill rerun after a workflow change). gh does
+          # not retry internally; a transient failure here is safe to re-run.
           gh release upload "$TAG" \
             "artifacts/$CRATE_FILE" \
             "artifacts/${CRATE_FILE}.sha256" \
