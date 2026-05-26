@@ -92,6 +92,16 @@ tsoracle is a small, embeddable Rust implementation. The consensus layer is left
 - [DeepWiki](https://deepwiki.com/prisma-risk/tsoracle) — prose documentation covering the window allocator, the `ConsensusDriver` contract, and operational topics (fsync cost, leader handoff, deployment topologies).
 - [docs.rs/tsoracle-server](https://docs.rs/tsoracle-server) — generated API reference.
 
+## Project documents
+
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute, including the DCO sign-off requirement.
+- [`GOVERNANCE.md`](GOVERNANCE.md) — roles, decision-making, and continuity-of-access plan.
+- [`ROADMAP.md`](ROADMAP.md) — near / mid / long-term direction.
+- [`SECURITY.md`](SECURITY.md) — vulnerability reporting and response commitments.
+- [`docs/assurance-case.md`](docs/assurance-case.md) — safety and security claims with supporting evidence.
+- [`docs/release-signatures.md`](docs/release-signatures.md) — verifying release provenance and signed tags.
+
 ## Examples
 
 - [examples/embedded-server](examples/embedded-server) — embed `tsoracle-server` with the file driver in your own binary, with graceful shutdown.

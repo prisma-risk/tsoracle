@@ -55,6 +55,21 @@ You'll also need:
 - **[`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny)** (optional) — CI runs `cargo deny check` against [`deny.toml`](deny.toml) to enforce the license allow-list and advisory policy.
 - **[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)** (optional, only needed to reproduce coverage locally) — CI runs `cargo llvm-cov` and uploads the resulting `lcov.info` to [Coveralls](https://coveralls.io/github/prisma-risk/tsoracle). Install with `cargo install cargo-llvm-cov`. Coverage is reported only — the build does not fail on a coverage drop.
 
+## Where to start
+
+If you're new to the project, a few entry points:
+
+- Issues labeled [`good first issue`](https://github.com/prisma-risk/tsoracle/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) are small, well-scoped, and don't require deep context on the consensus internals.
+- Issues labeled [`help wanted`](https://github.com/prisma-risk/tsoracle/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) are larger but maintainer-flagged as places where outside help is welcome.
+
+Three areas that frequently have well-bounded contribution opportunities:
+
+1. **Documentation polish** — fixing broken links in `docs/`, clarifying CLI examples, expanding `getting-started.md` for additional platforms.
+2. **Additional fuzz targets** — the harnesses under [`fuzz/fuzz_targets/`](fuzz/fuzz_targets/) focus on decoder paths; new targets exercising codec roundtrips or protocol invariants are welcome.
+3. **Additional integration tests** — tests under `crates/*/tests/` are composable; new scenarios exercising specific fault patterns (network jitter, slow disks, partial partitions) add coverage without requiring driver-internal changes.
+
+If you have an idea outside these areas, open a discussion issue first to confirm direction before investing time.
+
 ## Workspace layout
 
 The repo is a Cargo workspace. The crates under `crates/` are:
