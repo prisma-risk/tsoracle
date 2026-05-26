@@ -161,6 +161,7 @@ jobs:
     needs: build
     permissions:
       actions: read       # generator inspects the workflow to record build metadata
+      contents: read      # generator job checks out the source for provenance
       id-token: write     # OIDC token for Sigstore (Fulcio) keyless signing
     # upload-assets stays false (the default). The generator's upload path
     # PATCHes the release record (target_commitish) via softprops/action-gh-release,
