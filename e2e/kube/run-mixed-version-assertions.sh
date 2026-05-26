@@ -24,6 +24,23 @@ ADMIN_PORT=51002
 # :e2e-next. The Helm install sets the baseline tag.
 NEXT_IMAGE=tsoracle:e2e-next
 
+# Locate a `timeout` implementation. GNU coreutils' `timeout` is standard on
+# Linux (the CI lane) but absent from stock macOS — `coreutils` from brew
+# installs it as `gtimeout`. The admin CLI itself has no per-RPC deadline,
+# so this safety net IS load-bearing: without it a hung admin RPC would
+# block the whole orchestrator until the test job's activeDeadlineSeconds
+# expires. Fail loudly if neither is on PATH so the failure mode is
+# obvious instead of silently leaking via missing-binary rc=127.
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD=gtimeout
+else
+    echo "FATAL: neither 'timeout' nor 'gtimeout' is on PATH." >&2
+    echo "       Install GNU coreutils (Linux: apt/yum install coreutils; macOS: brew install coreutils)." >&2
+    exit 1
+fi
+
 # Try `tsoracle admin activate-format` against each tsoracle pod's loopback
 # admin in turn. Exit codes (CLI contract, see crates/tsoracle-bin/src/main.rs
 # ActivationOutcome):
@@ -46,7 +63,7 @@ try_activate_format() {
     local last_rc=0
     for pod in $pods; do
         local rc=0
-        timeout 30s kubectl exec "$pod" -c tsoracle -- \
+        "$TIMEOUT_CMD" 30s kubectl exec "$pod" -c tsoracle -- \
             tsoracle admin activate-format \
             --endpoint "http://127.0.0.1:${ADMIN_PORT}" \
             --target "$target" \
