@@ -98,7 +98,7 @@ async fn save_and_read_vote_roundtrips() {
 // yet historically persisted them as bare `postcard` with no version frame —
 // unlike every other persisted blob in the store. After a layout-changing
 // upgrade an unframed `Vote` would misdecode silently instead of loud-rejecting.
-// This pins the on-disk meta record to the same `[SCHEMA_VERSION | postcard]`
+// This pins the on-disk meta record to the same `[active write version | postcard]`
 // frame the log column uses: a save_vote must persist a version-prefixed record
 // that decodes back through the toolkit's public codec.
 #[tokio::test]
@@ -118,11 +118,11 @@ async fn save_vote_persists_version_framed_meta() {
 
     assert_eq!(
         raw[0],
-        tsoracle_openraft_toolkit::SCHEMA_VERSION,
-        "meta record must be framed with the leading schema-version byte",
+        tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+        "meta record must be framed with the active-write-version byte",
     );
     let decoded: Vote<TestLeaderId> =
-        tsoracle_openraft_toolkit::decode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &raw)
+        tsoracle_openraft_toolkit::decode(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &raw)
             .expect("framed vote must decode through the toolkit codec");
     assert_eq!(decoded, vote);
 }
@@ -184,12 +184,12 @@ async fn save_committed_with_none_clears_existing_record() {
     assert!(store.read_committed().await.unwrap().is_none());
 }
 
-// A meta record written under a foreign schema version must loud-reject on
-// read rather than misdecode silently against the current struct layout. This
-// is the core safety property the version frame buys: an upgrade that changed
+// A meta record written under an out-of-range version must loud-reject on read
+// rather than misdecode silently against the current struct layout. This is
+// the core safety property the version frame buys: an upgrade that changed
 // the `Vote` layout would otherwise risk corrupting term/leader-election
-// safety. The injected record carries a `0xFF` version byte (never our
-// `SCHEMA_VERSION`), so `read_vote` must surface `InvalidData`.
+// safety. The injected record carries a `0xFF` version byte (outside the
+// readable range), so `read_vote` must surface `InvalidData`.
 #[tokio::test]
 async fn read_vote_rejects_foreign_version_meta() {
     let dir = TempDir::new().unwrap();
@@ -216,22 +216,27 @@ async fn read_vote_rejects_foreign_version_meta() {
     );
 }
 
-// A meta record carrying the CURRENT schema version but an undecodable body
-// must surface as a generic `io::Error` — the non-`Version` arm of
-// `codec_io_error` — distinct from the `InvalidData` a version *mismatch*
-// yields. The foreign-version test above pins the `Version` arm; this pins its
+// A meta record carrying an IN-RANGE version but an undecodable body must
+// surface as a generic `io::Error` — the non-`Version` arm of
+// `codec_io_error` — distinct from the `InvalidData` a version mismatch
+// yields. The out-of-range test above pins the `Version` arm; this pins its
 // sibling, so a future edit that collapses the two error kinds is caught.
 #[tokio::test]
 async fn read_vote_surfaces_corrupt_body_as_generic_io_error() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
 
-    // Correct leading version byte, but no decodable `Vote` body behind it, so
-    // the codec fails at `take_from_bytes` rather than the version check.
+    // Correct (in-range) leading version byte, but no decodable `Vote` body
+    // behind it, so the codec fails at `take_from_bytes` rather than the
+    // version check.
     let key = Flat.meta_key(MetaLabel::Vote);
     let cf = db.cf_handle(META_CF).unwrap();
-    db.put_cf(&cf, &key, [tsoracle_openraft_toolkit::SCHEMA_VERSION])
-        .unwrap();
+    db.put_cf(
+        &cf,
+        &key,
+        [tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION],
+    )
+    .unwrap();
 
     let mut store: RocksdbLogStore<TestTypeConfig, Flat> =
         RocksdbLogStore::open(Arc::clone(&db), LOG_CF, META_CF, Flat).unwrap();

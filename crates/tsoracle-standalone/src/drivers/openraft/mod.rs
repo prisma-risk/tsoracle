@@ -36,7 +36,9 @@ use tsoracle_driver_openraft::{
     HighWaterStateMachine, OpenraftDriver, OpenraftLogCodec, OpenraftPeer, RocksdbSnapshotStore,
     SnapshotStore, StandaloneHost, TypeConfig,
 };
-use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
+use tsoracle_openraft_toolkit::{
+    ActiveWriteVersion, Flat, RocksdbLogStore, recover_active_write_version,
+};
 
 use crate::config::OpenraftConfig;
 use crate::error::StandaloneError;
@@ -108,8 +110,33 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
                 source: Box::new(e),
             }
         })?);
-    let state_machine = HighWaterStateMachine::with_store(snapshot_store)
+
+    // Seed the single, process-shared active-write-version cell from
+    // fsync-durable evidence. NO meta key is read: durability of any
+    // activation is the raft log (deterministically re-applied on restart)
+    // plus the snapshot's leading frame byte; the cell is just the runtime
+    // holder. Recovery takes the max of the baseline, the persisted snapshot's
+    // leading version byte, and the highest version byte among durable log
+    // records — never below what this node actually wrote.
+    let snapshot_leading_byte = snapshot_store
+        .load()
+        .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?
+        .as_deref()
+        .and_then(|bytes| bytes.first().copied());
+    let highest_log_record_byte = log_store
+        .highest_log_record_version()
         .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?;
+    let active_write_version = ActiveWriteVersion::new(recover_active_write_version(
+        snapshot_leading_byte,
+        highest_log_record_byte,
+    ));
+
+    // Thread the SAME cell into both writers: the log store stamps appended
+    // records, the state machine stamps snapshots, both reading this one cell.
+    let log_store = log_store.with_active_write_version(active_write_version.clone());
+    let state_machine =
+        HighWaterStateMachine::with_store_and_active_version(snapshot_store, active_write_version)
+            .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?;
     let state_machine_for_host = state_machine.clone();
 
     let config = Arc::new(

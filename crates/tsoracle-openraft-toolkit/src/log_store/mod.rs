@@ -36,8 +36,8 @@ use thiserror::Error;
 /// Construction (`open`) only fails when a named column family is absent;
 /// every later storage operation reports through `io::Error` to match the
 /// `RaftLogStorage` trait surface (decode/version failures route through the
-/// `[SCHEMA_VERSION | postcard]` codec, surfacing a foreign version as
-/// `InvalidData`).
+/// `[active write version | postcard]` codec, surfacing an out-of-range version
+/// as `InvalidData`).
 #[derive(Debug, Error)]
 pub enum RocksdbLogStoreError {
     #[error("column family `{0}` not found")]
@@ -94,6 +94,12 @@ where
     log_cf: String,
     meta_cf: String,
     keys: K,
+    /// Shared active write version: supplies the `version` argument every record
+    /// encode stamps. Constructed once at bootstrap and shared with the state
+    /// machine (and, in P3, the wire sender) so all writers emit the same
+    /// version. Defaults to a fresh `BASELINE_WRITE_VERSION` cell for
+    /// constructors that do not run the bootstrap recovery seed.
+    active_write_version: crate::codec::ActiveWriteVersion,
     // `fn() -> Codec` is a type-level marker that's always `Send + Sync` no
     // matter what `Codec` is — the struct holds no actual `Codec` value.
     _phantom: PhantomData<(C, fn() -> Codec)>,
@@ -125,8 +131,29 @@ where
             log_cf,
             meta_cf,
             keys,
+            active_write_version: crate::codec::ActiveWriteVersion::default(),
             _phantom: PhantomData,
         })
+    }
+
+    /// Replace the store's active-write-version cell with a shared one.
+    ///
+    /// Bootstrap constructs a single
+    /// [`ActiveWriteVersion`](crate::codec::ActiveWriteVersion), seeds it via
+    /// [`recover_active_write_version`](crate::codec::recover_active_write_version),
+    /// and threads the same cell here and into the state machine so both stamp
+    /// writes from one source of truth.
+    pub fn with_active_write_version(
+        mut self,
+        active_write_version: crate::codec::ActiveWriteVersion,
+    ) -> Self {
+        self.active_write_version = active_write_version;
+        self
+    }
+
+    /// The version this store currently stamps onto appended records.
+    pub fn active_write_version(&self) -> u8 {
+        self.active_write_version.get()
     }
 
     #[expect(
@@ -182,6 +209,7 @@ where
             log_cf: self.log_cf.clone(),
             meta_cf: self.meta_cf.clone(),
             keys: self.keys.clone(),
+            active_write_version: self.active_write_version.clone(),
             _phantom: PhantomData,
         }
     }
@@ -198,6 +226,7 @@ where
             .field("log_cf", &self.log_cf)
             .field("meta_cf", &self.meta_cf)
             .field("keys", &self.keys)
+            .field("active_write_version", &self.active_write_version.get())
             .finish()
     }
 }
@@ -218,8 +247,9 @@ fn range_boundary<RB: RangeBounds<u64>>(range: RB) -> (u64, u64) {
 
 /// Prepend the toolkit's version byte to a provider-produced body.
 ///
-/// The toolkit owns framing; `Codec` owns the body. In P1b the write version is
-/// the single `SCHEMA_VERSION`; P2 replaces it with the active write version.
+/// The toolkit owns framing; `Codec` owns the body. The `version` argument is
+/// the active write version supplied by the caller (the log store reads it from
+/// its [`ActiveWriteVersion`](crate::codec::ActiveWriteVersion) cell).
 fn frame_with_version(version: u8, body: Vec<u8>) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + body.len());
     out.push(version);
@@ -228,18 +258,20 @@ fn frame_with_version(version: u8, body: Vec<u8>) -> Vec<u8> {
 }
 
 /// Split a framed record into `(version, body)`, rejecting an out-of-range
-/// version before any body parse. In P1b the readable range is the single
-/// `SCHEMA_VERSION`; P2 widens this to `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`.
+/// version before any body parse. Accepts any version in the inclusive readable
+/// range `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`; the returned `version`
+/// is the leading byte, dispatched to a per-version body parser by the codec.
 fn unframe_with_version(bytes: &[u8]) -> io::Result<(u8, &[u8])> {
     let (first, body) = bytes.split_first().ok_or_else(|| {
         crate::codec::codec_io_error("log-store record decode", crate::codec::CodecError::Empty)
     })?;
     let version = *first;
-    if version != crate::codec::SCHEMA_VERSION {
+    if version < crate::codec::MIN_READABLE_VERSION || version > crate::codec::MAX_READABLE_VERSION
+    {
         return Err(crate::codec::codec_io_error(
             "log-store record decode",
             crate::codec::CodecError::Version {
-                expected: crate::codec::SCHEMA_VERSION,
+                expected: crate::codec::MAX_READABLE_VERSION,
                 actual: version,
             },
         ));
@@ -247,19 +279,19 @@ fn unframe_with_version(bytes: &[u8]) -> io::Result<(u8, &[u8])> {
     Ok((version, body))
 }
 
-/// Encode a log `Entry` as `[SCHEMA_VERSION | Codec::encode_entry(..)]`.
-fn encode_entry_record<C, Codec>(entry: &C::Entry) -> io::Result<Vec<u8>>
+/// Encode a log `Entry` as `[version | Codec::encode_entry(version, ..)]`.
+fn encode_entry_record<C, Codec>(version: u8, entry: &C::Entry) -> io::Result<Vec<u8>>
 where
     C: RaftTypeConfig,
     Codec: LogStoreCodec<C>,
 {
-    let version = crate::codec::SCHEMA_VERSION;
     let body = Codec::encode_entry(version, entry)
         .map_err(|err| crate::codec::codec_io_error("log-store record encode", err))?;
     Ok(frame_with_version(version, body))
 }
 
-/// Decode a log `Entry` framed by [`encode_entry_record`], rejecting a foreign version.
+/// Decode a log `Entry` framed by [`encode_entry_record`], rejecting an
+/// out-of-range version.
 fn decode_entry_record<C, Codec>(bytes: &[u8]) -> io::Result<C::Entry>
 where
     C: RaftTypeConfig,
@@ -270,19 +302,19 @@ where
         .map_err(|err| crate::codec::codec_io_error("log-store record decode", err))
 }
 
-/// Encode a `Vote` as `[SCHEMA_VERSION | Codec::encode_vote(..)]`.
-fn encode_vote_record<C, Codec>(vote: &VoteOf<C>) -> io::Result<Vec<u8>>
+/// Encode a `Vote` as `[version | Codec::encode_vote(version, ..)]`.
+fn encode_vote_record<C, Codec>(version: u8, vote: &VoteOf<C>) -> io::Result<Vec<u8>>
 where
     C: RaftTypeConfig,
     Codec: LogStoreCodec<C>,
 {
-    let version = crate::codec::SCHEMA_VERSION;
     let body = Codec::encode_vote(version, vote)
         .map_err(|err| crate::codec::codec_io_error("log-store record encode", err))?;
     Ok(frame_with_version(version, body))
 }
 
-/// Decode a `Vote` framed by [`encode_vote_record`], rejecting a foreign version.
+/// Decode a `Vote` framed by [`encode_vote_record`], rejecting an out-of-range
+/// version.
 fn decode_vote_record<C, Codec>(bytes: &[u8]) -> io::Result<VoteOf<C>>
 where
     C: RaftTypeConfig,
@@ -293,19 +325,19 @@ where
         .map_err(|err| crate::codec::codec_io_error("log-store record decode", err))
 }
 
-/// Encode a `LogId` as `[SCHEMA_VERSION | Codec::encode_log_id(..)]`.
-fn encode_log_id_record<C, Codec>(log_id: &LogIdOf<C>) -> io::Result<Vec<u8>>
+/// Encode a `LogId` as `[version | Codec::encode_log_id(version, ..)]`.
+fn encode_log_id_record<C, Codec>(version: u8, log_id: &LogIdOf<C>) -> io::Result<Vec<u8>>
 where
     C: RaftTypeConfig,
     Codec: LogStoreCodec<C>,
 {
-    let version = crate::codec::SCHEMA_VERSION;
     let body = Codec::encode_log_id(version, log_id)
         .map_err(|err| crate::codec::codec_io_error("log-store record encode", err))?;
     Ok(frame_with_version(version, body))
 }
 
-/// Decode a `LogId` framed by [`encode_log_id_record`], rejecting a foreign version.
+/// Decode a `LogId` framed by [`encode_log_id_record`], rejecting an
+/// out-of-range version.
 fn decode_log_id_record<C, Codec>(bytes: &[u8]) -> io::Result<LogIdOf<C>>
 where
     C: RaftTypeConfig,
@@ -347,6 +379,35 @@ where
         }
         let entry: C::Entry = decode_entry_record::<C, Codec>(&v)?;
         Ok(Some(entry.log_id()))
+    }
+
+    /// The highest format-version leading byte among durably-stored log records,
+    /// or `None` if the log is empty. One of the fsync-durable lower bounds
+    /// [`recover_active_write_version`](crate::codec::recover_active_write_version)
+    /// takes the max of when bootstrap seeds the shared cell.
+    ///
+    /// Reads only each record's leading byte (no postcard body parse), so a
+    /// record from any version in the readable range contributes its byte
+    /// without needing its parser. Bounded by `lo` like [`last_log_id_in_cf`]:
+    /// for `GroupPrefixed` the reverse iterator can walk into a neighbouring
+    /// group's bytes, so any key below `lo` ends the scan.
+    pub fn highest_log_record_version(&self) -> io::Result<Option<u8>> {
+        let cf = self.log_cf_handle();
+        let (lo, hi) = self.keys.log_range();
+        let it = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&hi, rocksdb::Direction::Reverse));
+        let mut highest: Option<u8> = None;
+        for item in it {
+            let (key, value) = item.map_err(io::Error::other)?;
+            if &*key < lo.as_slice() {
+                break;
+            }
+            if let Some(&leading) = value.first() {
+                highest = Some(highest.map_or(leading, |current| current.max(leading)));
+            }
+        }
+        Ok(highest)
     }
 }
 
@@ -427,7 +488,14 @@ where
     async fn save_vote(&mut self, vote: &VoteOf<C>) -> Result<(), io::Error> {
         let cf_meta = self.meta_cf_handle();
         let mut batch = WriteBatch::default();
-        meta::put_vote::<C, K, Codec>(&mut batch, &cf_meta, &self.keys, MetaLabel::Vote, vote)?;
+        meta::put_vote::<C, K, Codec>(
+            &mut batch,
+            &cf_meta,
+            &self.keys,
+            MetaLabel::Vote,
+            self.active_write_version.get(),
+            vote,
+        )?;
         // fsync: the vote must be durable before it is acknowledged, or a crash
         // could let this node vote twice in one term and split the cluster.
         let wo = Self::write_sync_opts();
@@ -444,6 +512,7 @@ where
                 &cf_meta,
                 &self.keys,
                 MetaLabel::Committed,
+                self.active_write_version.get(),
                 &committed,
             )?,
             None => meta::delete::<K>(&mut batch, &cf_meta, &self.keys, MetaLabel::Committed),
@@ -467,10 +536,11 @@ where
     {
         let cf_log = self.log_cf_handle();
         let mut batch = WriteBatch::default();
+        let write_version = self.active_write_version.get();
         for entry in entries {
             let (_leader, idx) = entry.log_id_parts();
             let key = self.keys.log_key(idx);
-            let value = encode_entry_record::<C, Codec>(&entry)?;
+            let value = encode_entry_record::<C, Codec>(write_version, &entry)?;
             batch.put_cf(&cf_log, &key, &value);
         }
 
@@ -549,6 +619,7 @@ where
             &cf_meta,
             &self.keys,
             MetaLabel::LastPurged,
+            self.active_write_version.get(),
             &log_id,
         )?;
 
@@ -629,7 +700,7 @@ mod range_boundary_tests {
 #[cfg(test)]
 mod record_codec_tests {
     use super::{decode_entry_record, encode_entry_record};
-    use crate::codec::SCHEMA_VERSION;
+    use crate::codec::{BASELINE_WRITE_VERSION, MAX_READABLE_VERSION, MIN_READABLE_VERSION};
     use crate::declare_raft_types_ext;
     use crate::log_store::DefaultLogStoreCodec;
     use serde::{Deserialize, Serialize};
@@ -669,30 +740,122 @@ mod record_codec_tests {
     }
 
     #[test]
-    fn encode_entry_record_stamps_schema_version_and_roundtrips() {
+    fn encode_entry_record_stamps_baseline_version_and_roundtrips() {
         let entry = sample_entry();
-        let bytes = encode_entry_record::<RecConfig, DefaultLogStoreCodec>(&entry).expect("encode");
-        assert_eq!(bytes[0], SCHEMA_VERSION);
+        let bytes =
+            encode_entry_record::<RecConfig, DefaultLogStoreCodec>(BASELINE_WRITE_VERSION, &entry)
+                .expect("encode");
+        assert_eq!(bytes[0], BASELINE_WRITE_VERSION);
         let back: RecEntry =
             decode_entry_record::<RecConfig, DefaultLogStoreCodec>(&bytes).expect("decode");
         // Compare via re-encode: EntryOf is not PartialEq across all type params.
         let reencoded =
-            encode_entry_record::<RecConfig, DefaultLogStoreCodec>(&back).expect("re-encode");
+            encode_entry_record::<RecConfig, DefaultLogStoreCodec>(BASELINE_WRITE_VERSION, &back)
+                .expect("re-encode");
         assert_eq!(bytes, reencoded);
     }
 
     #[test]
-    fn decode_entry_record_rejects_foreign_version() {
+    fn decode_entry_record_rejects_out_of_range_version() {
         // A 0xFF-framed record must surface as InvalidData rather than a
-        // successful-but-wrong decode, exactly as the old free function did.
+        // successful-but-wrong decode.
         let err = decode_entry_record::<RecConfig, DefaultLogStoreCodec>(&[0xFF, 5])
             .expect_err("must reject");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
-    fn schema_version_is_four() {
-        // Pinned so a future layout change re-confirms the bump deliberately.
-        assert_eq!(crate::codec::SCHEMA_VERSION, 4);
+    fn version_constants_are_at_four() {
+        assert_eq!(BASELINE_WRITE_VERSION, 4);
+        assert_eq!(MIN_READABLE_VERSION, 4);
+        assert_eq!(MAX_READABLE_VERSION, 4);
+    }
+}
+
+#[cfg(test)]
+mod active_write_version_wiring_tests {
+    use super::*;
+    use crate::codec::ActiveWriteVersion;
+    use crate::declare_raft_types_ext;
+    use crate::log_store::{DefaultLogStoreCodec, Flat};
+    use rocksdb::{ColumnFamilyDescriptor, DB, Options};
+    use serde::{Deserialize, Serialize};
+    use tempfile::TempDir;
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WirePeer {
+        addr: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WireData {
+        v: u64,
+    }
+    impl std::fmt::Display for WireData {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "WireData({})", self.v)
+        }
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WireApplied;
+
+    declare_raft_types_ext! {
+        pub WireConfig:
+            Node            = WirePeer,
+            AppData         = WireData,
+            AppDataResponse = WireApplied,
+            SnapshotData    = std::io::Cursor<Vec<u8>>,
+    }
+
+    fn open_empty_store() -> (
+        RocksdbLogStore<WireConfig, Flat, DefaultLogStoreCodec>,
+        TempDir,
+    ) {
+        let dir = TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let cfs = vec![
+            ColumnFamilyDescriptor::new("log", Options::default()),
+            ColumnFamilyDescriptor::new("meta", Options::default()),
+        ];
+        let db = Arc::new(DB::open_cf_descriptors(&opts, dir.path(), cfs).unwrap());
+        let store: RocksdbLogStore<WireConfig, Flat, DefaultLogStoreCodec> =
+            RocksdbLogStore::open(db, "log", "meta", Flat).unwrap();
+        (store, dir)
+    }
+
+    #[test]
+    fn highest_log_record_version_is_none_for_empty_log() {
+        let (store, _guard) = open_empty_store();
+        assert_eq!(store.highest_log_record_version().expect("scan"), None);
+    }
+
+    #[tokio::test]
+    async fn log_store_stamps_appended_records_at_the_shared_cell_version() {
+        // The store reads the SHARED cell for its write version. With a default
+        // (baseline) cell, appended records lead with BASELINE_WRITE_VERSION,
+        // and the scan that bootstrap uses reports that same byte back.
+        use openraft::storage::{IOFlushed, RaftLogStorage};
+
+        let cell = ActiveWriteVersion::default();
+        let (mut store, _guard) = open_empty_store();
+        store = store.with_active_write_version(cell.clone());
+
+        let lid = openraft::testing::log_id::<WireConfig>(1, 1, 1);
+        let entry: openraft::type_config::alias::EntryOf<WireConfig> =
+            openraft::entry::RaftEntry::new_normal(lid, WireData { v: 5 });
+        store
+            .append(std::iter::once(entry), IOFlushed::noop())
+            .await
+            .expect("append");
+        assert_eq!(
+            store.highest_log_record_version().expect("scan"),
+            Some(crate::codec::BASELINE_WRITE_VERSION)
+        );
+
+        // And the cell is the single source of truth: log store reports the
+        // same version the cell holds.
+        assert_eq!(store.active_write_version(), cell.get());
+        assert_eq!(cell.get(), crate::codec::BASELINE_WRITE_VERSION);
     }
 }
