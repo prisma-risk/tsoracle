@@ -62,7 +62,8 @@ fn map_write_error(err: RaftError<TypeConfig, ClientWriteError<TypeConfig>>) -> 
 /// kinds added above. `NotLeader` is a unit variant in
 /// `FormatActivationError` (see capabilities.rs:107-110), so the resulting
 /// `AdminError::NotLeader.leader_admin_endpoint` is always None — the
-/// CLI's redirect path is intentionally bypassed for activation.
+/// CLI cannot auto-redirect to the leader for activation; the operator
+/// (or shell orchestrator) must re-issue against a known leader.
 fn map_activation_error(err: tsoracle_driver_openraft::FormatActivationError) -> AdminError {
     use tsoracle_driver_openraft::FormatActivationError as FAE;
     match err {
@@ -312,5 +313,85 @@ mod tests {
                 ChangeMembershipError::LearnerNotFound(LearnerNotFound { node_id: 7 }),
             ));
         assert!(matches!(map_write_error(err), AdminError::NotMember(7)));
+    }
+
+    #[test]
+    fn activation_not_leader_maps_to_not_leader_none_endpoint() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::NotLeader) {
+            AdminError::NotLeader {
+                leader_admin_endpoint,
+            } => {
+                assert_eq!(leader_admin_endpoint, None);
+            }
+            other => panic!("expected NotLeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_target_out_of_range_maps_correctly() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::TargetOutOfRange {
+            target: 99,
+            min: 4,
+            max: 5,
+        }) {
+            AdminError::TargetOutOfRange { target, min, max } => {
+                assert_eq!((target, min, max), (99, 4, 5));
+            }
+            other => panic!("expected TargetOutOfRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_members_below_target_maps_preserves_incapable() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::MembersBelowTarget {
+            target: 5,
+            incapable: vec![(1, 4), (3, 4)],
+        }) {
+            AdminError::MembersBelowTarget { target, incapable } => {
+                assert_eq!(target, 5);
+                assert_eq!(incapable, vec![(1u64, 4u8), (3u64, 4u8)]);
+            }
+            other => panic!("expected MembersBelowTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_member_unreachable_maps_to_driver_with_detail() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::MemberUnreachable {
+            node_id: 2,
+            detail: "timeout".into(),
+        }) {
+            AdminError::Driver(s) => {
+                assert!(s.contains("member 2"), "missing node id in {s:?}");
+                assert!(s.contains("timeout"), "missing detail in {s:?}");
+            }
+            other => panic!("expected Driver, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_membership_changed_maps_correctly() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::MembershipChangedSinceGate { target: 5 }) {
+            AdminError::MembershipChangedSinceGate { target } => {
+                assert_eq!(target, 5);
+            }
+            other => panic!("expected MembershipChangedSinceGate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_proposal_failed_maps_to_driver_with_detail() {
+        use tsoracle_driver_openraft::FormatActivationError as FAE;
+        match map_activation_error(FAE::ProposalFailed("write failed".into())) {
+            AdminError::Driver(s) => {
+                assert!(s.contains("write failed"), "missing detail in {s:?}");
+            }
+            other => panic!("expected Driver, got {other:?}"),
+        }
     }
 }
