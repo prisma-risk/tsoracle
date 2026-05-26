@@ -35,17 +35,7 @@
 //! from the coverage report in the Makefile.
 
 #[cfg(any(feature = "openraft", feature = "paxos"))]
-async fn lease_port() -> std::net::SocketAddr {
-    // Bind an ephemeral port to learn a free address, then release it so the
-    // driver's peer listener can claim it. Same TOCTOU-tolerant trick the smoke
-    // tests use.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("read local addr");
-    drop(listener);
-    addr
-}
+mod common;
 
 #[cfg(feature = "file")]
 mod file_driver {
@@ -84,7 +74,7 @@ mod openraft_driver {
         DriverConfig, MemberAddr, OpenraftConfig, RaftTuning, StandaloneError, build,
     };
 
-    use crate::lease_port;
+    use crate::common::lease_port;
 
     fn single_node_cfg(
         raft_addr: std::net::SocketAddr,
@@ -127,9 +117,10 @@ mod openraft_driver {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_openraft_single_node_boots_and_drains() {
         let dir = tempdir().unwrap();
-        let raft_addr = lease_port().await;
+        let (raft_addr, raft_lease) = lease_port().await;
         let cfg = single_node_cfg(raft_addr, "127.0.0.1:1", dir.path().join("raft"));
 
+        drop(raft_lease);
         let mut node = build(DriverConfig::Openraft(cfg))
             .await
             .expect("build openraft driver");
@@ -259,13 +250,14 @@ mod openraft_driver {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admin_bind_conflict_is_a_bind_error() {
         let dir = tempdir().unwrap();
-        let raft_addr = lease_port().await;
+        let (raft_addr, raft_lease) = lease_port().await;
         // Hold the admin address so the admin server's bind collides with it.
         let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let taken = squatter.local_addr().unwrap();
 
         let mut cfg = single_node_cfg(raft_addr, "127.0.0.1:1", dir.path().join("raft"));
         cfg.admin_listen = Some(taken);
+        drop(raft_lease);
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
             Err(StandaloneError::AdminBind { .. })
@@ -281,7 +273,7 @@ mod paxos_driver {
     use tempfile::tempdir;
     use tsoracle_standalone::{DriverConfig, PaxosConfig, build};
 
-    use crate::lease_port;
+    use crate::common::lease_port;
 
     /// A paxos node boots through `build()`: storage opens, the peer listener
     /// binds, and the lifecycle host starts. OmniPaxos refuses a single-node
@@ -294,10 +286,10 @@ mod paxos_driver {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_paxos_boots_and_shuts_down() {
         let dir = tempdir().unwrap();
-        let peer_listen = lease_port().await;
+        let (peer_listen, peer_lease) = lease_port().await;
         // A second voter that we deliberately never start, just to satisfy
         // OmniPaxos's >1-node requirement.
-        let absent_peer = lease_port().await;
+        let (absent_peer, absent_lease) = lease_port().await;
         let mut peers = BTreeMap::new();
         peers.insert(1, peer_listen.to_string());
         peers.insert(2, absent_peer.to_string());
@@ -317,6 +309,8 @@ mod paxos_driver {
             peer_tls: None,
         };
 
+        drop(peer_lease);
+        drop(absent_lease);
         let mut node = build(DriverConfig::Paxos(cfg))
             .await
             .expect("build paxos driver");
@@ -355,7 +349,7 @@ mod paxos_driver {
         let dir = tempdir().unwrap();
         let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let taken = squatter.local_addr().unwrap();
-        let unused = lease_port().await;
+        let (unused, unused_lease) = lease_port().await;
 
         let mut peers = BTreeMap::new();
         peers.insert(1, taken.to_string());
@@ -369,6 +363,7 @@ mod paxos_driver {
             tick_interval: Duration::from_millis(20),
             peer_tls: None,
         };
+        drop(unused_lease);
         assert!(matches!(
             build(DriverConfig::Paxos(cfg)).await,
             Err(tsoracle_standalone::StandaloneError::PeerBind { .. })
