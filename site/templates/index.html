@@ -56,7 +56,7 @@
 
     <div class="hero-install">
         <pre>$ cargo install tsoracle
-$ tsoracle serve</pre>
+$ tsoracle</pre>
     </div>
 
     <div class="cta-group">
@@ -86,7 +86,7 @@ $ tsoracle serve</pre>
         </div>
         <div class="feature">
             <div class="feature__head">Pluggable consensus</div>
-            <p class="feature__body">Production openraft driver included. One trait to back tsoracle with raft-rs, etcd, or your own log.</p>
+            <p class="feature__body">Production openraft and OmniPaxos drivers included. One trait to back tsoracle with raft-rs, etcd, or your own replicated log.</p>
         </div>
         <div class="feature">
             <div class="feature__head">gRPC client included</div>
@@ -125,10 +125,11 @@ $ tsoracle serve</pre>
         <div class="code-col">
             <div class="code-col__title">Standalone binary</div>
 <pre><code>$ cargo install tsoracle
-$ tsoracle serve
+$ tsoracle
 
 # Listens on 127.0.0.1:50551
-# Persists state to ./tsoracle-data/</code></pre>
+# Persists state to ./tsoracle-data/
+# Bare `tsoracle` is shorthand for `tsoracle serve file`.</code></pre>
         </div>
         <div class="code-col">
             <div class="code-col__title">Embedded in your binary</div>
@@ -147,7 +148,7 @@ server.serve_with_shutdown(addr, shutdown).await?;</code></pre>
 
 <section class="landing-section container-wide">
     <div class="landing-section__rule">── Hardening ──</div>
-    <p>tsoracle is tested with coverage-guided fuzzing on its postcard decoders, failpoint-driven crash tests on the storage and replication paths, and a multi-process stress harness covering single-node and replicated raft topologies. Fuzz harnesses run nightly; the stress harness runs on every PR.</p>
+    <p>tsoracle is tested with coverage-guided fuzzing on its postcard decoders, failpoint-driven crash tests on the storage and replication paths, and an in-process + multi-process stress harness covering both the openraft and OmniPaxos backends. Fuzz harnesses run nightly; the stress harness runs on every PR.</p>
     <p>Details: <a href="{{ config.extra.github_url }}/tree/main/crates/tsoracle-tests">crates/tsoracle-tests</a> · <a href="{{ config.extra.github_url }}/tree/main/fuzz">fuzz/</a></p>
 </section>
 

@@ -67,11 +67,11 @@ You do not reach for a TSO when something weaker is enough. Single-DB CRUD appli
 
 A TSO does not need to be a six-figure engineering effort. The core is small. You need a window allocator that fsyncs the high-water mark forward, a consensus layer that replicates the high-water mark so a leader crash does not regress IDs, and a client that knows how to find the current leader and batch-fetch IDs. That is the whole shape. The implementation work is mostly in the consensus integration, the leader-failover client behaviour, and the test surface for the failure modes.
 
-`tsoracle` is one implementation of that shape. It is an embeddable Rust crate that ships a single binary, replicates via [openraft](https://github.com/databendlabs/openraft) by default, exposes a pluggable consensus trait for other backends, and includes a gRPC client driver with leader discovery and batched allocation built in. It is small enough to read in an afternoon and operate as a single replicated component next to the rest of your stack.
+`tsoracle` is one implementation of that shape. It is an embeddable Rust crate that ships a single binary, replicates via [openraft](https://github.com/databendlabs/openraft) or [OmniPaxos](https://omnipaxos.com/), exposes a pluggable consensus trait for other backends, and includes a gRPC client driver with leader discovery and batched allocation built in. It is small enough to read in an afternoon and operate as a single replicated component next to the rest of your stack.
 
 ```bash
 cargo install tsoracle
-tsoracle serve
+tsoracle
 ```
 
 If you are at the point of reading this post, you probably already know whether you need a TSO. If you do, `tsoracle` is a small Rust one worth a few minutes of evaluation. If you want the five-minute version of what's inside `tsoracle` itself — the window allocator, the consensus driver, the crash-safety contract — the [how-it-works summary](/how-it-works/) is the right starting point. Two follow-ups that readers usually want next: [tso-vs-uuidv7](/posts/tso-vs-uuidv7/) for the comparison with the most common alternative, and [When you need a TSO](/posts/when-you-need-a-tso/) for the decision framework — when the weaker tools are enough and when they are not.
