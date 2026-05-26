@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tsoracle-e2e-mixed-version-soak
+  labels:
+    app.kubernetes.io/name: tsoracle-e2e-driver
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsoracle-e2e-driver
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: tsoracle-e2e-driver:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --mode=mixed-version-soak
+            # All replica endpoints (not the Service VIP) so the client has a
+            # known-live peer to fail over to when the pod it is bound to is
+            # torn down during the rolling restart — matching how a real
+            # tsoracle client is configured (leader-hint failover assumes the
+            # client knows every replica).
+            - --endpoints=tsoracle-0.tsoracle-peer:5051,tsoracle-1.tsoracle-peer:5051,tsoracle-2.tsoracle-peer:5051
+            # Longer than the plain soak: must cover the rolling restart of
+            # every replica (one at a time, with readiness wait between) AND
+            # the operator-initiated activation that follows. 180s leaves
+            # ample headroom on top of a typical ~90s rolling restart of a
+            # 3-replica StatefulSet plus the activation round-trip; tune
+            # alongside the workflow if its sequencing grows.
+            - --duration-secs=180

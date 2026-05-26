@@ -31,12 +31,20 @@ use tsoracle_client::{ClientBuilder, RetryPolicy};
 
 use crate::tracker::Tracker;
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
 enum Mode {
     /// Probe each endpoint in turn; every one must serve or redirect to success.
     ColdStart,
     /// Hammer one client for a fixed duration; emit a sentinel on first success.
     Soak,
+    /// Soak variant for the mixed-version rollout: sustain load with the same
+    /// zero-monotonicity-violation invariant and 0.5% error tolerance while the
+    /// orchestrator rolls a subset of replicas to the next image and drives
+    /// activation. Prints a distinct sentinel (`mixed-version-soak: first GetTs
+    /// ok`) so the orchestrator only perturbs the cluster after load is provably
+    /// live. The driver itself is a pure observer of monotonicity — it does not
+    /// perform the rollout or the activation; the orchestrator does.
+    MixedVersionSoak,
 }
 
 #[derive(Parser, Debug)]
@@ -83,6 +91,9 @@ async fn main() -> Result<()> {
     let passed = match cli.mode {
         Mode::ColdStart => run_cold_start(&cli.endpoints, cli.count).await?,
         Mode::Soak => run_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?,
+        Mode::MixedVersionSoak => {
+            run_mixed_version_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?
+        }
     };
     if !passed {
         std::process::exit(1);
@@ -119,11 +130,31 @@ async fn run_cold_start(endpoints: &[String], count: u32) -> Result<bool> {
 /// on the first success so the workflow knows load is live before it restarts
 /// the StatefulSet.
 async fn run_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
+    sustain_load(endpoints, duration, "soak").await
+}
+
+/// Sustain GetTs load while the orchestrator performs a mixed-version rolling
+/// restart and drives activation. Identical invariants to [`run_soak`] — zero
+/// monotonicity violations, final error rate below [`MAX_SOAK_ERROR_RATE`] —
+/// because timestamp monotonicity is exactly the property a format activation
+/// must not break. The distinct sentinel (`mixed-version-soak: first GetTs ok`)
+/// lets the orchestrator sequence the partial upgrade + activation only after
+/// load is provably live, mirroring how the existing soak lane sequences a
+/// rolling restart.
+async fn run_mixed_version_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
+    sustain_load(endpoints, duration, "mixed-version-soak").await
+}
+
+/// Shared body of [`run_soak`] and [`run_mixed_version_soak`]. The `label` is
+/// the per-mode prefix used in the first-success sentinel, the per-error log
+/// line, and the final-verdict tracker report — so the orchestrator can grep
+/// for the right mode unambiguously.
+async fn sustain_load(endpoints: &[String], duration: Duration, label: &str) -> Result<bool> {
     let client = ClientBuilder::endpoints(endpoints.to_vec())
         .retry_policy(generous_policy())
         .build()
         .await
-        .context("build soak client")?;
+        .with_context(|| format!("build {label} client"))?;
     let mut tracker: Tracker<_> = Tracker::new();
     let mut announced = false;
     // The deadline is checked before each call, so the loop can overrun by up
@@ -134,16 +165,63 @@ async fn run_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
         match client.get_ts().await {
             Ok(ts) => {
                 if !announced {
-                    println!("soak: first GetTs ok");
+                    println!("{label}: first GetTs ok");
                     announced = true;
                 }
                 tracker.record_ok(ts);
             }
             Err(error) => {
-                eprintln!("soak: get_ts error: {error}");
+                eprintln!("{label}: get_ts error: {error}");
                 tracker.record_err();
             }
         }
     }
-    Ok(tracker.report_within_error_tolerance("soak", MAX_SOAK_ERROR_RATE))
+    Ok(tracker.report_within_error_tolerance(label, MAX_SOAK_ERROR_RATE))
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cold_start_mode_parses() {
+        let cli = Cli::parse_from([
+            "kube-e2e-driver",
+            "--mode=cold-start",
+            "--endpoints=a:5051,b:5051,c:5051",
+            "--count=3",
+        ]);
+        assert_eq!(cli.mode, Mode::ColdStart);
+        assert_eq!(cli.endpoints.len(), 3);
+        assert_eq!(cli.count, 3);
+    }
+
+    #[test]
+    fn soak_mode_parses() {
+        let cli = Cli::parse_from([
+            "kube-e2e-driver",
+            "--mode=soak",
+            "--endpoints=a:5051,b:5051,c:5051",
+            "--duration-secs=30",
+        ]);
+        assert_eq!(cli.mode, Mode::Soak);
+        assert_eq!(cli.duration_secs, 30);
+    }
+
+    #[test]
+    fn mixed_version_soak_mode_parses() {
+        // The new mode shares the CLI surface of `soak` (a list of endpoints
+        // + a duration); the orchestrator only needs to switch the value of
+        // `--mode` and route to a job manifest using the matching sentinel.
+        let cli = Cli::parse_from([
+            "kube-e2e-driver",
+            "--mode=mixed-version-soak",
+            "--endpoints=a:5051,b:5051,c:5051",
+            "--duration-secs=180",
+        ]);
+        assert_eq!(cli.mode, Mode::MixedVersionSoak);
+        assert_eq!(cli.endpoints.len(), 3);
+        assert_eq!(cli.duration_secs, 180);
+    }
 }
