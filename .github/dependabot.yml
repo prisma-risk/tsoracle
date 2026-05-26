@@ -21,3 +21,20 @@ updates:
           - "*"
     commit-message:
       prefix: "chore(fuzz)"
+
+  # Keep digest pins on `FROM rust:1-bookworm@sha256:...` and
+  # `FROM debian:bookworm-slim@sha256:...` fresh. Without this,
+  # the SHA-pinned base images would silently freeze and we'd
+  # miss security updates from upstream.
+  - package-ecosystem: docker
+    directories:
+      - /deploy
+      - /e2e/kube/driver
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(docker)"

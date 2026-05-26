@@ -1,0 +1,108 @@
+name: CodeQL
+
+# Static analysis for the Rust workspace. Runs on every PR that
+# touches Rust sources or this workflow, on every push to main,
+# and weekly so CodeQL's own query updates apply to the existing
+# codebase (not just to new diffs).
+#
+# CodeQL Rust support went GA in late 2025; we use the
+# `security-extended` query suite, which is a strict superset of
+# `security` / default.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '**/Cargo.toml'
+      - '.github/workflows/codeql.yml'
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '**/Cargo.toml'
+      - '.github/workflows/codeql.yml'
+  schedule:
+    # 06:00 UTC every Sunday — picks up CodeQL query-pack updates
+    # without colliding with the existing fuzz (02:00) / stress
+    # (03:00) / leak (04:00) nightlies.
+    - cron: '0 6 * * 0'
+
+# Default to read-only at workflow scope; the `analyze` job opts
+# into `security-events: write` to upload the SARIF result.
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: manual
+
+    steps:
+      # Same disk-cleanup as CI -- a workspace --all-features build
+      # exceeds the ubuntu-latest free-disk budget without it.
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          shared-key: codeql-${{ matrix.language }}
+
+      - name: system deps
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@051e2f90686233507fe9283ff167d2e709304b30  # v3.36.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-extended adds higher-precision queries beyond
+          # the default suite. Slower but worth it for a consensus
+          # library handling timestamps.
+          queries: security-extended
+
+      # Mirror CI's build invocation so CodeQL sees the same code
+      # paths exercised in production (all features, all crates).
+      - name: build
+        if: matrix.build-mode == 'manual'
+        run: cargo build --workspace --all-features --locked
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@051e2f90686233507fe9283ff167d2e709304b30  # v3.36.0
+        with:
+          category: '/language:${{ matrix.language }}'
