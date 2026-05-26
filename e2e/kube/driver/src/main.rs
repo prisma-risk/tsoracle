@@ -45,6 +45,16 @@ enum Mode {
     /// live. The driver itself is a pure observer of monotonicity — it does not
     /// perform the rollout or the activation; the orchestrator does.
     MixedVersionSoak,
+    /// Soak variant for the SIGKILL-leader assertion (issue #485): sustain load
+    /// with the same zero-monotonicity-violation invariant but a looser final
+    /// error tolerance ([`MAX_SIGKILL_SOAK_ERROR_RATE`]) while the orchestrator
+    /// force-deletes the current leader pod (`kubectl delete pod ... --force
+    /// --grace-period=0`) and waits for the StatefulSet to bring a replacement
+    /// up. Distinct sentinel (`sigkill-soak: first GetTs ok`) so the
+    /// orchestrator only severs the leader once load is provably live. The
+    /// driver remains a pure observer of monotonicity; the orchestrator picks
+    /// the leader and issues the kill.
+    SigkillSoak,
 }
 
 #[derive(Parser, Debug)]
@@ -74,6 +84,14 @@ struct Cli {
 /// above the observed teardown rate while still catching a real regression.
 const MAX_SOAK_ERROR_RATE: f64 = 0.005;
 
+/// SIGKILL-leader soak error budget. A force-deleted leader severs every
+/// in-flight RPC to that pod at once (no graceful shutdown, no
+/// `transfer_leader`, no draining) and re-election typically takes longer
+/// than a graceful step-down. The budget is looser than [`MAX_SOAK_ERROR_RATE`]
+/// because the client retry cannot mask the simultaneous burst of transport
+/// errors. Placeholder; tune downward against baseline runs per issue #485.
+const MAX_SIGKILL_SOAK_ERROR_RATE: f64 = 0.05;
+
 /// A budget generous enough that a single-pod restart's brief re-election is
 /// masked by the client's retry + leader-redirect, so a "final error" really
 /// means the client gave up.
@@ -93,6 +111,9 @@ async fn main() -> Result<()> {
         Mode::Soak => run_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?,
         Mode::MixedVersionSoak => {
             run_mixed_version_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?
+        }
+        Mode::SigkillSoak => {
+            run_sigkill_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs)).await?
         }
     };
     if !passed {
@@ -130,7 +151,7 @@ async fn run_cold_start(endpoints: &[String], count: u32) -> Result<bool> {
 /// on the first success so the workflow knows load is live before it restarts
 /// the StatefulSet.
 async fn run_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
-    sustain_load(endpoints, duration, "soak").await
+    sustain_load(endpoints, duration, "soak", MAX_SOAK_ERROR_RATE).await
 }
 
 /// Sustain GetTs load while the orchestrator performs a mixed-version rolling
@@ -142,14 +163,43 @@ async fn run_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
 /// load is provably live, mirroring how the existing soak lane sequences a
 /// rolling restart.
 async fn run_mixed_version_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
-    sustain_load(endpoints, duration, "mixed-version-soak").await
+    sustain_load(
+        endpoints,
+        duration,
+        "mixed-version-soak",
+        MAX_SOAK_ERROR_RATE,
+    )
+    .await
 }
 
-/// Shared body of [`run_soak`] and [`run_mixed_version_soak`]. The `label` is
-/// the per-mode prefix used in the first-success sentinel, the per-error log
-/// line, and the final-verdict tracker report — so the orchestrator can grep
-/// for the right mode unambiguously.
-async fn sustain_load(endpoints: &[String], duration: Duration, label: &str) -> Result<bool> {
+/// Sustain GetTs load while the orchestrator force-deletes the current leader
+/// pod. Same zero-monotonicity-violation invariant as the other soak modes,
+/// but with the looser [`MAX_SIGKILL_SOAK_ERROR_RATE`] budget because a
+/// SIGKILL severs every in-flight RPC to the leader simultaneously. The
+/// distinct sentinel (`sigkill-soak: first GetTs ok`) lets the orchestrator
+/// only kill the leader after load is provably live.
+async fn run_sigkill_soak(endpoints: &[String], duration: Duration) -> Result<bool> {
+    sustain_load(
+        endpoints,
+        duration,
+        "sigkill-soak",
+        MAX_SIGKILL_SOAK_ERROR_RATE,
+    )
+    .await
+}
+
+/// Shared body of the three soak modes. The `label` is the per-mode prefix
+/// used in the first-success sentinel, the per-error log line, and the final-
+/// verdict tracker report — so the orchestrator can grep for the right mode
+/// unambiguously. `max_error_rate` is passed through to the tracker because
+/// the SIGKILL lane needs a looser budget than the graceful rollouts (see
+/// [`MAX_SIGKILL_SOAK_ERROR_RATE`]).
+async fn sustain_load(
+    endpoints: &[String],
+    duration: Duration,
+    label: &str,
+    max_error_rate: f64,
+) -> Result<bool> {
     let client = ClientBuilder::endpoints(endpoints.to_vec())
         .retry_policy(generous_policy())
         .build()
@@ -176,7 +226,7 @@ async fn sustain_load(endpoints: &[String], duration: Duration, label: &str) -> 
             }
         }
     }
-    Ok(tracker.report_within_error_tolerance(label, MAX_SOAK_ERROR_RATE))
+    Ok(tracker.report_within_error_tolerance(label, max_error_rate))
 }
 
 #[cfg(test)]
@@ -221,6 +271,23 @@ mod cli_tests {
             "--duration-secs=180",
         ]);
         assert_eq!(cli.mode, Mode::MixedVersionSoak);
+        assert_eq!(cli.endpoints.len(), 3);
+        assert_eq!(cli.duration_secs, 180);
+    }
+
+    #[test]
+    fn sigkill_soak_mode_parses() {
+        // Like the other soaks, the SIGKILL mode shares the soak CLI surface;
+        // only `--mode` differs. The orchestrator picks the leader pod via
+        // `tsoracle admin members` (loopback admin port; see issue #485) and
+        // routes traffic at the same three replica endpoints the soak uses.
+        let cli = Cli::parse_from([
+            "kube-e2e-driver",
+            "--mode=sigkill-soak",
+            "--endpoints=a:5051,b:5051,c:5051",
+            "--duration-secs=180",
+        ]);
+        assert_eq!(cli.mode, Mode::SigkillSoak);
         assert_eq!(cli.endpoints.len(), 3);
         assert_eq!(cli.duration_secs, 180);
     }

@@ -52,7 +52,7 @@ jobs:
             --wait --timeout 5m
       - name: wait for cluster formation (TCP readiness)
         run: kubectl rollout status statefulset/tsoracle --timeout=300s
-      - name: run e2e assertions (cold-start + soak across rollout)
+      - name: run e2e assertions (cold-start + soak across rollout + sigkill leader)
         run: ./e2e/kube/run-assertions.sh
       - name: dump diagnostics on failure
         if: failure()
@@ -61,4 +61,5 @@ jobs:
           kubectl describe statefulset/tsoracle || true
           kubectl logs job/tsoracle-e2e-cold-start || true
           kubectl logs job/tsoracle-e2e-soak || true
+          kubectl logs job/tsoracle-e2e-sigkill-soak || true
           kubectl get events --sort-by=.lastTimestamp || true
