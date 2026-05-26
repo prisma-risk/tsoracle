@@ -109,6 +109,7 @@ async fn main() -> Result<()> {
         tuning: RaftTuning::default(),
         peer_tls,
         admin_listen: None,
+        admin_tls: None,
     });
     let mut node = build(cfg).await?;
     let drain = node.take_drain();

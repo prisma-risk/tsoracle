@@ -35,8 +35,8 @@ use tsoracle_consensus::ConsensusDriver;
 
 mod config;
 pub use config::{
-    DriverConfig, FileConfig, MemberAddr, OpenraftConfig, PaxosConfig, PeerTlsConfig, RaftTuning,
-    parse_peer_map,
+    AdminTlsConfig, DriverConfig, FileConfig, MemberAddr, OpenraftConfig, PaxosConfig,
+    PeerTlsConfig, RaftTuning, parse_peer_map,
 };
 
 mod drivers;
@@ -66,6 +66,9 @@ pub use transport::TransportHandle;
 #[cfg(any(feature = "openraft", feature = "paxos"))]
 pub(crate) mod peer_tls;
 
+#[cfg(feature = "openraft")]
+pub(crate) mod admin_tls;
+
 /// A constructed, running standalone node: the consensus driver plus the
 /// background peer-transport task (if any). The caller (the bin) owns the
 /// client-facing `tsoracle_server::Server`; this type owns only the driver
@@ -82,6 +85,10 @@ pub struct Standalone {
     /// Peer transport for the membership-admin gRPC server (openraft only;
     /// `noop` for file/paxos in this sub-project).
     admin_transport: TransportHandle,
+    /// Address the admin gRPC server actually bound to, after `:0` resolution.
+    /// `None` when no admin listener was requested or for drivers that do not
+    /// serve an admin surface (file, paxos).
+    admin_listen_addr: Option<std::net::SocketAddr>,
 }
 
 impl Standalone {
@@ -98,6 +105,13 @@ impl Standalone {
     pub async fn shutdown(mut self) {
         self.admin_transport.shutdown().await;
         self.transport.shutdown().await;
+    }
+
+    /// Address the admin gRPC server actually bound to (resolves `:0` to the
+    /// OS-picked port). `None` when no admin listener was requested or for
+    /// drivers without an admin surface.
+    pub fn admin_listen_addr(&self) -> Option<std::net::SocketAddr> {
+        self.admin_listen_addr
     }
 }
 

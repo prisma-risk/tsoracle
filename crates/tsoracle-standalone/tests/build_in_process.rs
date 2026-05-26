@@ -115,6 +115,7 @@ mod openraft_driver {
             },
             peer_tls: None,
             admin_listen: None,
+            admin_tls: None,
         }
     }
 
@@ -170,6 +171,7 @@ mod openraft_driver {
             tuning: RaftTuning::default(),
             peer_tls: None,
             admin_listen: None,
+            admin_tls: None,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -197,6 +199,7 @@ mod openraft_driver {
             tuning: RaftTuning::default(),
             peer_tls: None,
             admin_listen: None,
+            admin_tls: None,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,
@@ -224,6 +227,7 @@ mod openraft_driver {
             tuning: RaftTuning::default(),
             peer_tls: None,
             admin_listen: None,
+            admin_tls: None,
         };
         assert!(matches!(
             build(DriverConfig::Openraft(cfg)).await,

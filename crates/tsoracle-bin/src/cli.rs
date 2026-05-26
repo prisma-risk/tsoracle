@@ -64,11 +64,27 @@ pub enum AdminCmd {
 }
 
 #[cfg(feature = "openraft")]
+#[derive(Parser, Debug, Clone)]
+pub struct AdminClientTlsArgs {
+    /// PEM client certificate to present to the admin gRPC server (admin mTLS).
+    #[arg(long)]
+    pub client_tls_cert: Option<std::path::PathBuf>,
+    /// PEM private key for `--client-tls-cert`.
+    #[arg(long)]
+    pub client_tls_key: Option<std::path::PathBuf>,
+    /// PEM CA to verify the admin server's certificate.
+    #[arg(long)]
+    pub client_tls_ca: Option<std::path::PathBuf>,
+}
+
+#[cfg(feature = "openraft")]
 #[derive(Parser, Debug)]
 pub struct AdminEndpointArgs {
-    /// Any node's admin endpoint, e.g. `http://127.0.0.1:50561`.
+    /// Any node's admin endpoint, e.g. `https://127.0.0.1:50561`.
     #[arg(long)]
     pub endpoint: String,
+    #[command(flatten)]
+    pub tls: AdminClientTlsArgs,
 }
 
 #[cfg(feature = "openraft")]
@@ -78,6 +94,8 @@ pub struct AdminIdArgs {
     pub endpoint: String,
     #[arg(long)]
     pub id: u64,
+    #[command(flatten)]
+    pub tls: AdminClientTlsArgs,
 }
 
 #[cfg(feature = "openraft")]
@@ -93,6 +111,8 @@ pub struct AddLearnerArgs {
     pub service_endpoint: String,
     #[arg(long)]
     pub admin_endpoint: String,
+    #[command(flatten)]
+    pub tls: AdminClientTlsArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -165,9 +185,18 @@ pub struct OpenraftArgs {
     pub election_min_ms: u64,
     #[arg(long, default_value = "2000")]
     pub election_max_ms: u64,
-    /// Bind address for the membership-admin gRPC server. Omit to serve no admin surface.
+    /// Bind address for the membership-admin gRPC server. UNAUTHENTICATED plaintext on loopback; non-loopback bind requires --admin-tls-{cert,key,ca}. Omit to serve no admin surface.
     #[arg(long)]
     pub admin_listen: Option<SocketAddr>,
+    /// PEM server certificate for the admin gRPC server (enables admin mTLS; needs all three).
+    #[arg(long)]
+    pub admin_tls_cert: Option<std::path::PathBuf>,
+    /// PEM private key for `--admin-tls-cert`.
+    #[arg(long)]
+    pub admin_tls_key: Option<std::path::PathBuf>,
+    /// PEM CA (operator-dedicated, NOT the peer CA) to verify connecting admin clients.
+    #[arg(long)]
+    pub admin_tls_ca: Option<std::path::PathBuf>,
     /// PEM node certificate for the peer transport (enables peer mTLS; needs all three).
     #[arg(long)]
     pub peer_tls_cert: Option<std::path::PathBuf>,

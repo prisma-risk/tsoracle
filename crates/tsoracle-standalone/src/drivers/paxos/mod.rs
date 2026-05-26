@@ -188,6 +188,7 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
         drain: None,
         admin: std::sync::Arc::new(crate::admin::UnsupportedAdmin::new(admin_view)),
         admin_transport: crate::TransportHandle::noop(),
+        admin_listen_addr: None,
     })
 }
 

@@ -181,21 +181,36 @@ impl GrpcAdmin for AdminServiceImpl {
 
 /// Bind `listen` and spawn the admin gRPC server under a cancel token. Mirrors
 /// the peer-server pattern in `drivers/openraft/mod.rs` (bind before spawn so a
-/// bind failure surfaces to the caller).
+/// bind failure surfaces to the caller). When `admin_tls` is `Some`, the server
+/// requires a client certificate signed by the configured admin CA (mTLS).
+/// Returns the actual bound `SocketAddr` (resolves :0 to the OS-picked port)
+/// for caller-side observability — stored on `Standalone::admin_listen_addr`.
 pub(crate) async fn serve_admin(
     admin: Arc<dyn MembershipAdmin>,
     listen: std::net::SocketAddr,
-) -> Result<(oneshot::Sender<()>, JoinHandle<()>), std::io::Error> {
+    admin_tls: Option<crate::admin_tls::AdminTlsMaterial>,
+) -> Result<(oneshot::Sender<()>, JoinHandle<()>, std::net::SocketAddr), std::io::Error> {
     let listener = tokio::net::TcpListener::bind(listen).await?;
+    let bound = listener.local_addr()?;
     let service = MembershipAdminServer::new(AdminServiceImpl::new(admin))
         .max_decoding_message_size(MAX_ADMIN_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_ADMIN_MESSAGE_BYTES);
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let mut builder = tonic::transport::Server::builder();
+    if let Some(material) = admin_tls {
+        // tls_config() on a pre-validated ServerTlsConfig cannot fail in
+        // practice (admin_tls.rs already dry-ran the build), but tonic's
+        // signature returns Result so we surface any residual error as an
+        // io::Error rather than panic.
+        builder = builder.tls_config(material.server).map_err(|err| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string())
+        })?;
+    }
     let join = tokio::spawn(async move {
         let shutdown = async {
             let _ = cancel_rx.await;
         };
-        if let Err(err) = tonic::transport::Server::builder()
+        if let Err(err) = builder
             .add_service(service)
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
             .await
@@ -203,5 +218,5 @@ pub(crate) async fn serve_admin(
             tracing::error!(error = ?err, "admin server died");
         }
     });
-    Ok((cancel_tx, join))
+    Ok((cancel_tx, join, bound))
 }

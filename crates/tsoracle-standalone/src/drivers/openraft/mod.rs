@@ -91,6 +91,55 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         _ => {}
     }
 
+    // Cross-trio guard: reject the trivial operator error of pointing
+    // --peer-tls-ca and --admin-tls-ca at the same CA file. tonic's
+    // client_ca_root accepts ANY cert signed by the configured CA, so a
+    // shared CA means a compromised peer key can escalate to membership
+    // control via the admin port (and vice versa). We check canonicalized
+    // paths AND file bytes; we cannot detect "two distinct CAs where one
+    // chains to the other" — that remains an operator deployment concern
+    // documented in the AdminTlsConfig doc comment.
+    if let (Some(peer), Some(admin)) = (cfg.peer_tls.as_ref(), cfg.admin_tls.as_ref()) {
+        let same_path = std::fs::canonicalize(&peer.ca)
+            .ok()
+            .zip(std::fs::canonicalize(&admin.ca).ok())
+            .map(|(a, b)| a == b)
+            .unwrap_or(false);
+        let same_bytes = !same_path
+            && std::fs::read(&peer.ca)
+                .ok()
+                .zip(std::fs::read(&admin.ca).ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or(false);
+        if same_path || same_bytes {
+            return Err(StandaloneError::Config(format!(
+                "--peer-tls-ca ({}) and --admin-tls-ca ({}) resolve to the same CA; \
+                 admin authentication must use a CA distinct from the peer CA so a \
+                 compromised peer cert cannot change cluster membership",
+                peer.ca.display(),
+                admin.ca.display(),
+            )));
+        }
+    }
+    // Build (and eagerly dry-run validate) admin TLS material first, so a
+    // bad PEM surfaces as Tls — the operator's explicit intent — and takes
+    // precedence over the secure-by-default routable guard below.
+    let admin_tls_material: Option<crate::admin_tls::AdminTlsMaterial> = match &cfg.admin_tls {
+        Some(t) => Some(crate::admin_tls::build_admin_tls(t)?),
+        None => None,
+    };
+    // Secure-by-default: routable bind requires admin TLS. Loopback
+    // (127.0.0.0/8, ::1) is allowed plaintext for local-dev and same-pod
+    // sidecar callers; everything else must present TLS. Run BEFORE opening
+    // storage / binding any socket so a misconfigured deployment fails fast
+    // without leaving a half-initialized data dir.
+    if let Some(listen) = cfg.admin_listen
+        && admin_tls_material.is_none()
+        && !listen.ip().is_loopback()
+    {
+        return Err(StandaloneError::AdminInsecureRoutable { addr: listen });
+    }
+
     std::fs::create_dir_all(&cfg.raft_dir).map_err(|source| StandaloneError::Storage {
         path: cfg.raft_dir.clone(),
         source: Box::new(source),
@@ -250,17 +299,18 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         crate::admin::openraft::OpenraftMembershipAdmin::new(raft_for_admin),
     );
 
-    let admin_transport = match cfg.admin_listen {
+    let (admin_transport, admin_listen_addr) = match cfg.admin_listen {
         Some(listen) => {
-            let (cancel, join) = crate::admin::service::serve_admin(admin.clone(), listen)
-                .await
-                .map_err(|source| StandaloneError::AdminBind {
-                    addr: listen,
-                    source,
-                })?;
-            TransportHandle::new(cancel, join)
+            let (cancel, join, bound) =
+                crate::admin::service::serve_admin(admin.clone(), listen, admin_tls_material)
+                    .await
+                    .map_err(|source| StandaloneError::AdminBind {
+                        addr: listen,
+                        source,
+                    })?;
+            (TransportHandle::new(cancel, join), Some(bound))
         }
-        None => TransportHandle::noop(),
+        None => (TransportHandle::noop(), None),
     };
 
     Ok(Standalone {
@@ -271,5 +321,6 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         })),
         admin,
         admin_transport,
+        admin_listen_addr,
     })
 }

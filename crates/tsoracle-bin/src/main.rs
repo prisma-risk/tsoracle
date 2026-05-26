@@ -136,6 +136,11 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
                         args.peer_tls_ca,
                     )?,
                     admin_listen: args.admin_listen,
+                    admin_tls: admin_tls_config(
+                        args.admin_tls_cert,
+                        args.admin_tls_key,
+                        args.admin_tls_ca,
+                    )?,
                 });
                 run_serve(args.common, cfg).await
             }
@@ -241,6 +246,72 @@ fn peer_tls_config(
     }
 }
 
+/// Assemble the admin `AdminTlsConfig` from the all-or-nothing flag trio.
+#[cfg(feature = "openraft")]
+fn admin_tls_config(
+    cert: Option<std::path::PathBuf>,
+    key: Option<std::path::PathBuf>,
+    ca: Option<std::path::PathBuf>,
+) -> anyhow::Result<Option<tsoracle_standalone::AdminTlsConfig>> {
+    match (cert, key, ca) {
+        (None, None, None) => Ok(None),
+        (Some(cert), Some(key), Some(ca)) => {
+            Ok(Some(tsoracle_standalone::AdminTlsConfig { cert, key, ca }))
+        }
+        _ => anyhow::bail!(
+            "--admin-tls-cert, --admin-tls-key, and --admin-tls-ca must all be set together"
+        ),
+    }
+}
+
+/// Build a `ClientTlsConfig` for `tsoracle admin` from the all-or-nothing flag trio.
+#[cfg(feature = "openraft")]
+fn admin_client_tls(
+    args: &cli::AdminClientTlsArgs,
+) -> anyhow::Result<Option<tonic::transport::ClientTlsConfig>> {
+    match (
+        args.client_tls_cert.as_ref(),
+        args.client_tls_key.as_ref(),
+        args.client_tls_ca.as_ref(),
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(cert), Some(key), Some(ca)) => {
+            let cert_pem =
+                std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+            let key_pem = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
+            let ca_pem = std::fs::read(ca).with_context(|| format!("read {}", ca.display()))?;
+            Ok(Some(
+                tonic::transport::ClientTlsConfig::new()
+                    .ca_certificate(tonic::transport::Certificate::from_pem(&ca_pem))
+                    .identity(tonic::transport::Identity::from_pem(&cert_pem, &key_pem)),
+            ))
+        }
+        _ => anyhow::bail!(
+            "--client-tls-cert, --client-tls-key, and --client-tls-ca must all be set together"
+        ),
+    }
+}
+
+/// Dial an admin endpoint, optionally with mTLS material.
+#[cfg(feature = "openraft")]
+async fn admin_connect(
+    endpoint: &str,
+    tls: Option<&tonic::transport::ClientTlsConfig>,
+) -> anyhow::Result<tonic::transport::Channel> {
+    let builder = tonic::transport::Channel::from_shared(endpoint.to_string())
+        .with_context(|| format!("invalid endpoint {endpoint}"))?;
+    let builder = match tls {
+        Some(t) => builder
+            .tls_config(t.clone())
+            .with_context(|| "apply admin client TLS")?,
+        None => builder,
+    };
+    builder
+        .connect()
+        .await
+        .with_context(|| format!("connect {endpoint}"))
+}
+
 async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(&common.log).unwrap_or_else(|_| EnvFilter::new("info")))
@@ -329,8 +400,15 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
         PromoteRequest, RemoveNodeRequest,
     };
 
-    // Re-run `op` against the leader if the first call says NOT_LEADER.
-    async fn with_redirect<MakeCall>(endpoint: String, op: MakeCall) -> Result<ChangeResponse>
+    // Re-run `op` against the leader if the first call says NOT_LEADER. The
+    // leader-hint's scheme is reconstructed from the originally dialed
+    // endpoint so a `https://` operator session doesn't get downgraded to
+    // plaintext on redirect (and vice versa).
+    async fn with_redirect<MakeCall>(
+        endpoint: String,
+        tls: Option<&tonic::transport::ClientTlsConfig>,
+        op: MakeCall,
+    ) -> Result<ChangeResponse>
     where
         MakeCall: Fn(
             MembershipAdminClient<tonic::transport::Channel>,
@@ -338,17 +416,22 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
             Box<dyn std::future::Future<Output = Result<ChangeResponse, tonic::Status>> + Send>,
         >,
     {
-        let client = MembershipAdminClient::connect(endpoint.clone())
+        let channel = admin_connect(&endpoint, tls).await?;
+        let resp = op(MembershipAdminClient::new(channel))
             .await
-            .with_context(|| format!("connect {endpoint}"))?;
-        let resp = op(client).await.context("admin rpc")?;
+            .context("admin rpc")?;
         if resp.error == AdminErrorKind::NotLeader as i32 && !resp.leader_admin_endpoint.is_empty()
         {
-            let leader = format!("http://{}", resp.leader_admin_endpoint);
-            let client = MembershipAdminClient::connect(leader.clone())
+            let scheme = if endpoint.starts_with("https://") {
+                "https"
+            } else {
+                "http"
+            };
+            let leader = format!("{scheme}://{}", resp.leader_admin_endpoint);
+            let channel = admin_connect(&leader, tls).await?;
+            return op(MembershipAdminClient::new(channel))
                 .await
-                .with_context(|| format!("connect leader {leader}"))?;
-            return op(client).await.context("admin rpc (leader)");
+                .context("admin rpc (leader)");
         }
         Ok(resp)
     }
@@ -367,9 +450,9 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
 
     match cmd {
         AdminCmd::Members(args) => {
-            let mut client = MembershipAdminClient::connect(args.endpoint.clone())
-                .await
-                .with_context(|| format!("connect {}", args.endpoint))?;
+            let tls = admin_client_tls(&args.tls)?;
+            let channel = admin_connect(&args.endpoint, tls.as_ref()).await?;
+            let mut client = MembershipAdminClient::new(channel);
             let view = client
                 .list_members(ListMembersRequest {})
                 .await
@@ -392,40 +475,60 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
             }
             Ok(())
         }
-        AdminCmd::AddLearner(args) => report(
-            with_redirect(args.endpoint.clone(), move |mut client| {
-                let request = AddLearnerRequest {
-                    id: args.id,
-                    raft_addr: args.raft_addr.clone(),
-                    service_endpoint: args.service_endpoint.clone(),
-                    admin_endpoint: args.admin_endpoint.clone(),
-                };
-                Box::pin(async move { client.add_learner(request).await.map(|r| r.into_inner()) })
-            })
-            .await?,
-        ),
-        AdminCmd::Promote(args) => report(
-            with_redirect(args.endpoint.clone(), move |mut client| {
-                Box::pin(async move {
-                    client
-                        .promote(PromoteRequest { id: args.id })
-                        .await
-                        .map(|r| r.into_inner())
+        AdminCmd::AddLearner(args) => {
+            let tls = admin_client_tls(&args.tls)?;
+            let endpoint = args.endpoint.clone();
+            let id = args.id;
+            let raft_addr = args.raft_addr.clone();
+            let service_endpoint = args.service_endpoint.clone();
+            let admin_endpoint = args.admin_endpoint.clone();
+            report(
+                with_redirect(endpoint, tls.as_ref(), move |mut client| {
+                    let request = AddLearnerRequest {
+                        id,
+                        raft_addr: raft_addr.clone(),
+                        service_endpoint: service_endpoint.clone(),
+                        admin_endpoint: admin_endpoint.clone(),
+                    };
+                    Box::pin(
+                        async move { client.add_learner(request).await.map(|r| r.into_inner()) },
+                    )
                 })
-            })
-            .await?,
-        ),
-        AdminCmd::Remove(args) => report(
-            with_redirect(args.endpoint.clone(), move |mut client| {
-                Box::pin(async move {
-                    client
-                        .remove_node(RemoveNodeRequest { id: args.id })
-                        .await
-                        .map(|r| r.into_inner())
+                .await?,
+            )
+        }
+        AdminCmd::Promote(args) => {
+            let tls = admin_client_tls(&args.tls)?;
+            let endpoint = args.endpoint.clone();
+            let id = args.id;
+            report(
+                with_redirect(endpoint, tls.as_ref(), move |mut client| {
+                    Box::pin(async move {
+                        client
+                            .promote(PromoteRequest { id })
+                            .await
+                            .map(|r| r.into_inner())
+                    })
                 })
-            })
-            .await?,
-        ),
+                .await?,
+            )
+        }
+        AdminCmd::Remove(args) => {
+            let tls = admin_client_tls(&args.tls)?;
+            let endpoint = args.endpoint.clone();
+            let id = args.id;
+            report(
+                with_redirect(endpoint, tls.as_ref(), move |mut client| {
+                    Box::pin(async move {
+                        client
+                            .remove_node(RemoveNodeRequest { id })
+                            .await
+                            .map(|r| r.into_inner())
+                    })
+                })
+                .await?,
+            )
+        }
     }
 }
 
@@ -451,4 +554,83 @@ mod parse_members_tests {
             "got: {err}"
         );
     }
+}
+
+#[cfg(all(test, feature = "openraft"))]
+mod admin_tls_config_tests {
+    use super::admin_tls_config;
+    use std::path::PathBuf;
+
+    #[test]
+    fn none_returns_none() {
+        let result = admin_tls_config(None, None, None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn full_trio_returns_some() {
+        let cfg = admin_tls_config(
+            Some(PathBuf::from("/x/c")),
+            Some(PathBuf::from("/x/k")),
+            Some(PathBuf::from("/x/a")),
+        )
+        .unwrap()
+        .expect("Some");
+        assert_eq!(cfg.cert, PathBuf::from("/x/c"));
+        assert_eq!(cfg.key, PathBuf::from("/x/k"));
+        assert_eq!(cfg.ca, PathBuf::from("/x/a"));
+    }
+
+    #[test]
+    fn partial_trio_errors() {
+        for (c, k, a) in [
+            (Some(PathBuf::from("c")), None, None),
+            (None, Some(PathBuf::from("k")), None),
+            (None, None, Some(PathBuf::from("a"))),
+            (Some(PathBuf::from("c")), Some(PathBuf::from("k")), None),
+            (Some(PathBuf::from("c")), None, Some(PathBuf::from("a"))),
+            (None, Some(PathBuf::from("k")), Some(PathBuf::from("a"))),
+        ] {
+            let err = admin_tls_config(c, k, a).unwrap_err();
+            assert!(
+                err.to_string().contains("must all be set together"),
+                "got: {err}"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "openraft"))]
+mod admin_client_tls_tests {
+    use super::admin_client_tls;
+    use crate::cli::AdminClientTlsArgs;
+    use std::path::PathBuf;
+
+    fn args(cert: Option<&str>, key: Option<&str>, ca: Option<&str>) -> AdminClientTlsArgs {
+        AdminClientTlsArgs {
+            client_tls_cert: cert.map(PathBuf::from),
+            client_tls_key: key.map(PathBuf::from),
+            client_tls_ca: ca.map(PathBuf::from),
+        }
+    }
+
+    #[test]
+    fn none_returns_none() {
+        let result = admin_client_tls(&args(None, None, None)).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn partial_trio_errors() {
+        let err = admin_client_tls(&args(Some("c"), None, None)).unwrap_err();
+        assert!(
+            err.to_string().contains("must all be set together"),
+            "got: {err}"
+        );
+    }
+
+    // No "full trio returns Some" test here — that would require real PEM files
+    // on disk because admin_client_tls reads + parses them. The integration test
+    // in openraft_membership.rs already proves a real cert produces a working
+    // channel.
 }

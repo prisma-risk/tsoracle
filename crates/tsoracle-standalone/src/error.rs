@@ -45,6 +45,11 @@ pub enum StandaloneError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "admin listener on {addr} requires --admin-tls-{{cert,key,ca}} \
+         (only loopback addresses may bind without admin TLS)"
+    )]
+    AdminInsecureRoutable { addr: SocketAddr },
     #[error("driver bootstrap failed: {0}")]
     Bootstrap(Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid configuration: {0}")]
