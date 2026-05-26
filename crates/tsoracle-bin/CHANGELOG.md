@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v0.1.12...tsoracle-v0.1.13) - 2026-05-26
+
+### Fixed
+
+- *(standalone)* require mTLS for non-loopback admin gRPC bind ([#462](https://github.com/prisma-risk/tsoracle/pull/462))
+
+### Other
+
+- *(smoke)* retry binary spawn on EADDRINUSE port-probe race ([#474](https://github.com/prisma-risk/tsoracle/pull/474))
+
 ## [0.1.12](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v0.1.11...tsoracle-v0.1.12) - 2026-05-26
 
 ### Added
