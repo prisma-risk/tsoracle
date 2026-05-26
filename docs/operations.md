@@ -99,16 +99,16 @@ The client gives `FAILED_PRECONDITION` special handling: it parses the `tsoracle
 
 Cert and key shapes follow tonic: `ServerTlsConfig::new().identity(Identity::from_pem(cert, key))` for plain TLS; add `.client_ca_root(Certificate::from_pem(ca))` for mTLS.
 
-The stock `tsoracle` CLI exposes `--peer-tls-{cert,key,ca}` for peer mTLS, `--admin-tls-{cert,key,ca}` for the membership-admin gRPC server, and `--tls-cert / --tls-key / --tls-client-ca` for the client-facing gRPC port. See the [HA driver flag tables](../interface-reference.md#tsoracle-serve-openraft) for the per-flag wiring.
+The stock `tsoracle` CLI exposes `--peer-tls-{cert,key,ca}` for peer mTLS, `--admin-tls-{cert,key,ca}` for the membership-admin gRPC server, and `--tls-cert / --tls-key / --tls-client-ca` for the client-facing gRPC port. See the [HA driver flag tables](../interface-reference.md#tsoracle-serve-openraft) for the per-flag wiring. For a runnable wiring example see [`examples/tls-mtls`](../examples/tls-mtls/).
 
 ## Peer-port trust boundary
 
-`tsoracle serve openraft --raft-addr` and `tsoracle serve paxos --peer-listen` bind the consensus peer transport. The binary refuses a routable bind without peer TLS unless explicitly opted-out:
+`tsoracle serve openraft --raft-addr` and `tsoracle serve paxos --peer-listen` bind the consensus peer transport. The binary refuses a routable bind without peer TLS unless the operator explicitly sets `--allow-insecure-peer`:
 
-- **Loopback** (`127.0.0.0/8`, `::1`) — plaintext allowed. Intended for local-dev and same-pod sidecar callers.
-- **Routable** without `--peer-tls-{cert,key,ca}` — rejected at startup with `PeerInsecureRoutable` before storage is opened.
+- **Loopback** (`127.0.0.0/8`, `::1/128`) — plaintext allowed. Intended for local-dev and same-pod sidecar callers.
+- **Routable** without `--peer-tls-{cert,key,ca}` — rejected at startup with `PeerInsecureRoutable` before the data directory is created.
 - **Routable** with `--peer-tls-{cert,key,ca}` — peer mTLS; the cluster CA is the trust root for both directions.
-- **Routable** with `--allow-insecure-peer` — the secure-by-default guard is opted out. A `tracing::warn!` line emits at startup naming the bind address. Intended only for single-host dev or deployments where peer security is terminated out-of-band (e.g. a service mesh's pod-to-pod mTLS, or a strict NetworkPolicy + dedicated CNI).
+- **Routable** with `--allow-insecure-peer` — the secure-by-default guard is opted out. A startup warning is logged with the bind address: `peer listener bound without TLS via --allow-insecure-peer; relying on out-of-band transport security`. Intended only for single-host dev or deployments where peer security is terminated out-of-band (e.g. a service mesh's pod-to-pod mTLS, or a strict NetworkPolicy + dedicated CNI).
 
 ### Helm chart composition
 
