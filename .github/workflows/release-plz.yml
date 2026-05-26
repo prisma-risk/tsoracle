@@ -21,6 +21,7 @@ jobs:
     environment: crates-io
     permissions:
       contents: write
+      id-token: write  # for Sigstore gitsign OIDC (signs release tags)
     # Queue serial — never cancel a publish in flight (a half-done publish
     # could leave the repo with some crates released and others not).
     concurrency:
@@ -46,6 +47,28 @@ jobs:
         with:
           packages: protobuf-compiler clang libclang-dev
           version: 1
+      # Install Sigstore gitsign so release-plz creates annotated, keyless-signed
+      # tags. Signing identity = this workflow's GitHub Actions OIDC token,
+      # attested by Fulcio and logged to Rekor (same trust model as the SLSA
+      # provenance signed by .github/workflows/release-sign.yml).
+      - name: install gitsign
+        env:
+          GITSIGN_VERSION: "0.16.0"
+          GITSIGN_SHA256: "176b77ae1cf57ac73343c378e2f1338346930324bfb20408b600d97d21e45aa1"
+        run: |
+          set -euo pipefail
+          asset="gitsign_${GITSIGN_VERSION}_linux_amd64"
+          curl -sSLo /tmp/gitsign "https://github.com/sigstore/gitsign/releases/download/v${GITSIGN_VERSION}/${asset}"
+          echo "${GITSIGN_SHA256}  /tmp/gitsign" | sha256sum -c -
+          sudo install -m 0755 /tmp/gitsign /usr/local/bin/gitsign
+          rm -f /tmp/gitsign
+          gitsign --version
+      - name: configure git to sign tags via gitsign
+        run: |
+          set -euo pipefail
+          git config --global gpg.x509.program gitsign
+          git config --global gpg.format x509
+          git config --global tag.gpgSign true
       - uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db  # v0.5
         with:
           command: release
