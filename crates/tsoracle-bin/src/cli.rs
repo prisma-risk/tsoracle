@@ -192,7 +192,7 @@ pub struct OpenraftArgs {
     /// This node's numeric raft id (unique across the cluster).
     #[arg(long)]
     pub id: u64,
-    /// Address to listen for raft peer RPCs. UNAUTHENTICATED plaintext — bind only on a trusted network.
+    /// Address to listen for raft peer RPCs. Plaintext on loopback; routable bind requires --peer-tls-{cert,key,ca} or --allow-insecure-peer.
     #[arg(long)]
     pub raft_addr: SocketAddr,
     /// Directory for raft log + state-machine data.
@@ -231,6 +231,12 @@ pub struct OpenraftArgs {
     /// PEM CA (cluster-dedicated) to verify connecting peers.
     #[arg(long)]
     pub peer_tls_ca: Option<std::path::PathBuf>,
+    /// Opt out of the peer-listener secure-by-default guard. Allows
+    /// routable bind without --peer-tls-*. Matches the helm chart's
+    /// tls.allowInsecurePeer. Intended for single-host dev or
+    /// service-mesh-terminated mTLS only.
+    #[arg(long)]
+    pub allow_insecure_peer: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -240,7 +246,7 @@ pub struct PaxosArgs {
     /// This node's OmniPaxos pid (unique across the cluster).
     #[arg(long)]
     pub node_id: u64,
-    /// Address to listen for paxos peer RPCs. UNAUTHENTICATED plaintext — bind only on a trusted network.
+    /// Address to listen for paxos peer RPCs. Plaintext on loopback; routable bind requires --peer-tls-{cert,key,ca} or --allow-insecure-peer.
     #[arg(long)]
     pub peer_listen: SocketAddr,
     /// Comma-separated `id=host:port` paxos peer addresses (required every start).
@@ -263,6 +269,12 @@ pub struct PaxosArgs {
     /// PEM CA (cluster-dedicated) to verify connecting peers.
     #[arg(long)]
     pub peer_tls_ca: Option<std::path::PathBuf>,
+    /// Opt out of the peer-listener secure-by-default guard. Allows
+    /// routable bind without --peer-tls-*. Matches the helm chart's
+    /// tls.allowInsecurePeer. Intended for single-host dev or
+    /// service-mesh-terminated mTLS only.
+    #[arg(long)]
+    pub allow_insecure_peer: bool,
 }
 
 #[derive(Parser, Debug)]

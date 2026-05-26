@@ -144,7 +144,7 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
                         args.admin_tls_key,
                         args.admin_tls_ca,
                     )?,
-                    allow_insecure_peer: false, // TODO Task 5: wire to args.allow_insecure_peer
+                    allow_insecure_peer: args.allow_insecure_peer,
                 });
                 run_serve(args.common, cfg).await
             }
@@ -171,7 +171,7 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
                         args.peer_tls_key,
                         args.peer_tls_ca,
                     )?,
-                    allow_insecure_peer: false, // TODO Task 5: wire to args.allow_insecure_peer
+                    allow_insecure_peer: args.allow_insecure_peer,
                 });
                 run_serve(args.common, cfg).await
             }
