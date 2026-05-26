@@ -133,12 +133,25 @@ impl Default for ActiveWriteVersion {
 /// fsync-durable lower bounds.
 ///
 /// Returns `max(BASELINE_WRITE_VERSION, snapshot_leading_byte?,
-/// highest_log_record_byte?)`. Both inputs are `Option` because a fresh store
-/// has neither a persisted snapshot nor any log record. Taking the max of
+/// highest_log_record_byte?)` when every present input is within the readable
+/// range `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`, and
+/// [`CodecError::VersionUnsupported`] when any present input exceeds
+/// `MAX_READABLE_VERSION`. Both inputs are `Option` because a fresh store has
+/// neither a persisted snapshot nor any log record. Taking the max of
 /// durably-*written* evidence is monotone and safe: a rejected or no-op
 /// activation never caused any record to be written at the higher version, so it
 /// cannot be resurrected here, and a node never recovers a version below what it
 /// actually emitted.
+///
+/// The upper-bound check matters when this binary is older than the on-disk
+/// data — for example a rolling-restart that downgrades a node to a release
+/// whose [`MAX_READABLE_VERSION`] is lower than a leading byte already stamped
+/// in the log or snapshot by a newer release. Without the check the cell would
+/// be seeded to a value the decode side cannot handle, and the writers would
+/// stamp every new record at that unreadable version (a persistent availability
+/// failure). Failing the recovery fast surfaces the version mismatch at the
+/// boundary between durable bytes and the in-memory cell, instead of silently
+/// poisoning later reads.
 ///
 /// This deliberately does NOT read any meta-CF counter and does NOT inspect the
 /// mere presence of a committed `SetFormatVersion` log entry. Durability of an
@@ -151,10 +164,22 @@ impl Default for ActiveWriteVersion {
 pub fn recover_active_write_version(
     snapshot_leading_byte: Option<u8>,
     highest_log_record_byte: Option<u8>,
-) -> u8 {
-    BASELINE_WRITE_VERSION
+) -> Result<u8, CodecError> {
+    for byte in [snapshot_leading_byte, highest_log_record_byte]
+        .into_iter()
+        .flatten()
+    {
+        if byte > MAX_READABLE_VERSION {
+            return Err(CodecError::VersionUnsupported {
+                min: MIN_READABLE_VERSION,
+                max: MAX_READABLE_VERSION,
+                actual: byte,
+            });
+        }
+    }
+    Ok(BASELINE_WRITE_VERSION
         .max(snapshot_leading_byte.unwrap_or(BASELINE_WRITE_VERSION))
-        .max(highest_log_record_byte.unwrap_or(BASELINE_WRITE_VERSION))
+        .max(highest_log_record_byte.unwrap_or(BASELINE_WRITE_VERSION)))
 }
 
 #[cfg(test)]
@@ -213,24 +238,85 @@ mod tests {
     #[test]
     fn recover_returns_baseline_with_no_durable_evidence() {
         assert_eq!(
-            recover_active_write_version(None, None),
+            recover_active_write_version(None, None).unwrap(),
             BASELINE_WRITE_VERSION
         );
     }
 
     #[test]
     fn recover_takes_the_max_of_present_lower_bounds() {
-        assert_eq!(recover_active_write_version(Some(5), None), 5);
-        assert_eq!(recover_active_write_version(None, Some(6)), 6);
-        assert_eq!(recover_active_write_version(Some(5), Some(6)), 6);
-        assert_eq!(recover_active_write_version(Some(7), Some(5)), 7);
+        // The "max" only differs from BASELINE when MAX_READABLE_VERSION >
+        // BASELINE_WRITE_VERSION — the e2e-max-readable-next harness. Under the
+        // production cfg the range is a single point so every assertion here
+        // collapses to BASELINE, but the test still exercises every input shape.
+        assert_eq!(
+            recover_active_write_version(Some(MAX_READABLE_VERSION), None).unwrap(),
+            MAX_READABLE_VERSION
+        );
+        assert_eq!(
+            recover_active_write_version(None, Some(MAX_READABLE_VERSION)).unwrap(),
+            MAX_READABLE_VERSION
+        );
+        assert_eq!(
+            recover_active_write_version(Some(BASELINE_WRITE_VERSION), Some(MAX_READABLE_VERSION))
+                .unwrap(),
+            MAX_READABLE_VERSION
+        );
+        assert_eq!(
+            recover_active_write_version(Some(MAX_READABLE_VERSION), Some(BASELINE_WRITE_VERSION))
+                .unwrap(),
+            MAX_READABLE_VERSION
+        );
     }
 
     #[test]
     fn recover_never_drops_below_baseline() {
         assert_eq!(
-            recover_active_write_version(Some(1), Some(2)),
+            recover_active_write_version(Some(1), Some(2)).unwrap(),
             BASELINE_WRITE_VERSION
+        );
+    }
+
+    #[test]
+    fn recover_rejects_snapshot_byte_above_max_readable() {
+        let above = MAX_READABLE_VERSION + 1;
+        let err = recover_active_write_version(Some(above), None).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodecError::VersionUnsupported {
+                    min: MIN_READABLE_VERSION,
+                    max: MAX_READABLE_VERSION,
+                    actual,
+                } if actual == above,
+            ),
+            "expected VersionUnsupported for snapshot byte above MAX_READABLE_VERSION, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn recover_rejects_log_byte_above_max_readable() {
+        let above = MAX_READABLE_VERSION + 1;
+        let err = recover_active_write_version(None, Some(above)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodecError::VersionUnsupported {
+                    min: MIN_READABLE_VERSION,
+                    max: MAX_READABLE_VERSION,
+                    actual,
+                } if actual == above,
+            ),
+            "expected VersionUnsupported for log byte above MAX_READABLE_VERSION, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn recover_accepts_byte_at_max_readable() {
+        assert_eq!(
+            recover_active_write_version(Some(MAX_READABLE_VERSION), Some(MAX_READABLE_VERSION))
+                .unwrap(),
+            MAX_READABLE_VERSION,
         );
     }
 }
