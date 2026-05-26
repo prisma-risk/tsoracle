@@ -131,3 +131,142 @@ where
         Err(e) => Err(MembershipError::Other(e.to_string())),
     }
 }
+
+/// Why a learner-admission capability pre-check refused a candidate.
+///
+/// LATENT: nothing in this crate currently calls [`add_learner_gated`]; the
+/// guard is a pure predicate ready for a future admit-path consumer (the
+/// dynamic-membership admin already calls `Raft::add_learner` directly and
+/// would need to be re-routed through [`add_learner_gated`] to take effect).
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum JoinerGateError {
+    /// The candidate cannot read the cluster's active write version, so it
+    /// must not be admitted as a learner: openraft replicates and
+    /// snapshot-installs a learner before promotion, and those bytes are at
+    /// the active write version. Admitting it would either strand the
+    /// candidate or block a later activation behind an incompatible member.
+    #[error(
+        "candidate cannot read the cluster active write version: \
+         candidate max_readable_version={candidate_max_readable_version}, \
+         active_write_version={active_write_version}"
+    )]
+    IncompatibleCandidate {
+        candidate_max_readable_version: u8,
+        active_write_version: u8,
+    },
+}
+
+/// Capability pre-check for learner admission.
+///
+/// Returns `Ok(())` when the candidate's `candidate_max_readable_version` is
+/// at or above the cluster's `active_write_version`; otherwise
+/// [`JoinerGateError::IncompatibleCandidate`]. Pure and driver-agnostic on
+/// purpose: the caller projects the candidate's capability struct (e.g. the
+/// driver's `NodeCapabilities.max_readable_version`) and the leader's active
+/// write version into the two `u8` arguments, so the toolkit does not
+/// depend on the driver's capability type.
+pub fn learner_meets_active_write_version(
+    candidate_max_readable_version: u8,
+    active_write_version: u8,
+) -> Result<(), JoinerGateError> {
+    if candidate_max_readable_version < active_write_version {
+        return Err(JoinerGateError::IncompatibleCandidate {
+            candidate_max_readable_version,
+            active_write_version,
+        });
+    }
+    Ok(())
+}
+
+/// Failure of [`add_learner_gated`]: either the joiner gate refused the
+/// candidate (no raft call made) or the underlying [`add_learner`] failed.
+#[derive(Debug, Error)]
+pub enum GatedAdmissionError {
+    /// The joiner-gate capability pre-check refused the candidate; no raft
+    /// membership change was attempted.
+    #[error(transparent)]
+    Gate(#[from] JoinerGateError),
+    /// The capability check passed but the raft `add_learner` call failed.
+    #[error(transparent)]
+    Membership(#[from] MembershipError),
+}
+
+/// Capability-gated learner admission.
+///
+/// Runs [`learner_meets_active_write_version`] against the candidate's
+/// `candidate_max_readable_version` and the cluster's `active_write_version`
+/// FIRST; only if it passes does it delegate to [`add_learner`]. An admit
+/// path that routes through this entry point refuses an incompatible
+/// candidate before any replication or snapshot transfer is initiated.
+///
+/// LATENT: the existing admin path on this branch calls
+/// `Raft::add_learner` directly, not the toolkit `add_learner`. This
+/// wrapper is the seam a future admit caller can switch to.
+pub async fn add_learner_gated<C, SM>(
+    raft: &Raft<C, SM>,
+    id: C::NodeId,
+    node: C::Node,
+    blocking: bool,
+    candidate_max_readable_version: u8,
+    active_write_version: u8,
+) -> Result<(), GatedAdmissionError>
+where
+    C: RaftTypeConfig,
+    SM: RaftStateMachine<C>,
+{
+    learner_meets_active_write_version(candidate_max_readable_version, active_write_version)?;
+    add_learner(raft, id, node, blocking).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod joiner_gate_tests {
+    use super::*;
+
+    #[test]
+    fn admits_when_candidate_can_read_active_version() {
+        // max_readable >= active => admitted.
+        assert!(learner_meets_active_write_version(3, 3).is_ok());
+        assert!(learner_meets_active_write_version(4, 3).is_ok());
+    }
+
+    #[test]
+    fn refuses_when_candidate_below_active_version() {
+        // Refuse a learner whose max_readable_version is below the cluster's
+        // active write version — replication / snapshot transfer would hand
+        // it bytes it cannot decode.
+        let err = learner_meets_active_write_version(3, 4)
+            .expect_err("a candidate that cannot read the active version must be refused");
+        let JoinerGateError::IncompatibleCandidate {
+            candidate_max_readable_version,
+            active_write_version,
+        } = err;
+        assert_eq!(candidate_max_readable_version, 3);
+        assert_eq!(active_write_version, 4);
+    }
+
+    #[test]
+    fn refusal_message_is_actionable() {
+        let err = learner_meets_active_write_version(2, 5).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains('2'), "names the candidate capability");
+        assert!(message.contains('5'), "names the active write version");
+    }
+
+    #[test]
+    fn gated_admission_error_unifies_gate_and_membership_failures() {
+        // `add_learner_gated` can fail either because the joiner gate
+        // refused the candidate (before touching raft) or because the
+        // underlying `add_learner` raft call failed. `GatedAdmissionError`
+        // must carry both via `#[from]`.
+        let gate: GatedAdmissionError = JoinerGateError::IncompatibleCandidate {
+            candidate_max_readable_version: 3,
+            active_write_version: 4,
+        }
+        .into();
+        assert!(matches!(gate, GatedAdmissionError::Gate(_)));
+
+        let membership: GatedAdmissionError = MembershipError::NotLeader { leader: None }.into();
+        assert!(matches!(membership, GatedAdmissionError::Membership(_)));
+    }
+}

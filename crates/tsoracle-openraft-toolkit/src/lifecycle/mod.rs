@@ -29,4 +29,7 @@ pub mod membership;
 
 pub use bootstrap::{BootstrapError, BootstrapMode, bootstrap, join};
 pub use leader::{LeadershipState, leadership_events, leadership_events_from_metrics};
-pub use membership::{MembershipError, add_learner, change_membership};
+pub use membership::{
+    GatedAdmissionError, JoinerGateError, MembershipError, add_learner, add_learner_gated,
+    change_membership, learner_meets_active_write_version,
+};
