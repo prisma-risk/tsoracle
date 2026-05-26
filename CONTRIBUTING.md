@@ -82,7 +82,7 @@ cargo build --workspace --all-features
 cargo test  --workspace --all-features
 ```
 
-The `--all-features` flag activates the `failpoints` Cargo feature on each opting-in crate, so the failpoint suite (see [`docs/failpoint-testing.md`](docs/failpoint-testing.md)) is part of the normal `cargo test` run. `--all-features` also activates the `yieldpoints` Cargo feature, which gates async yield-point tests in `tsoracle-driver-paxos` (see [`docs/yieldpoint-testing.md`](docs/yieldpoint-testing.md) — the async counterpart of failpoints, for tests that need to park production code in an async path without blocking a tokio worker). To run just the failpoint suite:
+The `--all-features` flag activates the `failpoints` Cargo feature on each opting-in crate, so the failpoint suite (see [`docs/failpoint-testing.md`](docs/failpoint-testing.md)) is part of the normal `cargo test` run. `--all-features` also activates the `yieldpoints` Cargo feature, which gates async yield-point tests in `tsoracle-driver-openraft` (see [`docs/yieldpoint-testing.md`](docs/yieldpoint-testing.md) — the async counterpart of failpoints, for tests that need to park production code in an async path without blocking a tokio worker). To run just the failpoint suite:
 
 ```bash
 make test-failpoints
