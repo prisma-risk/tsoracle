@@ -267,6 +267,144 @@ mod openraft_driver {
             Err(StandaloneError::AdminBind { .. })
         ));
     }
+
+    #[tokio::test]
+    async fn openraft_peer_insecure_routable_bind_rejected_at_build() {
+        // Mirrors admin_insecure_routable_bind_rejected_at_build:
+        // guard runs at the top of build_openraft, before open_rocksdb,
+        // so raft_dir stays untouched.
+        let raft_dir = tempdir().unwrap();
+        let raft_dir_path = raft_dir.path().to_path_buf();
+        let cfg = OpenraftConfig {
+            id: 1,
+            raft_addr: "0.0.0.0:0".parse().unwrap(),
+            raft_dir: raft_dir_path.clone(),
+            bootstrap: true,
+            initial_membership: Some(BTreeMap::from([(
+                1u64,
+                MemberAddr {
+                    raft_addr: "127.0.0.1:9".into(),
+                    service_endpoint: "127.0.0.1:8".into(),
+                    admin_endpoint: "127.0.0.1:7".into(),
+                },
+            )])),
+            tuning: RaftTuning::default(),
+            peer_tls: None,
+            admin_listen: None,
+            admin_tls: None,
+            allow_insecure_peer: false,
+        };
+
+        let err = match build(DriverConfig::Openraft(cfg)).await {
+            Ok(_) => panic!("expected PeerInsecureRoutable"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(
+                err,
+                tsoracle_standalone::StandaloneError::PeerInsecureRoutable { .. }
+            ),
+            "got {err:?}"
+        );
+        let entries = std::fs::read_dir(&raft_dir_path)
+            .expect("raft_dir is the tempdir, still present")
+            .count();
+        assert_eq!(
+            entries, 0,
+            "guard must run before open_rocksdb; raft_dir should be untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn openraft_peer_loopback_no_tls_allowed() {
+        // Loopback binds are allowed plaintext for local-dev / sidecar.
+        let dir = tempdir().unwrap();
+        let (raft_addr, raft_lease) = lease_port().await;
+        let cfg = single_node_cfg(raft_addr, "127.0.0.1:1", dir.path().join("raft"));
+        assert!(raft_addr.ip().is_loopback(), "lease_port returns loopback");
+        // peer_tls None, allow_insecure_peer false — loopback carve-out wins.
+        drop(raft_lease);
+        let node = build(DriverConfig::Openraft(cfg))
+            .await
+            .expect("loopback + no peer_tls should build");
+        // Don't bother driving consensus — boot was the assertion.
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn openraft_peer_routable_opt_out_allowed() {
+        // allow_insecure_peer=true opts the routable bind in;
+        // build() must succeed past the guard. We don't drive consensus
+        // (would need a real listener-bind on 0.0.0.0); proving the guard
+        // is bypassed is the assertion, so the test uses 0.0.0.0:0 and
+        // expects either Ok() or a downstream error other than
+        // PeerInsecureRoutable.
+        let dir = tempdir().unwrap();
+        let raft_dir_path = dir.path().join("raft");
+        let cfg = OpenraftConfig {
+            id: 1,
+            raft_addr: "0.0.0.0:0".parse().unwrap(),
+            raft_dir: raft_dir_path,
+            bootstrap: true,
+            initial_membership: Some(BTreeMap::from([(
+                1u64,
+                MemberAddr {
+                    raft_addr: "127.0.0.1:9".into(),
+                    service_endpoint: "127.0.0.1:8".into(),
+                    admin_endpoint: "127.0.0.1:7".into(),
+                },
+            )])),
+            tuning: RaftTuning::default(),
+            peer_tls: None,
+            admin_listen: None,
+            admin_tls: None,
+            allow_insecure_peer: true,
+        };
+        match build(DriverConfig::Openraft(cfg)).await {
+            Ok(node) => node.shutdown().await,
+            Err(tsoracle_standalone::StandaloneError::PeerInsecureRoutable { .. }) => {
+                panic!("opt-out should bypass the guard")
+            }
+            Err(_) => {
+                // Any other error is acceptable for this guard-bypass test
+                // (we only care that PeerInsecureRoutable did not fire).
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openraft_peer_routable_with_tls_allowed() {
+        // peer_tls Some(...) bypasses the guard regardless of bind address.
+        use tsoracle_standalone::PeerTlsConfig;
+        let dir = tempdir().unwrap();
+        let (cert, key, ca) = crate::common::write_peer_pems(dir.path());
+        let cfg = OpenraftConfig {
+            id: 1,
+            raft_addr: "0.0.0.0:0".parse().unwrap(),
+            raft_dir: dir.path().join("raft"),
+            bootstrap: true,
+            initial_membership: Some(BTreeMap::from([(
+                1u64,
+                MemberAddr {
+                    raft_addr: "127.0.0.1:9".into(),
+                    service_endpoint: "127.0.0.1:8".into(),
+                    admin_endpoint: "127.0.0.1:7".into(),
+                },
+            )])),
+            tuning: RaftTuning::default(),
+            peer_tls: Some(PeerTlsConfig { cert, key, ca }),
+            admin_listen: None,
+            admin_tls: None,
+            allow_insecure_peer: false,
+        };
+        match build(DriverConfig::Openraft(cfg)).await {
+            Ok(node) => node.shutdown().await,
+            Err(tsoracle_standalone::StandaloneError::PeerInsecureRoutable { .. }) => {
+                panic!("routable + peer_tls should bypass the guard")
+            }
+            Err(_) => {} // any other error is fine for guard-bypass
+        }
+    }
 }
 
 #[cfg(feature = "paxos")]
