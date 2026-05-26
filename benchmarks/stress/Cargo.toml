@@ -43,11 +43,11 @@ tracing-subscriber = { workspace = true }
 tsoracle-client          = { path = "../../crates/tsoracle-client", version = "0.2.5" }
 tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "0.1.9" }
 tsoracle-core            = { path = "../../crates/tsoracle-core", version = "0.2.4" }
-tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.3.1" }
-tsoracle-driver-paxos    = { path = "../../crates/tsoracle-driver-paxos", version = "0.3.1" }
-tsoracle-openraft-toolkit = { path = "../../crates/tsoracle-openraft-toolkit", version = "0.2.1", features = ["test-fakes"] }
-tsoracle-paxos-toolkit   = { path = "../../crates/tsoracle-paxos-toolkit", version = "0.3.1", features = ["rocksdb-storage", "test-fakes"] }
-tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.2.7", features = ["test-fakes"] }
+tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "0.3.2" }
+tsoracle-driver-paxos    = { path = "../../crates/tsoracle-driver-paxos", version = "0.3.2" }
+tsoracle-openraft-toolkit = { path = "../../crates/tsoracle-openraft-toolkit", version = "0.2.2", features = ["test-fakes"] }
+tsoracle-paxos-toolkit   = { path = "../../crates/tsoracle-paxos-toolkit", version = "0.3.2", features = ["rocksdb-storage", "test-fakes"] }
+tsoracle-server          = { path = "../../crates/tsoracle-server", version = "0.2.8", features = ["test-fakes"] }
 
 fail = { workspace = true, optional = true }
 

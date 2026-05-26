@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.8](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.7...tsoracle-server-v0.2.8) - 2026-05-26
+
+### Added
+
+- *(driver-openraft)* format-migration observability and runbook ([#467](https://github.com/prisma-risk/tsoracle/pull/467))
+
 ## [0.2.7](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.6...tsoracle-server-v0.2.7) - 2026-05-26
 
 ### Fixed

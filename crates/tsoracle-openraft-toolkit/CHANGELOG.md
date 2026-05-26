@@ -4,6 +4,19 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.2.1...tsoracle-openraft-toolkit-v0.2.2) - 2026-05-26
+
+### Added
+
+- *(openraft-toolkit)* version-neutral e2e-max-readable-next feature ([#468](https://github.com/prisma-risk/tsoracle/pull/468))
+- *(driver-openraft)* joiner gate and migration-on-next-write tests ([#465](https://github.com/prisma-risk/tsoracle/pull/465))
+- *(openraft-toolkit)* add ActiveWriteVersion cell and version constants ([#460](https://github.com/prisma-risk/tsoracle/pull/460))
+- *(openraft-toolkit)* route RocksdbLogStore log/meta codec through LogStoreCodec provider seam ([#459](https://github.com/prisma-risk/tsoracle/pull/459))
+
+### Fixed
+
+- *(openraft-toolkit)* clamp recovered write version to readable range ([#478](https://github.com/prisma-risk/tsoracle/pull/478))
+
 ## [0.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.2.0...tsoracle-openraft-toolkit-v0.2.1) - 2026-05-26
 
 ### Added

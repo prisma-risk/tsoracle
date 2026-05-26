@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-codec-v0.1.3...tsoracle-codec-v0.1.4) - 2026-05-26
+
+### Added
+
+- *(codec)* add VersionedCodec trait and framed encode/decode helpers ([#454](https://github.com/prisma-risk/tsoracle/pull/454))
+
 ## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-codec-v0.1.2...tsoracle-codec-v0.1.3) - 2026-05-26
 
 ### Fixed
