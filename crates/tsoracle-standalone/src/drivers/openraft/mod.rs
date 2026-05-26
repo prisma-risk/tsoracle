@@ -44,7 +44,7 @@ use crate::config::OpenraftConfig;
 use crate::error::StandaloneError;
 use crate::{Standalone, TransportHandle};
 
-use network::{MAX_PEER_MESSAGE_BYTES, PeerFactory, server as peer_server};
+use network::{MAX_PEER_MESSAGE_BYTES, PeerFactory, WriteVersionSource, server as peer_server};
 
 const LOG_CF: &str = "raft_log";
 const META_CF: &str = "raft_meta";
@@ -139,6 +139,14 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
             .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?;
     let state_machine_for_host = state_machine.clone();
 
+    // Peer transport reads the active write version per-RPC through this
+    // closure so a runtime activation flip takes effect on the next message
+    // without rebuilding the transport.
+    let version_source: WriteVersionSource = {
+        let state_machine = state_machine.clone();
+        Arc::new(move || state_machine.active_write_version())
+    };
+
     let config = Arc::new(
         Config {
             heartbeat_interval: cfg.tuning.heartbeat_ms,
@@ -155,7 +163,10 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         None => None,
     };
 
-    let network = PeerFactory::new(peer_tls.as_ref().map(|m| m.client.clone()));
+    let network = PeerFactory::new(
+        peer_tls.as_ref().map(|m| m.client.clone()),
+        version_source.clone(),
+    );
     let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
         cfg.id,
         config,
@@ -173,7 +184,7 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
             addr: cfg.raft_addr,
             source,
         })?;
-    let peer_service = peer_server(raft.clone())
+    let peer_service = peer_server(raft.clone(), version_source)
         .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
     let mut builder = tonic::transport::Server::builder()

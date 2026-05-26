@@ -21,6 +21,10 @@ service RaftPeerService {
 
 message RaftMessage {
   bytes payload = 1;
+  // Format version of the postcard-encoded `payload`. proto3 default 0 means
+  // "absent" (a pre-feature sender) and is interpreted by the receiver as the
+  // BASELINE write version. A versioned sender stamps its active write version.
+  uint32 format_version = 2;
 }
 
 // One chunk of a snapshot install RPC.
@@ -42,4 +46,9 @@ message SnapshotHeader {
   bytes vote = 1;
   // postcard-encoded openraft SnapshotMeta (last_log_id, last_membership, snapshot_id).
   bytes meta = 2;
+  // Format version covering BOTH `vote` and `meta` postcard bodies. proto3
+  // default 0 ("absent") is interpreted as the BASELINE write version. The
+  // streamed `data` chunks are NOT covered here: that blob is self-describing
+  // via its own on-disk leading version byte.
+  uint32 format_version = 3;
 }

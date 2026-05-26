@@ -57,6 +57,9 @@ use tokio::sync::Mutex;
 use tonic::transport::{Channel, ClientTlsConfig};
 
 use tsoracle_driver_openraft::{OpenraftPeer as Node, TypeConfig};
+use tsoracle_openraft_toolkit::{
+    BASELINE_WRITE_VERSION, MAX_READABLE_VERSION, MIN_READABLE_VERSION,
+};
 type NodeId = u64;
 
 pub mod proto {
@@ -69,6 +72,49 @@ use proto::SnapshotHeader;
 use proto::raft_peer_service_client::RaftPeerServiceClient;
 use proto::raft_peer_service_server::{RaftPeerService, RaftPeerServiceServer};
 use proto::snapshot_chunk::Kind as ChunkKind;
+
+/// Wire-envelope versioning. The `format_version` protobuf field carries the
+/// format version of the postcard body alongside it. proto3's default `0`
+/// (a pre-feature sender that has no such field) is interpreted as
+/// [`BASELINE_WRITE_VERSION`]; any present value must fall inside the readable
+/// range `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]` or the body is refused
+/// before it is parsed. Senders stamp their node's active write version.
+mod wire {
+    use super::{BASELINE_WRITE_VERSION, MAX_READABLE_VERSION, MIN_READABLE_VERSION};
+
+    /// Stamp an outbound `format_version` from the node's active write `version`.
+    /// A plain widening to the protobuf `uint32`; isolated as a function so every
+    /// send site reads identically and a future stamping policy has one home.
+    pub(super) fn stamp(version: u8) -> u32 {
+        u32::from(version)
+    }
+
+    /// Normalize and range-check an inbound `format_version`. `0` (proto3 default
+    /// from a pre-feature sender) maps to [`BASELINE_WRITE_VERSION`]; a present
+    /// value must be inside `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`.
+    /// Returns the `u8` version to decode at, or an error string the caller wraps
+    /// in a transport-appropriate error (`tonic::Status` server-side, `RPCError`
+    /// client-side). Fails loud rather than guessing a parser.
+    pub(super) fn readable_version(format_version: u32) -> Result<u8, String> {
+        let version = if format_version == 0 {
+            BASELINE_WRITE_VERSION
+        } else {
+            u8::try_from(format_version).map_err(|_| {
+                format!(
+                    "format_version {format_version} outside readable range \
+                     [{MIN_READABLE_VERSION}, {MAX_READABLE_VERSION}]"
+                )
+            })?
+        };
+        if version < MIN_READABLE_VERSION || version > MAX_READABLE_VERSION {
+            return Err(format!(
+                "format_version {version} outside readable range \
+                 [{MIN_READABLE_VERSION}, {MAX_READABLE_VERSION}]"
+            ));
+        }
+        Ok(version)
+    }
+}
 
 /// Snapshot data is shipped in chunks of this many bytes. Sized to fit
 /// comfortably inside the default gRPC max-frame limit (4 MiB) with room
@@ -105,6 +151,12 @@ const SNAPSHOT_STREAM_TIMEOUT: Duration = Duration::from_secs(60);
 // ---------------------------------------------------------------------------
 
 type Pool = Arc<Mutex<HashMap<(NodeId, String), RaftPeerServiceClient<Channel>>>>;
+
+/// A cheap, thread-safe reader of the node's current active write version.
+/// Read at each RPC (not cached) so a future activation flip takes effect on the
+/// next message without rebuilding the transport. Backed by the driver's
+/// `active_write_version()` accessor at the construction site (see `mod.rs`).
+pub type WriteVersionSource = Arc<dyn Fn() -> u8 + Send + Sync>;
 
 // Generic over the value type so the keying/eviction logic is unit-testable
 // without constructing a live RaftPeerServiceClient.
@@ -164,13 +216,15 @@ async fn unary_call<ClientHandle, Body>(
 pub struct PeerFactory {
     pool: Pool,
     tls: Option<ClientTlsConfig>,
+    active_write_version: WriteVersionSource,
 }
 
 impl PeerFactory {
-    pub fn new(tls: Option<ClientTlsConfig>) -> Self {
+    pub fn new(tls: Option<ClientTlsConfig>, active_write_version: WriteVersionSource) -> Self {
         Self {
             pool: Arc::new(Mutex::new(HashMap::new())),
             tls,
+            active_write_version,
         }
     }
 }
@@ -184,6 +238,7 @@ impl RaftNetworkFactory<TypeConfig> for PeerFactory {
             addr: node.addr.clone(),
             pool: self.pool.clone(),
             tls: self.tls.clone(),
+            active_write_version: self.active_write_version.clone(),
         }
     }
 }
@@ -197,6 +252,7 @@ pub struct PeerNetwork {
     addr: String,
     pool: Pool,
     tls: Option<ClientTlsConfig>,
+    active_write_version: WriteVersionSource,
 }
 
 impl PeerNetwork {
@@ -243,9 +299,14 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
             self.target,
             &self.addr,
             option.hard_ttl(),
-            c.append_entries(RaftMessage { payload }),
+            c.append_entries(RaftMessage {
+                payload,
+                format_version: wire::stamp((self.active_write_version)()),
+            }),
         )
         .await?;
+        let _version = wire::readable_version(reply.format_version)
+            .map_err(|err| RPCError::Network(NetworkError::new(&std::io::Error::other(err))))?;
         let body: AppendEntriesResponse<TypeConfig> = postcard::from_bytes(&reply.payload)
             .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
         Ok(body)
@@ -271,7 +332,10 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
             self.target,
             &self.addr,
             option.hard_ttl(),
-            c.transfer_leader(RaftMessage { payload }),
+            c.transfer_leader(RaftMessage {
+                payload,
+                format_version: wire::stamp((self.active_write_version)()),
+            }),
         )
         .await?;
         Ok(())
@@ -290,9 +354,14 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
             self.target,
             &self.addr,
             option.hard_ttl(),
-            c.vote(RaftMessage { payload }),
+            c.vote(RaftMessage {
+                payload,
+                format_version: wire::stamp((self.active_write_version)()),
+            }),
         )
         .await?;
+        let _version = wire::readable_version(reply.format_version)
+            .map_err(|err| RPCError::Network(NetworkError::new(&std::io::Error::other(err))))?;
         let body: VoteResponse<TypeConfig> = postcard::from_bytes(&reply.payload)
             .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
         Ok(body)
@@ -330,6 +399,7 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
             kind: Some(ChunkKind::Header(SnapshotHeader {
                 vote: vote_bytes,
                 meta: meta_bytes,
+                format_version: wire::stamp((self.active_write_version)()),
             })),
         };
 
@@ -363,9 +433,11 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
                     }
                 };
                 let inner = raw.into_inner();
-                let resp: SnapshotResponse<TypeConfig> =
-                    postcard::from_bytes(&inner.payload)
-                        .map_err(|err| StreamingError::Network(NetworkError::new(&err)))?;
+                let _version = wire::readable_version(inner.format_version).map_err(|err| {
+                    StreamingError::Network(NetworkError::new(&std::io::Error::other(err)))
+                })?;
+                let resp: SnapshotResponse<TypeConfig> = postcard::from_bytes(&inner.payload)
+                    .map_err(|err| StreamingError::Network(NetworkError::new(&err)))?;
                 Ok(resp)
             }
             closed = cancel => {
@@ -381,6 +453,7 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
 
 pub struct PeerServiceImpl<SM = ()> {
     pub raft: openraft::Raft<TypeConfig, SM>,
+    pub active_write_version: WriteVersionSource,
 }
 
 #[tonic::async_trait]
@@ -389,9 +462,11 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
         &self,
         request: tonic::Request<RaftMessage>,
     ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
-        let body: AppendEntriesRequest<TypeConfig> =
-            postcard::from_bytes(&request.into_inner().payload)
-                .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        let message = request.into_inner();
+        let _version = wire::readable_version(message.format_version)
+            .map_err(tonic::Status::invalid_argument)?;
+        let body: AppendEntriesRequest<TypeConfig> = postcard::from_bytes(&message.payload)
+            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
         let resp = self
             .raft
             .append_entries(body)
@@ -399,14 +474,20 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
         let payload =
             postcard::to_stdvec(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
-        Ok(tonic::Response::new(RaftMessage { payload }))
+        Ok(tonic::Response::new(RaftMessage {
+            payload,
+            format_version: wire::stamp((self.active_write_version)()),
+        }))
     }
 
     async fn vote(
         &self,
         request: tonic::Request<RaftMessage>,
     ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
-        let body: VoteRequest<TypeConfig> = postcard::from_bytes(&request.into_inner().payload)
+        let message = request.into_inner();
+        let _version = wire::readable_version(message.format_version)
+            .map_err(tonic::Status::invalid_argument)?;
+        let body: VoteRequest<TypeConfig> = postcard::from_bytes(&message.payload)
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
         let resp = self
             .raft
@@ -415,22 +496,28 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
         let payload =
             postcard::to_stdvec(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
-        Ok(tonic::Response::new(RaftMessage { payload }))
+        Ok(tonic::Response::new(RaftMessage {
+            payload,
+            format_version: wire::stamp((self.active_write_version)()),
+        }))
     }
 
     async fn transfer_leader(
         &self,
         request: tonic::Request<RaftMessage>,
     ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
-        let body: TransferLeaderRequest<TypeConfig> =
-            postcard::from_bytes(&request.into_inner().payload)
-                .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        let message = request.into_inner();
+        let _version = wire::readable_version(message.format_version)
+            .map_err(tonic::Status::invalid_argument)?;
+        let body: TransferLeaderRequest<TypeConfig> = postcard::from_bytes(&message.payload)
+            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
         self.raft
             .handle_transfer_leader(body)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
         Ok(tonic::Response::new(RaftMessage {
             payload: Vec::new(),
+            format_version: wire::stamp((self.active_write_version)()),
         }))
     }
 
@@ -463,7 +550,10 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
 
         let payload =
             postcard::to_stdvec(&resp).map_err(|e| tonic::Status::internal(e.to_string()))?;
-        Ok(tonic::Response::new(RaftMessage { payload }))
+        Ok(tonic::Response::new(RaftMessage {
+            payload,
+            format_version: wire::stamp((self.active_write_version)()),
+        }))
     }
 }
 
@@ -516,6 +606,12 @@ where
         }
     };
 
+    // The header's format_version covers both the vote and meta postcard
+    // bodies. The streamed `data` chunks are self-describing on-disk blobs
+    // and are NOT re-checked here (see proto/raft_peer.proto SnapshotHeader).
+    let _version =
+        wire::readable_version(header.format_version).map_err(tonic::Status::invalid_argument)?;
+
     let vote: VoteOf<TypeConfig> = postcard::from_bytes(&header.vote)
         .map_err(|e| tonic::Status::invalid_argument(format!("bad vote: {e}")))?;
     let meta: openraft::type_config::alias::SnapshotMetaOf<TypeConfig> =
@@ -553,11 +649,18 @@ where
     Ok(AssembledSnapshot { vote, meta, data })
 }
 
-/// Construct the tonic server-side handler for the RaftPeerService.
+/// Construct the tonic server-side handler for the RaftPeerService. The
+/// `active_write_version` source is consulted to stamp `format_version` on
+/// every response body (read per-RPC so a future activation flip is picked up
+/// live).
 pub fn server<SM: Send + Sync + 'static>(
     raft: openraft::Raft<TypeConfig, SM>,
+    active_write_version: WriteVersionSource,
 ) -> RaftPeerServiceServer<PeerServiceImpl<SM>> {
-    RaftPeerServiceServer::new(PeerServiceImpl { raft })
+    RaftPeerServiceServer::new(PeerServiceImpl {
+        raft,
+        active_write_version,
+    })
 }
 
 #[cfg(test)]
@@ -672,6 +775,7 @@ mod tls_tests {
             addr: addr.to_string(),
             pool: Arc::new(Mutex::new(HashMap::new())),
             tls,
+            active_write_version: Arc::new(|| tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION),
         }
     }
 
@@ -687,6 +791,7 @@ mod tls_tests {
                 match c
                     .append_entries(tonic::Request::new(proto::RaftMessage {
                         payload: Vec::new(),
+                        format_version: 0,
                     }))
                     .await
                 {
@@ -852,6 +957,7 @@ mod tests {
             kind: Some(ChunkKind::Header(SnapshotHeader {
                 vote: postcard::to_stdvec(&vote).expect("encode vote"),
                 meta: postcard::to_stdvec(&meta).expect("encode meta"),
+                format_version: wire::stamp(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION),
             })),
         }
     }
@@ -900,5 +1006,275 @@ mod tests {
             .await
             .expect_err("data before header must be rejected");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // ---- wire envelope helpers ----
+
+    #[test]
+    fn absent_format_version_reads_as_baseline() {
+        // proto3 default 0 (a pre-feature sender) is interpreted as BASELINE.
+        let version = wire::readable_version(0).expect("0 normalizes to baseline");
+        assert_eq!(version, tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION);
+    }
+
+    #[test]
+    fn in_range_format_version_passes_through() {
+        // A stamped in-range version is returned unchanged. Asserted against
+        // the constant so this survives a future MAX bump.
+        let stamped = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION;
+        let version = wire::readable_version(u32::from(stamped)).expect("in-range");
+        assert_eq!(version, stamped);
+    }
+
+    #[test]
+    fn out_of_range_format_version_is_rejected() {
+        // Above MAX_READABLE_VERSION: no parser, must fail loud.
+        let too_new = u32::from(tsoracle_openraft_toolkit::MAX_READABLE_VERSION) + 1;
+        let err = wire::readable_version(too_new).expect_err("out-of-range rejected");
+        assert!(
+            err.contains("format_version"),
+            "message names the field: {err}"
+        );
+    }
+
+    #[test]
+    fn stamp_widens_to_u32() {
+        // The send side widens the active u8 write version to the protobuf
+        // uint32. The stamp is a plain widening; no transformation.
+        assert_eq!(wire::stamp(3), 3u32);
+        assert_eq!(wire::stamp(255), 255u32);
+    }
+
+    #[tokio::test]
+    async fn peer_network_holds_the_active_write_version_source() {
+        // The factory's version source feeds PeerNetwork; a node at BASELINE
+        // reads BASELINE through the source.
+        let factory_version = Arc::new(std::sync::atomic::AtomicU8::new(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+        ));
+        let version_for_source = factory_version.clone();
+        let mut factory = PeerFactory::new(
+            None,
+            Arc::new(move || version_for_source.load(std::sync::atomic::Ordering::Relaxed)),
+        );
+        let node = Node {
+            addr: "127.0.0.1:1".to_string(),
+            service_endpoint: String::new(),
+            admin_endpoint: String::new(),
+        };
+        let net = factory.new_client(7, &node).await;
+        assert_eq!(
+            (net.active_write_version)(),
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION
+        );
+        // The source is shared: flipping the underlying atomic shows through.
+        factory_version.store(5, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!((net.active_write_version)(), 5);
+    }
+
+    // ---- single-node Raft test helper ----
+    //
+    // The round-trip and out-of-range tests want a real `PeerServiceImpl` on a
+    // loopback listener so they exercise the actual stamp/read code, not a
+    // stub. That requires a live `Raft<TypeConfig, HighWaterStateMachine>`.
+    // This helper builds the minimum: a temp RocksDB, a state machine with
+    // the shared cell, and a Raft initialized as a single-voter cluster.
+    mod test_support {
+        use super::*;
+        use openraft::{Config, Raft};
+        use rocksdb::{ColumnFamilyDescriptor, DB, Options};
+        use std::collections::BTreeMap;
+        use tempfile::TempDir;
+        use tsoracle_driver_openraft::{
+            HighWaterStateMachine, OpenraftLogCodec, OpenraftPeer, RocksdbSnapshotStore,
+            SnapshotStore,
+        };
+        use tsoracle_openraft_toolkit::{ActiveWriteVersion, Flat, RocksdbLogStore};
+
+        pub(super) async fn single_node_raft() -> (Raft<TypeConfig, HighWaterStateMachine>, TempDir)
+        {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.create_missing_column_families(true);
+            let cfs = vec![
+                ColumnFamilyDescriptor::new("raft_log", Options::default()),
+                ColumnFamilyDescriptor::new("raft_meta", Options::default()),
+                ColumnFamilyDescriptor::new("raft_snapshot", Options::default()),
+            ];
+            let db =
+                Arc::new(DB::open_cf_descriptors(&opts, dir.path(), cfs).expect("open rocksdb"));
+            let cell = ActiveWriteVersion::default();
+            let log_store: RocksdbLogStore<TypeConfig, Flat, OpenraftLogCodec> =
+                RocksdbLogStore::open(db.clone(), "raft_log", "raft_meta", Flat)
+                    .expect("open log store")
+                    .with_active_write_version(cell.clone());
+            let snapshot_store: Arc<dyn SnapshotStore> = Arc::new(
+                RocksdbSnapshotStore::open(db, "raft_snapshot").expect("open snapshot store"),
+            );
+            let state_machine =
+                HighWaterStateMachine::with_store_and_active_version(snapshot_store, cell)
+                    .expect("state machine");
+            let config = Arc::new(
+                Config {
+                    heartbeat_interval: 50,
+                    election_timeout_min: 150,
+                    election_timeout_max: 300,
+                    ..Default::default()
+                }
+                .validate()
+                .expect("validate config"),
+            );
+            let version_source: WriteVersionSource =
+                Arc::new(|| tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION);
+            let network = PeerFactory::new(None, version_source);
+            let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
+                1,
+                config,
+                network,
+                log_store,
+                state_machine,
+            )
+            .await
+            .expect("raft new");
+            let mut members: BTreeMap<u64, OpenraftPeer> = BTreeMap::new();
+            members.insert(
+                1,
+                OpenraftPeer {
+                    addr: "127.0.0.1:1".to_string(),
+                    service_endpoint: String::new(),
+                    admin_endpoint: String::new(),
+                },
+            );
+            let _ = raft.initialize(members).await;
+            (raft, dir)
+        }
+    }
+
+    // ---- end-to-end round-trip + out-of-range rejection ----
+
+    #[tokio::test]
+    async fn vote_round_trips_with_baseline_format_version() {
+        use openraft::Vote;
+
+        let (raft, _temp) = test_support::single_node_raft().await;
+        let version_source: WriteVersionSource =
+            Arc::new(|| tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = server(raft, version_source.clone());
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut net = PeerNetwork {
+            target: 1,
+            addr: addr.to_string(),
+            pool: Arc::new(Mutex::new(HashMap::new())),
+            tls: None,
+            active_write_version: version_source,
+        };
+        let request = openraft::raft::VoteRequest::<TypeConfig>::new(Vote::new(1, 1), None);
+        let response = net
+            .vote(request, RPCOption::new(Duration::from_secs(5)))
+            .await
+            .expect("vote round-trips at baseline");
+        // The real openraft node answers; we only assert the body decoded
+        // (proves: client stamp → server read → server stamp → client read).
+        let _ = response;
+    }
+
+    #[tokio::test]
+    async fn server_rejects_out_of_range_format_version() {
+        let (raft, _temp) = test_support::single_node_raft().await;
+        let version_source: WriteVersionSource =
+            Arc::new(|| tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = server(raft, version_source);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = proto::raft_peer_service_client::RaftPeerServiceClient::connect(format!(
+            "http://{addr}"
+        ))
+        .await
+        .unwrap();
+        let too_new = u32::from(tsoracle_openraft_toolkit::MAX_READABLE_VERSION) + 1;
+        let status = client
+            .vote(tonic::Request::new(proto::RaftMessage {
+                payload: Vec::new(),
+                format_version: too_new,
+            }))
+            .await
+            .expect_err("an out-of-range format_version must be refused");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    // ---- snapshot header framing ----
+
+    #[tokio::test]
+    async fn snapshot_header_format_version_is_read_and_range_checked() {
+        // BASELINE-framed header reassembles fine.
+        let ok_chunks = vec![header_chunk(), data_chunk(b"snap")];
+        let assembled = reassemble_snapshot(ok_stream(ok_chunks), 1024)
+            .await
+            .expect("baseline-framed header assembles");
+        assert_eq!(assembled.data, b"snap");
+
+        // An out-of-range header format_version is refused before the
+        // vote/meta postcard parse.
+        let vote: VoteOf<TypeConfig> = openraft::Vote::new(1, 1);
+        let meta = SnapshotMetaOf::<TypeConfig> {
+            last_log_id: None,
+            last_membership: Default::default(),
+            snapshot_id: "bad".to_string(),
+        };
+        let bad_header = SnapshotChunk {
+            kind: Some(ChunkKind::Header(SnapshotHeader {
+                vote: postcard::to_stdvec(&vote).unwrap(),
+                meta: postcard::to_stdvec(&meta).unwrap(),
+                format_version: u32::from(tsoracle_openraft_toolkit::MAX_READABLE_VERSION) + 1,
+            })),
+        };
+        let err = reassemble_snapshot(ok_stream(vec![bad_header]), 1024)
+            .await
+            .expect_err("out-of-range header rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn snapshot_header_absent_format_version_reads_as_baseline() {
+        // A pre-feature sender emits no SnapshotHeader.format_version (proto3
+        // default 0). Reassembly must treat it as BASELINE and assemble
+        // normally.
+        let vote: VoteOf<TypeConfig> = Vote::new(1, 1);
+        let meta = SnapshotMetaOf::<TypeConfig> {
+            last_log_id: None,
+            last_membership: Default::default(),
+            snapshot_id: "legacy".to_string(),
+        };
+        let legacy_header = SnapshotChunk {
+            kind: Some(ChunkKind::Header(SnapshotHeader {
+                vote: postcard::to_stdvec(&vote).unwrap(),
+                meta: postcard::to_stdvec(&meta).unwrap(),
+                format_version: 0,
+            })),
+        };
+        let assembled = reassemble_snapshot(ok_stream(vec![legacy_header, data_chunk(b"x")]), 1024)
+            .await
+            .expect("absent format_version assembles as baseline");
+        assert_eq!(assembled.data, b"x");
     }
 }
