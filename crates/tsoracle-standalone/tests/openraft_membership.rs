@@ -21,7 +21,7 @@
 //  limitations under the License.
 //
 
-#![cfg(feature = "openraft")]
+#![cfg(all(feature = "openraft", feature = "test-support"))]
 
 mod common;
 
@@ -33,6 +33,7 @@ use tokio_stream::StreamExt;
 use tsoracle_consensus::LeaderState;
 use tsoracle_standalone::{
     DriverConfig, MemberAddr, MemberRole, NewMember, OpenraftConfig, RaftTuning, build,
+    build_openraft_with_listeners,
 };
 
 use common::lease_port;
@@ -68,19 +69,22 @@ async fn add_learner_promote_then_remove() {
             admin_endpoint: "127.0.0.1:11".into(),
         },
     );
-    drop(lease1);
-    let node1 = build(DriverConfig::Openraft(OpenraftConfig {
-        id: 1,
-        raft_addr: raft1,
-        raft_dir: dir1.path().join("raft"),
-        bootstrap: true,
-        initial_membership: Some(members),
-        tuning: fast_tuning(),
-        peer_tls: None,
-        admin_listen: None,
-        admin_tls: None,
-        allow_insecure_peer: false,
-    }))
+    let node1 = build_openraft_with_listeners(
+        OpenraftConfig {
+            id: 1,
+            raft_addr: raft1,
+            raft_dir: dir1.path().join("raft"),
+            bootstrap: true,
+            initial_membership: Some(members),
+            tuning: fast_tuning(),
+            peer_tls: None,
+            admin_listen: None,
+            admin_tls: None,
+            allow_insecure_peer: false,
+        },
+        lease1.into_listener(),
+        None,
+    )
     .await
     .expect("build node 1");
 
@@ -96,19 +100,22 @@ async fn add_learner_promote_then_remove() {
     .expect("node 1 elected");
     drop(events);
 
-    drop(lease2);
-    let node2 = build(DriverConfig::Openraft(OpenraftConfig {
-        id: 2,
-        raft_addr: raft2,
-        raft_dir: dir2.path().join("raft"),
-        bootstrap: false,
-        initial_membership: None,
-        tuning: fast_tuning(),
-        peer_tls: None,
-        admin_listen: None,
-        admin_tls: None,
-        allow_insecure_peer: false,
-    }))
+    let node2 = build_openraft_with_listeners(
+        OpenraftConfig {
+            id: 2,
+            raft_addr: raft2,
+            raft_dir: dir2.path().join("raft"),
+            bootstrap: false,
+            initial_membership: None,
+            tuning: fast_tuning(),
+            peer_tls: None,
+            admin_listen: None,
+            admin_tls: None,
+            allow_insecure_peer: false,
+        },
+        lease2.into_listener(),
+        None,
+    )
     .await
     .expect("build node 2");
 
@@ -183,20 +190,22 @@ async fn admin_grpc_list_and_add_learner() {
             admin_endpoint: admin_addr.to_string(),
         },
     );
-    drop(lease1);
-    drop(admin_lease);
-    let node1 = build(DriverConfig::Openraft(OpenraftConfig {
-        id: 1,
-        raft_addr: raft1,
-        raft_dir: dir1.path().join("raft"),
-        bootstrap: true,
-        initial_membership: Some(members),
-        tuning: fast_tuning(),
-        peer_tls: None,
-        admin_listen: Some(admin_addr),
-        admin_tls: None,
-        allow_insecure_peer: false,
-    }))
+    let node1 = build_openraft_with_listeners(
+        OpenraftConfig {
+            id: 1,
+            raft_addr: raft1,
+            raft_dir: dir1.path().join("raft"),
+            bootstrap: true,
+            initial_membership: Some(members),
+            tuning: fast_tuning(),
+            peer_tls: None,
+            admin_listen: Some(admin_addr),
+            admin_tls: None,
+            allow_insecure_peer: false,
+        },
+        lease1.into_listener(),
+        Some(admin_lease.into_listener()),
+    )
     .await
     .expect("build node 1");
 
@@ -212,19 +221,22 @@ async fn admin_grpc_list_and_add_learner() {
     .expect("elected");
     drop(events);
 
-    drop(lease2);
-    let node2 = build(DriverConfig::Openraft(OpenraftConfig {
-        id: 2,
-        raft_addr: raft2,
-        raft_dir: dir2.path().join("raft"),
-        bootstrap: false,
-        initial_membership: None,
-        tuning: fast_tuning(),
-        peer_tls: None,
-        admin_listen: None,
-        admin_tls: None,
-        allow_insecure_peer: false,
-    }))
+    let node2 = build_openraft_with_listeners(
+        OpenraftConfig {
+            id: 2,
+            raft_addr: raft2,
+            raft_dir: dir2.path().join("raft"),
+            bootstrap: false,
+            initial_membership: None,
+            tuning: fast_tuning(),
+            peer_tls: None,
+            admin_listen: None,
+            admin_tls: None,
+            allow_insecure_peer: false,
+        },
+        lease2.into_listener(),
+        None,
+    )
     .await
     .expect("build node 2");
 
@@ -285,19 +297,22 @@ async fn coexisting_learner_survives_a_promote() {
             admin_endpoint: "127.0.0.1:11".into(),
         },
     );
-    drop(lease1);
-    let node1 = build(DriverConfig::Openraft(OpenraftConfig {
-        id: 1,
-        raft_addr: raft1,
-        raft_dir: dir1.path().join("raft"),
-        bootstrap: true,
-        initial_membership: Some(members),
-        tuning: fast_tuning(),
-        peer_tls: None,
-        admin_listen: None,
-        admin_tls: None,
-        allow_insecure_peer: false,
-    }))
+    let node1 = build_openraft_with_listeners(
+        OpenraftConfig {
+            id: 1,
+            raft_addr: raft1,
+            raft_dir: dir1.path().join("raft"),
+            bootstrap: true,
+            initial_membership: Some(members),
+            tuning: fast_tuning(),
+            peer_tls: None,
+            admin_listen: None,
+            admin_tls: None,
+            allow_insecure_peer: false,
+        },
+        lease1.into_listener(),
+        None,
+    )
     .await
     .expect("build node 1");
 
@@ -313,26 +328,28 @@ async fn coexisting_learner_survives_a_promote() {
     .expect("node 1 elected");
     drop(events);
 
-    let build_follower = |id: u64, raft_addr, raft_dir| {
-        build(DriverConfig::Openraft(OpenraftConfig {
-            id,
-            raft_addr,
-            raft_dir,
-            bootstrap: false,
-            initial_membership: None,
-            tuning: fast_tuning(),
-            peer_tls: None,
-            admin_listen: None,
-            admin_tls: None,
-            allow_insecure_peer: false,
-        }))
+    let build_follower = |id: u64, raft_addr, raft_dir, listener| {
+        build_openraft_with_listeners(
+            OpenraftConfig {
+                id,
+                raft_addr,
+                raft_dir,
+                bootstrap: false,
+                initial_membership: None,
+                tuning: fast_tuning(),
+                peer_tls: None,
+                admin_listen: None,
+                admin_tls: None,
+                allow_insecure_peer: false,
+            },
+            listener,
+            None,
+        )
     };
-    drop(lease2);
-    let node2 = build_follower(2, raft2, dir2.path().join("raft"))
+    let node2 = build_follower(2, raft2, dir2.path().join("raft"), lease2.into_listener())
         .await
         .expect("build node 2");
-    drop(lease3);
-    let node3 = build_follower(3, raft3, dir3.path().join("raft"))
+    let node3 = build_follower(3, raft3, dir3.path().join("raft"), lease3.into_listener())
         .await
         .expect("build node 3");
 

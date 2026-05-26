@@ -215,18 +215,21 @@ impl GrpcAdmin for AdminServiceImpl {
     }
 }
 
-/// Bind `listen` and spawn the admin gRPC server under a cancel token. Mirrors
-/// the peer-server pattern in `drivers/openraft/mod.rs` (bind before spawn so a
-/// bind failure surfaces to the caller). When `admin_tls` is `Some`, the server
-/// requires a client certificate signed by the configured admin CA (mTLS).
-/// Returns the actual bound `SocketAddr` (resolves :0 to the OS-picked port)
-/// for caller-side observability — stored on `Standalone::admin_listen_addr`.
+/// Spawn the admin gRPC server on `listener` under a cancel token. The caller
+/// is responsible for the `TcpListener::bind` (the openraft driver build path
+/// does this immediately before calling us). Keeping the bind in the caller
+/// lets test-only entry points hand in a `TcpListener` that has been held
+/// continuously since `lease_port()` — eliminating the close/rebind race
+/// window where another `bind(:0)` could snatch the freshly-freed ephemeral
+/// port. When `admin_tls` is `Some`, the server requires a client certificate
+/// signed by the configured admin CA (mTLS). Returns the actual bound
+/// `SocketAddr` (resolves :0 to the OS-picked port) for caller-side
+/// observability — stored on `Standalone::admin_listen_addr`.
 pub(crate) async fn serve_admin(
     admin: Arc<dyn MembershipAdmin>,
-    listen: std::net::SocketAddr,
+    listener: tokio::net::TcpListener,
     admin_tls: Option<crate::admin_tls::AdminTlsMaterial>,
 ) -> Result<(oneshot::Sender<()>, JoinHandle<()>, std::net::SocketAddr), std::io::Error> {
-    let listener = tokio::net::TcpListener::bind(listen).await?;
     let bound = listener.local_addr()?;
     let service = MembershipAdminServer::new(AdminServiceImpl::new(admin))
         .max_decoding_message_size(MAX_ADMIN_MESSAGE_BYTES)
