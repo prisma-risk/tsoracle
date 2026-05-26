@@ -24,6 +24,10 @@ paxos    = [
     "dep:prost", "dep:postcard", "dep:parking_lot", "dep:tokio-stream",
     "tonic/tls-aws-lc",
 ]
+# Gates `admin::test_support`, a tiny public seam exposing the otherwise
+# `pub(crate)` `AdminServiceImpl` constructor so an integration test can
+# drive the gRPC handler with a fake `MembershipAdmin`. Off in production.
+test-support = []
 
 [dependencies]
 tsoracle-core      = { path = "../tsoracle-core", version = "0.2.5" }

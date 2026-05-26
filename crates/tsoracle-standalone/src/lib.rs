@@ -47,7 +47,11 @@ pub use drivers::file::init_file_seeded;
 mod error;
 pub use error::StandaloneError;
 
-mod admin;
+/// Driver-agnostic membership-admin surface. Re-exported types at the crate
+/// root preserve the original public surface; the module itself is also
+/// public so the `test_support` sub-module is reachable when its feature is
+/// enabled.
+pub mod admin;
 pub use admin::{
     AdminError, MemberEntry, MemberRole, MembershipAdmin, MembershipView, NewMember,
     UnsupportedAdmin,

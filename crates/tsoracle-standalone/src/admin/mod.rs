@@ -30,6 +30,27 @@ pub(crate) mod openraft;
 #[cfg(feature = "openraft")]
 pub(crate) mod service;
 
+/// Test-only entry points into otherwise-`pub(crate)` admin internals.
+///
+/// Gated on both `cfg(test)`/`feature = "test-support"` AND
+/// `feature = "openraft"` because the only seam currently exposed is the
+/// openraft-shaped `AdminServiceImpl` constructor. Production builds (which
+/// enable `openraft` but not `test-support`) never compile this module.
+#[cfg(all(any(test, feature = "test-support"), feature = "openraft"))]
+pub mod test_support {
+    use std::sync::Arc;
+
+    use super::MembershipAdmin;
+    use crate::admin::service::AdminServiceImpl;
+    use crate::admin_proto::membership_admin_server::MembershipAdmin as GrpcAdmin;
+
+    /// Build the gRPC handler around an arbitrary `MembershipAdmin` so a
+    /// test can call the generated trait methods directly (no socket).
+    pub fn admin_service(admin: Arc<dyn MembershipAdmin>) -> impl GrpcAdmin {
+        AdminServiceImpl::new(admin)
+    }
+}
+
 use async_trait::async_trait;
 
 /// A node's role in the current membership.
