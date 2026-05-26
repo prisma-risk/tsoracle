@@ -13,7 +13,8 @@
 [![CI](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml)
 [![stress](https://github.com/prisma-risk/tsoracle/actions/workflows/stress-nightly.yml/badge.svg?branch=main)](https://github.com/prisma-risk/tsoracle/actions/workflows/stress-nightly.yml)
 [![Coverage Status](https://coveralls.io/repos/github/prisma-risk/tsoracle/badge.svg?branch=main)](https://coveralls.io/github/prisma-risk/tsoracle?branch=main)
-    
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/prisma-risk/tsoracle/badge)](https://scorecard.dev/viewer/?uri=github.com/prisma-risk/tsoracle)
+
 </div>
 
 A distributed timestamp oracle for Rust — highly available and fault-tolerant, issuing strictly monotonic integer timestamps over gRPC, replicated via openraft or OmniPaxos (or your own log) with pluggable consensus.
