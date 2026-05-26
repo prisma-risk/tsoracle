@@ -22,6 +22,19 @@ default            = ["rocksdb-log-store"]
 rocksdb-log-store  = ["dep:rocksdb"]
 test-fakes         = ["dep:parking_lot"]
 failpoints         = ["tsoracle-failpoint/failpoints"]
+# Test-only harness affordance: raises `MAX_READABLE_VERSION` to
+# `BASELINE_WRITE_VERSION + 1` (i.e. one above whatever the current
+# baseline is — today 4, so MAX rises to 5; when baseline bumps to 5,
+# MAX rises to 6 with no edits here). When combined with the matching
+# `e2e-max-readable-next` feature on `tsoracle-driver-openraft` (which
+# adds `BASELINE + 1` alias arms to the per-version codec dispatch),
+# this lets a mixed-version e2e drive a real activation flip from the
+# baseline to the next version end-to-end. The aliased body layout is
+# byte-identical to baseline — only the version byte changes — so the
+# activation control plane runs but no genuine format change happens;
+# this is a faithful HARNESS for the activation machinery, not a real
+# format bump. Off by default; never compiled into production.
+e2e-max-readable-next = []
 
 [dependencies]
 async-trait      = { workspace = true }

@@ -106,7 +106,7 @@ mod wire {
                 )
             })?
         };
-        if version < MIN_READABLE_VERSION || version > MAX_READABLE_VERSION {
+        if !(MIN_READABLE_VERSION..=MAX_READABLE_VERSION).contains(&version) {
             return Err(format!(
                 "format_version {version} outside readable range \
                  [{MIN_READABLE_VERSION}, {MAX_READABLE_VERSION}]"

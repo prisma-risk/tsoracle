@@ -146,7 +146,23 @@ async fn format_migration_signals_fire_end_to_end() {
 
     let host = StandaloneHost::new(cluster.nodes[0].raft.clone(), cluster.nodes[0].sm.clone());
 
-    // ---- 2. Successful activation: gate passes (proposed + committed +
+    // ---- 2. Membership-subset no-op: drive the apply directly on a
+    //         bare state machine (the live host's gate would refuse this
+    //         scenario before apply, but the apply arm itself is the
+    //         counter site we're verifying). Apply a Membership entry
+    //         establishing {1, 2, 9}, then a SetFormatVersion gated only
+    //         on {1, 2}; committed_members ⊄ gated → no-op counter fires.
+    //
+    //         Order matters: this constructs a FRESH state machine via
+    //         `with_store_and_active_version`, which fires the boot
+    //         `record_active_write_version(BASELINE)` and would clobber
+    //         a later apply-flip gauge value. Doing it BEFORE the
+    //         successful activation below keeps the activation's
+    //         `record_active_write_version(target)` as the latest write
+    //         and observable in the snapshot.
+    drive_membership_subset_noop_apply().await;
+
+    // ---- 3. Successful activation: gate passes (proposed + committed +
     //         applied), apply-flip sets the active_write_version gauge.
     //         Target == MAX_READABLE_VERSION trivially passes today since
     //         the local node's max_readable_version == MAX_READABLE_VERSION.
@@ -154,7 +170,7 @@ async fn format_migration_signals_fire_end_to_end() {
         .await
         .expect("activation to MAX_READABLE_VERSION must pass on a single-node leader");
 
-    // ---- 3. Gate rejection: target above the local readable max.
+    // ---- 4. Gate rejection: target above the local readable max.
     let rejected = host
         .initiate_format_activation(MAX_READABLE_VERSION + 1, &UnusedSource)
         .await;
@@ -165,14 +181,6 @@ async fn format_migration_signals_fire_end_to_end() {
         ),
         "target above MAX_READABLE_VERSION must be rejected by the gate"
     );
-
-    // ---- 4. Membership-subset no-op: drive the apply directly on a
-    //         bare state machine (the live host's gate would refuse this
-    //         scenario before apply, but the apply arm itself is the
-    //         counter site we're verifying). Apply a Membership entry
-    //         establishing {1, 2, 9}, then a SetFormatVersion gated only
-    //         on {1, 2}; committed_members ⊄ gated → no-op counter fires.
-    drive_membership_subset_noop_apply().await;
 
     // ---- Assertions over the recorder snapshot.
     let snapshot: Vec<RecordedMetric> = snapshotter.snapshot().into_vec();
