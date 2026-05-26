@@ -514,4 +514,121 @@ mod paxos_driver {
             Err(tsoracle_standalone::StandaloneError::PeerBind { .. })
         ));
     }
+
+    #[tokio::test]
+    async fn paxos_peer_insecure_routable_bind_rejected_at_build() {
+        let data_dir = tempdir().unwrap();
+        let data_dir_path = data_dir.path().to_path_buf();
+        let mut peers = BTreeMap::new();
+        peers.insert(1, "0.0.0.0:1".to_string());
+        peers.insert(2, "127.0.0.1:2".to_string());
+        let cfg = PaxosConfig {
+            node_id: 1,
+            peer_listen: "0.0.0.0:0".parse().unwrap(),
+            peers,
+            tso_peers: BTreeMap::new(),
+            data_dir: data_dir_path.clone(),
+            tick_interval: Duration::from_millis(20),
+            peer_tls: None,
+            allow_insecure_peer: false,
+        };
+
+        let err = match build(DriverConfig::Paxos(cfg)).await {
+            Ok(_) => panic!("expected PeerInsecureRoutable"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(
+                err,
+                tsoracle_standalone::StandaloneError::PeerInsecureRoutable { .. }
+            ),
+            "got {err:?}"
+        );
+        let entries = std::fs::read_dir(&data_dir_path)
+            .expect("data_dir is the tempdir, still present")
+            .count();
+        assert_eq!(
+            entries, 0,
+            "guard must run before open_rocksdb; data_dir should be untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn paxos_peer_loopback_no_tls_allowed() {
+        let dir = tempdir().unwrap();
+        let (peer_listen, peer_lease) = lease_port().await;
+        let (absent_peer, absent_lease) = lease_port().await;
+        assert!(peer_listen.ip().is_loopback());
+        let mut peers = BTreeMap::new();
+        peers.insert(1, peer_listen.to_string());
+        peers.insert(2, absent_peer.to_string());
+        let cfg = PaxosConfig {
+            node_id: 1,
+            peer_listen,
+            peers,
+            tso_peers: BTreeMap::new(),
+            data_dir: dir.path().join("paxos"),
+            tick_interval: Duration::from_millis(20),
+            peer_tls: None,
+            allow_insecure_peer: false,
+        };
+        drop(peer_lease);
+        drop(absent_lease);
+        let node = build(DriverConfig::Paxos(cfg))
+            .await
+            .expect("loopback + no peer_tls should build");
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn paxos_peer_routable_opt_out_allowed() {
+        let dir = tempdir().unwrap();
+        let mut peers = BTreeMap::new();
+        peers.insert(1, "0.0.0.0:0".to_string());
+        peers.insert(2, "127.0.0.1:2".to_string());
+        let cfg = PaxosConfig {
+            node_id: 1,
+            peer_listen: "0.0.0.0:0".parse().unwrap(),
+            peers,
+            tso_peers: BTreeMap::new(),
+            data_dir: dir.path().join("paxos"),
+            tick_interval: Duration::from_millis(20),
+            peer_tls: None,
+            allow_insecure_peer: true,
+        };
+        match build(DriverConfig::Paxos(cfg)).await {
+            Ok(node) => node.shutdown().await,
+            Err(tsoracle_standalone::StandaloneError::PeerInsecureRoutable { .. }) => {
+                panic!("opt-out should bypass the guard")
+            }
+            Err(_) => {} // any other error is fine for guard-bypass
+        }
+    }
+
+    #[tokio::test]
+    async fn paxos_peer_routable_with_tls_allowed() {
+        use tsoracle_standalone::PeerTlsConfig;
+        let dir = tempdir().unwrap();
+        let (cert, key, ca) = crate::common::write_peer_pems(dir.path());
+        let mut peers = BTreeMap::new();
+        peers.insert(1, "0.0.0.0:0".to_string());
+        peers.insert(2, "127.0.0.1:2".to_string());
+        let cfg = PaxosConfig {
+            node_id: 1,
+            peer_listen: "0.0.0.0:0".parse().unwrap(),
+            peers,
+            tso_peers: BTreeMap::new(),
+            data_dir: dir.path().join("paxos"),
+            tick_interval: Duration::from_millis(20),
+            peer_tls: Some(PeerTlsConfig { cert, key, ca }),
+            allow_insecure_peer: false,
+        };
+        match build(DriverConfig::Paxos(cfg)).await {
+            Ok(node) => node.shutdown().await,
+            Err(tsoracle_standalone::StandaloneError::PeerInsecureRoutable { .. }) => {
+                panic!("routable + peer_tls should bypass the guard")
+            }
+            Err(_) => {} // any other error is fine
+        }
+    }
 }

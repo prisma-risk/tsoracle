@@ -62,6 +62,19 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
         None => None,
     };
 
+    if peer_tls.is_none() && !cfg.peer_listen.ip().is_loopback() {
+        if !cfg.allow_insecure_peer {
+            return Err(StandaloneError::PeerInsecureRoutable {
+                addr: cfg.peer_listen,
+            });
+        }
+        tracing::warn!(
+            addr = %cfg.peer_listen,
+            "peer listener bound without TLS via --allow-insecure-peer; \
+             relying on out-of-band transport security"
+        );
+    }
+
     // Validate self identity (spec: Lifecycle): a node absent from its own
     // ClusterConfig.nodes can never be elected.
     if !cfg.peers.contains_key(&cfg.node_id) {
