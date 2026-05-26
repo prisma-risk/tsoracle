@@ -41,6 +41,7 @@ serde              = { workspace = true }
 thiserror          = { workspace = true }
 tokio              = { workspace = true }
 tracing            = { workspace = true }
+tsoracle-codec     = { workspace = true }
 tsoracle-consensus = { path = "../tsoracle-consensus", version = "0.1.9", features = ["serde"] }
 tsoracle-core      = { path = "../tsoracle-core", version = "0.2.4" }
 

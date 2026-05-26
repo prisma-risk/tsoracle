@@ -3337,6 +3337,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tsoracle-codec",
  "tsoracle-consensus",
  "tsoracle-core",
  "tsoracle-openraft-toolkit",

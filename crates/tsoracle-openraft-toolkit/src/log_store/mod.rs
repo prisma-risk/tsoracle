@@ -26,6 +26,7 @@
 pub mod key_space;
 mod meta;
 
+pub use crate::codec_provider::{DefaultLogStoreCodec, LogStoreCodec};
 pub use key_space::{Flat, GroupPrefixed, KeySpace, MetaLabel};
 
 use thiserror::Error;
@@ -62,8 +63,6 @@ use openraft::storage::RaftLogStorage;
 use openraft::type_config::alias::LogIdOf;
 use openraft::type_config::alias::VoteOf;
 use rocksdb::{BoundColumnFamily, DB, IteratorMode, WriteBatch, WriteOptions};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 /// RocksDB-backed `RaftLogStorage` implementation.
 ///
@@ -72,6 +71,11 @@ use serde::de::DeserializeOwned;
 /// - `K`: the active [`KeySpace`] — [`Flat`] for single-group deployments,
 ///   [`GroupPrefixed`] for multi-group deployments that multiplex N raft
 ///   instances onto shared column families.
+/// - `Codec`: the [`LogStoreCodec`] body provider. The toolkit owns the
+///   leading version-byte framing; this codec produces and consumes only the
+///   bare body. Defaults to [`DefaultLogStoreCodec`], a behavior-preserving
+///   whole-value postcard provider, so toolkit-internal call sites compile
+///   unchanged. Drivers supply their own marker to satisfy the orphan rule.
 ///
 /// `Arc<DB>` is `Clone`, so the store can be cloned cheaply to satisfy
 /// `RaftLogStorage::LogReader = Self`. All rocksdb operations take `&DB`, so
@@ -80,22 +84,26 @@ use serde::de::DeserializeOwned;
 ///
 /// Construct via [`RocksdbLogStore::open`], which validates that the two
 /// column-family names you pass already exist on the database.
-pub struct RocksdbLogStore<C, K>
+pub struct RocksdbLogStore<C, K, Codec = DefaultLogStoreCodec>
 where
     C: RaftTypeConfig,
     K: KeySpace,
+    Codec: 'static,
 {
     db: Arc<DB>,
     log_cf: String,
     meta_cf: String,
     keys: K,
-    _phantom: PhantomData<C>,
+    // `fn() -> Codec` is a type-level marker that's always `Send + Sync` no
+    // matter what `Codec` is — the struct holds no actual `Codec` value.
+    _phantom: PhantomData<(C, fn() -> Codec)>,
 }
 
-impl<C, K> RocksdbLogStore<C, K>
+impl<C, K, Codec> RocksdbLogStore<C, K, Codec>
 where
     C: RaftTypeConfig,
     K: KeySpace,
+    Codec: 'static,
 {
     /// Open a log store on top of an already-opened `DB`. Both column families
     /// must already exist; `open_cf_descriptors` should have created them when
@@ -162,10 +170,11 @@ where
     }
 }
 
-impl<C, K> Clone for RocksdbLogStore<C, K>
+impl<C, K, Codec> Clone for RocksdbLogStore<C, K, Codec>
 where
     C: RaftTypeConfig,
     K: KeySpace,
+    Codec: 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -178,10 +187,11 @@ where
     }
 }
 
-impl<C, K> fmt::Debug for RocksdbLogStore<C, K>
+impl<C, K, Codec> fmt::Debug for RocksdbLogStore<C, K, Codec>
 where
     C: RaftTypeConfig,
     K: KeySpace,
+    Codec: 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RocksdbLogStore")
@@ -206,23 +216,111 @@ fn range_boundary<RB: RangeBounds<u64>>(range: RB) -> (u64, u64) {
     (start, end)
 }
 
-/// Encode a log record as `[SCHEMA_VERSION | postcard(value)]`.
-fn encode_record<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
-    crate::codec::encode(crate::codec::SCHEMA_VERSION, value)
-        .map_err(|err| crate::codec::codec_io_error("log-store record encode", err))
+/// Prepend the toolkit's version byte to a provider-produced body.
+///
+/// The toolkit owns framing; `Codec` owns the body. In P1b the write version is
+/// the single `SCHEMA_VERSION`; P2 replaces it with the active write version.
+fn frame_with_version(version: u8, body: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + body.len());
+    out.push(version);
+    out.extend_from_slice(&body);
+    out
 }
 
-/// Decode a record framed by [`encode_record`], rejecting a foreign version.
-fn decode_record<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
-    crate::codec::decode(crate::codec::SCHEMA_VERSION, bytes)
+/// Split a framed record into `(version, body)`, rejecting an out-of-range
+/// version before any body parse. In P1b the readable range is the single
+/// `SCHEMA_VERSION`; P2 widens this to `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`.
+fn unframe_with_version(bytes: &[u8]) -> io::Result<(u8, &[u8])> {
+    let (first, body) = bytes.split_first().ok_or_else(|| {
+        crate::codec::codec_io_error("log-store record decode", crate::codec::CodecError::Empty)
+    })?;
+    let version = *first;
+    if version != crate::codec::SCHEMA_VERSION {
+        return Err(crate::codec::codec_io_error(
+            "log-store record decode",
+            crate::codec::CodecError::Version {
+                expected: crate::codec::SCHEMA_VERSION,
+                actual: version,
+            },
+        ));
+    }
+    Ok((version, body))
+}
+
+/// Encode a log `Entry` as `[SCHEMA_VERSION | Codec::encode_entry(..)]`.
+fn encode_entry_record<C, Codec>(entry: &C::Entry) -> io::Result<Vec<u8>>
+where
+    C: RaftTypeConfig,
+    Codec: LogStoreCodec<C>,
+{
+    let version = crate::codec::SCHEMA_VERSION;
+    let body = Codec::encode_entry(version, entry)
+        .map_err(|err| crate::codec::codec_io_error("log-store record encode", err))?;
+    Ok(frame_with_version(version, body))
+}
+
+/// Decode a log `Entry` framed by [`encode_entry_record`], rejecting a foreign version.
+fn decode_entry_record<C, Codec>(bytes: &[u8]) -> io::Result<C::Entry>
+where
+    C: RaftTypeConfig,
+    Codec: LogStoreCodec<C>,
+{
+    let (version, body) = unframe_with_version(bytes)?;
+    Codec::decode_entry(version, body)
         .map_err(|err| crate::codec::codec_io_error("log-store record decode", err))
 }
 
-impl<C, K> RocksdbLogStore<C, K>
+/// Encode a `Vote` as `[SCHEMA_VERSION | Codec::encode_vote(..)]`.
+fn encode_vote_record<C, Codec>(vote: &VoteOf<C>) -> io::Result<Vec<u8>>
+where
+    C: RaftTypeConfig,
+    Codec: LogStoreCodec<C>,
+{
+    let version = crate::codec::SCHEMA_VERSION;
+    let body = Codec::encode_vote(version, vote)
+        .map_err(|err| crate::codec::codec_io_error("log-store record encode", err))?;
+    Ok(frame_with_version(version, body))
+}
+
+/// Decode a `Vote` framed by [`encode_vote_record`], rejecting a foreign version.
+fn decode_vote_record<C, Codec>(bytes: &[u8]) -> io::Result<VoteOf<C>>
+where
+    C: RaftTypeConfig,
+    Codec: LogStoreCodec<C>,
+{
+    let (version, body) = unframe_with_version(bytes)?;
+    Codec::decode_vote(version, body)
+        .map_err(|err| crate::codec::codec_io_error("log-store record decode", err))
+}
+
+/// Encode a `LogId` as `[SCHEMA_VERSION | Codec::encode_log_id(..)]`.
+fn encode_log_id_record<C, Codec>(log_id: &LogIdOf<C>) -> io::Result<Vec<u8>>
+where
+    C: RaftTypeConfig,
+    Codec: LogStoreCodec<C>,
+{
+    let version = crate::codec::SCHEMA_VERSION;
+    let body = Codec::encode_log_id(version, log_id)
+        .map_err(|err| crate::codec::codec_io_error("log-store record encode", err))?;
+    Ok(frame_with_version(version, body))
+}
+
+/// Decode a `LogId` framed by [`encode_log_id_record`], rejecting a foreign version.
+fn decode_log_id_record<C, Codec>(bytes: &[u8]) -> io::Result<LogIdOf<C>>
+where
+    C: RaftTypeConfig,
+    Codec: LogStoreCodec<C>,
+{
+    let (version, body) = unframe_with_version(bytes)?;
+    Codec::decode_log_id(version, body)
+        .map_err(|err| crate::codec::codec_io_error("log-store record decode", err))
+}
+
+impl<C, K, Codec> RocksdbLogStore<C, K, Codec>
 where
     C: RaftTypeConfig,
     K: KeySpace,
-    C::Entry: Serialize + DeserializeOwned,
+    Codec: LogStoreCodec<C> + 'static,
 {
     /// Scan the log CF in reverse and return the highest-index `LogId`, or
     /// `None` if the log range is empty. The full log id (not just the index)
@@ -247,16 +345,16 @@ where
         if &*k < lo.as_slice() {
             return Ok(None);
         }
-        let entry: C::Entry = decode_record(&v)?;
+        let entry: C::Entry = decode_entry_record::<C, Codec>(&v)?;
         Ok(Some(entry.log_id()))
     }
 }
 
-impl<C, K> RaftLogReader<C> for RocksdbLogStore<C, K>
+impl<C, K, Codec> RaftLogReader<C> for RocksdbLogStore<C, K, Codec>
 where
     C: RaftTypeConfig,
     K: KeySpace,
-    C::Entry: Serialize + DeserializeOwned,
+    Codec: LogStoreCodec<C> + 'static,
 {
     async fn try_get_log_entries<RB>(&mut self, range: RB) -> Result<Vec<C::Entry>, io::Error>
     where
@@ -284,7 +382,7 @@ where
             if &*k >= end_key.as_slice() {
                 break;
             }
-            let entry: C::Entry = decode_record(&v)?;
+            let entry: C::Entry = decode_entry_record::<C, Codec>(&v)?;
             out.push(entry);
         }
         Ok(out)
@@ -292,15 +390,15 @@ where
 
     async fn read_vote(&mut self) -> Result<Option<VoteOf<C>>, io::Error> {
         let cf = self.meta_cf_handle();
-        meta::read::<VoteOf<C>, K>(&self.db, &cf, &self.keys, MetaLabel::Vote)
+        meta::read_vote::<C, K, Codec>(&self.db, &cf, &self.keys, MetaLabel::Vote)
     }
 }
 
-impl<C, K> RaftLogStorage<C> for RocksdbLogStore<C, K>
+impl<C, K, Codec> RaftLogStorage<C> for RocksdbLogStore<C, K, Codec>
 where
     C: RaftTypeConfig,
     K: KeySpace,
-    C::Entry: Serialize + DeserializeOwned,
+    Codec: LogStoreCodec<C> + 'static,
 {
     type LogReader = Self;
 
@@ -310,8 +408,12 @@ where
 
     async fn get_log_state(&mut self) -> Result<LogState<C>, io::Error> {
         let cf_meta = self.meta_cf_handle();
-        let last_purged_log_id: Option<LogIdOf<C>> =
-            meta::read::<LogIdOf<C>, K>(&self.db, &cf_meta, &self.keys, MetaLabel::LastPurged)?;
+        let last_purged_log_id: Option<LogIdOf<C>> = meta::read_log_id::<C, K, Codec>(
+            &self.db,
+            &cf_meta,
+            &self.keys,
+            MetaLabel::LastPurged,
+        )?;
 
         let last_in_log = self.last_log_id_in_cf()?;
         let last_log_id = last_in_log.or_else(|| last_purged_log_id.clone());
@@ -325,7 +427,7 @@ where
     async fn save_vote(&mut self, vote: &VoteOf<C>) -> Result<(), io::Error> {
         let cf_meta = self.meta_cf_handle();
         let mut batch = WriteBatch::default();
-        meta::put::<VoteOf<C>, K>(&mut batch, &cf_meta, &self.keys, MetaLabel::Vote, vote)?;
+        meta::put_vote::<C, K, Codec>(&mut batch, &cf_meta, &self.keys, MetaLabel::Vote, vote)?;
         // fsync: the vote must be durable before it is acknowledged, or a crash
         // could let this node vote twice in one term and split the cluster.
         let wo = Self::write_sync_opts();
@@ -337,7 +439,7 @@ where
         let cf_meta = self.meta_cf_handle();
         let mut batch = WriteBatch::default();
         match committed {
-            Some(committed) => meta::put::<LogIdOf<C>, K>(
+            Some(committed) => meta::put_log_id::<C, K, Codec>(
                 &mut batch,
                 &cf_meta,
                 &self.keys,
@@ -355,7 +457,7 @@ where
 
     async fn read_committed(&mut self) -> Result<Option<LogIdOf<C>>, io::Error> {
         let cf_meta = self.meta_cf_handle();
-        meta::read::<LogIdOf<C>, K>(&self.db, &cf_meta, &self.keys, MetaLabel::Committed)
+        meta::read_log_id::<C, K, Codec>(&self.db, &cf_meta, &self.keys, MetaLabel::Committed)
     }
 
     async fn append<I>(&mut self, entries: I, callback: IOFlushed<C>) -> Result<(), io::Error>
@@ -368,7 +470,7 @@ where
         for entry in entries {
             let (_leader, idx) = entry.log_id_parts();
             let key = self.keys.log_key(idx);
-            let value = encode_record(&entry)?;
+            let value = encode_entry_record::<C, Codec>(&entry)?;
             batch.put_cf(&cf_log, &key, &value);
         }
 
@@ -442,7 +544,7 @@ where
         };
         batch.delete_range_cf(&cf_log, &lo, &end_key);
 
-        meta::put::<LogIdOf<C>, K>(
+        meta::put_log_id::<C, K, Codec>(
             &mut batch,
             &cf_meta,
             &self.keys,
@@ -526,34 +628,71 @@ mod range_boundary_tests {
 
 #[cfg(test)]
 mod record_codec_tests {
-    use super::{decode_record, encode_record};
+    use super::{decode_entry_record, encode_entry_record};
+    use crate::codec::SCHEMA_VERSION;
+    use crate::declare_raft_types_ext;
+    use crate::log_store::DefaultLogStoreCodec;
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
-    struct Rec {
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct RecPeer {
+        addr: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct RecData {
         v: u64,
     }
 
-    #[test]
-    fn encode_record_stamps_schema_version_and_roundtrips() {
-        let bytes = encode_record(&Rec { v: 5 }).expect("encode");
-        assert_eq!(bytes[0], crate::codec::SCHEMA_VERSION);
-        let back: Rec = decode_record(&bytes).expect("decode");
-        assert_eq!(back, Rec { v: 5 });
+    impl std::fmt::Display for RecData {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "RecData({})", self.v)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct RecApplied;
+
+    declare_raft_types_ext! {
+        pub RecConfig:
+            Node            = RecPeer,
+            AppData         = RecData,
+            AppDataResponse = RecApplied,
+            SnapshotData    = std::io::Cursor<Vec<u8>>,
+    }
+
+    type RecEntry = openraft::type_config::alias::EntryOf<RecConfig>;
+
+    fn sample_entry() -> RecEntry {
+        let lid = openraft::testing::log_id::<RecConfig>(1, 1, 1);
+        openraft::entry::RaftEntry::new_normal(lid, RecData { v: 5 })
     }
 
     #[test]
-    fn decode_record_rejects_foreign_version() {
+    fn encode_entry_record_stamps_schema_version_and_roundtrips() {
+        let entry = sample_entry();
+        let bytes = encode_entry_record::<RecConfig, DefaultLogStoreCodec>(&entry).expect("encode");
+        assert_eq!(bytes[0], SCHEMA_VERSION);
+        let back: RecEntry =
+            decode_entry_record::<RecConfig, DefaultLogStoreCodec>(&bytes).expect("decode");
+        // Compare via re-encode: EntryOf is not PartialEq across all type params.
+        let reencoded =
+            encode_entry_record::<RecConfig, DefaultLogStoreCodec>(&back).expect("re-encode");
+        assert_eq!(bytes, reencoded);
+    }
+
+    #[test]
+    fn decode_entry_record_rejects_foreign_version() {
         // A 0xFF-framed record must surface as InvalidData rather than a
-        // successful-but-wrong decode.
-        let err = decode_record::<Rec>(&[0xFF, 5]).expect_err("must reject");
+        // successful-but-wrong decode, exactly as the old free function did.
+        let err = decode_entry_record::<RecConfig, DefaultLogStoreCodec>(&[0xFF, 5])
+            .expect_err("must reject");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn schema_version_is_four() {
-        // Pinned so a future layout change re-confirms the bump deliberately;
-        // v4 widened the openraft driver's OpenraftPeer with admin_endpoint.
+        // Pinned so a future layout change re-confirms the bump deliberately.
         assert_eq!(crate::codec::SCHEMA_VERSION, 4);
     }
 }

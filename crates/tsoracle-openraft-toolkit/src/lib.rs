@@ -28,6 +28,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod codec;
+pub mod codec_provider;
 pub mod macros;
 
 #[cfg(feature = "rocksdb-log-store")]
@@ -39,6 +40,7 @@ pub mod lifecycle;
 pub mod test_fakes;
 
 pub use codec::{CodecError, SCHEMA_VERSION, codec_io_error, decode, encode};
+pub use codec_provider::{DefaultLogStoreCodec, LogStoreCodec};
 pub use lifecycle::{
     BootstrapError, BootstrapMode, LeadershipState, MembershipError, add_learner, bootstrap,
     change_membership, join, leadership_events, leadership_events_from_metrics,
@@ -48,3 +50,19 @@ pub use lifecycle::{
 pub use log_store::{
     Flat, GroupPrefixed, KeySpace, MetaLabel, RocksdbLogStore, RocksdbLogStoreError,
 };
+
+#[cfg(all(test, feature = "rocksdb-log-store"))]
+mod reexport_tests {
+    #[test]
+    fn seam_items_are_reachable_from_crate_root() {
+        // Compile-time reachability: name the re-exported items. (A type-level
+        // assertion; the driver imports both from the crate root.)
+        fn _assert_reachable<C, Codec>()
+        where
+            C: openraft::RaftTypeConfig,
+            Codec: crate::LogStoreCodec<C>,
+        {
+        }
+        let _ = std::any::type_name::<crate::DefaultLogStoreCodec>();
+    }
+}

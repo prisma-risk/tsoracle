@@ -57,7 +57,10 @@ use openraft::type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMe
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use tsoracle_openraft_toolkit::{SCHEMA_VERSION, codec_io_error, decode, encode};
+use tsoracle_codec::{
+    VersionedCodec, decode_framed, decode_postcard_exact, encode_framed, encode_postcard,
+};
+use tsoracle_openraft_toolkit::{SCHEMA_VERSION, codec_io_error};
 
 use crate::log_entry::HighWaterCommand;
 use crate::snapshot_store::{InMemorySnapshotStore, SnapshotStore};
@@ -94,6 +97,56 @@ pub struct HighWaterStateMachineSnapshot {
 struct PersistedSnapshot {
     meta: SnapMeta,
     data: Vec<u8>,
+}
+
+impl VersionedCodec for HighWaterStateMachineSnapshot {
+    fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
+        match version {
+            // v4: whole-value postcard, byte-identical to the pre-seam frame.
+            // P2 adds older/newer arms here as the layout evolves.
+            v if v == SCHEMA_VERSION => decode_postcard_exact(body),
+            other => Err(tsoracle_codec::CodecError::VersionUnsupported {
+                min: SCHEMA_VERSION,
+                max: SCHEMA_VERSION,
+                actual: other,
+            }),
+        }
+    }
+
+    fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
+        match version {
+            v if v == SCHEMA_VERSION => encode_postcard(self),
+            other => Err(tsoracle_codec::CodecError::VersionUnsupported {
+                min: SCHEMA_VERSION,
+                max: SCHEMA_VERSION,
+                actual: other,
+            }),
+        }
+    }
+}
+
+impl VersionedCodec for PersistedSnapshot {
+    fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
+        match version {
+            v if v == SCHEMA_VERSION => decode_postcard_exact(body),
+            other => Err(tsoracle_codec::CodecError::VersionUnsupported {
+                min: SCHEMA_VERSION,
+                max: SCHEMA_VERSION,
+                actual: other,
+            }),
+        }
+    }
+
+    fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
+        match version {
+            v if v == SCHEMA_VERSION => encode_postcard(self),
+            other => Err(tsoracle_codec::CodecError::VersionUnsupported {
+                min: SCHEMA_VERSION,
+                max: SCHEMA_VERSION,
+                actual: other,
+            }),
+        }
+    }
 }
 
 /// Mutable core guarded by a single mutex. `parking_lot::Mutex` because the
@@ -204,10 +257,12 @@ impl HighWaterStateMachine {
             current_snapshot: None,
         };
         if let Some(bytes) = store.load()? {
-            let persisted: PersistedSnapshot = decode(SCHEMA_VERSION, &bytes)
-                .map_err(|e| codec_io_error("persisted snapshot envelope decode", e))?;
-            let payload: HighWaterStateMachineSnapshot = decode(SCHEMA_VERSION, &persisted.data)
-                .map_err(|e| codec_io_error("persisted snapshot payload decode", e))?;
+            let persisted: PersistedSnapshot =
+                decode_framed(SCHEMA_VERSION, SCHEMA_VERSION, &bytes)
+                    .map_err(|e| codec_io_error("persisted snapshot envelope decode", e))?;
+            let payload: HighWaterStateMachineSnapshot =
+                decode_framed(SCHEMA_VERSION, SCHEMA_VERSION, &persisted.data)
+                    .map_err(|e| codec_io_error("persisted snapshot payload decode", e))?;
             core.current_value = payload.current_value;
             core.last_applied = payload.last_applied;
             core.last_membership = payload.last_membership;
@@ -315,7 +370,7 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
                 last_membership: core.last_membership.clone(),
                 snapshot_id,
             };
-            let bytes = encode(SCHEMA_VERSION, &payload)
+            let bytes = encode_framed(SCHEMA_VERSION, &payload)
                 .map_err(|e| codec_io_error("snapshot payload serialize", e))?;
             (bytes, meta)
         };
@@ -324,7 +379,7 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
             meta: meta.clone(),
             data: snapshot_payload.clone(),
         };
-        let envelope = encode(SCHEMA_VERSION, &persisted)
+        let envelope = encode_framed(SCHEMA_VERSION, &persisted)
             .map_err(|e| codec_io_error("snapshot envelope serialize", e))?;
         // Persist + publish through the monotone, serialized commit path. The
         // store write happens BEFORE `current_snapshot` is updated, so a
@@ -411,8 +466,9 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
         snapshot: SnapData,
     ) -> Result<(), io::Error> {
         let bytes = snapshot.into_inner();
-        let payload: HighWaterStateMachineSnapshot = decode(SCHEMA_VERSION, &bytes)
-            .map_err(|e| codec_io_error("snapshot payload decode", e))?;
+        let payload: HighWaterStateMachineSnapshot =
+            decode_framed(SCHEMA_VERSION, SCHEMA_VERSION, &bytes)
+                .map_err(|e| codec_io_error("snapshot payload decode", e))?;
 
         // `meta.last_log_id` is read back by `get_current_snapshot` while
         // `payload.last_applied` is read back by `applied_state`. `build_snapshot`
@@ -436,7 +492,7 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
             meta: meta.clone(),
             data: bytes.clone(),
         };
-        let envelope = encode(SCHEMA_VERSION, &persisted)
+        let envelope = encode_framed(SCHEMA_VERSION, &persisted)
             .map_err(|e| codec_io_error("snapshot envelope serialize", e))?;
         // Persist, apply the snapshot's state, and publish atomically through
         // the monotone, serialized commit path — the same one `build_snapshot`
@@ -1126,10 +1182,56 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_payload_versioned_codec_matches_legacy_frame() {
+        use tsoracle_codec::{decode_framed, encode_framed};
+        // The framed bytes through the new VersionedCodec seam must equal the
+        // legacy `tsoracle_openraft_toolkit::encode(SCHEMA_VERSION, ..)` frame —
+        // proving the on-disk format did not move.
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 7,
+            last_applied: None,
+            last_membership: StoredMembership::default(),
+        };
+        let via_seam = encode_framed(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
+            .expect("encode_framed");
+        let legacy =
+            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
+                .expect("legacy encode");
+        assert_eq!(via_seam, legacy);
+        assert_eq!(via_seam, vec![4, 7, 0, 0, 0, 0]);
+
+        let back: HighWaterStateMachineSnapshot = decode_framed(
+            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            &via_seam,
+        )
+        .expect("decode_framed");
+        assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn snapshot_payload_versioned_codec_rejects_foreign_version() {
+        use tsoracle_codec::{CodecError, decode_framed};
+        let framed = vec![0xFFu8, 7, 0, 0, 0, 0];
+        let err = decode_framed::<HighWaterStateMachineSnapshot>(
+            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            &framed,
+        )
+        .expect_err("must reject");
+        assert!(matches!(
+            err,
+            CodecError::VersionUnsupported { actual: 0xFF, .. }
+        ));
+    }
+
+    #[test]
     fn snapshot_payload_pins_v4_layout() {
-        // Hand-built v4 frame: [SCHEMA_VERSION | postcard(payload)]. The leading
-        // byte advanced 3 -> 4 when OpenraftPeer gained the admin_endpoint field
-        // (a breaking on-disk change for membership); the postcard body is
+        use tsoracle_codec::encode_framed;
+        // Hand-built v4 frame: [SCHEMA_VERSION | postcard(payload)], now produced
+        // through the VersionedCodec seam that build_snapshot uses. Leading byte
+        // advanced 3 -> 4 when OpenraftPeer gained the admin_endpoint field (a
+        // breaking on-disk change for membership); the postcard body is
         // unchanged. Body [7, 0, 0, 0, 0] = current_value 7, last_applied None,
         // then default StoredMembership (None log id + empty configs + empty
         // nodes). Reordering or inserting a field changes these bytes and trips
@@ -1140,44 +1242,53 @@ mod tests {
             last_membership: StoredMembership::default(),
         };
         let framed =
-            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload)
-                .expect("encode");
+            encode_framed(tsoracle_openraft_toolkit::SCHEMA_VERSION, &payload).expect("encode");
         assert_eq!(framed, vec![4, 7, 0, 0, 0, 0]);
     }
 
     #[test]
     fn log_entry_pins_v4_layout() {
-        // The bytes RocksdbLogStore<TypeConfig> persists per entry: the v4
+        use crate::log_codec::OpenraftLogCodec;
+        use tsoracle_openraft_toolkit::LogStoreCodec;
+        // The bytes RocksdbLogStore<TypeConfig> persists per entry: SCHEMA_VERSION
+        // byte (prepended by the store) + OpenraftLogCodec entry body — the v4
         // frame around a Normal entry carrying Advance(AdvancePayload { at_least: 5 })
-        // at log id (term 1, node 1, index 1). Leading byte 4 is SCHEMA_VERSION;
-        // body [1,1,1,1,0,5] = leader (term 1, node 1), index 1,
-        // EntryPayload::Normal tag (1), Advance variant (0), at_least 5 —
-        // byte-identical to the pre-v4 layout.
+        // at log id (term 1, node 1, index 1). Body [1,1,1,1,0,5] = leader
+        // (term 1, node 1), index 1, EntryPayload::Normal tag (1), Advance
+        // variant (0), at_least 5 — byte-identical to the pre-seam layout.
         let lid = openraft::testing::log_id::<TypeConfig>(1, 1, 1);
         let entry: EntryOf<TypeConfig> = EntryOf::<TypeConfig>::new_normal(
             lid,
             HighWaterCommand::Advance(AdvancePayload { at_least: 5 }),
         );
-        let framed =
-            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &entry)
-                .expect("encode");
+        let body = <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_entry(
+            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            &entry,
+        )
+        .expect("encode entry body");
+        let mut framed = vec![tsoracle_openraft_toolkit::SCHEMA_VERSION];
+        framed.extend_from_slice(&body);
         assert_eq!(framed, vec![4, 1, 1, 1, 1, 0, 5]);
     }
 
     #[test]
     fn meta_vote_pins_v4_layout() {
-        // The bytes RocksdbLogStore<TypeConfig> now persists in the meta column
-        // for a Vote — historically a bare, unversioned postcard blob, now the
-        // same [SCHEMA_VERSION | postcard] frame as the log column. This is the
-        // recovery-critical field (term/leader-election safety) the framing
-        // protects: a foreign version loud-rejects instead of misdecoding. Body
-        // [7, 3, 1] = leader (term 7, node 3), committed flag true; leading byte
-        // 4 is SCHEMA_VERSION. A layout change to Vote trips this test.
+        use crate::log_codec::OpenraftLogCodec;
+        use tsoracle_openraft_toolkit::LogStoreCodec;
+        // The bytes RocksdbLogStore<TypeConfig> persists in the meta column for a
+        // Vote: SCHEMA_VERSION byte + OpenraftLogCodec vote body. Body [7, 3, 1] =
+        // leader (term 7, node 3), committed flag true. A layout change to Vote
+        // trips this test. This is the recovery-critical field the framing
+        // protects: a foreign version loud-rejects instead of misdecoding.
         let vote: openraft::type_config::alias::VoteOf<TypeConfig> =
             openraft::Vote::new_committed(7, 3);
-        let framed =
-            tsoracle_openraft_toolkit::encode(tsoracle_openraft_toolkit::SCHEMA_VERSION, &vote)
-                .expect("encode");
+        let body = <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_vote(
+            tsoracle_openraft_toolkit::SCHEMA_VERSION,
+            &vote,
+        )
+        .expect("encode vote body");
+        let mut framed = vec![tsoracle_openraft_toolkit::SCHEMA_VERSION];
+        framed.extend_from_slice(&body);
         assert_eq!(framed, vec![4, 7, 3, 1]);
     }
 

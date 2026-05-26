@@ -33,8 +33,8 @@ use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tsoracle_consensus::ConsensusDriver;
 use tsoracle_driver_openraft::{
-    HighWaterStateMachine, OpenraftDriver, OpenraftPeer, RocksdbSnapshotStore, SnapshotStore,
-    StandaloneHost, TypeConfig,
+    HighWaterStateMachine, OpenraftDriver, OpenraftLogCodec, OpenraftPeer, RocksdbSnapshotStore,
+    SnapshotStore, StandaloneHost, TypeConfig,
 };
 use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
 
@@ -94,12 +94,13 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         source: Box::new(source),
     })?;
     let db = open_rocksdb(&cfg.raft_dir)?;
-    let log_store = RocksdbLogStore::open(db.clone(), LOG_CF, META_CF, Flat).map_err(|e| {
-        StandaloneError::Storage {
-            path: cfg.raft_dir.clone(),
-            source: Box::new(e),
-        }
-    })?;
+    let log_store: RocksdbLogStore<TypeConfig, Flat, OpenraftLogCodec> =
+        RocksdbLogStore::open(db.clone(), LOG_CF, META_CF, Flat).map_err(|e| {
+            StandaloneError::Storage {
+                path: cfg.raft_dir.clone(),
+                source: Box::new(e),
+            }
+        })?;
     let snapshot_store: Arc<dyn SnapshotStore> =
         Arc::new(RocksdbSnapshotStore::open(db, SNAP_CF).map_err(|e| {
             StandaloneError::Storage {
