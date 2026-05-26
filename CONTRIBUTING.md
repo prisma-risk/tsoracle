@@ -117,6 +117,14 @@ Coverage (library crates only — `tsoracle-bin` and `examples/` are excluded):
 make coverage   # writes lcov.info at the workspace root
 ```
 
+## Test policy
+
+Every contribution that adds new functionality **must** include automated tests that exercise it, in the same PR as the change. Every bug fix **must** include at least one regression test that fails on the unfixed code and passes on the fix. Tests run as part of `cargo test --workspace --all-features` (a CI required check).
+
+Commits with the `docs:`, `refactor:`, or `chore:` [Conventional Commits](https://www.conventionalcommits.org/) prefix are exempt because they do not change runtime behavior. A `refactor:` that changes observable behavior is misclassified — relabel it `feat:` or `fix:` and add the tests.
+
+Enforcement is at review time, backed by the workspace's measured line coverage (cargo-llvm-cov → [Coveralls](https://coveralls.io/github/prisma-risk/tsoracle), currently ~95%). A PR that drops coverage materially without justification will not be merged.
+
 ## Panic policy: `unwrap` and `expect`
 
 Library and binary crates avoid `.unwrap()` and `.expect(...)` in non-test code. Each library/binary crate root carries:
