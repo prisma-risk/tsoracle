@@ -1,0 +1,35 @@
+name: release-sign
+
+# Auto: fires when release-plz publishes a per-crate GitHub Release.
+# Manual: backfill for releases that pre-date this workflow, or to re-sign
+# after a workflow change. `inputs.tag` is the existing release's tag name
+# (e.g. `tsoracle-v0.1.14`).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to sign (e.g. tsoracle-v0.1.14)'
+        required: true
+        type: string
+
+# Default to read-only at the workflow level; each job opts in to what it
+# needs. Mirrors the convention in release-plz.yml and release-images.yml.
+permissions:
+  contents: read
+
+# Never cancel a signing in flight: a half-signed release (e.g. .crate
+# uploaded but .intoto.jsonl missing) is worse than slow CI. Group by tag
+# so concurrent runs for *different* releases proceed in parallel.
+concurrency:
+  group: release-sign-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  # Jobs added in subsequent tasks.
+  noop:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'true'
