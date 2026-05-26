@@ -29,7 +29,8 @@ use tonic::{Request, Response, Status};
 use tsoracle_core::IgnoreReason;
 use tsoracle_core::{CommitOutcome, CoreError, Epoch};
 use tsoracle_proto::v1::{
-    EpochWire, GetTsRequest, GetTsResponse, LeaderHint, tso_service_server::TsoService,
+    EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetTsRequest, GetTsResponse,
+    LeaderHint, tso_service_server::TsoService,
 };
 
 use crate::leader_hint::not_leader_status;
@@ -196,6 +197,13 @@ impl TsoService for TsoServiceImpl {
                 Err(other) => return Err(core_status(other)),
             }
         }
+    }
+
+    async fn get_current_max_safe(
+        &self,
+        _request: Request<GetCurrentMaxSafeRequest>,
+    ) -> Result<Response<GetCurrentMaxSafeResponse>, Status> {
+        Ok(Response::new(GetCurrentMaxSafeResponse::default()))
     }
 }
 

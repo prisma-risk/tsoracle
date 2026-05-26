@@ -623,6 +623,16 @@ mod tests {
                 // → AttemptOutcome::NoLeaderYet in the retry loop.
                 Err(tonic::Status::failed_precondition("not leader"))
             }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -710,6 +720,16 @@ mod tests {
                     leader_endpoint: Some("b:1".into()),
                     leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
                 }))
+            }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
             }
         }
 
@@ -824,6 +844,16 @@ mod tests {
                     }))
                 }
             }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -919,6 +949,16 @@ mod tests {
                     }))
                 }
             }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1002,6 +1042,16 @@ mod tests {
                     leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
                     leader_epoch: None,
                 }))
+            }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
             }
         }
 
@@ -1138,6 +1188,16 @@ mod tests {
                     }))
                 }
             }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1226,6 +1286,16 @@ mod tests {
                         epoch_lo: 0,
                     }))
                 }
+            }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
             }
         }
 
@@ -1337,6 +1407,16 @@ mod tests {
                 );
                 Err(status)
             }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1406,6 +1486,16 @@ mod tests {
             ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
             {
                 Err(tonic::Status::failed_precondition("no leader yet"))
+            }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
             }
         }
 
@@ -1513,6 +1603,16 @@ mod tests {
                     epoch_hi: 0,
                     epoch_lo: 0,
                 }))
+            }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
             }
         }
 

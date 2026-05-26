@@ -303,6 +303,15 @@ impl TsoService for FixedHintService {
             leader_epoch: None,
         }))
     }
+
+    async fn get_current_max_safe(
+        &self,
+        _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+    ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status> {
+        Ok(tonic::Response::new(
+            tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+        ))
+    }
 }
 
 /// Bind a TLS gRPC peer on `127.0.0.1:0` that always replies `NOT_LEADER` with a

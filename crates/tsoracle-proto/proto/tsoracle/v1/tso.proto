@@ -19,11 +19,35 @@ service TsoService {
   // trailer carrying a postcard-encoded `LeaderHint` (see below); clients
   // re-route to the hinted leader and retry.
   rpc GetTs(GetTsRequest) returns (GetTsResponse);
+
+  // Read the current safe-point. Safe-point is the highest physical-millisecond
+  // at which any timestamp issued at or before that physical_ms is durably
+  // backed by the leader's persisted window. External coordinators poll this
+  // RPC to fence reads/writes that depend on a durable timestamp watermark.
+  //
+  // - Leaders return the authoritative current value.
+  // - Followers return 0; target the leader for an authoritative value.
+  // - A response of zero also means the leader has not yet admitted a window
+  //   (cold start before the first persist).
+  rpc GetCurrentMaxSafe(GetCurrentMaxSafeRequest) returns (GetCurrentMaxSafeResponse);
 }
 
 message GetTsRequest {
   // Number of consecutive timestamps to allocate. Must be >= 1.
   uint32 count = 1;
+}
+
+message GetCurrentMaxSafeRequest {}
+
+message GetCurrentMaxSafeResponse {
+  // Safe-point in physical-millisecond units (not the 64-bit packed form).
+  // Equal to `persisted_high_water - window_ahead_ms - 1` on the leader when
+  // a window has been admitted; zero otherwise (cold start or non-leader).
+  uint64 max_safe_physical_ms = 1;
+  // Leader epoch attached so long-lived pollers can fence stale-leader values,
+  // split into two 64-bit halves matching `GetTsResponse.epoch_hi`/`epoch_lo`.
+  uint64 epoch_hi = 2;
+  uint64 epoch_lo = 3;
 }
 
 message GetTsResponse {
