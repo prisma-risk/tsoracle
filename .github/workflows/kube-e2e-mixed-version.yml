@@ -1,0 +1,74 @@
+name: kube-e2e-mixed-version
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kube-e2e-mixed-version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+      - name: build baseline image (openraft only, no e2e feature)
+        run: |
+          docker build -f deploy/Dockerfile \
+            --build-arg FEATURES=openraft \
+            -t tsoracle:e2e-baseline .
+      - name: build next image (openraft + e2e-max-readable-next)
+        run: |
+          docker build -f deploy/Dockerfile \
+            --build-arg FEATURES=openraft,e2e-max-readable-next \
+            -t tsoracle:e2e-next .
+      - name: build driver image
+        run: docker build -f e2e/kube/driver/Dockerfile -t tsoracle-e2e-driver:latest .
+      - name: create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+        with:
+          cluster_name: tsoracle-e2e
+          config: e2e/kube/kind-config.yaml
+      - name: load images into kind
+        run: |
+          kind load docker-image tsoracle:e2e-baseline   --name tsoracle-e2e
+          kind load docker-image tsoracle:e2e-next       --name tsoracle-e2e
+          kind load docker-image tsoracle-e2e-driver:latest --name tsoracle-e2e
+      - name: install helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.15.0-linux-amd64.tar.gz | tar xz
+      - name: deploy chart (baseline tag)
+        run: |
+          ./linux-amd64/helm install tsoracle deploy/charts/tsoracle \
+            --set image.repository=tsoracle,image.tag=e2e-baseline \
+            --set driver=openraft,replicas=3 \
+            --set ports.client=5051,ports.peer=5100 \
+            --set tls.allowInsecurePeer=true \
+            --wait --timeout 5m
+      - name: wait for cluster formation (TCP readiness)
+        run: kubectl rollout status statefulset/tsoracle --timeout=300s
+      - name: run mixed-version assertions
+        run: ./e2e/kube/run-mixed-version-assertions.sh
+      - name: dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -o wide || true
+          kubectl describe statefulset/tsoracle || true
+          kubectl get sts/tsoracle -o jsonpath='{.spec.updateStrategy}' || true
+          kubectl logs job/tsoracle-e2e-mixed-version-soak || true
+          kubectl logs -l app.kubernetes.io/name=tsoracle --tail=200 || true
+          kubectl get events --sort-by=.lastTimestamp || true
