@@ -29,18 +29,25 @@
 //! [`OpenraftHighWaterHost`](crate::OpenraftHighWaterHost) directly against
 //! that existing cluster instead.
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use openraft::Raft;
 use openraft::RaftMetrics;
 use openraft::ReadPolicy;
+use openraft::ServerState;
+use openraft::async_runtime::watch::WatchReceiver;
 use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
 use openraft::type_config::alias::WatchReceiverOf;
 use tsoracle_consensus::ConsensusError;
 
+use crate::capabilities::{
+    CapabilitySource, FormatActivationError, NodeCapabilities, all_members_can_read, gather_with,
+};
 use crate::host::OpenraftHighWaterHost;
 use crate::log_entry::HighWaterCommand;
 use crate::state_machine::HighWaterStateMachine;
-use crate::type_config::TypeConfig;
+use crate::type_config::{OpenraftPeer, TypeConfig};
 use tsoracle_consensus::AdvancePayload;
 
 /// `OpenraftHighWaterHost` that owns its own raft cluster + state machine.
@@ -76,6 +83,102 @@ impl StandaloneHost {
     /// a successful activation apply (later phase) advances it.
     pub fn active_write_version(&self) -> u8 {
         self.state_machine.active_write_version()
+    }
+
+    /// The local node's format-migration capabilities: compile-time read range
+    /// plus the durable active write version.
+    pub fn local_capabilities(&self) -> NodeCapabilities {
+        NodeCapabilities::local(self.active_write_version())
+    }
+
+    /// Read the current voter+learner membership and the local node id /
+    /// leader state from `raft.metrics()`. Returns `(local_node_id, is_leader,
+    /// members)`, where `members` is every node in
+    /// `membership_config.nodes()` — voters and learners both, because the
+    /// all-members gate covers learners too.
+    fn membership_snapshot(&self) -> (u64, bool, Vec<(u64, OpenraftPeer)>) {
+        let metrics = self.raft.metrics();
+        let snapshot = metrics.borrow_watched();
+        let local_node_id = snapshot.id;
+        let is_leader = snapshot.state == ServerState::Leader;
+        let members = snapshot
+            .membership_config
+            .nodes()
+            .map(|(node_id, node)| (*node_id, node.clone()))
+            .collect();
+        (local_node_id, is_leader, members)
+    }
+
+    /// Query every current member (voters AND learners) for its capabilities,
+    /// answering the local node directly. `source` dials remote members. Fails
+    /// closed the moment any remote query fails — the all-members gate cannot
+    /// pass on a member it could not confirm.
+    pub async fn gather_member_capabilities<S>(
+        &self,
+        source: &S,
+    ) -> Result<Vec<(u64, NodeCapabilities)>, FormatActivationError>
+    where
+        S: CapabilitySource<Node = OpenraftPeer>,
+    {
+        let (local_node_id, _is_leader, members) = self.membership_snapshot();
+        gather_with(local_node_id, self.local_capabilities(), &members, source).await
+    }
+
+    /// Run the all-members activation gate for `target`. Requires local
+    /// leadership (only the leader may drive activation), gathers every
+    /// member's capabilities, and returns the gated member set iff all can
+    /// read `target`. On failure returns a [`FormatActivationError`] (not
+    /// leader / a member below target / a member unreachable). This is the
+    /// function boundary that a later phase's proposal step will consume: the
+    /// returned set is exactly the snapshot a `SetFormatVersion` log entry
+    /// would embed for apply to re-validate against.
+    pub async fn run_activation_gate<S>(
+        &self,
+        target: u8,
+        source: &S,
+    ) -> Result<BTreeSet<u64>, FormatActivationError>
+    where
+        S: CapabilitySource<Node = OpenraftPeer>,
+    {
+        let (_local_node_id, is_leader, _members) = self.membership_snapshot();
+        if !is_leader {
+            return Err(FormatActivationError::NotLeader);
+        }
+        let gathered = self.gather_member_capabilities(source).await?;
+        match all_members_can_read(target, &gathered) {
+            Some(gated_members) => Ok(gated_members),
+            None => {
+                let incapable = gathered
+                    .iter()
+                    .filter(|(_, capabilities)| capabilities.max_readable_version < target)
+                    .map(|(node_id, capabilities)| (*node_id, capabilities.max_readable_version))
+                    .collect();
+                Err(FormatActivationError::MembersBelowTarget { target, incapable })
+            }
+        }
+    }
+
+    /// Operator entry point to begin a format-version activation to `target`
+    /// (interim, library-only). Runs the all-members gate and returns
+    /// `Ok(())` when it passes. A later phase fills the body between the gate
+    /// and this return — it takes the `gated_members` set returned by
+    /// [`run_activation_gate`](Self::run_activation_gate) and proposes a
+    /// `SetFormatVersion { target, gated_members }` entry at the pre-bump
+    /// active write version via `self.raft.client_write(...)`, then keys the
+    /// write-version flip off the successful apply. The function boundary
+    /// `run_activation_gate(target) -> Ok(gated_members)` is the exact seam
+    /// that proposal step builds on; today the gate result is simply not yet
+    /// consumed.
+    pub async fn initiate_format_activation<S>(
+        &self,
+        target: u8,
+        source: &S,
+    ) -> Result<(), FormatActivationError>
+    where
+        S: CapabilitySource<Node = OpenraftPeer>,
+    {
+        let _gated_members = self.run_activation_gate(target, source).await?;
+        Ok(())
     }
 }
 

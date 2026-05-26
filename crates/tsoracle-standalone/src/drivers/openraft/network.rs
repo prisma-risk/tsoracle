@@ -56,7 +56,7 @@ use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use tokio::sync::Mutex;
 use tonic::transport::{Channel, ClientTlsConfig};
 
-use tsoracle_driver_openraft::{OpenraftPeer as Node, TypeConfig};
+use tsoracle_driver_openraft::{NodeCapabilities, OpenraftPeer as Node, TypeConfig};
 use tsoracle_openraft_toolkit::{
     BASELINE_WRITE_VERSION, MAX_READABLE_VERSION, MIN_READABLE_VERSION,
 };
@@ -255,6 +255,70 @@ pub struct PeerNetwork {
     active_write_version: WriteVersionSource,
 }
 
+/// Deadline for a single capability query. The gate is operator-initiated and
+/// not on the hot path, so a generous fixed bound is fine; it exists only to
+/// fail closed on a black-holed peer rather than hang the gate forever.
+const CAPABILITY_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Concrete [`CapabilitySource`](tsoracle_driver_openraft::CapabilitySource)
+/// that dials a member via the `Capabilities` peer RPC. Constructed in the
+/// transport crate (where `PeerNetwork` lives) and handed to
+/// `StandaloneHost::run_activation_gate`; the driver crate stays free of a
+/// dependency on this crate.
+pub struct PeerCapabilitySource {
+    pool: Pool,
+    tls: Option<ClientTlsConfig>,
+}
+
+impl PeerCapabilitySource {
+    // The only in-workspace caller today is the round-trip test; a later
+    // phase wires this into the production `initiate_format_activation`
+    // path. `pub` is the intended surface — this `allow` documents that and
+    // unblocks the workspace build's `-D warnings` lint.
+    #[allow(dead_code)]
+    pub fn new(tls: Option<ClientTlsConfig>) -> Self {
+        Self {
+            pool: Arc::new(Mutex::new(HashMap::new())),
+            tls,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl tsoracle_driver_openraft::CapabilitySource for PeerCapabilitySource {
+    type Node = Node;
+
+    async fn query(&self, node_id: NodeId, member: &Node) -> Result<NodeCapabilities, String> {
+        // The `Capabilities` request payload is empty and the response body
+        // is not version-framed, so the outbound carrier's `format_version`
+        // is informational only. Stamping `BASELINE_WRITE_VERSION` is correct
+        // for any pre-activation node (and any post-activation node that has
+        // not yet handled the bump apply) — the gate is exactly the operator
+        // step that precedes a target bump.
+        let network = PeerNetwork {
+            target: node_id,
+            addr: member.addr.clone(),
+            pool: self.pool.clone(),
+            tls: self.tls.clone(),
+            active_write_version: Arc::new(|| tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION),
+        };
+        network
+            .capabilities(CAPABILITY_QUERY_TIMEOUT)
+            .await
+            .map_err(|err| format!("{err:?}"))
+    }
+}
+
+/// Build the postcard body of a `Capabilities` reply for the local node with
+/// the given active write version. Split out from the tonic handler so the
+/// decode→build→encode contract is unit-testable without a live `Raft`.
+fn capabilities_response(active_write_version: u8) -> Vec<u8> {
+    let capabilities = NodeCapabilities::local(active_write_version);
+    // `NodeCapabilities` is three `u8`s; postcard encoding is infallible for
+    // it, but we surface a definite `Vec` either way to keep the handler total.
+    postcard::to_stdvec(&capabilities).unwrap_or_default()
+}
+
 impl PeerNetwork {
     /// Return a cached (or freshly connected) tonic client to the target.
     async fn client(&self) -> Result<RaftPeerServiceClient<Channel>, RPCError<TypeConfig>> {
@@ -282,6 +346,37 @@ impl PeerNetwork {
         let client = RaftPeerServiceClient::new(channel);
         self.pool.lock().await.insert(key, client.clone());
         Ok(client)
+    }
+
+    /// Query the target peer for its format-migration capabilities. Not part
+    /// of `RaftNetworkV2` (openraft has no such RPC); used only by the
+    /// leader-side activation gate. The request payload is empty; the reply
+    /// is a postcard `NodeCapabilities`.
+    ///
+    /// `format_version` on the carrier `RaftMessage` is stamped from the
+    /// node's active write version (same as every other outbound message),
+    /// but the response body itself is NOT version-framed — its scalar-u8
+    /// shape never changes, it is the bootstrap message that tells the caller
+    /// what versions the peer supports.
+    pub async fn capabilities(
+        &self,
+        deadline: Duration,
+    ) -> Result<NodeCapabilities, RPCError<TypeConfig>> {
+        let mut client = self.client().await?;
+        let reply = unary_call(
+            &self.pool,
+            self.target,
+            &self.addr,
+            deadline,
+            client.capabilities(RaftMessage {
+                payload: Vec::new(),
+                format_version: wire::stamp((self.active_write_version)()),
+            }),
+        )
+        .await?;
+        let capabilities: NodeCapabilities = postcard::from_bytes(&reply.payload)
+            .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
+        Ok(capabilities)
     }
 }
 
@@ -555,6 +650,24 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
             format_version: wire::stamp((self.active_write_version)()),
         }))
     }
+
+    /// Answer with the local node's format-migration capabilities. The
+    /// request payload is ignored (the query takes no arguments); the
+    /// envelope's `format_version` is ignored too because the response body
+    /// itself is not version-framed (its scalar-u8 shape is the bootstrap
+    /// message that tells the caller which versions to use). The reply
+    /// carrier still stamps `format_version` for symmetry with the rest of
+    /// the peer transport.
+    async fn capabilities(
+        &self,
+        _request: tonic::Request<RaftMessage>,
+    ) -> Result<tonic::Response<RaftMessage>, tonic::Status> {
+        let payload = capabilities_response((self.active_write_version)());
+        Ok(tonic::Response::new(RaftMessage {
+            payload,
+            format_version: wire::stamp((self.active_write_version)()),
+        }))
+    }
 }
 
 /// A snapshot reassembled from a peer's client-streaming RPC.
@@ -744,6 +857,12 @@ mod tls_tests {
             Err(tonic::Status::unimplemented("stub"))
         }
         async fn transfer_leader(
+            &self,
+            _: tonic::Request<proto::RaftMessage>,
+        ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+            Err(tonic::Status::unimplemented("stub"))
+        }
+        async fn capabilities(
             &self,
             _: tonic::Request<proto::RaftMessage>,
         ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
@@ -1276,5 +1395,129 @@ mod tests {
             .await
             .expect("absent format_version assembles as baseline");
         assert_eq!(assembled.data, b"x");
+    }
+
+    // ---- Capabilities RPC ----
+
+    #[test]
+    fn capabilities_response_reports_local_node() {
+        // The server handler answers Capabilities by encoding `NodeCapabilities::local`
+        // of the supplied active write version. The decode→build→encode contract
+        // lives in `capabilities_response`, exercised here without a live tonic
+        // server.
+        let payload = capabilities_response(7);
+        let decoded: NodeCapabilities =
+            postcard::from_bytes(&payload).expect("decode NodeCapabilities");
+        assert_eq!(
+            decoded,
+            NodeCapabilities {
+                min_readable_version: tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+                max_readable_version: tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+                active_write_version: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn capabilities_payload_round_trips_client_side() {
+        // A client decoding the same payload over the RaftMessage envelope
+        // recovers the struct — the wire contract `PeerCapabilitySource` relies
+        // on. The envelope's `format_version` is unrelated to this body
+        // (NodeCapabilities is the bootstrap message and is not version-framed).
+        let server_payload = capabilities_response(4);
+        let message = RaftMessage {
+            payload: server_payload,
+            format_version: 0,
+        };
+        let decoded: NodeCapabilities =
+            postcard::from_bytes(&message.payload).expect("client decode");
+        assert_eq!(decoded.active_write_version, 4);
+    }
+
+    // Stand up a real RaftPeerService whose `capabilities` handler reports a
+    // fixed active write version, then dial it through the `PeerCapabilitySource`
+    // adapter and assert the round-trip recovers the reported capabilities. The
+    // server uses a `CapStub` rather than building a full `Raft`, so the test
+    // proves the adapter + RPC wire contract in isolation.
+    #[tokio::test]
+    async fn peer_capability_source_round_trips_against_live_server() {
+        use proto::raft_peer_service_server::{
+            RaftPeerService as ProtoService, RaftPeerServiceServer,
+        };
+        use tsoracle_driver_openraft::CapabilitySource;
+
+        struct CapStub {
+            active_write_version: u8,
+        }
+
+        #[tonic::async_trait]
+        impl ProtoService for CapStub {
+            async fn append_entries(
+                &self,
+                _: tonic::Request<proto::RaftMessage>,
+            ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+                Err(tonic::Status::unimplemented("cap stub"))
+            }
+            async fn vote(
+                &self,
+                _: tonic::Request<proto::RaftMessage>,
+            ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+                Err(tonic::Status::unimplemented("cap stub"))
+            }
+            async fn snapshot(
+                &self,
+                _: tonic::Request<tonic::Streaming<proto::SnapshotChunk>>,
+            ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+                Err(tonic::Status::unimplemented("cap stub"))
+            }
+            async fn transfer_leader(
+                &self,
+                _: tonic::Request<proto::RaftMessage>,
+            ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+                Err(tonic::Status::unimplemented("cap stub"))
+            }
+            async fn capabilities(
+                &self,
+                _: tonic::Request<proto::RaftMessage>,
+            ) -> Result<tonic::Response<proto::RaftMessage>, tonic::Status> {
+                Ok(tonic::Response::new(proto::RaftMessage {
+                    payload: capabilities_response(self.active_write_version),
+                    format_version: 0,
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(RaftPeerServiceServer::new(CapStub {
+                    active_write_version: 5,
+                }))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let source = PeerCapabilitySource::new(None);
+        let node = Node {
+            addr: addr.to_string(),
+            service_endpoint: String::new(),
+            admin_endpoint: String::new(),
+        };
+        let capabilities = source
+            .query(2, &node)
+            .await
+            .expect("live capabilities query");
+        assert_eq!(capabilities.active_write_version, 5);
+        assert_eq!(
+            capabilities.min_readable_version,
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION
+        );
+        assert_eq!(
+            capabilities.max_readable_version,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION
+        );
     }
 }

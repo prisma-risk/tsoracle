@@ -17,6 +17,15 @@ service RaftPeerService {
   rpc Vote (RaftMessage) returns (RaftMessage);
   rpc Snapshot (stream SnapshotChunk) returns (RaftMessage);
   rpc TransferLeader (RaftMessage) returns (RaftMessage);
+  // Format-migration capability query. The request `RaftMessage.payload` is
+  // empty (the query takes no arguments). The reply `RaftMessage.payload` is
+  // a postcard-encoded `NodeCapabilities { min_readable_version,
+  // max_readable_version, active_write_version }`. The response body is the
+  // bootstrap message that tells the caller which versions this node supports,
+  // so it is NOT itself version-framed (its scalar-u8 shape never changes);
+  // any `format_version` envelope field on the carrier `RaftMessage` is
+  // ignored here.
+  rpc Capabilities (RaftMessage) returns (RaftMessage);
 }
 
 message RaftMessage {
