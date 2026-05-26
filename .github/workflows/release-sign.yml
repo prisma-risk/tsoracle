@@ -167,4 +167,8 @@ jobs:
       base64-subjects: ${{ needs.build.outputs.subjects }}
       provenance-name: ${{ needs.build.outputs.provenance-name }}
       upload-assets: true
+      # Explicit on both auto + workflow_dispatch paths: the reusable workflow
+      # falls back to github.ref for the upload tag, which is refs/heads/main
+      # (not a tag ref) on workflow_dispatch. Don't remove this without
+      # restructuring the trigger contract.
       upload-tag-name: ${{ needs.build.outputs.tag }}
