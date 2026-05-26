@@ -24,7 +24,7 @@ Install [`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier):
 go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@latest
 ```
 
-Then, downloading from a release (replace tag/crate as needed):
+Then, download from a release (replace tag/crate as needed):
 
 ```sh
 gh release download tsoracle-v0.1.14 \
