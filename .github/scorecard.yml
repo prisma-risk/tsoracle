@@ -1,0 +1,40 @@
+# OpenSSF Scorecard configuration.
+#
+# Annotations document accepted exceptions for individual checks. They do not
+# change the numerical score; they surface a machine-readable rationale to
+# downstream report consumers (scorecard.dev, deps.dev, SARIF in code-scanning).
+# Schema: https://github.com/ossf/scorecard/blob/main/config/annotations.go
+#   - `reason` must be one of: test-data, remediated, not-applicable,
+#     not-supported, not-detected (kebab-case; enforced by isValidReason()).
+#   - There is no `comment:` field in the schema; rationale lives in YAML
+#     comments only (yaml.v3 silently drops unknown fields).
+#
+# ---------------------------------------------------------------------------
+# pinned-dependencies / remediated
+# ---------------------------------------------------------------------------
+# The reusable workflow
+#   slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml
+# at .github/workflows/release-sign.yml is referenced by tag (@vX.Y.Z), not by
+# SHA. This is required by the upstream generator: its generate-builder.sh
+# parses the calling ref expecting `refs/tags/vX.Y.Z` and exits with
+# `Invalid ref: <sha>` when SHA-pinned (see commit 5fbdb68 for the failed pin
+# attempt; release-sign.yml has an inline comment block at the call site).
+#
+# Mitigation: integrity is anchored upstream by a hardcoded SHA256 of the
+# generator binary baked into the workflow at each tagged release, and the
+# generator itself is SLSA-attested. Every other third-party action across
+# .github/workflows/ is SHA-pinned (verified by:
+#   grep -rEn 'uses: [^@]+@(v?[0-9]|main|master|HEAD)' .github/workflows/
+# ).
+#
+# This annotation applies to the pinned-dependencies check as a whole, so any
+# future tag-pinned third-party action would be implicitly covered. Re-audit
+# this exemption when adding new external actions or when SLSA generator
+# upstream gains SHA-ref support (track:
+#   https://github.com/slsa-framework/slsa-github-generator
+# ).
+annotations:
+  - checks:
+      - pinned-dependencies
+    reasons:
+      - reason: remediated
