@@ -125,8 +125,11 @@ pub struct AddLearnerArgs {
 #[cfg(feature = "openraft")]
 #[derive(Parser, Debug)]
 pub struct ActivateFormatArgs {
-    /// Admin endpoint of any cluster member (the CLI does NOT follow
-    /// leader-redirect for activation — see `dispatch_admin`).
+    /// Admin endpoint of any cluster member. `NOT_LEADER` responses for
+    /// activation carry an empty `leader_admin_endpoint` (the underlying
+    /// `FormatActivationError::NotLeader` is a unit variant), so the
+    /// existing `with_redirect` short-circuits and the CLI exits 3 rather
+    /// than auto-redirecting. Re-issue against a known leader.
     #[arg(long)]
     pub endpoint: String,
     /// Target format version. Must be within the local binary's readable
