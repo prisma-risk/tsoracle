@@ -19,6 +19,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 # Never cancel a signing in flight: a half-signed release (e.g. .crate
 # uploaded but .intoto.jsonl missing) is worse than slow CI. Group by tag
 # so concurrent runs for *different* releases proceed in parallel.
