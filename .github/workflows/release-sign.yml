@@ -181,11 +181,11 @@ jobs:
     # Instead the generator emits the .intoto.jsonl as a workflow artifact,
     # and the attach job below uploads it alongside the .crate + .sha256
     # via `gh release upload`, which only touches asset slots (mutation-safe).
-    # SLSA generator does NOT support SHA pins. Its generate-builder.sh
-    # parses the calling ref expecting `refs/tags/vX.Y.Z`, fails with
-    # "Invalid ref: <sha>" otherwise. Integrity is anchored upstream by a
-    # hardcoded SHA256 of the generator binary baked into the workflow at
-    # each tagged release. Bump this tag intentionally; do not SHA-pin.
+    # SLSA generator does NOT support SHA pins (its generate-builder.sh
+    # rejects refs that don't match refs/tags/vX.Y.Z, exit 2). Tag ref is
+    # intentional and matches what scorecard's own goreleaser.yaml does.
+    # Full rationale + upstream issue links: SECURITY.md "Documented
+    # exception" section. Bump this tag intentionally; do not SHA-pin.
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: ${{ needs.build.outputs.subjects }}
