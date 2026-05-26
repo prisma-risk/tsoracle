@@ -22,19 +22,30 @@
 //
 
 use std::path::PathBuf;
+use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{io, net::SocketAddr, time::Duration};
 use tempfile::tempdir;
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
 use tsoracle_client::{Client, ClientError};
 
-async fn bind_unused() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    addr
+/// Allocate `n` unused 127.0.0.1 ports by binding `n` listeners at once and
+/// dropping them together, which keeps the probe window per-port as short as
+/// possible. The kernel can still hand any one of these ports to another
+/// process between `drop` and the subprocess's `.bind()` — that residual
+/// race is handled by [`retry_spawn`].
+async fn bind_unused_set(n: usize) -> Vec<SocketAddr> {
+    let mut listeners = Vec::with_capacity(n);
+    for _ in 0..n {
+        listeners.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
+    }
+    let addrs: Vec<SocketAddr> = listeners.iter().map(|l| l.local_addr().unwrap()).collect();
+    drop(listeners);
+    addrs
 }
 
 /// Replaces the brittle `sleep(...)` startup wait with a real condition
@@ -61,39 +72,147 @@ async fn wait_until_accepting(addr: SocketAddr, budget: Duration) -> io::Result<
     })
 }
 
+enum AwaitOutcome {
+    Ready,
+    ChildExited(ExitStatus),
+    Timeout(SocketAddr),
+}
+
+/// Wait for each address in `ready_idx` to start accepting connections,
+/// racing every wait against the child exiting early. Returns
+/// `Ready` only after every selected addr has accepted.
+async fn await_listening(
+    child: &mut Child,
+    ready_idx: &[usize],
+    addrs: &[SocketAddr],
+    per_addr_budget: Duration,
+) -> AwaitOutcome {
+    for &i in ready_idx {
+        let addr = addrs[i];
+        let waiter = wait_until_accepting(addr, per_addr_budget);
+        tokio::pin!(waiter);
+        tokio::select! {
+            res = &mut waiter => match res {
+                Ok(()) => continue,
+                Err(_) => return AwaitOutcome::Timeout(addr),
+            },
+            res = child.wait() => {
+                let status = res.expect("wait on child failed");
+                return AwaitOutcome::ChildExited(status);
+            }
+        }
+    }
+    AwaitOutcome::Ready
+}
+
+/// Spawn the binary with a retry loop that survives the
+/// probe-then-drop port race: if the child exits with
+/// `Address already in use` in its stderr, re-probe ports and try again
+/// (up to 3 attempts).
+///
+/// - `n_ports` reserves that many `127.0.0.1:0` ports per attempt.
+/// - `ready_idx` lists the addrs whose subprocess listener we wait for via
+///   [`wait_until_accepting`]. Ports passed through as membership metadata
+///   but never `.bind()`-ed by the child (e.g. `admin_addr` without
+///   `--admin-listen`) MUST NOT be included — readiness would time out.
+/// - `build` constructs the `Command` for each attempt and is called once
+///   per retry. The closure captures stable test state (tempdirs, certs);
+///   `--bootstrap` is idempotent so reusing a `raft_dir` across attempts
+///   is safe (`drivers/openraft/mod.rs:284-285`).
+async fn retry_spawn<F>(
+    n_ports: usize,
+    ready_idx: &[usize],
+    per_addr_budget: Duration,
+    mut build: F,
+) -> (Child, Vec<SocketAddr>)
+where
+    F: FnMut(&[SocketAddr]) -> Command,
+{
+    const MAX_ATTEMPTS: usize = 3;
+    let mut last_eaddrinuse: Option<String> = None;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        let addrs = bind_unused_set(n_ports).await;
+        let mut cmd = build(&addrs);
+        cmd.stderr(Stdio::piped()).kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn tsoracle");
+
+        // Drain stderr concurrently so a chatty child can't fill the pipe
+        // buffer and back-pressure itself into a hang. The buffer is read
+        // on early exit to classify the failure as EADDRINUSE vs. other.
+        let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+        let drain_buf = Arc::clone(&stderr_buf);
+        let drain = tokio::spawn(async move {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stderr_pipe.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => drain_buf.lock().unwrap().extend_from_slice(&chunk[..n]),
+                }
+            }
+        });
+
+        match await_listening(&mut child, ready_idx, &addrs, per_addr_budget).await {
+            AwaitOutcome::Ready => {
+                // Detach the drain — it exits naturally when the child
+                // closes stderr (on test-end kill).
+                drop(drain);
+                return (child, addrs);
+            }
+            AwaitOutcome::ChildExited(status) => {
+                let _ = drain.await;
+                let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
+                if stderr.contains("Address already in use") {
+                    last_eaddrinuse = Some(format!(
+                        "attempt {}/{MAX_ATTEMPTS}: EADDRINUSE (status={status})\
+                         \nstderr:\n{stderr}",
+                        attempt + 1,
+                    ));
+                    continue;
+                }
+                panic!(
+                    "binary exited before accepting connections: status={status}\
+                     \nstderr:\n{stderr}"
+                );
+            }
+            AwaitOutcome::Timeout(addr) => {
+                let _ = child.kill().await;
+                let _ = drain.await;
+                let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
+                panic!(
+                    "binary did not start accepting on {addr} within {per_addr_budget:?}\
+                     \nstderr:\n{stderr}"
+                );
+            }
+        }
+    }
+
+    panic!(
+        "EADDRINUSE on all {MAX_ATTEMPTS} port-allocation attempts; last error:\n{}",
+        last_eaddrinuse.unwrap_or_else(|| "<none>".into())
+    );
+}
+
 #[tokio::test]
 async fn binary_serves_timestamps() {
     let binary_path = env!("CARGO_BIN_EXE_tsoracle");
     let state_dir = tempdir().unwrap();
-    let listen_addr = bind_unused().await;
 
-    let mut child = Command::new(binary_path)
-        .arg("serve")
-        .arg("file")
-        .arg("--listen")
-        .arg(listen_addr.to_string())
-        .arg("--state-dir")
-        .arg(state_dir.path())
-        .arg("--log")
-        .arg("warn")
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-
-    // Race readiness against the subprocess exiting early — if the binary
-    // dies in startup, we want a clear "exited before accepting" failure
-    // rather than a 10s "timed out" red herring.
-    let readiness = wait_until_accepting(listen_addr, Duration::from_secs(10));
-    tokio::pin!(readiness);
-    tokio::select! {
-        result = &mut readiness => {
-            result.expect("binary did not start accepting connections");
-        }
-        child_result = child.wait() => {
-            let status = child_result.expect("wait on child failed");
-            panic!("binary exited before accepting connections: status={status}");
-        }
-    }
+    let (mut child, addrs) = retry_spawn(1, &[0], Duration::from_secs(10), |addrs| {
+        let mut cmd = Command::new(binary_path);
+        cmd.arg("serve")
+            .arg("file")
+            .arg("--listen")
+            .arg(addrs[0].to_string())
+            .arg("--state-dir")
+            .arg(state_dir.path())
+            .arg("--log")
+            .arg("warn");
+        cmd
+    })
+    .await;
+    let listen_addr = addrs[0];
 
     let client = Client::connect(vec![listen_addr.to_string()])
         .await
@@ -124,35 +243,23 @@ async fn binary_serves_timestamps() {
 async fn sigterm_triggers_graceful_shutdown() {
     let binary_path = env!("CARGO_BIN_EXE_tsoracle");
     let state_dir = tempdir().unwrap();
-    let listen_addr = bind_unused().await;
-
-    let mut child = Command::new(binary_path)
-        .arg("serve")
-        .arg("file")
-        .arg("--listen")
-        .arg(listen_addr.to_string())
-        .arg("--state-dir")
-        .arg(state_dir.path())
-        .arg("--log")
-        .arg("warn")
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
 
     // Wait until the SIGTERM handler is live: it is registered when the
     // shutdown future is first polled, which happens once tonic is serving —
     // i.e. by the time the listener is accepting connections.
-    let readiness = wait_until_accepting(listen_addr, Duration::from_secs(10));
-    tokio::pin!(readiness);
-    tokio::select! {
-        result = &mut readiness => {
-            result.expect("binary did not start accepting connections");
-        }
-        child_result = child.wait() => {
-            let status = child_result.expect("wait on child failed");
-            panic!("binary exited before accepting connections: status={status}");
-        }
-    }
+    let (mut child, _addrs) = retry_spawn(1, &[0], Duration::from_secs(10), |addrs| {
+        let mut cmd = Command::new(binary_path);
+        cmd.arg("serve")
+            .arg("file")
+            .arg("--listen")
+            .arg(addrs[0].to_string())
+            .arg("--state-dir")
+            .arg(state_dir.path())
+            .arg("--log")
+            .arg("warn");
+        cmd
+    })
+    .await;
 
     let pid = child.id().expect("child has a pid before exit");
     let kill = Command::new("kill")
@@ -198,41 +305,33 @@ async fn wait_until_responsive(client: &Client, budget: Duration) -> Result<(), 
 async fn serve_openraft_single_node_serves_after_bootstrap() {
     let binary_path = env!("CARGO_BIN_EXE_tsoracle");
     let raft_dir = tempdir().unwrap();
-    let listen_addr = bind_unused().await;
-    let raft_addr = bind_unused().await;
-    let admin_addr = bind_unused().await;
 
-    let mut child = Command::new(binary_path)
-        .arg("serve")
-        .arg("openraft")
-        .arg("--id")
-        .arg("1")
-        .arg("--listen")
-        .arg(listen_addr.to_string())
-        .arg("--raft-addr")
-        .arg(raft_addr.to_string())
-        .arg("--raft-dir")
-        .arg(raft_dir.path())
-        .arg("--bootstrap")
-        .arg("--members")
-        .arg(format!("1={raft_addr}/{listen_addr}/{admin_addr}"))
-        .arg("--log")
-        .arg("warn")
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-
-    let readiness = wait_until_accepting(listen_addr, Duration::from_secs(15));
-    tokio::pin!(readiness);
-    tokio::select! {
-        result = &mut readiness => {
-            result.expect("binary did not start accepting connections");
-        }
-        child_result = child.wait() => {
-            let status = child_result.expect("wait on child failed");
-            panic!("binary exited before accepting connections: status={status}");
-        }
-    }
+    // admin_addr is metadata-only here (no `--admin-listen`); only the
+    // client listener is bound, so ready_idx = [0].
+    let (mut child, addrs) = retry_spawn(3, &[0], Duration::from_secs(15), |addrs| {
+        let listen_addr = addrs[0];
+        let raft_addr = addrs[1];
+        let admin_addr = addrs[2];
+        let mut cmd = Command::new(binary_path);
+        cmd.arg("serve")
+            .arg("openraft")
+            .arg("--id")
+            .arg("1")
+            .arg("--listen")
+            .arg(listen_addr.to_string())
+            .arg("--raft-addr")
+            .arg(raft_addr.to_string())
+            .arg("--raft-dir")
+            .arg(raft_dir.path())
+            .arg("--bootstrap")
+            .arg("--members")
+            .arg(format!("1={raft_addr}/{listen_addr}/{admin_addr}"))
+            .arg("--log")
+            .arg("warn");
+        cmd
+    })
+    .await;
+    let listen_addr = addrs[0];
 
     let client = Client::connect(vec![listen_addr.to_string()])
         .await
@@ -308,31 +407,25 @@ async fn serve_file_with_client_tls_serves_over_tls() {
     let certdir = tempdir().unwrap();
     let certs = write_server_certs(certdir.path());
     let state_dir = tempdir().unwrap();
-    let listen_addr = bind_unused().await;
 
-    let mut child = Command::new(binary_path)
-        .arg("serve")
-        .arg("file")
-        .arg("--listen")
-        .arg(listen_addr.to_string())
-        .arg("--state-dir")
-        .arg(state_dir.path())
-        .arg("--tls-cert")
-        .arg(&certs.cert)
-        .arg("--tls-key")
-        .arg(&certs.key)
-        .arg("--log")
-        .arg("warn")
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-
-    let readiness = wait_until_accepting(listen_addr, Duration::from_secs(10));
-    tokio::pin!(readiness);
-    tokio::select! {
-        r = &mut readiness => r.expect("binary did not start accepting connections"),
-        c = child.wait() => panic!("binary exited before accepting connections: {c:?}"),
-    }
+    let (mut child, addrs) = retry_spawn(1, &[0], Duration::from_secs(10), |addrs| {
+        let mut cmd = Command::new(binary_path);
+        cmd.arg("serve")
+            .arg("file")
+            .arg("--listen")
+            .arg(addrs[0].to_string())
+            .arg("--state-dir")
+            .arg(state_dir.path())
+            .arg("--tls-cert")
+            .arg(&certs.cert)
+            .arg("--tls-key")
+            .arg(&certs.key)
+            .arg("--log")
+            .arg("warn");
+        cmd
+    })
+    .await;
+    let listen_addr = addrs[0];
 
     let tls = tonic::transport::ClientTlsConfig::new()
         .ca_certificate(tonic::transport::Certificate::from_pem(&certs.ca_pem))
@@ -364,47 +457,39 @@ async fn serve_openraft_with_peer_mtls_boots_and_serves() {
     let certdir = tempdir().unwrap();
     let certs = write_server_certs(certdir.path());
     let raft_dir = tempdir().unwrap();
-    let listen_addr = bind_unused().await;
-    let raft_addr = bind_unused().await;
-    let admin_addr = bind_unused().await;
 
-    let mut child = Command::new(binary_path)
-        .arg("serve")
-        .arg("openraft")
-        .arg("--id")
-        .arg("1")
-        .arg("--listen")
-        .arg(listen_addr.to_string())
-        .arg("--raft-addr")
-        .arg(raft_addr.to_string())
-        .arg("--raft-dir")
-        .arg(raft_dir.path())
-        .arg("--bootstrap")
-        .arg("--members")
-        .arg(format!("1={raft_addr}/{listen_addr}/{admin_addr}"))
-        .arg("--peer-tls-cert")
-        .arg(&certs.cert)
-        .arg("--peer-tls-key")
-        .arg(&certs.key)
-        .arg("--peer-tls-ca")
-        .arg(&certs.ca_path)
-        .arg("--log")
-        .arg("warn")
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-
-    let readiness = wait_until_accepting(listen_addr, Duration::from_secs(15));
-    tokio::pin!(readiness);
-    tokio::select! {
-        result = &mut readiness => {
-            result.expect("binary did not start accepting connections");
-        }
-        child_result = child.wait() => {
-            let status = child_result.expect("wait on child failed");
-            panic!("binary exited before accepting connections: status={status}");
-        }
-    }
+    // admin_addr is metadata-only here (no `--admin-listen`); only the
+    // client listener is bound, so ready_idx = [0].
+    let (mut child, addrs) = retry_spawn(3, &[0], Duration::from_secs(15), |addrs| {
+        let listen_addr = addrs[0];
+        let raft_addr = addrs[1];
+        let admin_addr = addrs[2];
+        let mut cmd = Command::new(binary_path);
+        cmd.arg("serve")
+            .arg("openraft")
+            .arg("--id")
+            .arg("1")
+            .arg("--listen")
+            .arg(listen_addr.to_string())
+            .arg("--raft-addr")
+            .arg(raft_addr.to_string())
+            .arg("--raft-dir")
+            .arg(raft_dir.path())
+            .arg("--bootstrap")
+            .arg("--members")
+            .arg(format!("1={raft_addr}/{listen_addr}/{admin_addr}"))
+            .arg("--peer-tls-cert")
+            .arg(&certs.cert)
+            .arg("--peer-tls-key")
+            .arg(&certs.key)
+            .arg("--peer-tls-ca")
+            .arg(&certs.ca_path)
+            .arg("--log")
+            .arg("warn");
+        cmd
+    })
+    .await;
+    let listen_addr = addrs[0];
 
     let client = Client::connect(vec![listen_addr.to_string()])
         .await
@@ -428,61 +513,42 @@ async fn serve_openraft_with_peer_mtls_boots_and_serves() {
 async fn admin_members_lists_the_bootstrap_node() {
     let binary_path = env!("CARGO_BIN_EXE_tsoracle");
     let raft_dir = tempdir().unwrap();
-    let listen_addr = bind_unused().await;
-    let raft_addr = bind_unused().await;
-    let admin_addr = bind_unused().await;
 
-    let mut server = Command::new(binary_path)
-        .arg("serve")
-        .arg("openraft")
-        .arg("--id")
-        .arg("1")
-        .arg("--listen")
-        .arg(listen_addr.to_string())
-        .arg("--raft-addr")
-        .arg(raft_addr.to_string())
-        .arg("--raft-dir")
-        .arg(raft_dir.path())
-        .arg("--bootstrap")
-        .arg("--members")
-        .arg(format!("1={raft_addr}/{listen_addr}/{admin_addr}"))
-        .arg("--admin-listen")
-        .arg(admin_addr.to_string())
-        .arg("--heartbeat-ms")
-        .arg("50")
-        .arg("--election-min-ms")
-        .arg("150")
-        .arg("--election-max-ms")
-        .arg("300")
-        .arg("--log")
-        .arg("warn")
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-
-    // Wait for both the client gRPC port and the admin gRPC port to accept.
-    let client_ready = wait_until_accepting(listen_addr, Duration::from_secs(15));
-    let admin_ready = wait_until_accepting(admin_addr, Duration::from_secs(15));
-    tokio::pin!(client_ready);
-    tokio::pin!(admin_ready);
-    tokio::select! {
-        result = &mut client_ready => {
-            result.expect("binary did not start accepting on client port");
-        }
-        child_result = server.wait() => {
-            let status = child_result.expect("wait on child failed");
-            panic!("binary exited before accepting connections: status={status}");
-        }
-    }
-    tokio::select! {
-        result = &mut admin_ready => {
-            result.expect("binary did not start accepting on admin port");
-        }
-        child_result = server.wait() => {
-            let status = child_result.expect("wait on child failed");
-            panic!("binary exited before accepting on admin port: status={status}");
-        }
-    }
+    // Both the client gRPC port and the admin gRPC port are bound by the
+    // child here (`--admin-listen` is passed), so wait on both.
+    let (mut server, addrs) = retry_spawn(3, &[0, 2], Duration::from_secs(15), |addrs| {
+        let listen_addr = addrs[0];
+        let raft_addr = addrs[1];
+        let admin_addr = addrs[2];
+        let mut cmd = Command::new(binary_path);
+        cmd.arg("serve")
+            .arg("openraft")
+            .arg("--id")
+            .arg("1")
+            .arg("--listen")
+            .arg(listen_addr.to_string())
+            .arg("--raft-addr")
+            .arg(raft_addr.to_string())
+            .arg("--raft-dir")
+            .arg(raft_dir.path())
+            .arg("--bootstrap")
+            .arg("--members")
+            .arg(format!("1={raft_addr}/{listen_addr}/{admin_addr}"))
+            .arg("--admin-listen")
+            .arg(admin_addr.to_string())
+            .arg("--heartbeat-ms")
+            .arg("50")
+            .arg("--election-min-ms")
+            .arg("150")
+            .arg("--election-max-ms")
+            .arg("300")
+            .arg("--log")
+            .arg("warn");
+        cmd
+    })
+    .await;
+    let listen_addr = addrs[0];
+    let admin_addr = addrs[2];
 
     // Wait for the node to elect itself leader so that list_members returns
     // a coherent view.
