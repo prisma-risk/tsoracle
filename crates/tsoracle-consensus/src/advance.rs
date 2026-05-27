@@ -72,8 +72,9 @@ pub struct AdvanceOutOfRange(pub u64);
 /// `persist_high_water` carries a value in the `physical_ms` domain, which must
 /// fit the 46-bit timestamp layout. A value above the cap is a *poison*: once
 /// durably committed it can never be served — every subsequent leadership gain
-/// reloads it and the allocator's `try_on_leadership_gained` rejects it
-/// (`CoreError::PhysicalMsOutOfRange`), so the new leader can never serve. The
+/// reloads it and the boundary `PhysicalMs::try_new` wrap (which feeds
+/// `try_on_leadership_gained`) rejects it (`CoreError::PhysicalMsOutOfRange`),
+/// so the new leader can never serve. The
 /// high-water only ratchets up, so it cannot self-heal.
 ///
 /// Every `ConsensusDriver::persist_high_water` MUST call this before appending

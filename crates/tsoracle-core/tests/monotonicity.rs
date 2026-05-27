@@ -26,7 +26,7 @@
 //! regresses across leadership transitions.
 
 use proptest::prelude::*;
-use tsoracle_core::{Allocator, Epoch, Timestamp};
+use tsoracle_core::{Allocator, Epoch, PhysicalMs, Timestamp};
 
 #[derive(Debug, Clone)]
 enum Op {
@@ -77,7 +77,10 @@ proptest! {
                     // at the allocator's current epoch.
                     if let Some(epoch) = allocator.epoch() {
                         let target = allocator
-                            .try_prepare_window_extension(now_ms, ahead_ms)
+                            .try_prepare_window_extension(
+                                PhysicalMs::try_new(now_ms).unwrap(),
+                                ahead_ms,
+                            )
                             .unwrap();
                         allocator.try_commit_window_extension(target, epoch).unwrap();
                     }
@@ -94,7 +97,13 @@ proptest! {
                     };
                     // committed_ceiling must be >= fence_floor for immediate serving.
                     let committed_ceiling = fence_floor.saturating_add(30_000);
-                    allocator.try_on_leadership_gained(fence_floor, committed_ceiling, Epoch(u128::from(epoch_counter))).unwrap();
+                    allocator
+                        .try_on_leadership_gained(
+                            PhysicalMs::try_new(fence_floor).unwrap(),
+                            PhysicalMs::try_new(committed_ceiling).unwrap(),
+                            Epoch(u128::from(epoch_counter)),
+                        )
+                        .unwrap();
                 }
                 Op::Lose => {
                     allocator.on_leadership_lost();
