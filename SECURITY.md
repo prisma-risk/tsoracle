@@ -56,7 +56,7 @@ Every GitHub Action and reusable workflow in `.github/workflows/` is pinned to a
 
 ### Documented exception: `slsa-framework/slsa-github-generator`
 
-The SLSA generic generator's reusable workflow (`.github/workflows/release-sign.yml`) is referenced by tag (`@v2.1.0`) rather than by commit SHA. This is intentional and unavoidable:
+The SLSA generic generator's reusable workflow (referenced from `.github/workflows/release-plz.yml`) is referenced by tag (`@v2.1.0`) rather than by commit SHA. This is intentional and unavoidable:
 
 - The generator's `generate-builder.sh` script validates the calling ref against `refs/tags/vX.Y.Z` and exits 2 with `Invalid ref: <sha>. Expected ref of the form refs/tags/vX.Y.Z` when SHA-pinned. The builder binary is fetched from the GitHub release matching the tag — there is no equivalent operation keyed on a commit SHA.
 - Upstream tracks this constraint in [slsa-github-generator#722](https://github.com/slsa-framework/slsa-github-generator/issues/722) and [slsa-verifier#12](https://github.com/slsa-framework/slsa-verifier/issues/12); the [SLSA README](https://github.com/slsa-framework/slsa-github-generator#referencing-slsa-builders-and-generators) acknowledges this departs from GitHub's general best practice.

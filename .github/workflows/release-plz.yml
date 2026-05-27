@@ -22,6 +22,10 @@ jobs:
     permissions:
       contents: write
       id-token: write  # for Sigstore gitsign OIDC (signs release tags)
+    outputs:
+      # JSON array of newly-published packages; consumed by the per-crate
+      # attestation jobs below.
+      releases: ${{ steps.release-plz.outputs.releases }}
     # Queue serial — never cancel a publish in flight (a half-done publish
     # could leave the repo with some crates released and others not).
     concurrency:
@@ -50,7 +54,8 @@ jobs:
       # Install Sigstore gitsign so release-plz creates annotated, keyless-signed
       # tags. Signing identity = this workflow's GitHub Actions OIDC token,
       # attested by Fulcio and logged to Rekor (same trust model as the SLSA
-      # provenance signed by .github/workflows/release-sign.yml).
+      # provenance built by the `prepare-attestation` / `provenance` / `attach`
+      # jobs below).
       - name: install gitsign
         env:
           GITSIGN_VERSION: "0.16.0"
@@ -70,11 +75,178 @@ jobs:
           git config --global gpg.format x509
           git config --global tag.gpgSign true
       - uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db  # v0.5
+        id: release-plz
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # When the `release` job above publishes one or more crates, fan out to
+  # build per-crate SLSA provenance attestations and attach them (plus the
+  # .crate tarball + .sha256 sidecar) to the corresponding GitHub Release.
+  # Skipped when no release PR was merged (no crates published in this run).
+  #
+  # This collapses publishing and signing into one workflow run; the prior
+  # standalone release-sign.yml has been removed. Manual workflow_dispatch
+  # backfill of pre-existing releases is no longer supported — fix any
+  # signing issue forward, not retroactively.
+  prepare-attestation:
+    name: package and hash released crates
+    needs: release
+    if: needs.release.outputs.releases != '' && needs.release.outputs.releases != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      # JSON array of {crate, version, tag, crate_file, subjects}; consumed
+      # via `strategy.matrix.include` by the provenance + attach jobs below.
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+      - name: system deps
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
+      - name: package each released crate and assemble SLSA matrix
+        id: build
+        env:
+          # Bind release-plz's JSON output to an env var rather than inlining
+          # the `${{ }}` expression into the shell body — prevents script
+          # injection via crafted package metadata.
+          RELEASES_JSON: ${{ needs.release.outputs.releases }}
+        run: |
+          set -euo pipefail
+          # Collect workspace member names once for the crate-exists assertion.
+          WS_NAMES="$(cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import sys,json; print(" ".join(p["name"] for p in json.load(sys.stdin)["packages"]))')"
+          ITEMS="[]"
+          # release-plz's `releases` output is a JSON array of objects with
+          # at least .package_name, .version, .tag.
+          while IFS= read -r entry; do
+            CRATE="$(jq -r '.package_name' <<<"$entry")"
+            VERSION="$(jq -r '.version' <<<"$entry")"
+            TAG="$(jq -r '.tag // empty' <<<"$entry")"
+            # Defensive tag-shape check (mirrors the prior release-sign.yml).
+            # A hand-crafted or mis-shaped tag must not silently sign a
+            # different crate's tarball.
+            if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+-v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
+              echo "::error::release-plz entry for '$CRATE' has missing or malformed tag '$TAG'" >&2
+              exit 1
+            fi
+            if ! printf ' %s ' "$WS_NAMES" | grep -q " $CRATE "; then
+              echo "::error::release-plz reports '$CRATE' was released, but it is not a workspace member at this commit" >&2
+              exit 1
+            fi
+            CRATE_FILE="${CRATE}-${VERSION}.crate"
+            cargo package --no-verify --locked -p "$CRATE"
+            CRATE_PATH="target/package/$CRATE_FILE"
+            if [ ! -f "$CRATE_PATH" ]; then
+              echo "::error::expected packaged crate at $CRATE_PATH, not found" >&2
+              ls -la target/package/ >&2 || true
+              exit 1
+            fi
+            SHA256="$(sha256sum "$CRATE_PATH" | awk '{print $1}')"
+            # SLSA generic generator v2.x expects base64-subjects to be the
+            # SHA256SUMS line(s) (`<sha256>  <name>` — two spaces between),
+            # NOT a JSON array. Identical content goes into the .sha256 sidecar.
+            SHA256SUMS_LINE="$(printf '%s  %s' "$SHA256" "$CRATE_FILE")"
+            SUBJECTS_B64="$(printf '%s' "$SHA256SUMS_LINE" | base64 -w0)"
+            printf '%s\n' "$SHA256SUMS_LINE" > "${CRATE_PATH}.sha256"
+            ITEMS="$(jq -c --arg c "$CRATE" --arg v "$VERSION" --arg t "$TAG" \
+                --arg cf "$CRATE_FILE" --arg s "$SUBJECTS_B64" \
+                '. + [{crate:$c, version:$v, tag:$t, crate_file:$cf, subjects:$s}]' <<<"$ITEMS")"
+          done < <(jq -c '.[]' <<<"$RELEASES_JSON")
+          echo "matrix=$ITEMS" >> "$GITHUB_OUTPUT"
+      - name: upload packaged crates for the attach job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: packaged-crates
+          path: |
+            target/package/*.crate
+            target/package/*.crate.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # One reusable-workflow invocation per published crate. The generator signs
+  # the SHA256 subject against Sigstore (Fulcio + Rekor) and emits the
+  # .intoto.jsonl as a workflow artifact named exactly its `provenance-name`.
+  #
+  # SLSA generator does NOT support SHA pins (its generate-builder.sh
+  # rejects refs that don't match refs/tags/vX.Y.Z, exit 2). Tag ref is
+  # intentional and matches what scorecard's own goreleaser.yaml does.
+  # Full rationale: SECURITY.md "Documented exception" section. Bump
+  # this tag intentionally; do not SHA-pin.
+  provenance:
+    needs: prepare-attestation
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare-attestation.outputs.matrix) }}
+    permissions:
+      actions: read       # generator inspects the workflow to record build metadata
+      contents: write     # parse-time satisfaction for the generator's upload-assets
+                          # nested job. Gated off with `upload-assets: false` (default)
+                          # so the PATCH against the immutable release never happens —
+                          # but Actions validates declared permissions of every nested
+                          # job at parse time regardless of `if:`, so `contents: read`
+                          # is rejected at workflow load.
+      id-token: write     # OIDC token for Sigstore (Fulcio) keyless signing
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ matrix.subjects }}
+      provenance-name: ${{ matrix.crate_file }}.intoto.jsonl
+
+  # Attach .crate + .sha256 + .intoto.jsonl to each crate's GitHub Release.
+  # Only asset slots are touched — release metadata is left untouched, so
+  # this is safe against immutable releases.
+  attach:
+    name: attach .crate + provenance to release
+    needs: [prepare-attestation, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare-attestation.outputs.matrix) }}
+    steps:
+      - name: Download packaged crates
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: packaged-crates
+          path: artifacts
+      - name: Download SLSA provenance
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          # The SLSA generator uploads its artifact named exactly its
+          # `provenance-name` input, so we pass the same value here.
+          name: ${{ matrix.crate_file }}.intoto.jsonl
+          path: artifacts
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ matrix.tag }}
+          CRATE_FILE: ${{ matrix.crate_file }}
+          PROVENANCE_FILE: ${{ matrix.crate_file }}.intoto.jsonl
+        run: |
+          set -euo pipefail
+          # --clobber: idempotent on re-run (e.g. CI rerun). gh does not retry
+          # internally; a transient failure is safe to re-run.
+          gh release upload "$TAG" \
+            "artifacts/$CRATE_FILE" \
+            "artifacts/${CRATE_FILE}.sha256" \
+            "artifacts/$PROVENANCE_FILE" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
 
   # Opens or updates the release PR whenever main moves. The PR contains the
   # version bumps + CHANGELOG diffs; merging it triggers the `release` job
