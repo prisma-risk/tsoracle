@@ -506,9 +506,12 @@ impl Allocator {
                 committed_high_water,
                 ..
             } => {
-                let floor = committed_high_water
-                    .checked_add(1)
-                    .ok_or(CoreError::PhysicalMsOutOfRange(*committed_high_water))?;
+                debug_assert!(
+                    *committed_high_water <= PHYSICAL_MS_MAX,
+                    "committed_high_water > PHYSICAL_MS_MAX: \
+                     try_on_leadership_gained / try_commit_window_extension invariant",
+                );
+                let floor = *committed_high_water + 1;
                 let now_ms = now_ms.get();
                 let requested = core::cmp::max(floor, now_ms).checked_add(ahead_ms).ok_or(
                     CoreError::WindowExtensionOverflow {
