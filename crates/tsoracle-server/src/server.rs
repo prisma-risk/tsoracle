@@ -101,6 +101,7 @@ pub struct ServerBuilder {
     window_ahead: Duration,
     failover_advance: Duration,
     shutdown_grace: Duration,
+    heartbeat_interval: Duration,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -113,6 +114,7 @@ impl Default for ServerBuilder {
             window_ahead: Duration::from_secs(3),
             failover_advance: Duration::from_secs(1),
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
+            heartbeat_interval: Duration::from_secs(10),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: None,
         }
@@ -156,6 +158,20 @@ impl ServerBuilder {
         self
     }
 
+    /// Interval between heartbeat log lines emitted at `target = "tsoracle::heartbeat"`.
+    /// Defaults to 10 seconds. Pass `Duration::ZERO` to disable the heartbeat task entirely.
+    ///
+    /// The heartbeat surfaces serving role, current epoch, requests served,
+    /// timestamps issued, and key error counters every interval — proof-of-life
+    /// for production deployments that may not have a metrics exporter installed.
+    ///
+    /// Requires `feature = "tracing"` to emit output; with `tracing` off the
+    /// setter is accepted but no task is spawned (no subscriber to log to).
+    pub fn heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = interval;
+        self
+    }
+
     /// Configure TLS termination for this server. Applied inside
     /// [`Server::serve`], [`Server::serve_with_shutdown`], and
     /// [`Server::serve_with_listener`]. Not applied to [`Server::into_router`] —
@@ -176,7 +192,9 @@ impl ServerBuilder {
             window_ahead: self.window_ahead,
             failover_advance: self.failover_advance,
             shutdown_grace: self.shutdown_grace,
+            heartbeat_interval: self.heartbeat_interval,
             core: Arc::new(ServingCore::new(self.window_ahead)),
+            reporter: Arc::new(crate::reporter::Reporter::new()),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: self.tls_config,
         })
@@ -191,6 +209,13 @@ pub struct Server {
     /// Bound on the graceful-shutdown wait for the leader-watch task before a
     /// forced abort. See [`ServerBuilder::shutdown_grace`].
     pub(crate) shutdown_grace: Duration,
+    /// Interval between periodic heartbeat log lines. See [`ServerBuilder::heartbeat_interval`].
+    ///
+    /// The only reader is the `cfg(feature = "tracing")` spawn block in
+    /// `into_router_parts`; without `tracing` there is no subscriber to log to
+    /// and the spawn arm is compiled out, so the field is genuinely unread.
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
+    pub(crate) heartbeat_interval: Duration,
     /// Owns the allocator, serving-state channel, and both extension locks, with
     /// the lock-ordering and step-down invariants private behind its methods.
     ///
@@ -200,20 +225,27 @@ pub struct Server {
     /// gate *synchronously* at shutdown, leaving the watch task's later
     /// `step_down` a harmless idempotent repeat.
     pub(crate) core: Arc<ServingCore>,
+    pub(crate) reporter: Arc<crate::reporter::Reporter>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub(crate) tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
 
 /// Raw parts produced by [`Server::into_router_parts`]: the gRPC `Routes`, the
 /// leader-watch task's cooperative-cancel sender (dropping it stops the task),
-/// and the task's join handle. [`Server::into_router`] wraps these into a
-/// [`WatchGuard`]; the `serve_*` methods consume them directly via
-/// [`serve_inner`].
-type RouterParts = (
-    Routes,
-    tokio::sync::oneshot::Sender<()>,
-    tokio::task::JoinHandle<Result<(), ServerError>>,
-);
+/// the task's join handle, and the optional heartbeat task's cancel sender /
+/// join handle. [`Server::into_router`] wraps these into a [`WatchGuard`]; the
+/// `serve_*` methods consume them directly via [`serve_inner`].
+///
+/// The heartbeat fields are `None` when the heartbeat is disabled — either by
+/// `ServerBuilder::heartbeat_interval(Duration::ZERO)` or by building without
+/// the `tracing` feature (there is no subscriber to log to).
+pub(crate) struct RouterParts {
+    pub routes: Routes,
+    pub cancel_tx: tokio::sync::oneshot::Sender<()>,
+    pub watch_handle: tokio::task::JoinHandle<Result<(), ServerError>>,
+    pub heartbeat_cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    pub heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+}
 
 impl Server {
     pub fn builder() -> ServerBuilder {
@@ -270,18 +302,23 @@ impl Server {
         // the returned guard can bound its own shutdown wait identically to the
         // `serve_*` paths.
         let shutdown_grace = self.shutdown_grace;
-        // Clone the shared core before `into_router_parts` consumes `self`, so
-        // the guard can close the serving gate synchronously on drop / shutdown
-        // rather than relying on the watch task's later publish.
+        // Clone the shared core and reporter before `into_router_parts` consumes
+        // `self`, so the guard can close the serving gate synchronously on drop /
+        // shutdown rather than relying on the watch task's later publish, and can
+        // record the shutdown_watch_aborted counter if the grace-bounded reap fires.
         let core = self.core.clone();
-        let (routes, cancel_tx, handle) = self.into_router_parts()?;
+        let reporter = self.reporter.clone();
+        let parts = self.into_router_parts()?;
         Ok((
-            routes,
+            parts.routes,
             WatchGuard {
-                cancel_tx: Some(cancel_tx),
-                handle: Some(handle),
+                cancel_tx: Some(parts.cancel_tx),
+                handle: Some(parts.watch_handle),
                 shutdown_grace,
                 core,
+                reporter,
+                heartbeat_cancel_tx: parts.heartbeat_cancel_tx,
+                heartbeat_handle: parts.heartbeat_handle,
             },
         ))
     }
@@ -349,6 +386,54 @@ impl Server {
             }
         });
 
+        // Spawn the heartbeat task, if enabled. Gated on `feature = "tracing"`
+        // because the heartbeat module is only compiled with `tracing`
+        // (no subscriber to emit to without it) — and on a non-zero interval,
+        // since `Duration::ZERO` is the documented opt-out.
+        //
+        // The task body is wrapped in `AssertUnwindSafe(...).catch_unwind()`
+        // mirroring the leader-watch spawn above: on panic we bump the
+        // `heartbeat_task_panicked` counter and log at error level, then let
+        // the task end (no restart — the heartbeat is observability, not
+        // correctness, so a panicked task must not be allowed to thrash).
+        let (heartbeat_cancel_tx, heartbeat_handle) = {
+            #[cfg(feature = "tracing")]
+            {
+                if server.heartbeat_interval.is_zero() {
+                    (None, None)
+                } else {
+                    use futures::FutureExt;
+                    let (htx, hrx) = tokio::sync::oneshot::channel::<()>();
+                    let hb_reporter = server.reporter.clone();
+                    let hb_core = server.core.clone();
+                    let hb_interval = server.heartbeat_interval;
+                    let handle = tokio::spawn(async move {
+                        let outcome =
+                            std::panic::AssertUnwindSafe(crate::heartbeat::run_heartbeat(
+                                hb_interval,
+                                hb_core,
+                                hb_reporter.clone(),
+                                hrx,
+                            ))
+                            .catch_unwind()
+                            .await;
+                        if outcome.is_err() {
+                            hb_reporter.heartbeat_task_panicked.increment(1);
+                            tracing::error!(
+                                target: "tsoracle::heartbeat",
+                                "heartbeat task panicked; liveness logs disabled until restart"
+                            );
+                        }
+                    });
+                    (Some(htx), Some(handle))
+                }
+            }
+            #[cfg(not(feature = "tracing"))]
+            {
+                (None, None)
+            }
+        };
+
         let service = TsoServiceImpl { server };
         #[allow(unused_mut)]
         let mut routes = Routes::new(TsoServiceServer::new(service));
@@ -356,7 +441,13 @@ impl Server {
         {
             routes = routes.add_service(reflection);
         }
-        Ok((routes, cancel_tx, watch_handle))
+        Ok(RouterParts {
+            routes,
+            cancel_tx,
+            watch_handle,
+            heartbeat_cancel_tx,
+            heartbeat_handle,
+        })
     }
 
     pub async fn serve(self, addr: SocketAddr) -> Result<(), ServerError> {
@@ -390,11 +481,12 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        // Read the `Copy` grace and clone the shared core before
+        // Read the `Copy` grace and clone the shared core and reporter before
         // `into_router_parts` consumes `self`.
         let shutdown_grace = self.shutdown_grace;
         let core = self.core.clone();
-        let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
+        let reporter = self.reporter.clone();
+        let parts = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
         let mut tonic = TonicServer::builder();
@@ -403,16 +495,19 @@ impl Server {
             tonic = tonic.tls_config(cfg).map_err(ServerError::Transport)?;
         }
         let serve = tonic
-            .add_routes(routes)
+            .add_routes(parts.routes)
             .serve_with_shutdown(addr, combined_shutdown);
 
         serve_inner(
-            watch_cancel_tx,
-            watch_handle,
+            parts.cancel_tx,
+            parts.watch_handle,
+            parts.heartbeat_cancel_tx,
+            parts.heartbeat_handle,
             serve,
             cancel_tx,
             shutdown_grace,
             core,
+            reporter,
         )
         .await
     }
@@ -447,11 +542,12 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        // Read the `Copy` grace and clone the shared core before
+        // Read the `Copy` grace and clone the shared core and reporter before
         // `into_router_parts` consumes `self`.
         let shutdown_grace = self.shutdown_grace;
         let core = self.core.clone();
-        let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
+        let reporter = self.reporter.clone();
+        let parts = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
         let incoming = tonic::transport::server::TcpIncoming::from(listener);
@@ -462,16 +558,19 @@ impl Server {
             tonic = tonic.tls_config(cfg).map_err(ServerError::Transport)?;
         }
         let serve = tonic
-            .add_routes(routes)
+            .add_routes(parts.routes)
             .serve_with_incoming_shutdown(incoming, combined_shutdown);
 
         serve_inner(
-            watch_cancel_tx,
-            watch_handle,
+            parts.cancel_tx,
+            parts.watch_handle,
+            parts.heartbeat_cancel_tx,
+            parts.heartbeat_handle,
             serve,
             cancel_tx,
             shutdown_grace,
             core,
+            reporter,
         )
         .await
     }
@@ -504,6 +603,18 @@ pub struct WatchGuard {
     /// watch task to observe cancellation and publish `NotServing` on its own
     /// timeline — a window during which the fast gate would still admit RPCs.
     core: Arc<ServingCore>,
+    /// Metrics reporter, cloned from the `Server`. Used to record the
+    /// `shutdown_watch_aborted` counter if the grace-bounded reap fires.
+    reporter: Arc<crate::reporter::Reporter>,
+    /// Cooperative-cancel sender for the heartbeat task. `None` when the
+    /// heartbeat is disabled (interval == 0 or built without `tracing`).
+    /// Dropping the sender resolves the task's cancel future.
+    heartbeat_cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Join handle for the heartbeat task. `None` when the heartbeat is
+    /// disabled. Output is `()` because the task never returns an error —
+    /// panics are caught inside the task body and recorded via the
+    /// `heartbeat_task_panicked` counter.
+    heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl WatchGuard {
@@ -522,11 +633,32 @@ impl WatchGuard {
     /// elapses (still reported as `Ok(())`), so an embedder's shutdown can never
     /// wedge behind a hung driver.
     pub async fn shutdown(mut self) -> Result<(), ServerError> {
-        // Dropping the sender fires the task's cancel future.
+        // Dropping the senders fires each task's cancel future. The heartbeat
+        // task is reaped first because it is bounded by `tokio::time::sleep`
+        // (cooperative stop is fast and never wedges on a driver call), so its
+        // reap returns quickly and leaves the grace budget for the watch task
+        // — which may be parked in a wedged consensus-driver call.
+        self.heartbeat_cancel_tx.take();
         self.cancel_tx.take();
+        if let Some(mut hb_handle) = self.heartbeat_handle.take() {
+            match tokio::time::timeout(self.shutdown_grace, &mut hb_handle).await {
+                Ok(Ok(())) => {}
+                // Task panicked — already counted + logged via catch_unwind in
+                // the task body. Nothing more to do here.
+                Ok(Err(_join_err)) => {}
+                // Grace overrun — sleep + select! should always observe a
+                // dropped cancel sender, so this is a backstop. Abort and
+                // reap; no separate metric (the heartbeat is observability
+                // only — its lateness is not a serving correctness signal).
+                Err(_elapsed) => {
+                    hb_handle.abort();
+                    let _ = (&mut hb_handle).await;
+                }
+            }
+        }
         match self.handle.take() {
             Some(mut handle) => join_to_server_result(
-                await_watch_within_grace(&mut handle, self.shutdown_grace).await,
+                await_watch_within_grace(&mut handle, self.shutdown_grace, &self.reporter).await,
             ),
             None => Ok(()),
         }
@@ -540,6 +672,12 @@ impl WatchGuard {
     pub fn abort(mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
+        }
+        // Hard-abort the heartbeat task too — leaving it running after the
+        // watch is torn down would publish heartbeats describing a stale
+        // (typically `NotServing`) view until the Arc<Reporter> is dropped.
+        if let Some(hb_handle) = self.heartbeat_handle.take() {
+            hb_handle.abort();
         }
     }
 
@@ -574,6 +712,15 @@ impl Drop for WatchGuard {
         // `NotServing` and returns. The `JoinHandle` is dropped here too,
         // detaching the task to finish its cooperative shutdown on its own.
         self.cancel_tx.take();
+        // Same treatment for the heartbeat task. `Drop` is sync so we cannot
+        // await the cooperative stop; instead we drop the cancel sender (the
+        // task will observe it at its next select! boundary) and hard-abort
+        // the handle so it cannot outlive the guard and publish heartbeats
+        // describing a stale view if the runtime keeps the Arc alive.
+        self.heartbeat_cancel_tx.take();
+        if let Some(hb_handle) = self.heartbeat_handle.take() {
+            hb_handle.abort();
+        }
     }
 }
 
@@ -623,12 +770,12 @@ fn combined_shutdown_with_cancel(
 async fn await_watch_within_grace(
     watch_handle: &mut tokio::task::JoinHandle<Result<(), ServerError>>,
     grace: Duration,
+    reporter: &Arc<crate::reporter::Reporter>,
 ) -> Result<Result<(), ServerError>, tokio::task::JoinError> {
     match tokio::time::timeout(grace, &mut *watch_handle).await {
         Ok(join_result) => join_result,
         Err(_elapsed) => {
-            #[cfg(feature = "metrics")]
-            metrics::counter!("tsoracle.shutdown.watch_aborted.total").increment(1);
+            reporter.shutdown_watch_aborted.increment(1);
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 grace_ms = grace.as_millis() as u64,
@@ -664,20 +811,29 @@ async fn await_watch_within_grace(
 /// same one the watch task and the gRPC service hold): the user-shutdown arm
 /// closes the gate on it synchronously so no RPC is admitted in the window
 /// before the watch task observes cancellation and publishes `NotServing`.
+// Private serve helper. The wide signature is the cost of being the single
+// merge point for the two public `serve_*` paths and the leader-watch +
+// heartbeat task pair: bundling these into a struct just to placate clippy
+// would obscure the lifecycle (every parameter is consumed exactly once and
+// has no shared identity worth naming). Keep the arguments visible.
+#[allow(clippy::too_many_arguments)]
 async fn serve_inner<S>(
     watch_cancel_tx: tokio::sync::oneshot::Sender<()>,
     mut watch_handle: tokio::task::JoinHandle<Result<(), ServerError>>,
+    heartbeat_cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
     serve_future: S,
     tonic_cancel_tx: tokio::sync::oneshot::Sender<()>,
     shutdown_grace: Duration,
     core: Arc<ServingCore>,
+    reporter: Arc<crate::reporter::Reporter>,
 ) -> Result<(), ServerError>
 where
     S: Future<Output = Result<(), tonic::transport::Error>>,
 {
     tokio::pin!(serve_future);
 
-    tokio::select! {
+    let outcome = tokio::select! {
         // Bias toward the watch arm: if both are ready in the same poll
         // (rare but possible — graceful shutdown completed in the same
         // tick the watch returned), we want to surface the watch error
@@ -719,11 +875,32 @@ where
             // task's own cooperative-cancel publish.
             core.step_down(None, None);
             drop(watch_cancel_tx);
-            let _ = await_watch_within_grace(&mut watch_handle, shutdown_grace).await;
+            let _ = await_watch_within_grace(&mut watch_handle, shutdown_grace, &reporter).await;
             serve_result?;
             Ok(())
         }
+    };
+
+    // Stop the heartbeat task on every exit path. Done after the watch reap so
+    // the watch-arm `combine_watch_and_drain` already saw the watch outcome,
+    // and the user-shutdown arm has finished its grace-bounded wait. Dropping
+    // the cancel sender breaks the task's `tokio::select! { biased; cancel,
+    // sleep }` loop on the next poll; if the task is wedged for any reason we
+    // hard-abort on grace overrun. The task's outcome is observability only
+    // and cannot influence serving correctness, so its join result is dropped.
+    drop(heartbeat_cancel_tx);
+    if let Some(mut hb_handle) = heartbeat_handle {
+        match tokio::time::timeout(shutdown_grace, &mut hb_handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_join_err)) => {} // panic — already counted via catch_unwind
+            Err(_elapsed) => {
+                hb_handle.abort();
+                let _ = (&mut hb_handle).await;
+            }
+        }
     }
+
+    outcome
 }
 
 /// Convert a `JoinHandle` result into a `ServerError`-typed result.
@@ -1037,6 +1214,9 @@ mod tests {
             handle: Some(handle),
             shutdown_grace: Duration::from_secs(10),
             core: core.clone(),
+            reporter: Arc::new(crate::reporter::Reporter::new()),
+            heartbeat_cancel_tx: None,
+            heartbeat_handle: None,
         };
 
         drop(guard);
@@ -1073,10 +1253,13 @@ mod tests {
         let result = serve_inner(
             watch_cancel_tx,
             watch_handle,
+            None, // heartbeat_cancel_tx — heartbeat disabled in this regression test
+            None, // heartbeat_handle
             serve_future,
             tonic_cancel_tx,
             Duration::from_millis(0),
             core.clone(),
+            Arc::new(crate::reporter::Reporter::new()),
         )
         .await;
 

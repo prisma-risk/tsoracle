@@ -29,8 +29,11 @@
 mod bt;
 mod clock;
 mod fence;
+#[cfg(feature = "tracing")]
+pub(crate) mod heartbeat;
 mod leader_hint;
 mod persist_disposition;
+pub(crate) mod reporter;
 mod server;
 mod service;
 mod serving_core;
@@ -38,6 +41,7 @@ mod signal;
 
 pub mod docs;
 
+pub use crate::reporter::Reporter;
 pub use bt::Bt;
 pub use clock::{Clock, SystemClock};
 pub use server::{BuildError, Server, ServerBuilder, ServerError, ServingState, WatchGuard};

@@ -91,3 +91,7 @@ required-features = ["test-support", "metrics"]
 [[test]]
 name = "fence_yieldpoint"
 required-features = ["yieldpoints", "test-fakes"]
+
+[[test]]
+name = "heartbeat_into_router"
+required-features = ["test-support", "tracing"]

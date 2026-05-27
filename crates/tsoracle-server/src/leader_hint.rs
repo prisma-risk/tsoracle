@@ -28,12 +28,11 @@ use tonic::Status;
 use tonic::metadata::{BinaryMetadataKey, BinaryMetadataValue};
 use tsoracle_proto::v1::{LEADER_HINT_TRAILER_KEY, LeaderHint, LeaderHintLookup};
 
-pub fn not_leader_status(hint: LeaderHint) -> Status {
+pub fn not_leader_status(reporter: &crate::reporter::Reporter, hint: LeaderHint) -> Status {
     // Single chokepoint: every NOT_LEADER rejection in the service layer
     // routes through this constructor, so the counter increments exactly
     // once per rejection regardless of which call site detected it.
-    #[cfg(feature = "metrics")]
-    metrics::counter!("tsoracle.not_leader.total").increment(1);
+    reporter.not_leader.increment(1);
     with_leader_hint(
         Status::failed_precondition("not leader"),
         hint,
@@ -93,7 +92,7 @@ mod tests {
             leader_endpoint: Some("10.0.0.7:50551".into()),
             leader_epoch: Some(EpochWire { hi: 0, lo: 42 }),
         };
-        let status = not_leader_status(hint.clone());
+        let status = not_leader_status(&crate::reporter::Reporter::for_tests(), hint.clone());
         let decoded = decode_leader_hint(&status).expect("present");
         assert_eq!(decoded.leader_endpoint, hint.leader_endpoint);
         assert_eq!(decoded.leader_epoch, hint.leader_epoch);

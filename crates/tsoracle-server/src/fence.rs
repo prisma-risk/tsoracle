@@ -171,7 +171,6 @@ pub(crate) async fn run_leader_watch(
                 // Time the full fence: drain-barrier wait, durable persist, and
                 // allocator seed are all included. Recorded only when the fence
                 // reaches Serving.
-                #[cfg(feature = "metrics")]
                 let fence_started_at = std::time::Instant::now();
 
                 // Enter the fence: clear the allocator and publish NotServing so
@@ -186,8 +185,8 @@ pub(crate) async fn run_leader_watch(
                 // then steps down (NotLeader/Fenced) or faults — matching the
                 // prior pre-`match` placement exactly. Emitting after the clear
                 // (not before) keeps a blocking recorder from delaying it.
-                #[cfg(feature = "metrics")]
-                metrics::counter!("tsoracle.leader_transition.total").increment(1);
+                server.reporter.leader_transitions.increment(1);
+                server.reporter.last_leader_transition.touch_now();
 
                 // Fence with retry. A consensus error here is not automatically
                 // fatal: the post-election window is volatile and `ConsensusError`
@@ -288,8 +287,9 @@ pub(crate) async fn run_leader_watch(
 
                     match attempt {
                         Ok(()) => {
-                            #[cfg(feature = "metrics")]
-                            metrics::histogram!("tsoracle.leader_transition.fence_latency")
+                            server
+                                .reporter
+                                .fence_latency
                                 .record(fence_started_at.elapsed().as_secs_f64());
                             break;
                         }
@@ -318,11 +318,7 @@ pub(crate) async fn run_leader_watch(
                                 // transition is observed instead of spun past.
                                 PersistDisposition::Transient(_source) => {
                                     transient_retries += 1;
-                                    #[cfg(feature = "metrics")]
-                                    metrics::counter!(
-                                        "tsoracle.leader_transition.fence_transient_retries.total"
-                                    )
-                                    .increment(1);
+                                    server.reporter.fence_transient_retries.increment(1);
                                     #[cfg(feature = "tracing")]
                                     if warn_on_stuck_fence(transient_retries) {
                                         tracing::warn!(
@@ -382,15 +378,15 @@ pub(crate) async fn run_leader_watch(
                 server.core.step_down(leader_endpoint, leader_epoch);
                 // Emit after the NotServing publish so a blocking recorder
                 // cannot delay the safety state change.
-                #[cfg(feature = "metrics")]
-                metrics::counter!("tsoracle.leader_transition.total").increment(1);
+                server.reporter.leader_transitions.increment(1);
+                server.reporter.last_leader_transition.touch_now();
             }
             LeaderState::Unknown => {
                 server.core.step_down(None, None);
                 // Emit after the NotServing publish so a blocking recorder
                 // cannot delay the safety state change.
-                #[cfg(feature = "metrics")]
-                metrics::counter!("tsoracle.leader_transition.total").increment(1);
+                server.reporter.leader_transitions.increment(1);
+                server.reporter.last_leader_transition.touch_now();
             }
         }
     }
