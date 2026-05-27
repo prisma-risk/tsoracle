@@ -94,7 +94,9 @@ impl core::fmt::Display for PhysicalMs {
 /// covers fits the packed 46-bit physical / 18-bit logical layout. A value of
 /// this type is therefore proof that [`first`](Self::first) and
 /// [`last`](Self::last) can pack without panicking — the in-range invariant is
-/// guaranteed by the type, not by the one constructor that happens to build it.
+/// guaranteed by the type, not by the constructors that happen to build it.
+/// The crate-internal back door [`new_unchecked`](Self::new_unchecked) skips
+/// the validation but documents the same invariant as a caller obligation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WindowGrant {
     physical_ms: u64,
@@ -105,9 +107,11 @@ pub struct WindowGrant {
 
 impl WindowGrant {
     /// Construct a grant, checking that every timestamp it covers packs
-    /// cleanly. This is the only way to build a `WindowGrant` outside this
-    /// module, so a constructed value witnesses that `first`/`last` are
-    /// infallible.
+    /// cleanly. This is the only *validating* constructor; the
+    /// crate-internal [`new_unchecked`](Self::new_unchecked) skips the
+    /// checks but requires the caller to have established the invariant
+    /// some other way. Either way, a constructed value witnesses that
+    /// `first`/`last` are infallible.
     ///
     /// Rejects `count == 0` (a grant covers at least one timestamp, and
     /// `last`'s `logical_start + count - 1` would underflow). The range check
@@ -146,6 +150,32 @@ impl WindowGrant {
             count,
             epoch,
         })
+    }
+
+    /// Construct a grant without re-checking the packing invariant. The caller
+    /// must guarantee `count >= 1`, `physical_ms <= PHYSICAL_MS_MAX`, and
+    /// `logical_start + count - 1 <= LOGICAL_MAX` — i.e. every timestamp the
+    /// grant covers packs cleanly. Intended for `Allocator::try_grant`, whose
+    /// `project_grant` helper has already established these bounds; routing
+    /// that path through `try_new` would repeat four checked operations on the
+    /// hot path. The `debug_assert!`s catch a future drift between
+    /// `project_grant` and this constructor in test builds without paying any
+    /// cost in release.
+    pub(crate) fn new_unchecked(
+        physical_ms: u64,
+        logical_start: u32,
+        count: u32,
+        epoch: Epoch,
+    ) -> Self {
+        debug_assert!(count != 0);
+        debug_assert!(physical_ms <= PHYSICAL_MS_MAX);
+        debug_assert!((logical_start as u64) + (count as u64) <= (LOGICAL_MAX as u64) + 1);
+        WindowGrant {
+            physical_ms,
+            logical_start,
+            count,
+            epoch,
+        }
     }
 
     pub fn physical_ms(&self) -> u64 {
@@ -442,12 +472,7 @@ impl Allocator {
             count,
         )?;
 
-        // project_grant already guarantees physical_ms and the logical range
-        // are in bounds, so this construction never fails in practice — but
-        // routing through the checked constructor propagates a CoreError rather
-        // than panicking should that invariant ever be violated, and keeps this
-        // path free of the unwrap/expect the crate's panic policy bans.
-        let grant = WindowGrant::try_new(physical_ms, logical_start, count, *epoch)?;
+        let grant = WindowGrant::new_unchecked(physical_ms, logical_start, count, *epoch);
         (*next_physical_ms, *next_logical) =
             Self::advance_cursor(physical_ms, logical_start, count);
         Ok(grant)
