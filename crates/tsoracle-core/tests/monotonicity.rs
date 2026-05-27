@@ -98,7 +98,7 @@ proptest! {
                     // committed_ceiling must be >= fence_floor for immediate serving.
                     let committed_ceiling = fence_floor.saturating_add(30_000);
                     allocator
-                        .try_on_leadership_gained(
+                        .become_leader(
                             PhysicalMs::try_new(fence_floor).unwrap(),
                             PhysicalMs::try_new(committed_ceiling).unwrap(),
                             Epoch(u128::from(epoch_counter)),
@@ -106,7 +106,7 @@ proptest! {
                         .unwrap();
                 }
                 Op::Lose => {
-                    allocator.on_leadership_lost();
+                    allocator.step_down();
                 }
             }
         }

@@ -64,7 +64,7 @@ With `feature = "failpoints"` off, both forms expand to `()` — zero code, no d
 | Site name | Position | Useful actions | Test |
 |---|---|---|---|
 | `server::fence::after_load_before_persist` | In `run_leader_watch`, between `consensus.load_high_water()` and `consensus.persist_high_water()`. | `panic`, `sleep(ms)`, `return(transient)` via the closure form (closure produces `Err(ServerError::Consensus(ConsensusError::TransientDriver(_)))`). A single `1*return(transient)` is recovered by the fence's bounded retry; a `panic` still terminates the watch task. | `fence_recovers_after_transient_load_error` |
-| `server::fence::after_persist_before_publish` | In `run_leader_watch`, after `persist_high_water` returns, before `try_on_leadership_gained` and the `state_tx.send(Serving)`. | `panic`. | `fence_panic_after_persist_advances_durable_but_not_serving` |
+| `server::fence::after_persist_before_publish` | In `run_leader_watch`, after `persist_high_water` returns, before `become_leader` and the `state_tx.send(Serving)`. | `panic`. | `fence_panic_after_persist_advances_durable_but_not_serving` |
 | `server::service::before_allocate` | In `Service::get_ts`, before the allocator lock is taken. | `sleep(ms)`, `pause`. Used for timing-shape tests only — closure-form `return` would produce a `Status` directly and bypass the production `ConsensusError → Status` classification path. | `before_allocate_sleep_delays_get_ts` |
 | `server::service::extension_gate_held` | In `Service::extend_window`, immediately after the `extension_gate.read().await` guard is bound. | `pause`, `sleep(ms)`. | `extension_gate_held_sleep_delays_get_ts` |
 

@@ -11,13 +11,13 @@ The allocator tracks a *committed high-water* `H` — the persisted upper bound 
 ```mermaid
 stateDiagram-v2
     [*] --> NoEpoch
-    NoEpoch --> Serving: on_leadership_gained(floor, H, epoch)
+    NoEpoch --> Serving: become_leader(floor, H, epoch)
     Serving --> Exhausted: try_grant reaches H
     Exhausted --> Extending: prepare_window_extension
     Extending --> Serving: commit_window_extension(actual, epoch)
-    Serving --> NoEpoch: on_leadership_lost
-    Exhausted --> NoEpoch: on_leadership_lost
-    Extending --> NoEpoch: on_leadership_lost
+    Serving --> NoEpoch: step_down
+    Exhausted --> NoEpoch: step_down
+    Extending --> NoEpoch: step_down
 ```
 
 ## Prepare-commit split

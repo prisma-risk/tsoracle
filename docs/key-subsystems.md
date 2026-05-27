@@ -9,7 +9,7 @@ The server runs one long-lived task per process — `run_leader_watch` — that 
 The driver reports three variants:
 
 - **`Leader { epoch }`** — this node is the elected leader at `epoch`. The pipeline runs the [failover fence](#the-failover-fence): clear serving, drain in-flight extensions, load the durable high-water, persist the requested advance, seed the allocator, then publish `Serving`. Until the fence completes, `GetTs` returns `NOT_LEADER`.
-- **`Follower { leader_endpoint }`** — this node is not the leader. The pipeline calls `allocator.on_leadership_lost()` (which forgets any cached window so the next `try_grant` returns `NotLeader`) and publishes `ServingState::NotServing { leader_endpoint }` so the service handler can include the endpoint in the `tsoracle-leader-hint-bin` trailer. Followers reject `GetTs` immediately, with no I/O.
+- **`Follower { leader_endpoint }`** — this node is not the leader. The pipeline calls `allocator.step_down()` (which forgets any cached window so the next `try_grant` returns `NotLeader`) and publishes `ServingState::NotServing { leader_endpoint }` so the service handler can include the endpoint in the `tsoracle-leader-hint-bin` trailer. Followers reject `GetTs` immediately, with no I/O.
 - **`Unknown`** — election in progress, partition, or driver-internal transient. Treated as a follower with no known leader: the allocator loses its window, `ServingState::NotServing { leader_endpoint: None }` is published. Clients seeing this trailer fall back to round-robin across configured endpoints.
 
 The drain step on entering `Leader` is the part most worth understanding. The server holds a single `tokio::sync::RwLock` (`extension_gate`): the steady-state window-extension code path in `service.rs` acquires a *read* lock for the entire `prepare → persist_high_water → commit` sequence, and the leader-watch task acquires a *write* lock immediately after clearing `ServingState`. Acquiring the write lock blocks until every read lock from the prior epoch has been dropped, so the new fence's `load_high_water` cannot race a stale `persist_high_water` still in flight from the previous leader. This is what makes the [monotonicity proof](the-allocator.md#monotonicity-proof) hold under realistic concurrency: any stale persist call either committed before the fence load (and is visible to it) or was dropped by the allocator's epoch check on return.
@@ -50,7 +50,7 @@ sequenceDiagram
     Note over LW: floor = max(prior_max + 1, now_ms)<br/>requested = floor + failover_advance
     LW->>Driver: persist_high_water(requested, epoch)
     Driver-->>LW: actual
-    LW->>Alloc: on_leadership_gained(floor, actual, epoch)
+    LW->>Alloc: become_leader(floor, actual, epoch)
     LW->>Svc: ServingState::Serving
     LW->>Gate: drop write-lock
     Note over Svc: GetTs → Ok

@@ -27,7 +27,7 @@
 //!   serving_floor = max(prior_max + 1, now)
 //!   requested     = serving_floor + failover_advance
 //!   actual        = consensus.persist_high_water(requested, epoch)
-//!   allocator.try_on_leadership_gained(serving_floor, actual, epoch)
+//!   allocator.become_leader(serving_floor, actual, epoch)
 //!
 //! The `+1` is load-bearing: a prior leader at physical_ms = prior_max could
 //! have served logical = LOGICAL_MAX, so the new leader MUST start strictly

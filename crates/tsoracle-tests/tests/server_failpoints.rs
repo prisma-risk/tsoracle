@@ -87,7 +87,7 @@ async fn fence_recovers_after_transient_load_error() {
 }
 
 /// `server::fence::after_persist_before_publish` fires after
-/// `persist_high_water` returns, before `try_on_leadership_gained` and
+/// `persist_high_water` returns, before `become_leader` and
 /// the `state_tx.send(Serving)`. A `panic` action terminates the
 /// leader-watch task. The durable high-water has already advanced
 /// (verifiable via `driver.current_high_water()`), but serving state
@@ -198,7 +198,7 @@ async fn panic_after_serving_published_poisons_state_when_guard_unobserved() {
     // After the panic, the catch_unwind branch calls step_down, which
     // publishes NotServing. Without the fix, state would stay Serving and
     // GetTs would succeed against the allocator (seeded by
-    // try_on_leadership_gained before the failpoint fires). Polling rather
+    // become_leader before the failpoint fires). Polling rather
     // than observing watch::Receiver transitions because rapid Serving →
     // NotServing transitions can collapse on a slow receiver — see
     // tokio::sync::watch's "only latest value retained" semantics.
