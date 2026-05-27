@@ -1,0 +1,82 @@
+//
+//  ░▀█▀░█▀▀░█▀█░█▀▄░█▀█░█▀▀░█░░░█▀▀
+//  ░░█░░▀▀█░█░█░█▀▄░█▀█░█░░░█░░░█▀▀
+//  ░░▀░░▀▀▀░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀
+//
+//  tsoracle — Distributed Timestamp Oracle
+//  https://www.tsoracle.rs
+//
+//  Copyright (c) 2026 Prisma Risk
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//      https://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
+//
+
+//! Typed metric facade for `tsoracle-server`.
+//!
+//! `Reporter` is the single place metric-name string literals live in this
+//! crate. Each typed counter/histogram field forwards an increment/record to
+//! both the global `metrics::` recorder (Prometheus path, unchanged) and a
+//! local `Arc<AtomicU64>` that the heartbeat task can read without depending
+//! on any installed recorder.
+
+// Items are scaffolded here and wired up in later tasks (T3–T11).
+#![allow(dead_code)]
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub struct ReporterCounter {
+    name: &'static str,
+    local: Arc<AtomicU64>,
+}
+
+impl ReporterCounter {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            local: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn increment(&self, n: u64) {
+        #[cfg(feature = "metrics")]
+        metrics::counter!(self.name).increment(n);
+        self.local.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> u64 {
+        self.local.load(Ordering::Relaxed)
+    }
+}
+
+pub(crate) fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counter_increment_bumps_local_snapshot() {
+        let c = ReporterCounter::new("tsoracle.test.local");
+        assert_eq!(c.snapshot(), 0);
+        c.increment(1);
+        c.increment(4);
+        assert_eq!(c.snapshot(), 5);
+    }
+}

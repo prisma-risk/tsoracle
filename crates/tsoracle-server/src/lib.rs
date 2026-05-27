@@ -31,6 +31,7 @@ mod clock;
 mod fence;
 mod leader_hint;
 mod persist_disposition;
+pub(crate) mod reporter;
 mod server;
 mod service;
 mod serving_core;
