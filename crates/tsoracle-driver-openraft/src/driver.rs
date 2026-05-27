@@ -174,8 +174,7 @@ where
             epoch: Epoch(u128::from(term)),
         },
         LeadershipState::Follower { term, leader } => LeaderState::Follower {
-            leader_endpoint: leader
-                .and_then(|(_id, node)| node.service_endpoint().map(str::to_owned)),
+            leader_endpoint: leader.and_then(|(_id, node)| node.service_endpoint()),
             leader_epoch: Some(Epoch(u128::from(term))),
         },
         LeadershipState::Candidate { .. }
@@ -189,7 +188,7 @@ mod tests {
     use super::map_leader_state;
     use crate::type_config::TypeConfig;
     use tsoracle_consensus::LeaderState;
-    use tsoracle_core::Epoch;
+    use tsoracle_core::{Epoch, PeerEndpoint};
     use tsoracle_openraft_toolkit::LeadershipState;
 
     #[test]
@@ -208,7 +207,7 @@ mod tests {
         assert_eq!(
             state,
             LeaderState::Follower {
-                leader_endpoint: Some("node-2:50051".into()),
+                leader_endpoint: Some(PeerEndpoint::try_from("node-2:50051").unwrap()),
                 leader_epoch: Some(Epoch(4)),
             }
         );

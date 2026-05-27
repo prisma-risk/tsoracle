@@ -29,7 +29,7 @@ use tokio::sync::watch;
 use tonic::service::Routes;
 use tonic::transport::Server as TonicServer;
 use tsoracle_consensus::ConsensusDriver;
-use tsoracle_core::{Clock, Epoch, SystemClock};
+use tsoracle_core::{Clock, Epoch, PeerEndpoint, SystemClock};
 #[cfg(any(test, feature = "test-fakes"))]
 use tsoracle_core::{CoreError, WindowGrant};
 use tsoracle_proto::v1::tso_service_server::TsoServiceServer;
@@ -79,7 +79,7 @@ pub enum ServerError {
 #[derive(Clone, Debug)]
 pub enum ServingState {
     NotServing {
-        leader_endpoint: Option<String>,
+        leader_endpoint: Option<PeerEndpoint>,
         leader_epoch: Option<Epoch>,
     },
     Serving,
@@ -874,16 +874,15 @@ mod tests {
             .build()
             .expect("build must succeed");
 
-        server
-            .core
-            .step_down(Some("http://new-leader:9000".into()), Some(Epoch(7)));
+        let hint = PeerEndpoint::try_from("new-leader:9000").unwrap();
+        server.core.step_down(Some(hint.clone()), Some(Epoch(7)));
 
         match server.core.serving_state() {
             ServingState::NotServing {
                 leader_endpoint,
                 leader_epoch,
             } => {
-                assert_eq!(leader_endpoint.as_deref(), Some("http://new-leader:9000"));
+                assert_eq!(leader_endpoint, Some(hint));
                 assert_eq!(leader_epoch, Some(Epoch(7)));
             }
             ServingState::Serving => panic!("expected NotServing after step_down"),

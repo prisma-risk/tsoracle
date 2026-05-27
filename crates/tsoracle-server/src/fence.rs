@@ -77,27 +77,17 @@ fn warn_on_stuck_fence(transient_retries: u32) -> bool {
             == 0
 }
 
-/// Whether `endpoint` is a scheme-less `host:port` — the shape
-/// `LeaderState::Follower::leader_endpoint` is contracted to carry.
+/// Debug-only guard that a driver-surfaced [`LeaderState`] honors the
+/// `LeaderState::Follower` epoch-monotonicity contract (see
+/// [`tsoracle_consensus::LeaderState`]): `leader_epoch` is non-decreasing
+/// across emissions. The client's monotone-forward gate
+/// (`compare_and_set_leader`) drops a hint that cannot outrank the cached
+/// leader, so a regressing epoch makes clients drop valid redirects.
 ///
-/// Match shape mirrors the client's `normalize_uri` / `rejects_plaintext_hint`:
-/// ASCII-lowercase `http://` and `https://` prefixes. An uppercase variant
-/// would already fail to parse downstream, so checking the lowercase form is
-/// sufficient.
-fn endpoint_is_scheme_less(endpoint: &str) -> bool {
-    !endpoint.starts_with("http://") && !endpoint.starts_with("https://")
-}
-
-/// Debug-only guard that a driver-surfaced [`LeaderState`] honors the two
-/// `LeaderState::Follower` contracts (see [`tsoracle_consensus::LeaderState`]):
-///
-///   * `leader_endpoint` is a scheme-less `host:port`. A scheme-bearing hint is
-///     silently dropped by the client's `rejects_plaintext_hint` under TLS, so
-///     a contract-violating driver makes that leader unreachable via redirect.
-///   * `leader_epoch` is non-decreasing across emissions. The client's
-///     monotone-forward gate (`compare_and_set_leader`) drops a hint that
-///     cannot outrank the cached leader, so a regressing epoch makes clients
-///     drop valid redirects.
+/// The companion scheme-less `leader_endpoint` contract is enforced at the
+/// type level by [`tsoracle_core::PeerEndpoint`]: a scheme-bearing string
+/// cannot inhabit the field, so the historical runtime check folded into the
+/// type's constructor.
 ///
 /// Compiled out in release builds (`debug_assert!`), so it costs nothing in
 /// production and fires only in a driver author's own test suite — turning a
@@ -106,18 +96,6 @@ fn endpoint_is_scheme_less(endpoint: &str) -> bool {
 /// (epoch-less paxos hints, `Unknown`) are a documented valid case and advance
 /// nothing.
 fn debug_assert_leader_state_contract(evt: &LeaderState, last_epoch: &mut Option<Epoch>) {
-    if let LeaderState::Follower {
-        leader_endpoint: Some(endpoint),
-        ..
-    } = evt
-    {
-        debug_assert!(
-            endpoint_is_scheme_less(endpoint),
-            "consensus driver surfaced a scheme-bearing leader_endpoint ({endpoint:?}); \
-             LeaderState::Follower::leader_endpoint must be a scheme-less host:port — \
-             the TLS client silently drops http(s):// hints to avoid transport downgrade",
-        );
-    }
     let epoch = match evt {
         LeaderState::Leader { epoch } => Some(*epoch),
         LeaderState::Follower { leader_epoch, .. } => *leader_epoch,
@@ -427,20 +405,7 @@ pub(crate) async fn run_leader_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tsoracle_core::Epoch;
-
-    #[test]
-    fn bare_host_port_is_scheme_less() {
-        assert!(endpoint_is_scheme_less("leader:9000"));
-        assert!(endpoint_is_scheme_less("10.9.8.7:50551"));
-        assert!(endpoint_is_scheme_less("node-2"));
-    }
-
-    #[test]
-    fn http_and_https_are_not_scheme_less() {
-        assert!(!endpoint_is_scheme_less("http://leader:9000"));
-        assert!(!endpoint_is_scheme_less("https://leader:9000"));
-    }
+    use tsoracle_core::{Epoch, PeerEndpoint};
 
     #[test]
     fn monotone_sequence_with_bare_endpoints_passes_guard() {
@@ -449,7 +414,7 @@ mod tests {
             LeaderState::Unknown,
             LeaderState::Leader { epoch: Epoch(5) },
             LeaderState::Follower {
-                leader_endpoint: Some("leader:9000".into()),
+                leader_endpoint: Some(PeerEndpoint::try_from("leader:9000").unwrap()),
                 leader_epoch: Some(Epoch(5)),
             },
             LeaderState::Follower {
@@ -465,18 +430,6 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "scheme-less host:port")]
-    fn scheme_bearing_follower_endpoint_trips_guard() {
-        let mut last_epoch = None;
-        let evt = LeaderState::Follower {
-            leader_endpoint: Some("http://leader:9000".into()),
-            leader_epoch: Some(Epoch(1)),
-        };
-        debug_assert_leader_state_contract(&evt, &mut last_epoch);
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
     #[should_panic(expected = "leader_epoch that regressed")]
     fn regressing_epoch_trips_guard() {
         let mut last_epoch = None;
@@ -486,7 +439,7 @@ mod tests {
         );
         debug_assert_leader_state_contract(
             &LeaderState::Follower {
-                leader_endpoint: Some("leader:9000".into()),
+                leader_endpoint: Some(PeerEndpoint::try_from("leader:9000").unwrap()),
                 leader_epoch: Some(Epoch(6)),
             },
             &mut last_epoch,

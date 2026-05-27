@@ -22,7 +22,7 @@
 //
 
 use std::{sync::Arc, time::Duration};
-use tsoracle_core::Epoch;
+use tsoracle_core::{Epoch, PeerEndpoint};
 use tsoracle_proto::v1::{GetTsRequest, tso_service_client::TsoServiceClient};
 use tsoracle_server::test_fakes::InMemoryDriver;
 use tsoracle_server::test_support::{
@@ -79,7 +79,7 @@ async fn returns_not_leader_with_hint() {
 
     let mut booted = boot_server(server).await;
 
-    driver.become_follower(Some("10.9.8.7:50551".into()));
+    driver.become_follower(Some(PeerEndpoint::try_from("10.9.8.7:50551").unwrap()));
     // Wait for the follower hint to actually be visible in state — distinct
     // from the initial NotServing { leader_endpoint: None }.
     wait_until(&mut booted.state_rx, |s| {

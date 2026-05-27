@@ -43,7 +43,7 @@ use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, SnapshotPolicy, StandaloneHost};
-use tsoracle_paxos_toolkit::lifecycle::{MessageSink, TsoPeer};
+use tsoracle_paxos_toolkit::lifecycle::{MessageSink, PeerEndpoint, TsoPeer};
 use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
 use tsoracle_paxos_toolkit::test_fakes::mem_storage::MemStorage;
 use tsoracle_server::Server as TsoServer;
@@ -126,11 +126,14 @@ async fn main() -> anyhow::Result<()> {
         let toolkit_peers: Vec<TsoPeer> = tso_endpoints
             .iter()
             .filter(|(peer_id, _)| *peer_id != id)
-            .map(|(peer_id, addr)| TsoPeer {
-                node_id: *peer_id,
-                endpoint: format!("http://{addr}"),
+            .map(|(peer_id, addr)| -> anyhow::Result<TsoPeer> {
+                Ok(TsoPeer {
+                    node_id: *peer_id,
+                    endpoint: PeerEndpoint::try_from(addr.to_string())
+                        .context("invalid peer endpoint")?,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         let mut host = StandaloneHost::builder()
             .omnipaxos(omnipaxos)
             .my_node_id(id)

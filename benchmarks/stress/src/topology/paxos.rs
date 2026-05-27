@@ -55,7 +55,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep};
 use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, SnapshotPolicy, StandaloneHost};
-use tsoracle_paxos_toolkit::lifecycle::{MessageSink, TsoPeer};
+use tsoracle_paxos_toolkit::lifecycle::{MessageSink, PeerEndpoint, TsoPeer};
 use tsoracle_paxos_toolkit::storage::RocksdbStorage;
 use tsoracle_paxos_toolkit::test_fakes::mem_network::MemNetwork;
 use tsoracle_paxos_toolkit::test_fakes::partition::PartitionController;
@@ -188,13 +188,15 @@ fn paxos_config(node_id: u64, cluster: &ClusterConfig) -> OmniPaxosConfig {
 /// ever used as a leader hint, never dialed. See
 /// `build_toolkit_peers_yields_scheme_less_endpoints`.
 #[allow(dead_code)]
+#[allow(clippy::expect_used)] // SocketAddr's Display is provably scheme-less host:port.
 fn build_toolkit_peers(tso_endpoints: &[(u64, SocketAddr)], my_id: u64) -> Vec<TsoPeer> {
     tso_endpoints
         .iter()
         .filter(|(peer_id, _)| *peer_id != my_id)
         .map(|(peer_id, peer_addr)| TsoPeer {
             node_id: *peer_id,
-            endpoint: peer_addr.to_string(),
+            endpoint: PeerEndpoint::try_from(peer_addr.to_string())
+                .expect("SocketAddr's Display is scheme-less host:port"),
         })
         .collect()
 }
@@ -545,13 +547,11 @@ mod tests {
     use super::*;
     use std::time::Instant as StdInstant;
 
-    // The follower-redirect contract this guards is enforced at runtime only by
-    // a `debug_assert` in the server's `run_leader_watch`, which fires solely
-    // when a follower has observed a *stable* leader long enough to surface its
-    // hint. On a fast host the chaos tests finish before that happens, so the
-    // guard's coverage is timing-dependent (it slipped through once, surfacing
-    // as a slow-CI-only flake). This test pins the contract at the construction
-    // site instead — fully deterministic, independent of leader-election timing.
+    // The scheme-less invariant the original form of this test guarded is now
+    // enforced at the type level by `PeerEndpoint::try_from`: a scheme-bearing
+    // endpoint would panic inside `build_toolkit_peers`'s `.expect(...)`
+    // before this assertion runs. The test is kept as a smoke-check that
+    // construction succeeds and the self-filter still holds.
     #[test]
     fn build_toolkit_peers_yields_scheme_less_endpoints() {
         let tso_endpoints: Vec<(u64, SocketAddr)> = vec![
@@ -567,14 +567,6 @@ mod tests {
             peers.iter().all(|peer| peer.node_id != 2),
             "node 2 must be filtered from its own peer list, got {peers:?}"
         );
-        for peer in &peers {
-            assert!(
-                !peer.endpoint.starts_with("http://") && !peer.endpoint.starts_with("https://"),
-                "peer leader_endpoint must be a scheme-less host:port (a TLS client \
-                 drops http(s):// hints); got {:?}",
-                peer.endpoint
-            );
-        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

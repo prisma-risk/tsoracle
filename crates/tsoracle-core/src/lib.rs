@@ -37,7 +37,7 @@ pub mod docs;
 pub use allocator::{Allocator, CommitOutcome, CoreError, IgnoreReason, WindowGrant};
 pub use clock::{Clock, SystemClock};
 pub use epoch::Epoch;
-pub use peer::TsoPeer;
+pub use peer::{PeerEndpoint, PeerEndpointError, TsoPeer};
 pub use timestamp::{LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp, TimestampError};
 
 #[cfg(any(test, feature = "test-clock"))]

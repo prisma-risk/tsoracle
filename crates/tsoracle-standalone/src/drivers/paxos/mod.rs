@@ -32,7 +32,7 @@ use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tsoracle_consensus::ConsensusDriver;
 use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, SnapshotPolicy, StandaloneHost};
-use tsoracle_paxos_toolkit::lifecycle::TsoPeer;
+use tsoracle_paxos_toolkit::lifecycle::{PeerEndpoint, TsoPeer};
 use tsoracle_paxos_toolkit::storage::RocksdbStorage;
 
 use crate::config::PaxosConfig;
@@ -198,11 +198,15 @@ async fn build_paxos_inner(
         .tso_peers
         .iter()
         .filter(|(id, _)| **id != cfg.node_id)
-        .map(|(id, endpoint)| TsoPeer {
-            node_id: *id,
-            endpoint: endpoint.clone(),
+        .map(|(id, endpoint)| {
+            PeerEndpoint::try_from(endpoint.clone())
+                .map(|endpoint| TsoPeer {
+                    node_id: *id,
+                    endpoint,
+                })
+                .map_err(|e| StandaloneError::Config(format!("peer {id}: {e}")))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let mut host = StandaloneHost::builder()
         .omnipaxos(omnipaxos)
         .my_node_id(cfg.node_id)

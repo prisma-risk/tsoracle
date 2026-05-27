@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Notify, watch};
 use tokio_stream::wrappers::WatchStream;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
-use tsoracle_core::Epoch;
+use tsoracle_core::{Epoch, PeerEndpoint};
 
 #[derive(Clone)]
 pub struct InMemoryDriver {
@@ -61,7 +61,7 @@ impl InMemoryDriver {
         let _ = self.tx.send(LeaderState::Leader { epoch });
     }
 
-    pub fn become_follower(&self, hint: Option<String>) {
+    pub fn become_follower(&self, hint: Option<PeerEndpoint>) {
         let _ = self.tx.send(LeaderState::Follower {
             leader_endpoint: hint,
             leader_epoch: None,
@@ -70,7 +70,7 @@ impl InMemoryDriver {
 
     /// Emit a `Follower` transition carrying both the leader endpoint hint and
     /// the leader's epoch, so tests can exercise epoch propagation.
-    pub fn become_follower_with_epoch(&self, hint: Option<String>, epoch: Option<Epoch>) {
+    pub fn become_follower_with_epoch(&self, hint: Option<PeerEndpoint>, epoch: Option<Epoch>) {
         let _ = self.tx.send(LeaderState::Follower {
             leader_endpoint: hint,
             leader_epoch: epoch,
@@ -280,7 +280,7 @@ impl FaultyDriver {
         self.inner.become_leader(epoch);
     }
 
-    pub fn become_follower(&self, hint: Option<String>) {
+    pub fn become_follower(&self, hint: Option<PeerEndpoint>) {
         self.inner.become_follower(hint);
     }
 

@@ -24,7 +24,7 @@
 //! Maps OmniPaxos leadership observations to `tsoracle_consensus::LeaderState`.
 
 use tsoracle_consensus::LeaderState;
-use tsoracle_core::{Epoch, TsoPeer};
+use tsoracle_core::{Epoch, PeerEndpoint, TsoPeer};
 
 /// Internal leadership observation, mappable to
 /// [`tsoracle_consensus::LeaderState`] via [`Self::to_consensus`].
@@ -38,7 +38,9 @@ pub enum LeadershipState {
     Leader { epoch: Epoch },
     /// This node is a follower; `leader_endpoint` is the elected leader's
     /// advertised tsoracle service address if known.
-    Follower { leader_endpoint: Option<String> },
+    Follower {
+        leader_endpoint: Option<PeerEndpoint>,
+    },
     /// No leader is currently observed (election in progress, partition,
     /// or local-leader observation without an accompanying epoch).
     Unknown,
@@ -123,13 +125,13 @@ mod tests {
     fn leader_is_other_emits_follower_with_endpoint() {
         let peers = vec![TsoPeer {
             node_id: 2,
-            endpoint: "node-2:50051".into(),
+            endpoint: PeerEndpoint::try_from("node-2:50051").unwrap(),
         }];
         let state = LeadershipState::from_omnipaxos(1, Some(2), Some(Epoch(7)), &peers);
         assert_eq!(
             state.to_consensus(),
             LeaderState::Follower {
-                leader_endpoint: Some("node-2:50051".into()),
+                leader_endpoint: Some(PeerEndpoint::try_from("node-2:50051").unwrap()),
                 leader_epoch: None,
             },
         );

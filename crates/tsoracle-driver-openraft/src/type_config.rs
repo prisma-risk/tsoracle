@@ -30,6 +30,7 @@
 use std::io::Cursor;
 
 use serde::{Deserialize, Serialize};
+use tsoracle_core::PeerEndpoint;
 use tsoracle_openraft_toolkit::declare_raft_types_ext;
 
 use crate::log_entry::HighWaterCommand;
@@ -58,21 +59,31 @@ pub struct OpenraftPeer {
     pub admin_endpoint: String,
 }
 
-/// Resolves a membership `Node`'s tsoracle client endpoint for `LeaderHint`
-/// follower redirects. Implemented by every `Node` type used with
-/// [`crate::OpenraftDriver`]; return `None` for nodes that do not redirect
-/// tsoracle clients.
+/// Resolves a membership `Node`'s tsoracle endpoints for follower redirects
+/// (`service_endpoint`) and admin-plane requests (`admin_endpoint`).
+/// Implemented by every `Node` type used with [`crate::OpenraftDriver`];
+/// return `None` for nodes that do not expose the corresponding plane.
+///
+/// **Return-type rationale:** these methods *parse* the stored representation
+/// into a typed [`PeerEndpoint`] on each call. The underlying field on a
+/// concrete `Node` (e.g. [`OpenraftPeer`]) stays `String` to preserve the
+/// postcard wire format used in openraft membership log entries; the typed
+/// projection lives at the read boundary, identical to how `LeaderHint`'s
+/// wire `String` is parsed by `tsoracle_client::leader_hint`. A malformed
+/// or empty value silently maps to `None` — matching the historical
+/// `is_empty -> None` sentinel — rather than panicking, so a misconfigured
+/// peer never crashes the leader-watch task.
 pub trait ServiceEndpoint {
-    fn service_endpoint(&self) -> Option<&str>;
+    fn service_endpoint(&self) -> Option<PeerEndpoint>;
+    fn admin_endpoint(&self) -> Option<PeerEndpoint>;
 }
 
 impl ServiceEndpoint for OpenraftPeer {
-    fn service_endpoint(&self) -> Option<&str> {
-        if self.service_endpoint.is_empty() {
-            None
-        } else {
-            Some(&self.service_endpoint)
-        }
+    fn service_endpoint(&self) -> Option<PeerEndpoint> {
+        PeerEndpoint::try_from(self.service_endpoint.clone()).ok()
+    }
+    fn admin_endpoint(&self) -> Option<PeerEndpoint> {
+        PeerEndpoint::try_from(self.admin_endpoint.clone()).ok()
     }
 }
 
@@ -299,10 +310,15 @@ mod tests {
         use crate::type_config::ServiceEndpoint;
         let with = OpenraftPeer {
             addr: "node-1:50052".to_string(),
-            service_endpoint: "http://node-1:50051".to_string(),
+            service_endpoint: "node-1:50051".to_string(),
             admin_endpoint: String::new(),
         };
-        assert_eq!(with.service_endpoint(), Some("http://node-1:50051"));
+        assert_eq!(
+            with.service_endpoint(),
+            Some(PeerEndpoint::try_from("node-1:50051").unwrap()),
+        );
+        // An empty admin_endpoint is mapped to None.
+        assert_eq!(with.admin_endpoint(), None);
 
         let without = OpenraftPeer {
             addr: "node-1:50052".to_string(),
@@ -310,5 +326,21 @@ mod tests {
             admin_endpoint: String::new(),
         };
         assert_eq!(without.service_endpoint(), None);
+        assert_eq!(without.admin_endpoint(), None);
+    }
+
+    #[test]
+    fn service_endpoint_silently_drops_malformed() {
+        // A persisted-then-recovered scheme-bearing endpoint (e.g. carried
+        // forward from a pre-newtype configuration) must not crash the
+        // leader-watch task; it is treated as "no redirect".
+        use crate::type_config::ServiceEndpoint;
+        let bad = OpenraftPeer {
+            addr: "node-1:50052".to_string(),
+            service_endpoint: "http://node-1:50051".to_string(),
+            admin_endpoint: "https://node-1:50053".to_string(),
+        };
+        assert_eq!(bad.service_endpoint(), None);
+        assert_eq!(bad.admin_endpoint(), None);
     }
 }

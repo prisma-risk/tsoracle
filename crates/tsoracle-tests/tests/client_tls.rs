@@ -31,7 +31,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
-use tsoracle_core::Epoch;
+use tsoracle_core::{Epoch, PeerEndpoint};
 use tsoracle_server::Server;
 use tsoracle_server::test_fakes::InMemoryDriver;
 use tsoracle_server::test_support::{
@@ -307,7 +307,9 @@ async fn leader_hint_redirect_under_tls() {
 
     let leader_endpoint = format!("127.0.0.1:{}", booted_leader.addr.port());
     let follower_driver = Arc::new(InMemoryDriver::new());
-    follower_driver.become_follower(Some(leader_endpoint.clone()));
+    follower_driver.become_follower(Some(
+        PeerEndpoint::try_from(leader_endpoint.clone()).unwrap(),
+    ));
     let follower = Server::builder()
         .consensus_driver(follower_driver.clone())
         .tls_config(server_tls_config(&bundle))

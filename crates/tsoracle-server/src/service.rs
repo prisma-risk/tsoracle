@@ -27,7 +27,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 #[cfg(feature = "metrics")]
 use tsoracle_core::IgnoreReason;
-use tsoracle_core::{CommitOutcome, CoreError, Epoch};
+use tsoracle_core::{CommitOutcome, CoreError, Epoch, PeerEndpoint};
 use tsoracle_proto::v1::{
     EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetTsRequest, GetTsResponse,
     LeaderHint, tso_service_server::TsoService,
@@ -60,7 +60,11 @@ fn leader_hint_from(server: &Server) -> LeaderHint {
         ServingState::Serving => (None, None),
     };
     LeaderHint {
-        leader_endpoint,
+        // Wire-format `LeaderHint.leader_endpoint` stays `Option<String>`
+        // (prost-generated) — the boundary out of the typed `PeerEndpoint` is
+        // here; the boundary back in is in `tsoracle_client::leader_hint`
+        // where every wire-supplied hint runs through `PeerEndpoint::try_from`.
+        leader_endpoint: leader_endpoint.map(PeerEndpoint::into_inner),
         leader_epoch: wire_epoch(leader_epoch),
     }
 }
@@ -402,14 +406,12 @@ mod tests {
             .clock(std::sync::Arc::new(tsoracle_core::SystemClock))
             .build()
             .unwrap();
-        server
-            .core
-            .publish_not_serving(Some("http://other-node:9000".into()), Some(Epoch(7)));
-        let hint = leader_hint_from(&server);
-        assert_eq!(
-            hint.leader_endpoint.as_deref(),
-            Some("http://other-node:9000")
+        server.core.publish_not_serving(
+            Some(PeerEndpoint::try_from("other-node:9000").unwrap()),
+            Some(Epoch(7)),
         );
+        let hint = leader_hint_from(&server);
+        assert_eq!(hint.leader_endpoint.as_deref(), Some("other-node:9000"));
         let (hi, lo) = Epoch(7).to_wire();
         assert_eq!(hint.leader_epoch, Some(EpochWire { hi, lo }));
 
