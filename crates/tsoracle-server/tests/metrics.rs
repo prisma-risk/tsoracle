@@ -36,7 +36,7 @@ use metrics_util::{
     debugging::{DebugValue, DebuggingRecorder, Snapshotter},
 };
 use tokio::time::sleep;
-use tsoracle_core::Epoch;
+use tsoracle_core::{Epoch, PeerEndpoint};
 use tsoracle_proto::v1::{GetTsRequest, tso_service_client::TsoServiceClient};
 use tsoracle_server::test_fakes::{FaultKind, FaultyDriver};
 use tsoracle_server::test_support::{
@@ -135,7 +135,7 @@ async fn emits_documented_signals_end_to_end() {
 
     // Drop leadership, then issue one more GetTs to drive a NOT_LEADER
     // rejection through `not_leader_status`.
-    driver.become_follower(Some("10.9.8.7:50551".into()));
+    driver.become_follower(Some(PeerEndpoint::try_from("10.9.8.7:50551").unwrap()));
     wait_until(&mut booted.state_rx, |s| {
         matches!(
             s,

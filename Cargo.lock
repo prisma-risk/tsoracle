@@ -3299,6 +3299,7 @@ dependencies = [
  "husky-rs",
  "proptest",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

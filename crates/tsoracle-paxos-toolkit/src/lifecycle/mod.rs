@@ -30,7 +30,7 @@ pub use events::{
     LeaderEventSender, LeaderEventStream, LeaderEventSubscriber, SendError, leader_event_channel,
 };
 pub use state::LeadershipState;
-pub use tsoracle_core::TsoPeer;
+pub use tsoracle_core::{PeerEndpoint, PeerEndpointError, TsoPeer};
 
 use std::sync::Arc;
 use std::time::Duration;

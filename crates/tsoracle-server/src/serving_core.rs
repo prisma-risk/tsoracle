@@ -52,7 +52,7 @@ use tokio::sync::{
     Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
     watch,
 };
-use tsoracle_core::{Allocator, CommitOutcome, CoreError, Epoch, WindowGrant};
+use tsoracle_core::{Allocator, CommitOutcome, CoreError, Epoch, PeerEndpoint, WindowGrant};
 
 use crate::server::ServingState;
 
@@ -136,7 +136,7 @@ impl ServingCore {
 
     pub(crate) fn publish_not_serving(
         &self,
-        leader_endpoint: Option<String>,
+        leader_endpoint: Option<PeerEndpoint>,
         leader_epoch: Option<Epoch>,
     ) {
         self.state_tx.send_replace(ServingState::NotServing {
@@ -153,7 +153,11 @@ impl ServingCore {
     /// in-flight extension holding the read lock and awaiting `persist_high_water`
     /// would deadlock against a write here. Those in-flights complete cleanly or
     /// fail and reach this method themselves — it is idempotent.
-    pub(crate) fn step_down(&self, leader_endpoint: Option<String>, leader_epoch: Option<Epoch>) {
+    pub(crate) fn step_down(
+        &self,
+        leader_endpoint: Option<PeerEndpoint>,
+        leader_epoch: Option<Epoch>,
+    ) {
         self.allocator.lock().on_leadership_lost();
         self.state_tx.send_replace(ServingState::NotServing {
             leader_endpoint,
@@ -278,14 +282,15 @@ mod tests {
         let core = ServingCore::new(Duration::from_secs(3));
         assert_eq!(core.state_tx.receiver_count(), 0);
 
-        core.step_down(Some("http://new-leader:9000".into()), Some(Epoch(7)));
+        let hint = PeerEndpoint::try_from("new-leader:9000").unwrap();
+        core.step_down(Some(hint.clone()), Some(Epoch(7)));
 
         match core.serving_state() {
             ServingState::NotServing {
                 leader_endpoint,
                 leader_epoch,
             } => {
-                assert_eq!(leader_endpoint.as_deref(), Some("http://new-leader:9000"));
+                assert_eq!(leader_endpoint, Some(hint));
                 assert_eq!(leader_epoch, Some(Epoch(7)));
             }
             ServingState::Serving => panic!("expected NotServing after step_down"),
@@ -367,7 +372,10 @@ mod tests {
         );
         assert!(matches!(core.serving_state(), ServingState::Serving));
 
-        core.step_down(Some("http://leader:9000".into()), Some(Epoch(1)));
+        core.step_down(
+            Some(PeerEndpoint::try_from("leader:9000").unwrap()),
+            Some(Epoch(1)),
+        );
         assert!(!core.is_serving(), "step_down must flip is_serving false");
     }
 

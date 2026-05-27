@@ -90,9 +90,12 @@ pub struct HostPeer {
 }
 
 impl tsoracle_driver_openraft::ServiceEndpoint for HostPeer {
-    // The piggyback KV demo never redirects tsoracle clients, so it carries no
-    // client endpoint.
-    fn service_endpoint(&self) -> Option<&str> {
+    // The piggyback KV demo never redirects tsoracle clients, so it carries
+    // no client endpoint and no admin endpoint.
+    fn service_endpoint(&self) -> Option<tsoracle_core::PeerEndpoint> {
+        None
+    }
+    fn admin_endpoint(&self) -> Option<tsoracle_core::PeerEndpoint> {
         None
     }
 }

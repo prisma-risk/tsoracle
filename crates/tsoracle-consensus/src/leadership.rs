@@ -23,7 +23,7 @@
 
 //! Leadership state surfaced to the server's leader-watch task.
 
-use tsoracle_core::Epoch;
+use tsoracle_core::{Epoch, PeerEndpoint};
 
 /// Leadership state surfaced to the server's leader-watch task.
 ///
@@ -43,15 +43,15 @@ pub enum LeaderState {
     /// clients to reject a stale follower's lower-epoch redirect; `None` when
     /// the driver does not surface it.
     ///
-    /// **Contract — endpoint shape:** `leader_endpoint`, when `Some`, MUST be a
-    /// scheme-less `host:port` (e.g. `leader:9000`, `10.0.0.7:50551`), never a
-    /// `http://...` or `https://...` URL. The follower-redirect path surfaces
-    /// this string to clients as a leader hint, and a TLS-configured client
-    /// *silently drops* any `http://` hint (`rejects_plaintext_hint`) to refuse
-    /// a transport downgrade — so a scheme-bearing endpoint makes this leader
-    /// unreachable via redirect, with only a log line as evidence. The shipped
-    /// drivers satisfy this by reading the operator-configured membership
-    /// service endpoint, which is itself contracted scheme-less.
+    /// **Contract — endpoint shape:** `leader_endpoint`, when `Some`, is a
+    /// `tsoracle_core::PeerEndpoint` — a scheme-less `host:port` enforced at
+    /// the type level (the value cannot exist with a `http://` / `https://`
+    /// prefix, since [`PeerEndpoint::try_from`] rejects scheme-bearing input).
+    /// The newtype subsumes the historical `endpoint_is_scheme_less` runtime
+    /// guard that wrapped this field — a TLS-configured client silently drops
+    /// any scheme-bearing hint (`rejects_plaintext_hint`) to refuse a transport
+    /// downgrade, so a contract-violating endpoint would make this leader
+    /// unreachable via redirect with only a log line as evidence.
     ///
     /// **Contract — epoch monotonicity:** `leader_epoch`, across successive
     /// emissions from one node, MUST be non-decreasing. Clients gate redirects
@@ -61,7 +61,7 @@ pub enum LeaderState {
     /// monotonic per node, so the shipped drivers satisfy this by construction;
     /// `None` (an epoch-less hint) is always permitted and gates nothing.
     Follower {
-        leader_endpoint: Option<String>,
+        leader_endpoint: Option<PeerEndpoint>,
         leader_epoch: Option<Epoch>,
     },
     /// No leader is currently known (election in progress, partition, etc.).
@@ -82,7 +82,7 @@ mod tests {
         assert_eq!(l1, LeaderState::Leader { epoch: Epoch(1) });
 
         let f_known = LeaderState::Follower {
-            leader_endpoint: Some("node-2".into()),
+            leader_endpoint: Some(PeerEndpoint::try_from("node-2:50051").unwrap()),
             leader_epoch: Some(Epoch(4)),
         };
         let f_unknown = LeaderState::Follower {
@@ -96,7 +96,7 @@ mod tests {
         // Epoch participates in equality so the watch-debounce re-emits on a
         // follower-side epoch change, not just an endpoint change.
         let f_epoch_5 = LeaderState::Follower {
-            leader_endpoint: Some("node-2".into()),
+            leader_endpoint: Some(PeerEndpoint::try_from("node-2:50051").unwrap()),
             leader_epoch: Some(Epoch(5)),
         };
         assert_ne!(f_known, f_epoch_5, "epoch must discriminate followers");

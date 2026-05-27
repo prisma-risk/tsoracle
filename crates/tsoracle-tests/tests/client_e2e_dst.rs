@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tsoracle_client::{Client, ClientBuilder, ClientError};
-use tsoracle_core::{Clock, Epoch};
+use tsoracle_core::{Clock, Epoch, PeerEndpoint};
 use tsoracle_server::Server;
 use tsoracle_server::test_fakes::InMemoryDriver;
 use tsoracle_server_testkit::{into_sim_parts, serve, sim_channel};
@@ -140,7 +140,9 @@ fn client_follows_leader_hint_on_first_call() {
                     .build()
                     .unwrap();
                 let parts = into_sim_parts(server)?;
-                driver_a.become_follower(Some(format!("server-b:{PORT}")));
+                driver_a.become_follower(Some(
+                    PeerEndpoint::try_from(format!("server-b:{PORT}")).unwrap(),
+                ));
                 serve(parts.routes, PORT).await?;
                 Ok(())
             }

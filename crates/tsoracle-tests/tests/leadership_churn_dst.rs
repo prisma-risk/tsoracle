@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use futures::Stream;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
-use tsoracle_core::{Epoch, testing::MockClock};
+use tsoracle_core::{Epoch, PeerEndpoint, testing::MockClock};
 use tsoracle_proto::v1::GetTsRequest;
 use tsoracle_server::test_fakes::{FaultKind, FaultyDriver, InMemoryDriver};
 use tsoracle_server::test_support::{wait_until, wait_until_not_serving, wait_until_serving};
@@ -126,7 +126,7 @@ fn fence_observes_follower_transition_during_unbounded_transient_retry() {
         // Follower handler publishes NotServing carrying the hint; the fence's
         // own NotServing uses leader_endpoint: None, so observing Some(hint)
         // proves the event was dispatched rather than spun past.
-        inner_in_host.become_follower(Some("10.1.2.3:50551".into()));
+        inner_in_host.become_follower(Some(PeerEndpoint::try_from("10.1.2.3:50551").unwrap()));
 
         wait_until(&mut parts.state_rx, |s| {
             matches!(
