@@ -62,6 +62,21 @@ impl ReporterCounter {
     }
 }
 
+pub struct ReporterHistogram {
+    name: &'static str,
+}
+
+impl ReporterHistogram {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self { name }
+    }
+
+    pub(crate) fn record(&self, _v: f64) {
+        #[cfg(feature = "metrics")]
+        metrics::histogram!(self.name).record(_v);
+    }
+}
+
 pub(crate) fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -112,6 +127,32 @@ mod tests {
             format!("{value:?}"),
             "Counter(7)",
             "expected the recorder to observe Counter(7), got {value:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "metrics")]
+    fn histogram_record_forwards_to_metrics_recorder() {
+        use metrics::Key;
+        use metrics_util::CompositeKey;
+        use metrics_util::MetricKind;
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            let h = ReporterHistogram::new("tsoracle.test.hist");
+            h.record(1.0);
+            h.record(2.0);
+            h.record(3.0);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let key = CompositeKey::new(MetricKind::Histogram, Key::from_name("tsoracle.test.hist"));
+        assert!(
+            snap.iter().any(|(k, ..)| *k == key),
+            "histogram key not recorded"
         );
     }
 }
