@@ -2,8 +2,8 @@ apiVersion: v2
 name: tsoracle
 description: Distributed timestamp oracle (file / openraft / paxos drivers)
 type: application
-version: 0.2.0
-appVersion: "1.0.0"
+version: 0.1.0
+appVersion: "0.1.0"
 home: https://github.com/prisma-risk/tsoracle
 sources:
   - https://github.com/prisma-risk/tsoracle
