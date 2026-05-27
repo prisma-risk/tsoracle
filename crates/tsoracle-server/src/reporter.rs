@@ -81,4 +81,37 @@ mod tests {
         c.increment(4);
         assert_eq!(c.snapshot(), 5);
     }
+
+    #[test]
+    #[cfg(feature = "metrics")]
+    fn counter_increment_forwards_to_metrics_recorder() {
+        use metrics::Key;
+        use metrics_util::CompositeKey;
+        use metrics_util::MetricKind;
+        use metrics_util::debugging::{DebuggingRecorder, Snapshotter};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter: Snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            let c = ReporterCounter::new("tsoracle.test.forwarded");
+            c.increment(7);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let key = CompositeKey::new(
+            MetricKind::Counter,
+            Key::from_name("tsoracle.test.forwarded"),
+        );
+        let entry = snap
+            .iter()
+            .find(|(k, ..)| *k == key)
+            .expect("counter not recorded by DebuggingRecorder");
+        let (_, _, _, value) = entry;
+        assert_eq!(
+            format!("{value:?}"),
+            "Counter(7)",
+            "expected the recorder to observe Counter(7), got {value:?}"
+        );
+    }
 }
