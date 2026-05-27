@@ -127,7 +127,10 @@ impl TsoService for TsoServiceImpl {
         // is best-effort either way — this mirrors the NotLeader arm below, which
         // also re-reads after `try_grant`.
         if !self.server.core.is_serving() {
-            return Err(not_leader_status(leader_hint_from(&self.server)));
+            return Err(not_leader_status(
+                &self.server.reporter,
+                leader_hint_from(&self.server),
+            ));
         }
 
         // At most two attempts: the first may return WindowExhausted, in which
@@ -172,7 +175,10 @@ impl TsoService for TsoServiceImpl {
                     }));
                 }
                 Err(CoreError::NotLeader) => {
-                    return Err(not_leader_status(leader_hint_from(&self.server)));
+                    return Err(not_leader_status(
+                        &self.server.reporter,
+                        leader_hint_from(&self.server),
+                    ));
                 }
                 Err(CoreError::WindowExhausted) if attempt == 0 => {
                     self.extend_window(now_ms, count).await?;
@@ -246,7 +252,10 @@ impl TsoServiceImpl {
                 // channel knows about), not a bare FAILED_PRECONDITION without
                 // metadata.
                 Err(CoreError::NotLeader) => {
-                    return Err(not_leader_status(leader_hint_from(&self.server)));
+                    return Err(not_leader_status(
+                        &self.server.reporter,
+                        leader_hint_from(&self.server),
+                    ));
                 }
                 Err(other) => return Err(core_status(other)),
             };
@@ -285,7 +294,10 @@ impl TsoServiceImpl {
                 // present for Fenced, absent for NotLeader.
                 PersistDisposition::SteppedDown { fenced_by } => {
                     self.server.core.step_down(None, fenced_by);
-                    return Err(not_leader_status(leader_hint_from(&self.server)));
+                    return Err(not_leader_status(
+                        &self.server.reporter,
+                        leader_hint_from(&self.server),
+                    ));
                 }
                 // Transient driver failure: storage hiccup, peer transport
                 // flap, quorum momentarily lost. Tell the client it MAY retry;

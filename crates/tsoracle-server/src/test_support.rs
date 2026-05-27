@@ -298,10 +298,13 @@ impl TsoService for FixedHintService {
         &self,
         _request: tonic::Request<GetTsRequest>,
     ) -> Result<tonic::Response<GetTsResponse>, tonic::Status> {
-        Err(not_leader_status(LeaderHint {
-            leader_endpoint: Some(self.hint_endpoint.clone()),
-            leader_epoch: None,
-        }))
+        Err(not_leader_status(
+            &crate::reporter::Reporter::for_tests(),
+            LeaderHint {
+                leader_endpoint: Some(self.hint_endpoint.clone()),
+                leader_epoch: None,
+            },
+        ))
     }
 
     async fn get_current_max_safe(
