@@ -4,6 +4,20 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v1.0.0...tsoracle-server-v2.0.0) - 2026-05-27
+
+### Added
+
+- *(server)* periodic heartbeat log + typed Reporter metric facade ([#567](https://github.com/prisma-risk/tsoracle/pull/567))
+
+### Other
+
+- *(core)* [**breaking**] clearer leadership naming + Applied { high_water } ([#566](https://github.com/prisma-risk/tsoracle/pull/566))
+- *(core)* PhysicalMs newtype hoists 46-bit bound to type system ([#562](https://github.com/prisma-risk/tsoracle/pull/562))
+- [**breaking**] relocate Clock to tsoracle-server ([#559](https://github.com/prisma-risk/tsoracle/pull/559))
+- *(core)* PeerEndpoint newtype hoists scheme-less contract to type system ([#560](https://github.com/prisma-risk/tsoracle/pull/560))
+- [**breaking**] relocate Bt to tsoracle-server, prune vestigial features ([#558](https://github.com/prisma-risk/tsoracle/pull/558))
+
 ## [0.2.9](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v0.2.8...tsoracle-server-v0.2.9) - 2026-05-26
 
 ### Added

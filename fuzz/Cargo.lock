@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-consensus"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-core"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -2034,7 +2034,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-file"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "crc32c",
@@ -2051,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-openraft"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-paxos"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -2124,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-paxos-toolkit"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "futures",

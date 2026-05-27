@@ -4,6 +4,22 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v1.0.0...tsoracle-core-v2.0.0) - 2026-05-27
+
+### Fixed
+
+- *(core/allocator)* try_prepare_window_extension +1 overflow guard reported wrong operand ([#565](https://github.com/prisma-risk/tsoracle/pull/565))
+
+### Other
+
+- *(core)* use WindowGrant::new_unchecked in try_grant hot path ([#564](https://github.com/prisma-risk/tsoracle/pull/564))
+- *(core)* [**breaking**] clearer leadership naming + Applied { high_water } ([#566](https://github.com/prisma-risk/tsoracle/pull/566))
+- *(core)* extract advance_cursor helper from try_grant ([#563](https://github.com/prisma-risk/tsoracle/pull/563))
+- *(core)* PhysicalMs newtype hoists 46-bit bound to type system ([#562](https://github.com/prisma-risk/tsoracle/pull/562))
+- [**breaking**] relocate Clock to tsoracle-server ([#559](https://github.com/prisma-risk/tsoracle/pull/559))
+- *(core)* PeerEndpoint newtype hoists scheme-less contract to type system ([#560](https://github.com/prisma-risk/tsoracle/pull/560))
+- [**breaking**] relocate Bt to tsoracle-server, prune vestigial features ([#558](https://github.com/prisma-risk/tsoracle/pull/558))
+
 ## [0.2.5](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v0.2.4...tsoracle-core-v0.2.5) - 2026-05-26
 
 ### Added

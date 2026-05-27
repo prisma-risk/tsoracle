@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.0.0...tsoracle-standalone-v1.1.0) - 2026-05-27
+
+### Added
+
+- peer-listener secure-by-default guard + chart pass-through (closes #481) ([#539](https://github.com/prisma-risk/tsoracle/pull/539))
+
+### Other
+
+- *(core)* PeerEndpoint newtype hoists scheme-less contract to type system ([#560](https://github.com/prisma-risk/tsoracle/pull/560))
+- *(standalone)* eliminate close/rebind port-bind race in openraft_membership tests ([#530](https://github.com/prisma-risk/tsoracle/pull/530))
+
 ## [0.1.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v0.1.2...tsoracle-standalone-v0.1.3) - 2026-05-26
 
 ### Fixed

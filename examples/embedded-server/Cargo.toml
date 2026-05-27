@@ -9,8 +9,8 @@ description            = "tsoracle example: embed FileDriver in your own binary 
 publish                = false
 
 [dependencies]
-tsoracle-server       = { path = "../../crates/tsoracle-server", version = "1.0.0" }
-tsoracle-driver-file = { path = "../../crates/tsoracle-driver-file", version = "1.0.0" }
+tsoracle-server       = { path = "../../crates/tsoracle-server", version = "2.0.0" }
+tsoracle-driver-file = { path = "../../crates/tsoracle-driver-file", version = "1.0.1" }
 tokio                 = { workspace = true, features = ["signal"] }
 tracing               = { workspace = true }
 tracing-subscriber    = { workspace = true }
