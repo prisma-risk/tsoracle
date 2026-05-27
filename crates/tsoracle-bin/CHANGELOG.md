@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v1.0.0...tsoracle-v2.0.0) - 2026-05-27
+
+### Added
+
+- peer-listener secure-by-default guard + chart pass-through (closes #481) ([#539](https://github.com/prisma-risk/tsoracle/pull/539))
+
+### Other
+
+- [**breaking**] relocate Bt to tsoracle-server, prune vestigial features ([#558](https://github.com/prisma-risk/tsoracle/pull/558))
+
 ## [0.1.14](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v0.1.13...tsoracle-v0.1.14) - 2026-05-26
 
 ### Other

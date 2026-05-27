@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle"
-version      = "1.0.0"
+version      = "2.0.0"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -37,7 +37,7 @@ tracing-subscriber    = { workspace = true }
 tonic                 = { workspace = true, features = ["tls-aws-lc"] }
 tsoracle-core         = { path = "../tsoracle-core", version = "1.0.0" }
 tsoracle-server       = { path = "../tsoracle-server", version = "1.0.0" }
-tsoracle-standalone   = { path = "../tsoracle-standalone", version = "1.0.0", default-features = false }
+tsoracle-standalone   = { path = "../tsoracle-standalone", version = "1.1.0", default-features = false }
 
 [dev-dependencies]
 tsoracle-client    = { path = "../tsoracle-client", version = "1.0.0" }
