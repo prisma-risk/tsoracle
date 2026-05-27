@@ -39,9 +39,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tsoracle_client::{Client, ClientBuilder, ClientError};
-use tsoracle_core::{Clock, Epoch};
-use tsoracle_server::Server;
+use tsoracle_core::Epoch;
 use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::{Clock, Server};
 use tsoracle_server_testkit::{into_sim_parts, serve, sim_channel};
 
 const PORT: u16 = 9_999;

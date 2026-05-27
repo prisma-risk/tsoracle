@@ -44,10 +44,10 @@ use std::time::Duration;
 use futures::Stream;
 use futures::future::join_all;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
-use tsoracle_core::{Epoch, testing::MockClock};
+use tsoracle_core::Epoch;
 use tsoracle_proto::v1::GetTsRequest;
 use tsoracle_server::Server;
-use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::test_fakes::{InMemoryDriver, MockClock};
 use tsoracle_server::test_support::wait_until_serving;
 use tsoracle_server_testkit::{client, into_sim_parts, serve};
 

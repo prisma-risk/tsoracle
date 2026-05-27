@@ -29,12 +29,13 @@ use tokio::sync::watch;
 use tonic::service::Routes;
 use tonic::transport::Server as TonicServer;
 use tsoracle_consensus::ConsensusDriver;
-use tsoracle_core::{Clock, Epoch, PeerEndpoint, SystemClock};
+use tsoracle_core::{Epoch, PeerEndpoint};
 #[cfg(any(test, feature = "test-fakes"))]
 use tsoracle_core::{CoreError, WindowGrant};
 use tsoracle_proto::v1::tso_service_server::TsoServiceServer;
 
 use crate::bt::Bt;
+use crate::clock::{Clock, SystemClock};
 use crate::service::TsoServiceImpl;
 use crate::serving_core::ServingCore;
 

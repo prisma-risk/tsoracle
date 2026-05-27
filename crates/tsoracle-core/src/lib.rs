@@ -27,7 +27,6 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod allocator;
-mod clock;
 mod epoch;
 mod peer;
 mod timestamp;
@@ -35,10 +34,6 @@ mod timestamp;
 pub mod docs;
 
 pub use allocator::{Allocator, CommitOutcome, CoreError, IgnoreReason, WindowGrant};
-pub use clock::{Clock, SystemClock};
 pub use epoch::Epoch;
 pub use peer::{PeerEndpoint, PeerEndpointError, TsoPeer};
 pub use timestamp::{LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp, TimestampError};
-
-#[cfg(any(test, feature = "test-clock"))]
-pub use clock::testing;

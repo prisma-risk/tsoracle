@@ -24,10 +24,10 @@
 use std::{sync::Arc, time::Duration};
 use tokio::time::timeout;
 use tsoracle_consensus::ConsensusDriver;
-use tsoracle_core::{Epoch, PeerEndpoint, testing::MockClock};
+use tsoracle_core::{Epoch, PeerEndpoint};
 use tsoracle_server::{
     Server, ServerError, ServingState,
-    test_fakes::{FaultKind, FaultyDriver, InMemoryDriver},
+    test_fakes::{FaultKind, FaultyDriver, InMemoryDriver, MockClock},
 };
 
 /// Drive a leader transition to completion and return when `state_rx` reports

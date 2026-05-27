@@ -38,9 +38,9 @@ use futures::Stream;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
-use tsoracle_core::{Epoch, SystemClock};
+use tsoracle_core::Epoch;
 use tsoracle_server::{
-    Server, ServerError,
+    Server, ServerError, SystemClock,
     test_fakes::{InMemoryDriver, StallableDriver},
 };
 

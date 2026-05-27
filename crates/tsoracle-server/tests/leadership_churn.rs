@@ -42,9 +42,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
-use tsoracle_core::{Epoch, testing::MockClock};
+use tsoracle_core::Epoch;
 use tsoracle_proto::v1::{GetTsRequest, tso_service_client::TsoServiceClient};
-use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::test_fakes::{InMemoryDriver, MockClock};
 use tsoracle_server::test_support::{
     BootedServer, boot_server, wait_for_grpc_handshake, wait_until_not_serving, wait_until_serving,
 };

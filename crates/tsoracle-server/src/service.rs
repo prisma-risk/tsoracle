@@ -403,7 +403,7 @@ mod tests {
     fn leader_hint_from_returns_endpoint_and_epoch_when_not_serving() {
         let server = Server::builder()
             .consensus_driver(std::sync::Arc::new(crate::test_fakes::InMemoryDriver::new()))
-            .clock(std::sync::Arc::new(tsoracle_core::SystemClock))
+            .clock(std::sync::Arc::new(crate::SystemClock))
             .build()
             .unwrap();
         server.core.publish_not_serving(
