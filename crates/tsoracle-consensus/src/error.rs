@@ -31,12 +31,13 @@ use tsoracle_core::Epoch;
 /// `TransientDriver` or `PermanentDriver`. The server uses that classification
 /// directly to pick a gRPC status code:
 ///
-/// | Variant            | gRPC code            | Client expectation         |
-/// |--------------------|----------------------|----------------------------|
-/// | `NotLeader`        | `FAILED_PRECONDITION` + `LeaderHint` | Retry against the new leader |
-/// | `Fenced`           | `FAILED_PRECONDITION` + `LeaderHint` | Retry against the new leader |
-/// | `TransientDriver`  | `UNAVAILABLE`        | Safe to retry              |
-/// | `PermanentDriver`  | `INTERNAL`           | Do NOT silently retry      |
+/// | Variant              | gRPC code            | Client expectation         |
+/// |----------------------|----------------------|----------------------------|
+/// | `NotLeader`          | `FAILED_PRECONDITION` + `LeaderHint` | Retry against the new leader |
+/// | `Fenced`             | `FAILED_PRECONDITION` + `LeaderHint` | Retry against the new leader |
+/// | `TransientDriver`    | `UNAVAILABLE`        | Safe to retry              |
+/// | `PermanentDriver`    | `INTERNAL`           | Do NOT silently retry      |
+/// | `AdvanceOutOfRange`  | `INTERNAL`           | Do NOT silently retry      |
 #[derive(Debug, thiserror::Error)]
 pub enum ConsensusError {
     #[error("not leader (current epoch: {observed:?})")]
@@ -53,6 +54,16 @@ pub enum ConsensusError {
     /// storage device, bad driver implementation, invariant violation.
     #[error("permanent driver error: {0}")]
     PermanentDriver(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// A high-water advance whose `physical_ms` value exceeds the 46-bit
+    /// timestamp layout's cap. Carries the offending value structurally so
+    /// the server can format and route it without downcasting through
+    /// `Box<dyn Error>`. Semantically permanent (a saturated or misconfigured
+    /// clock), so the server surfaces it as `INTERNAL` rather than retrying.
+    /// See [`reject_out_of_range_advance`] for the propose-time guard.
+    ///
+    /// [`reject_out_of_range_advance`]: crate::reject_out_of_range_advance
+    #[error("high-water advance {0} exceeds the 46-bit physical_ms maximum")]
+    AdvanceOutOfRange(u64),
 }
 
 #[cfg(test)]
@@ -82,5 +93,11 @@ mod tests {
         let permanent = ConsensusError::PermanentDriver(Box::new(std::io::Error::other("corrupt")));
         assert!(permanent.to_string().contains("permanent"));
         assert!(permanent.to_string().contains("corrupt"));
+
+        let out_of_range = ConsensusError::AdvanceOutOfRange(tsoracle_core::PHYSICAL_MS_MAX + 1);
+        let oor_text = out_of_range.to_string();
+        assert!(oor_text.contains("high-water advance"));
+        assert!(oor_text.contains("46-bit"));
+        assert!(oor_text.contains(&(tsoracle_core::PHYSICAL_MS_MAX + 1).to_string()));
     }
 }

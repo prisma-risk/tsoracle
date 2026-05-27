@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+use tsoracle_consensus::ConsensusError;
 use tsoracle_core::{CommitOutcome, CoreError, Epoch, PeerEndpoint};
 use tsoracle_proto::v1::{
     EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetTsRequest, GetTsResponse,
@@ -311,6 +312,17 @@ impl TsoServiceImpl {
                 // down — the driver is sick, not fenced.
                 PersistDisposition::Permanent(source) => {
                     return Err(Status::internal(format!("persist: {source}")));
+                }
+                // Proposed advance exceeded the 46-bit physical_ms cap. Same
+                // surface policy as Permanent (INTERNAL, no step-down), but the
+                // offending value is carried structurally. Reuse the variant's
+                // `Display` (a single source of truth in `ConsensusError`) so
+                // the message text stays pinned to the consensus crate.
+                PersistDisposition::OutOfRange(at_least) => {
+                    return Err(Status::internal(format!(
+                        "persist: {}",
+                        ConsensusError::AdvanceOutOfRange(at_least)
+                    )));
                 }
             },
         };
