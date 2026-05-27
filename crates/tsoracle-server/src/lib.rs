@@ -29,6 +29,8 @@
 mod bt;
 mod clock;
 mod fence;
+#[cfg(feature = "tracing")]
+pub(crate) mod heartbeat;
 mod leader_hint;
 mod persist_disposition;
 pub(crate) mod reporter;
