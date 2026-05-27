@@ -56,8 +56,8 @@ Both libraries are exporter-agnostic: embedders install whichever recorder they 
 
 ```toml
 [dependencies]
-tsoracle-server             = { version = "0.1", features = ["metrics"] }
-tsoracle-client             = { version = "0.1", features = ["metrics"] }
+tsoracle-server             = { version = "1", features = ["metrics"] }
+tsoracle-client             = { version = "1", features = ["metrics"] }
 metrics-exporter-prometheus = "0.16"
 ```
 
