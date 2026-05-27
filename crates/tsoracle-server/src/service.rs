@@ -25,8 +25,6 @@
 
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-#[cfg(feature = "metrics")]
-use tsoracle_core::IgnoreReason;
 use tsoracle_core::{CommitOutcome, CoreError, Epoch, PeerEndpoint};
 use tsoracle_proto::v1::{
     EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetTsRequest, GetTsResponse,
@@ -101,21 +99,6 @@ fn core_status(error: CoreError) -> Status {
     }
 }
 
-/// The per-reason counter name for an ignored window-extension commit. Each
-/// reason gets its own flat counter (matching the rest of the catalog) so an
-/// operator can alert on epoch churn (`not_leader` / `epoch_mismatch`)
-/// separately from persist reordering (`not_advanced`).
-#[cfg(feature = "metrics")]
-fn ignored_commit_metric(reason: IgnoreReason) -> &'static str {
-    match reason {
-        IgnoreReason::NotLeader => "tsoracle.window.extensions.ignored.not_leader.total",
-        IgnoreReason::EpochMismatch { .. } => {
-            "tsoracle.window.extensions.ignored.epoch_mismatch.total"
-        }
-        IgnoreReason::NotAdvanced { .. } => "tsoracle.window.extensions.ignored.not_advanced.total",
-    }
-}
-
 pub struct TsoServiceImpl {
     pub(crate) server: Arc<Server>,
 }
@@ -136,8 +119,7 @@ impl TsoService for TsoServiceImpl {
         // total climbing while successes stay flat (vs. flat-at-zero, which is
         // indistinguishable from no traffic). Outside the retry loop, so a
         // single-extend-retry call still counts exactly once.
-        #[cfg(feature = "metrics")]
-        metrics::counter!("tsoracle.get_ts.requests.total").increment(1);
+        self.server.reporter.get_ts_requests.increment(1);
 
         // Fast NOT_LEADER gate. `is_serving` answers the gate without cloning a
         // `ServingState`; only the rejected path re-reads (via `leader_hint_from`)
@@ -175,12 +157,11 @@ impl TsoService for TsoServiceImpl {
             let outcome = self.server.core.try_grant(now_ms, count);
             match outcome {
                 Ok(grant) => {
-                    #[cfg(feature = "metrics")]
-                    {
-                        metrics::counter!("tsoracle.get_ts.success.total").increment(1);
-                        metrics::counter!("tsoracle.get_ts.timestamps_issued")
-                            .increment(u64::from(grant.count()));
-                    }
+                    self.server.reporter.get_ts_success.increment(1);
+                    self.server
+                        .reporter
+                        .timestamps_issued
+                        .increment(u64::from(grant.count()));
                     let (epoch_hi, epoch_lo) = grant.epoch().to_wire();
                     return Ok(Response::new(GetTsResponse {
                         physical_ms: grant.physical_ms(),
@@ -273,19 +254,17 @@ impl TsoServiceImpl {
         // recheck-after-acquire short-circuit above skips it, and operators
         // tuning `window_ahead` care about how often a stampede actually
         // reached persist + how long that took (success or failure).
-        #[cfg(feature = "metrics")]
         let extension_started_at = std::time::Instant::now();
         let persist_outcome = self
             .server
             .consensus
             .persist_high_water(requested, epoch)
             .await;
-        #[cfg(feature = "metrics")]
-        {
-            metrics::counter!("tsoracle.window.extensions.total").increment(1);
-            metrics::histogram!("tsoracle.window.extension_latency")
-                .record(extension_started_at.elapsed().as_secs_f64());
-        }
+        self.server.reporter.window_extensions.increment(1);
+        self.server
+            .reporter
+            .window_extension_latency
+            .record(extension_started_at.elapsed().as_secs_f64());
         let actual = match persist_outcome {
             Ok(v) => v,
             // Route the failure through the shared classifier and apply the
@@ -335,8 +314,11 @@ impl TsoServiceImpl {
         if let CommitOutcome::Ignored(_reason) = commit_outcome {
             #[cfg(feature = "tracing")]
             tracing::debug!(reason = ?_reason, "window extension commit ignored after persist");
-            #[cfg(feature = "metrics")]
-            metrics::counter!(ignored_commit_metric(_reason)).increment(1);
+            self.server
+                .reporter
+                .ignored_commits
+                .for_reason(_reason)
+                .increment(1);
         }
         Ok(())
     }
@@ -435,32 +417,5 @@ mod tests {
         assert_eq!(wire_epoch(Some(cross)), Some(EpochWire { hi, lo }));
 
         assert_eq!(wire_epoch(None), None);
-    }
-
-    #[cfg(feature = "metrics")]
-    #[test]
-    fn ignored_commit_metric_names_each_reason_distinctly() {
-        use tsoracle_core::IgnoreReason;
-        // Each ignore reason maps to its own counter so an operator can tell
-        // epoch churn (not_leader / epoch_mismatch) from persist reordering
-        // (not_advanced) at the metric layer, not just in the logs.
-        assert_eq!(
-            ignored_commit_metric(IgnoreReason::NotLeader),
-            "tsoracle.window.extensions.ignored.not_leader.total"
-        );
-        assert_eq!(
-            ignored_commit_metric(IgnoreReason::EpochMismatch {
-                expected: Epoch(4),
-                current: Epoch(5),
-            }),
-            "tsoracle.window.extensions.ignored.epoch_mismatch.total"
-        );
-        assert_eq!(
-            ignored_commit_metric(IgnoreReason::NotAdvanced {
-                persisted: 3_000,
-                committed: 5_000,
-            }),
-            "tsoracle.window.extensions.ignored.not_advanced.total"
-        );
     }
 }
