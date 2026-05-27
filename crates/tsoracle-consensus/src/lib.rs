@@ -33,7 +33,7 @@ mod leadership;
 
 pub mod docs;
 
-pub use advance::{AdvanceOutOfRange, AdvancePayload, reject_out_of_range_advance};
+pub use advance::{AdvancePayload, reject_out_of_range_advance};
 pub use driver::ConsensusDriver;
 pub use error::ConsensusError;
 pub use leadership::LeaderState;

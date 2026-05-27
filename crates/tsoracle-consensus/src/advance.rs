@@ -60,12 +60,6 @@ impl AdvancePayload {
     }
 }
 
-/// The error carried by a rejected out-of-range high-water advance. See
-/// [`reject_out_of_range_advance`].
-#[derive(Debug, thiserror::Error)]
-#[error("high-water advance {0} exceeds the 46-bit physical_ms maximum")]
-pub struct AdvanceOutOfRange(pub u64);
-
 /// Reject a high-water advance whose `physical_ms` value exceeds
 /// `tsoracle_core::PHYSICAL_MS_MAX`, before it is durably persisted.
 ///
@@ -85,15 +79,15 @@ pub struct AdvanceOutOfRange(pub u64);
 /// a replicated log and apply with an unchecked `max` — from drifting away from
 /// that contract.
 ///
-/// Classified [`ConsensusError::PermanentDriver`]: an out-of-range advance
+/// Classified [`ConsensusError::AdvanceOutOfRange`]: an out-of-range advance
 /// signals a saturated or misconfigured clock (`SystemClock::now_ms` saturates
 /// to `u64::MAX` to surface a far-future clock visibly), not a transient
 /// condition, so the server must surface `INTERNAL` rather than silently retry.
+/// The variant carries the offending value structurally, so the server can
+/// route and format it without downcasting.
 pub fn reject_out_of_range_advance(at_least: u64) -> Result<(), ConsensusError> {
     if at_least > tsoracle_core::PHYSICAL_MS_MAX {
-        return Err(ConsensusError::PermanentDriver(Box::new(
-            AdvanceOutOfRange(at_least),
-        )));
+        return Err(ConsensusError::AdvanceOutOfRange(at_least));
     }
     Ok(())
 }
@@ -170,18 +164,17 @@ mod tests {
     }
 
     #[test]
-    fn reject_out_of_range_advance_rejects_above_the_cap_as_permanent() {
+    fn reject_out_of_range_advance_rejects_above_the_cap_as_variant() {
+        // The rejected value is carried in a typed variant, not type-erased
+        // through `PermanentDriver(Box<dyn Error>)`. Server-side classification
+        // can route on the variant directly (see `PersistDisposition::OutOfRange`)
+        // and reconstruct the original error faithfully after the disposition.
         for at_least in [tsoracle_core::PHYSICAL_MS_MAX + 1, u64::MAX] {
             let err = reject_out_of_range_advance(at_least)
                 .expect_err("a value above the cap must be rejected");
             match err {
-                ConsensusError::PermanentDriver(source) => {
-                    let downcast = source
-                        .downcast_ref::<AdvanceOutOfRange>()
-                        .expect("permanent driver error must carry AdvanceOutOfRange");
-                    assert_eq!(downcast.0, at_least);
-                }
-                other => panic!("expected PermanentDriver, got {other:?}"),
+                ConsensusError::AdvanceOutOfRange(value) => assert_eq!(value, at_least),
+                other => panic!("expected AdvanceOutOfRange, got {other:?}"),
             }
         }
     }

@@ -71,6 +71,15 @@ pub(crate) enum PersistDisposition {
     ///
     /// [`Transient`]: PersistDisposition::Transient
     Permanent(Box<dyn std::error::Error + Send + Sync>),
+    /// The proposed high-water advance exceeded the 46-bit `physical_ms` cap
+    /// (`ConsensusError::AdvanceOutOfRange`). Semantically permanent — same
+    /// surface policy as [`Permanent`] (`INTERNAL`, no step-down, propagate as
+    /// fatal in the fence path) — but kept as its own variant so the offending
+    /// `u64` is carried structurally end-to-end. The two call sites can format
+    /// or reconstruct it without downcasting through `Box<dyn Error>`.
+    ///
+    /// [`Permanent`]: PersistDisposition::Permanent
+    OutOfRange(u64),
 }
 
 /// Classify a consensus persist/load failure into its policy-neutral
@@ -88,6 +97,7 @@ pub(crate) fn classify(error: ConsensusError) -> PersistDisposition {
         ConsensusError::NotLeader { .. } => PersistDisposition::SteppedDown { fenced_by: None },
         ConsensusError::TransientDriver(source) => PersistDisposition::Transient(source),
         ConsensusError::PermanentDriver(source) => PersistDisposition::Permanent(source),
+        ConsensusError::AdvanceOutOfRange(at_least) => PersistDisposition::OutOfRange(at_least),
     }
 }
 
@@ -146,6 +156,22 @@ mod tests {
         match disposition {
             PersistDisposition::Permanent(source) => assert_eq!(source.to_string(), "corrupted"),
             other => panic!("expected Permanent, got a different disposition: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_out_of_range_carries_the_offending_value_structurally() {
+        // The `u64` survives classification typed — no boxing, no downcast.
+        // The fence path reconstructs the original ConsensusError variant from
+        // this disposition, so identity must round-trip faithfully.
+        let disposition = classify(ConsensusError::AdvanceOutOfRange(
+            tsoracle_core::PHYSICAL_MS_MAX + 1,
+        ));
+        match disposition {
+            PersistDisposition::OutOfRange(at_least) => {
+                assert_eq!(at_least, tsoracle_core::PHYSICAL_MS_MAX + 1);
+            }
+            other => panic!("expected OutOfRange, got a different disposition: {other:?}"),
         }
     }
 }

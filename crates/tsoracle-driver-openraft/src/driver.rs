@@ -334,8 +334,8 @@ mod tests {
             .await
             .expect_err("an out-of-range advance must be rejected, not persisted");
         assert!(
-            matches!(err, tsoracle_consensus::ConsensusError::PermanentDriver(_)),
-            "out-of-range advance must classify as PermanentDriver, got {err:?}"
+            matches!(err, tsoracle_consensus::ConsensusError::AdvanceOutOfRange(at_least) if at_least == PHYSICAL_MS_MAX + 1),
+            "out-of-range advance must surface as AdvanceOutOfRange carrying the offending value, got {err:?}"
         );
 
         // The boundary value is in range and still delegates to the host,

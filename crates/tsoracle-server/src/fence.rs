@@ -362,6 +362,17 @@ pub(crate) async fn run_leader_watch(
                                         ConsensusError::PermanentDriver(source),
                                     ));
                                 }
+                                // Same surface policy as Permanent (fatal, poison
+                                // serving), but the variant carries the offending
+                                // u64 structurally, so we reconstruct the original
+                                // ConsensusError variant — not collapse it into
+                                // PermanentDriver — so propagated diagnostics keep
+                                // their typed identity.
+                                PersistDisposition::OutOfRange(at_least) => {
+                                    return Err(ServerError::Consensus(
+                                        ConsensusError::AdvanceOutOfRange(at_least),
+                                    ));
+                                }
                             }
                         }
                         // A non-consensus fault (e.g. a Core allocator invariant
