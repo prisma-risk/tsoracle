@@ -244,7 +244,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bench-minimal"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "example-embedded-server"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "tokio",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "example-failover-demo"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "tokio",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "example-metrics-prometheus"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "metrics-exporter-prometheus",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "example-openraft-piggyback"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "example-openraft-standalone"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "example-paxos-embedded"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "example-paxos-piggyback"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "example-paxos-standalone"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "example-tls-mtls"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "futures",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "kube-e2e-driver"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2785,7 +2785,7 @@ dependencies = [
 
 [[package]]
 name = "stress"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3227,7 +3227,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tsoracle"
-version = "1.0.0"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3252,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-client"
-version = "1.0.0"
+version = "0.2.6"
 dependencies = [
  "futures",
  "metrics",
@@ -3272,7 +3272,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-codec"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "postcard",
  "proptest",
@@ -3282,7 +3282,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-consensus"
-version = "1.0.0"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "futures",
@@ -3294,7 +3294,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-core"
-version = "1.0.0"
+version = "0.2.5"
 dependencies = [
  "husky-rs",
  "proptest",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-file"
-version = "1.0.0"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "crc32c",
@@ -3323,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-openraft"
-version = "1.0.0"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-paxos"
-version = "1.0.0"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3377,14 +3377,14 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-failpoint"
-version = "1.0.0"
+version = "0.1.1"
 dependencies = [
  "fail",
 ]
 
 [[package]]
 name = "tsoracle-openraft-toolkit"
-version = "1.0.0"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -3404,7 +3404,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-paxos-toolkit"
-version = "1.0.0"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "futures",
@@ -3427,7 +3427,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-proto"
-version = "1.0.0"
+version = "0.2.4"
 dependencies = [
  "prost",
  "serde",
@@ -3438,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-server"
-version = "1.0.0"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "futures",
@@ -3464,7 +3464,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-server-testkit"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "async-stream",
  "hyper",
@@ -3479,7 +3479,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-standalone"
-version = "1.0.0"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "futures",
@@ -3510,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-tests"
-version = "1.0.0"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -3532,7 +3532,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-yieldpoint"
-version = "1.0.0"
+version = "0.1.6"
 dependencies = [
  "parking_lot",
  "tokio",
