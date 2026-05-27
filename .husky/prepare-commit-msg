@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Prepare-commit-msg hook: auto-append a DCO `Signed-off-by` trailer to every
+# commit if one isn't already present. The repository's CONTRIBUTING.md
+# requires DCO sign-off on every commit and the DCO GitHub App enforces it
+# at merge time; this hook removes the friction of remembering `git commit -s`.
+#
+# Auto-installed by husky-rs alongside `.husky/pre-commit` on the first
+# `cargo test` of this clone — husky-rs sets `core.hooksPath = .husky`.
+#
+# Bypass intentionally with `git commit --no-verify` (will fail DCO at CI).
+# To override the trailer identity, set git config user.name / user.email.
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+COMMIT_SOURCE="${2:-}"
+
+# Skip for merge commits and squash commits — they synthesize messages from
+# the commits being combined, which already carry their own sign-offs.
+case "$COMMIT_SOURCE" in
+    merge|squash)
+        exit 0
+        ;;
+esac
+
+# If a Signed-off-by trailer is already present (e.g. user ran `git commit -s`
+# or amended a previously-signed commit), don't add a duplicate.
+if grep -qE '^Signed-off-by: ' "$COMMIT_MSG_FILE"; then
+    exit 0
+fi
+
+NAME=$(git config user.name || true)
+EMAIL=$(git config user.email || true)
+
+if [ -z "$NAME" ] || [ -z "$EMAIL" ]; then
+    echo "prepare-commit-msg: skipping auto-signoff — git user.name or user.email not configured" >&2
+    exit 0
+fi
+
+git interpret-trailers --in-place \
+    --if-exists addIfDifferent \
+    --trailer "Signed-off-by: $NAME <$EMAIL>" \
+    "$COMMIT_MSG_FILE"
