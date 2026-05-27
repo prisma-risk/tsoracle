@@ -116,23 +116,23 @@
   "dynamic_analysis_unsafe_status": "Met",
   "dynamic_analysis_unsafe_justification": "Where the project uses dynamic analysis (libFuzzer in fuzz/, kube-e2e + mixed-version-soak in e2e/kube/, stress-smoke + stress-nightly, leak-nightly), it exercises the program against malformed or adversarial input and under real-world fault injection. The failpoints and yieldpoints test scaffolding (see docs/failpoint-testing.md and docs/yieldpoint-testing.md) injects software faults during integration runs, and the stress lane's positive-control inject-violation step proves the monotonicity-violation detector still fires. Findings are addressed before merge.",
 
-  "dco_status": "Unmet",
-  "dco_justification": "The project does not require DCO sign-off on commits. CONTRIBUTING.md documents an inbound-equals-outbound Apache-2.0 contribution model under GitHub ToS §D.6 instead. This matches the upstream conventions of many Rust ecosystem projects but does not meet the DCO criterion as written. Action: enable DCO via the GitHub Probot DCO app or document a sign-off requirement in CONTRIBUTING.md.",
+  "dco_status": "Met",
+  "dco_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/CONTRIBUTING.md#developer-certificate-of-origin\n\nCONTRIBUTING.md's 'Developer Certificate of Origin' section requires every commit to carry a Signed-off-by trailer attesting to DCO v1.1 (https://developercertificate.org/). The DCO GitHub App (https://github.com/apps/dco) is installed as a required PR check; a PR with any unsigned commit fails the check and cannot be merged. DCO is layered on top of the project's Apache-2.0 inbound = outbound licensing under GitHub ToS §D.6.",
 
-  "governance_status": "Unmet",
-  "governance_justification": "The project does not currently have a written GOVERNANCE.md describing decision-making, roles, and the maintainer escalation path. De-facto governance is single-maintainer with public PR review on the main branch. Action: add GOVERNANCE.md.",
+  "governance_status": "Met",
+  "governance_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/GOVERNANCE.md\n\nGOVERNANCE.md documents project mission, structure, roles (maintainer, reviewer, contributor), decision-making, the path to becoming a maintainer, and a continuity-of-access plan with a named maintainer and named secondary contact. Honest about the pre-1.0 single-maintainer state; links the bus_factor gap to its prerequisite (a second active maintainer).",
 
   "code_of_conduct_status": "Met",
   "code_of_conduct_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/CODE_OF_CONDUCT.md\n\nThe project adopts the Contributor Covenant v2.1 (https://www.contributor-covenant.org/version/2/1/code_of_conduct/), shipped as CODE_OF_CONDUCT.md at the repository root. CONTRIBUTING.md links to it and to the private reporting channel for code-of-conduct concerns.",
 
-  "roles_responsibilities_status": "Unmet",
-  "roles_responsibilities_justification": "Roles and responsibilities are not currently documented. The .github/CODEOWNERS file identifies code-owner reviewers, but a written description of maintainer / reviewer / contributor roles does not exist. Action: add a roles section to a GOVERNANCE.md.",
+  "roles_responsibilities_status": "Met",
+  "roles_responsibilities_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/GOVERNANCE.md#3-roles-and-responsibilities\n\nGOVERNANCE.md §3 documents three roles: Maintainer (final design/merge/release authority, current maintainer named with email), Reviewer (anyone listed in .github/CODEOWNERS), and Contributor (anyone opening a PR). Each role lists explicit authorities and responsibilities.",
 
-  "access_continuity_status": "Unmet",
-  "access_continuity_justification": "The project does not currently document a continuity-of-access plan (e.g., what happens if the primary maintainer becomes unavailable, who can recover repository and registry admin access). This is a known gap for a single-maintainer pre-1.0 project. Action: document a continuity plan in GOVERNANCE.md, ideally with a named backup maintainer.",
+  "access_continuity_status": "Met",
+  "access_continuity_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/GOVERNANCE.md#6-continuity-of-access\n\nGOVERNANCE.md §6 enumerates every credential surface (GitHub org admin, crates.io owners, ghcr.io maintainers, Sigstore signing identity, Pages/DNS) with holder and recovery path. §6.1 names a designated secondary contact with read-only credential-inventory access and Code-of-Conduct escalation authority. §6.2 documents the maintainer-unavailable procedure including GitHub inactive-account recovery.",
 
-  "documentation_roadmap_status": "Unmet",
-  "documentation_roadmap_justification": "The project does not currently publish a written roadmap. Direction is set per PR and per release-plz versioned release. Action: add a ROADMAP.md or a roadmap section in docs/.",
+  "documentation_roadmap_status": "Met",
+  "documentation_roadmap_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/ROADMAP.md\n\nROADMAP.md publishes direction at three horizons (near 0-3 months, mid 3-12 months, long 12+ months) covering OpenSSF gap closure, transport-crate extraction, peer-listener hardening (#481), Gold-tier criteria, second-maintainer designation, additional consensus backends, and a public conformance suite.",
 
   "documentation_architecture_status": "Met",
   "documentation_architecture_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/docs/architecture-deep-dive.md\n\ndocs/architecture-deep-dive.md documents the project's architecture, complemented by docs/consensus-integration.md (the ConsensusDriver trait), docs/the-allocator.md (the timestamp allocator), docs/operations.md, docs/performance-critical-path.md, docs/key-subsystems.md, and the driver comparison at docs/driver-comparison.md. The in-crate `docs` modules additionally render the algorithm / consensus / operations chapters on docs.rs alongside the API reference.",
@@ -146,8 +146,8 @@
   "documentation_current_status": "Met",
   "documentation_current_justification": "Documentation is updated alongside code changes in the same PR. CONTRIBUTING.md (Documentation section) describes the dual-tree layout (root docs/ + in-crate docs modules) and the rule that protocol-visible or allocator changes must update both. release-plz publishes documentation alongside each per-crate release to docs.rs. The pages.yml workflow rebuilds the marketing/documentation site on every push to main.",
 
-  "documentation_achievements_status": "Unmet",
-  "documentation_achievements_justification": "The project does not currently document its OpenSSF Best Practices badge status in README or in dedicated documentation. Action: once the passing badge is achieved, add the badge URL to the README header.",
+  "documentation_achievements_status": "Met",
+  "documentation_achievements_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/README.md\n\nThe README header includes the OpenSSF Best Practices badge (https://www.bestpractices.dev/projects/12991) and the OpenSSF Scorecard badge (https://scorecard.dev/viewer/?uri=github.com/prisma-risk/tsoracle), both linking to the project's pages on the respective sites and reflecting current achievement status.",
 
   "accessibility_best_practices_status": "N/A",
   "accessibility_best_practices_justification": "The project ships a Rust gRPC service, a CLI binary, and library crates; it does not expose graphical user interfaces requiring accessibility (WCAG) compliance. The marketing site at https://www.tsoracle.rs is plain HTML/Markdown documentation.",
@@ -236,14 +236,14 @@
   "signed_releases_status": "Met",
   "signed_releases_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/docs/release-signatures.md\n\nEvery per-crate GitHub Release is signed via SLSA v1.0 build provenance (`.intoto.jsonl` attestation) generated by `slsa-framework/slsa-github-generator` and signed transparently through Sigstore (Fulcio + Rekor) — no long-lived signing key. The .github/workflows/release-sign.yml workflow fires on `release: published` (with workflow_dispatch backfill). docs/release-signatures.md documents end-to-end verification with `slsa-verifier verify-artifact` commands, anchored in the Sigstore transparency log. Scope: source crate tarballs (the canonical release artifact, matching crates.io publish); container images at ghcr.io are content-addressable by SHA256 but not yet cosign-signed (follow-up).",
 
-  "version_tags_signed_status": "Unmet",
-  "version_tags_signed_justification": "release-plz creates lightweight (unsigned) tags for releases. Action: switch release-plz configuration to creating annotated, GPG/SSH-signed tags.",
+  "version_tags_signed_status": "Met",
+  "version_tags_signed_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/docs/release-signatures.md#verifying-release-tags\n\nRelease tags are annotated and signed via Sigstore gitsign (keyless, transparency-log anchored) in .github/workflows/release-plz.yml. Signing identity = the workflow's GitHub Actions OIDC token, attested by Fulcio, logged to Rekor — same trust model as the SLSA build provenance. Verify: `git verify-tag --raw <tag>` resolves the Fulcio certificate and Rekor entry.",
 
   "input_validation_status": "Met",
   "input_validation_justification": "The external input surface is the gRPC API; the protobuf-generated decoder is the first validation layer (type-checked, length-prefixed). Above that: barrier-seq invariants in the timestamp allocator; leader-epoch monotonicity checks at the consensus layer; schema-version codecs that fail loud on out-of-range versions (NotRepresentable); and 15+ libFuzzer harnesses (fuzz/fuzz_targets/) exercising decode and roundtrip paths against malformed input across record/openraft/paxos/proto/snapshot/toolkit codecs.",
 
-  "assurance_case_status": "Unmet",
-  "assurance_case_justification": "The project does not yet publish a structured assurance case (claims → arguments → evidence). The architectural deep dive (docs/architecture-deep-dive.md) documents how the consensus and timestamp invariants are maintained, and docs/performance-critical-path.md documents the source-level rules on hot files, but neither is structured as a formal assurance case. Action: add a docs/assurance-case.md.",
+  "assurance_case_status": "Met",
+  "assurance_case_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/docs/assurance-case.md\n\ndocs/assurance-case.md presents the project's safety and security claims as a claims → arguments → evidence tree. Two top claims: (1) Safety — strict timestamp monotonicity under crashes, partitions, leader handoff, rolling restarts, mixed-version operation; five arguments (integration tests, kube-e2e soak with measured error budget, stress with positive-control, failpoint/yieldpoint fault injection, decoder fuzzing). (2) Security — no unauthenticated peer/admin RPCs in the secure-by-default deployment; four arguments including one open gap (#481) tracked transparently.",
 
   "test_invocation_status": "Met",
   "test_invocation_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/CONTRIBUTING.md\n\nThe project's tests are invoked with `cargo test --workspace --all-features` (documented under 'Running the checks locally' in CONTRIBUTING.md). The Makefile additionally provides convenience targets such as `make test-failpoints` and `make coverage`.",
@@ -258,7 +258,7 @@
   "dynamic_analysis_enable_assertions_justification": "Rust's `debug_assert!` macros are active in debug builds (default for `cargo test`) and in stress-smoke, kube-e2e, and fuzz harness binaries (libFuzzer builds in debug). The project uses `debug_assert!` liberally on invariant-protection paths (e.g., the openraft LeaderState contract guard at run_leader_watch, the PaxosRunner start guard, the consensus barrier-seq invariants).",
 
   "bus_factor_status": "Unmet",
-  "bus_factor_justification": "URL: https://github.com/prisma-risk/tsoracle/graphs/contributors\n\nAs of 2026-05-26, the project has a single primary maintainer. Multiple contributors have landed code, but no other person currently has the full context required to make architectural or release-management decisions. Action: actively grow the maintainer pool — a single-maintainer pre-1.0 project does not meet the bus-factor criterion.",
+  "bus_factor_justification": "URL: https://github.com/prisma-risk/tsoracle/graphs/contributors\n\nAs of 2026-05-26 the project has a single active maintainer. A named secondary contact (GOVERNANCE.md §6.1) handles continuity-of-access (credentials, CoC escalation) but is not an active maintainer; bus_factor is about active maintainership, not access continuity. Path to Met (ROADMAP.md mid-term): designate a second active maintainer, add to CODEOWNERS and GOVERNANCE.md §3.1, grant crates.io owner access. Outreach via `good first issue` / `help wanted` triage in CONTRIBUTING.md.",
 
   "crypto_used_network_status": "Met",
   "crypto_used_network_justification": "When transmitting data over networks where confidentiality and integrity are required (peer-to-peer consensus traffic, admin RPCs, client traffic), the project uses TLS or mTLS via rustls. The standalone deployment additionally rejects plaintext peer transport at the Helm chart layer unless explicitly opted in via tls.allowInsecurePeer (see deploy/charts/tsoracle/).",
@@ -270,7 +270,7 @@
   "hardening_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/docs/operations.md\n\nThe project enables multiple hardening mechanisms: (1) safe-Rust as the implementation language structurally excludes memory-safety vulnerability classes; (2) the deployed pods run with a non-root securityContext (fsGroup 10001 for EBS-mounted volumes); (3) container images are SHA256-pinned base images (rust:1-bookworm@sha256:..., debian:bookworm-slim@sha256:...) refreshed by Dependabot; (4) the Helm chart applies NetworkPolicies restricting Ingress to expected sources; (5) clippy's -D warnings + the unwrap_used/expect_used lints fail any panicking call in non-test code at CI time.",
 
   "contributors_unassociated_status": "Unmet",
-  "contributors_unassociated_justification": "URL: https://github.com/prisma-risk/tsoracle/graphs/contributors\n\nAs of 2026-05-26, contributors to the project are not yet from organizations unassociated with the primary maintainer. The project is in an early stage where outside contributions have not yet broadened the contributor base.",
+  "contributors_unassociated_justification": "URL: https://github.com/prisma-risk/tsoracle/graphs/contributors\n\nAs of 2026-05-26 contributors are not yet from organizations unassociated with the primary maintainer. Early-stage; outside contributions have not yet broadened the base. Path to Met (ROADMAP.md): publish ROADMAP.md on the documentation site, maintain `good first issue` / `help wanted` triage in CONTRIBUTING.md's 'Where to start', and link from adjacent Rust-ecosystem consensus / distributed-systems forums.",
 
   "copyright_per_file_status": "Met",
   "copyright_per_file_justification": "Every first-party .rs file in the project carries the canonical short license header containing `SPDX-License-Identifier: Apache-2.0` and the project's copyright statement. The header format is enforced by `scripts/check-ts-header.py` in CI on every PR (the `header-check` job in .github/workflows/ci.yml). The canonical header text lives at scripts/header.txt; the full Apache-2.0 license text and copyright is at LICENSE.",
@@ -278,14 +278,14 @@
   "license_per_file_status": "Met",
   "license_per_file_justification": "Every first-party .rs file carries `SPDX-License-Identifier: Apache-2.0` in its canonical short header, enforced by scripts/check-ts-header.py in CI.",
 
-  "small_tasks_status": "Unmet",
-  "small_tasks_justification": "The project does not currently label issues for new-contributor onboarding (e.g., 'good first issue', 'help wanted'). Action: triage existing issues and apply such labels to suitable ones, and add a 'Where to start' section in CONTRIBUTING.md.",
+  "small_tasks_status": "Met",
+  "small_tasks_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/CONTRIBUTING.md#where-to-start\n\nCONTRIBUTING.md has a 'Where to start' section pointing first-time contributors at GitHub label searches for `good first issue` (https://github.com/prisma-risk/tsoracle/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and `help wanted` (https://github.com/prisma-risk/tsoracle/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22), plus three concrete starter areas (documentation polish, additional fuzz targets, additional integration tests). Existing open issues have been triaged and labeled.",
 
   "code_review_standards_status": "Met",
   "code_review_standards_justification": "URL: https://github.com/prisma-risk/tsoracle/blob/main/CONTRIBUTING.md\n\nCONTRIBUTING.md documents the project's review and contribution process (required CI checks, coding standards, proto/buf expectations, Conventional Commits, rebase-and-squash flow). Branch protection on main requires PR review before merge. The .github/CODEOWNERS file assigns code-owner review responsibility. The required CI checks (test, clippy with -D warnings, deny, buf, header-check, critical-path) must pass before merge.",
 
   "two_person_review_status": "Unmet",
-  "two_person_review_justification": "As a single-maintainer project, two-person review is not currently enforced: external-contributor PRs are reviewed by the maintainer (counting as one reviewer). Branch protection requires one approval but not two. This is a corollary of the bus-factor gap above. Action: as the maintainer pool grows, enable branch protection's required reviewers ≥ 2.",
+  "two_person_review_justification": "As a single-maintainer project, two-person review is not currently enforced: external-contributor PRs are reviewed by the maintainer (counting as one reviewer). Corollary of the bus_factor gap. Path to Met (ROADMAP.md mid-term): once a second active maintainer is designated under GOVERNANCE.md §5, enable branch protection `required reviewers ≥ 2` on `main`. The required-checks list is already populated; only the reviewer-count knob changes.",
 
   "build_reproducible_status": "Unmet",
   "build_reproducible_justification": "The build is repeatable (build_repeatable, silver) but not bit-for-bit reproducible across hosts. Rust does not currently guarantee bit-for-bit reproducible release-profile builds across different build hosts (timestamps embedded in linker metadata vary by build environment and linker version). The project has not invested in the reproducible-build tooling (e.g., diffoscope-driven CI gate) required to overcome this. Action: add a reproducible-build CI lane if/when stable Rust reaches deterministic release builds.",
