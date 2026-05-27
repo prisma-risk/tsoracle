@@ -292,6 +292,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "metrics"))]
+    fn counter_works_without_metrics_feature() {
+        // With the `metrics` feature off, the increment body skips the
+        // recorder forward but the local atomic still bumps — the heartbeat
+        // path stays functional in default tsoracle-bin builds (which do not
+        // enable the `metrics` feature on tsoracle-server).
+        let c = ReporterCounter::new("tsoracle.test.no_metrics");
+        c.increment(3);
+        assert_eq!(c.snapshot(), 3);
+    }
+
+    #[test]
     #[cfg(feature = "metrics")]
     fn reporter_new_resolves_distinct_metric_names() {
         use metrics::Key;
