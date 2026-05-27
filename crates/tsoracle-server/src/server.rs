@@ -101,6 +101,7 @@ pub struct ServerBuilder {
     window_ahead: Duration,
     failover_advance: Duration,
     shutdown_grace: Duration,
+    heartbeat_interval: Duration,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -113,6 +114,7 @@ impl Default for ServerBuilder {
             window_ahead: Duration::from_secs(3),
             failover_advance: Duration::from_secs(1),
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
+            heartbeat_interval: Duration::from_secs(10),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: None,
         }
@@ -156,6 +158,20 @@ impl ServerBuilder {
         self
     }
 
+    /// Interval between heartbeat log lines emitted at `target = "tsoracle::heartbeat"`.
+    /// Defaults to 10 seconds. Pass `Duration::ZERO` to disable the heartbeat task entirely.
+    ///
+    /// The heartbeat surfaces serving role, current epoch, requests served,
+    /// timestamps issued, and key error counters every interval — proof-of-life
+    /// for production deployments that may not have a metrics exporter installed.
+    ///
+    /// Requires `feature = "tracing"` to emit output; with `tracing` off the
+    /// setter is accepted but no task is spawned (no subscriber to log to).
+    pub fn heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = interval;
+        self
+    }
+
     /// Configure TLS termination for this server. Applied inside
     /// [`Server::serve`], [`Server::serve_with_shutdown`], and
     /// [`Server::serve_with_listener`]. Not applied to [`Server::into_router`] —
@@ -176,6 +192,7 @@ impl ServerBuilder {
             window_ahead: self.window_ahead,
             failover_advance: self.failover_advance,
             shutdown_grace: self.shutdown_grace,
+            heartbeat_interval: self.heartbeat_interval,
             core: Arc::new(ServingCore::new(self.window_ahead)),
             reporter: Arc::new(crate::reporter::Reporter::new()),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -192,6 +209,9 @@ pub struct Server {
     /// Bound on the graceful-shutdown wait for the leader-watch task before a
     /// forced abort. See [`ServerBuilder::shutdown_grace`].
     pub(crate) shutdown_grace: Duration,
+    /// Interval between periodic heartbeat log lines. See [`ServerBuilder::heartbeat_interval`].
+    #[allow(dead_code)]
+    pub(crate) heartbeat_interval: Duration,
     /// Owns the allocator, serving-state channel, and both extension locks, with
     /// the lock-ordering and step-down invariants private behind its methods.
     ///
