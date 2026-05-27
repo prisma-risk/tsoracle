@@ -36,7 +36,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use tsoracle_core::IgnoreReason;
 
 pub struct ReporterCounter {
     name: &'static str,
@@ -99,6 +101,95 @@ impl ReporterTimestamp {
     pub(crate) fn snapshot(&self) -> Option<u64> {
         let v = self.local.load(Ordering::Relaxed);
         (v != 0).then_some(v)
+    }
+}
+
+pub struct IgnoredCommitsByReason {
+    pub not_leader: ReporterCounter,
+    pub epoch_mismatch: ReporterCounter,
+    pub not_advanced: ReporterCounter,
+}
+
+impl IgnoredCommitsByReason {
+    fn new() -> Self {
+        Self {
+            not_leader: ReporterCounter::new("tsoracle.window.extensions.ignored.not_leader.total"),
+            epoch_mismatch: ReporterCounter::new(
+                "tsoracle.window.extensions.ignored.epoch_mismatch.total",
+            ),
+            not_advanced: ReporterCounter::new(
+                "tsoracle.window.extensions.ignored.not_advanced.total",
+            ),
+        }
+    }
+
+    pub(crate) fn for_reason(&self, reason: IgnoreReason) -> &ReporterCounter {
+        match reason {
+            IgnoreReason::NotLeader => &self.not_leader,
+            IgnoreReason::EpochMismatch { .. } => &self.epoch_mismatch,
+            IgnoreReason::NotAdvanced { .. } => &self.not_advanced,
+        }
+    }
+}
+
+pub struct Reporter {
+    // get_ts hot path
+    pub get_ts_requests: ReporterCounter,
+    pub get_ts_success: ReporterCounter,
+    pub timestamps_issued: ReporterCounter,
+
+    // leader / fence
+    pub not_leader: ReporterCounter,
+    pub leader_transitions: ReporterCounter,
+    pub fence_transient_retries: ReporterCounter,
+    pub fence_latency: ReporterHistogram,
+
+    // window
+    pub window_extensions: ReporterCounter,
+    pub window_extension_latency: ReporterHistogram,
+    pub ignored_commits: IgnoredCommitsByReason,
+
+    // lifecycle
+    pub shutdown_watch_aborted: ReporterCounter,
+    pub heartbeat_task_panicked: ReporterCounter,
+    pub last_leader_transition: ReporterTimestamp,
+    pub started_at: Instant,
+}
+
+impl Reporter {
+    pub fn new() -> Self {
+        Self {
+            get_ts_requests: ReporterCounter::new("tsoracle.get_ts.requests.total"),
+            get_ts_success: ReporterCounter::new("tsoracle.get_ts.success.total"),
+            timestamps_issued: ReporterCounter::new("tsoracle.get_ts.timestamps_issued"),
+            not_leader: ReporterCounter::new("tsoracle.not_leader.total"),
+            leader_transitions: ReporterCounter::new("tsoracle.leader_transition.total"),
+            fence_transient_retries: ReporterCounter::new(
+                "tsoracle.leader_transition.fence_transient_retries.total",
+            ),
+            fence_latency: ReporterHistogram::new("tsoracle.leader_transition.fence_latency"),
+            window_extensions: ReporterCounter::new("tsoracle.window.extensions.total"),
+            window_extension_latency: ReporterHistogram::new("tsoracle.window.extension_latency"),
+            ignored_commits: IgnoredCommitsByReason::new(),
+            shutdown_watch_aborted: ReporterCounter::new("tsoracle.shutdown.watch_aborted.total"),
+            heartbeat_task_panicked: ReporterCounter::new("tsoracle.heartbeat.task_panicked.total"),
+            last_leader_transition: ReporterTimestamp::new(),
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Convenience constructor for unit tests. Same as `Reporter::new()`; the
+    /// dedicated name documents intent at call sites (tests that just need a
+    /// Reporter to satisfy a struct field).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for Reporter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -198,5 +289,50 @@ mod tests {
             observed >= before && observed <= after,
             "timestamp {observed} not within [{before}, {after}]"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "metrics")]
+    fn reporter_new_resolves_distinct_metric_names() {
+        use metrics::Key;
+        use metrics_util::CompositeKey;
+        use metrics_util::MetricKind;
+        use metrics_util::debugging::DebuggingRecorder;
+        use tsoracle_core::{Epoch, IgnoreReason};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            let r = Reporter::new();
+            r.ignored_commits
+                .for_reason(IgnoreReason::NotLeader)
+                .increment(1);
+            r.ignored_commits
+                .for_reason(IgnoreReason::EpochMismatch {
+                    expected: Epoch(1),
+                    current: Epoch(2),
+                })
+                .increment(1);
+            r.ignored_commits
+                .for_reason(IgnoreReason::NotAdvanced {
+                    persisted: 1,
+                    committed: 2,
+                })
+                .increment(1);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        for name in [
+            "tsoracle.window.extensions.ignored.not_leader.total",
+            "tsoracle.window.extensions.ignored.epoch_mismatch.total",
+            "tsoracle.window.extensions.ignored.not_advanced.total",
+        ] {
+            let key = CompositeKey::new(MetricKind::Counter, Key::from_name(name));
+            assert!(
+                snap.iter().any(|(k, ..)| *k == key),
+                "expected metric {name} to be recorded distinctly"
+            );
+        }
     }
 }
