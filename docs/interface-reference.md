@@ -230,7 +230,7 @@ Common flags (above), plus:
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
 | `--id` | `u64` | *required* | This node's numeric raft id. Must be unique across the cluster. |
-| `--raft-addr` | `SocketAddr` | *required* | Bind address for the raft peer transport (consensus traffic). **Plaintext and unauthenticated unless `--peer-tls-*` is set.** |
+| `--raft-addr` | `SocketAddr` | *required* | Bind address for the raft peer transport (consensus traffic). Plaintext on loopback; routable bind requires the `--peer-tls-*` triple or `--allow-insecure-peer`. See [Peer-port trust boundary](operations.md#peer-port-trust-boundary). |
 | `--raft-dir` | path | *required* | Directory for raft log + state-machine data. Persisted across restarts. |
 | `--bootstrap` | bool | `false` | Initialize the cluster on this node, first boot only. Used exactly once per cluster lifetime. |
 | `--members` | string | — | Initial membership, **only valid with `--bootstrap`**. Format: `id=raft_host:port/service_host:port/admin_host:port,...`. |
@@ -244,6 +244,7 @@ Common flags (above), plus:
 | `--peer-tls-cert` | path | — | PEM node certificate for the peer transport. Enables peer mTLS — needs all three `--peer-tls-*` flags. |
 | `--peer-tls-key` | path | — | PEM private key paired with `--peer-tls-cert`. |
 | `--peer-tls-ca` | path | — | PEM CA used to verify connecting peers. Cluster-dedicated. |
+| `--allow-insecure-peer` | bool | `false` | Opt out of the peer-listener secure-by-default guard. Allows routable bind without `--peer-tls-*`. Matches the helm chart's `tls.allowInsecurePeer`. Intended for single-host dev or service-mesh-terminated mTLS only. |
 
 ### `tsoracle serve paxos`
 
@@ -254,7 +255,7 @@ Common flags (above), plus:
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
 | `--node-id` | `u64` | *required* | This node's OmniPaxos pid. Must be unique across the cluster. |
-| `--peer-listen` | `SocketAddr` | *required* | Bind address for the paxos peer transport. **Plaintext and unauthenticated unless `--peer-tls-*` is set.** |
+| `--peer-listen` | `SocketAddr` | *required* | Bind address for the paxos peer transport. Plaintext on loopback; routable bind requires the `--peer-tls-*` triple or `--allow-insecure-peer`. See [Peer-port trust boundary](operations.md#peer-port-trust-boundary). |
 | `--peers` | string | *required* | Comma-separated `id=host:port` paxos peer addresses. Required at every start, not just bootstrap. |
 | `--tso-peers` | string | *required* | Comma-separated `id=host:port` tsoracle service addresses (per-node `TsoService` ports), used to populate `LeaderHint` for follower redirects. |
 | `--data-dir` | path | *required* | Directory for the paxos log + meta. |
@@ -262,6 +263,7 @@ Common flags (above), plus:
 | `--peer-tls-cert` | path | — | PEM node certificate for the peer transport. Enables peer mTLS — needs all three `--peer-tls-*` flags. |
 | `--peer-tls-key` | path | — | PEM private key paired with `--peer-tls-cert`. |
 | `--peer-tls-ca` | path | — | PEM CA used to verify connecting peers. |
+| `--allow-insecure-peer` | bool | `false` | Opt out of the peer-listener secure-by-default guard. Allows routable bind without `--peer-tls-*`. Matches the helm chart's `tls.allowInsecurePeer`. Intended for single-host dev or service-mesh-terminated mTLS only. |
 
 ### `tsoracle init`
 

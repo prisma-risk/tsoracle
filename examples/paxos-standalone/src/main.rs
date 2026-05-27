@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
         data_dir: cli.data_dir,
         tick_interval: Duration::from_millis(20),
         peer_tls,
+        allow_insecure_peer: false,
     });
     let mut node = build(cfg).await?;
     let drain = node.take_drain();

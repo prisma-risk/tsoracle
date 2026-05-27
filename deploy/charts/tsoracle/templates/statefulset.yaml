@@ -66,6 +66,10 @@ spec:
             - name: CLIENT_MTLS
               value: {{ .Values.tls.clientMtls | quote }}
             {{- end }}
+            {{- if and (ne .Values.driver "file") (not .Values.tls.enabled) .Values.tls.allowInsecurePeer }}
+            - name: ALLOW_INSECURE_PEER
+              value: "true"
+            {{- end }}
           ports:
             - name: peer
               containerPort: {{ .Values.ports.peer }}

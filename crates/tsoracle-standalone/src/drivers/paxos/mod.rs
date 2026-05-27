@@ -57,10 +57,26 @@ fn open_rocksdb(dir: &std::path::Path) -> Result<Arc<DB>, StandaloneError> {
 }
 
 pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, StandaloneError> {
+    // Mirror the openraft peer secure-by-default guard (drivers/openraft/mod.rs):
+    // dry-build peer TLS first so a bad PEM surfaces as Tls (operator's
+    // explicit intent) before the routable guard fires.
     let peer_tls = match &cfg.peer_tls {
         Some(p) => Some(crate::peer_tls::build_peer_tls(p)?),
         None => None,
     };
+
+    if peer_tls.is_none() && !cfg.peer_listen.ip().is_loopback() {
+        if !cfg.allow_insecure_peer {
+            return Err(StandaloneError::PeerInsecureRoutable {
+                addr: cfg.peer_listen,
+            });
+        }
+        tracing::warn!(
+            addr = %cfg.peer_listen,
+            "peer listener bound without TLS via --allow-insecure-peer; \
+             relying on out-of-band transport security"
+        );
+    }
 
     // Validate self identity (spec: Lifecycle): a node absent from its own
     // ClusterConfig.nodes can never be elected.
@@ -210,6 +226,7 @@ mod tests {
             data_dir: std::path::PathBuf::from("/this/path/must/not/be/touched"),
             tick_interval: Duration::from_millis(20),
             peer_tls: None,
+            allow_insecure_peer: false,
         };
         match build_paxos(cfg).await {
             Err(StandaloneError::Config(_)) => {}

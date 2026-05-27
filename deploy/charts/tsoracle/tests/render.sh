@@ -47,6 +47,22 @@ fi
 helm template t "$chart" --set driver=openraft,tls.allowInsecurePeer=true | grep -q "kind: NetworkPolicy" \
     || { echo "allowInsecurePeer: NetworkPolicy not emitted"; exit 1; }
 
+# opt-out: allowInsecurePeer also injects ALLOW_INSECURE_PEER env (Task 6: chart -> binary pass-through)
+helm template t "$chart" --set driver=openraft,tls.allowInsecurePeer=true | grep -q "ALLOW_INSECURE_PEER" \
+    || { echo "allowInsecurePeer: ALLOW_INSECURE_PEER env not injected (openraft)"; exit 1; }
+helm template t "$chart" --set driver=paxos,tls.allowInsecurePeer=true | grep -q "ALLOW_INSECURE_PEER" \
+    || { echo "allowInsecurePeer: ALLOW_INSECURE_PEER env not injected (paxos)"; exit 1; }
+
+# TLS enabled MUST suppress ALLOW_INSECURE_PEER injection (TLS path wins; opt-out would be a no-op or mask a bad Secret)
+if helm template t "$chart" --set driver=openraft,tls.enabled=true,tls.secretName=certs,tls.allowInsecurePeer=true | grep -q "ALLOW_INSECURE_PEER"; then
+    echo "tls.enabled=true must suppress ALLOW_INSECURE_PEER env"; exit 1
+fi
+
+# file driver has no peer surface; ALLOW_INSECURE_PEER must never be injected
+if helm template t "$chart" --set driver=file,replicas=1,tls.allowInsecurePeer=true | grep -q "ALLOW_INSECURE_PEER"; then
+    echo "file driver must not inject ALLOW_INSECURE_PEER"; exit 1
+fi
+
 # networkPolicy.enabled=false suppresses the policy
 if helm template t "$chart" --set driver=openraft,tls.allowInsecurePeer=true,networkPolicy.enabled=false | grep -q "kind: NetworkPolicy"; then
     echo "networkPolicy.enabled=false still emitted a NetworkPolicy"; exit 1

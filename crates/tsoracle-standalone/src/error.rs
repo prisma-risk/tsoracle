@@ -50,6 +50,11 @@ pub enum StandaloneError {
          (only loopback addresses may bind without admin TLS)"
     )]
     AdminInsecureRoutable { addr: SocketAddr },
+    #[error(
+        "peer listener on {addr} requires --peer-tls-{{cert,key,ca}} or \
+         --allow-insecure-peer (only loopback addresses may bind without peer TLS)"
+    )]
+    PeerInsecureRoutable { addr: SocketAddr },
     #[error("driver bootstrap failed: {0}")]
     Bootstrap(Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid configuration: {0}")]

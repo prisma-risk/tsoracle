@@ -109,6 +109,12 @@ pub struct OpenraftConfig {
     /// loopback only; routable `admin_listen` without TLS is rejected at
     /// build() (see `StandaloneError::AdminInsecureRoutable`).
     pub admin_tls: Option<AdminTlsConfig>,
+    /// When `false`, a non-loopback `raft_addr` without `peer_tls` is
+    /// rejected at build() (see `StandaloneError::PeerInsecureRoutable`).
+    /// Set `true` to opt out — intended only for single-host dev or
+    /// service-mesh-terminated mTLS, and matches the helm chart's
+    /// `tls.allowInsecurePeer`.
+    pub allow_insecure_peer: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +129,12 @@ pub struct PaxosConfig {
     pub data_dir: PathBuf,
     pub tick_interval: Duration,
     pub peer_tls: Option<PeerTlsConfig>,
+    /// When `false`, a non-loopback `peer_listen` without `peer_tls` is
+    /// rejected at build() (see `StandaloneError::PeerInsecureRoutable`).
+    /// Set `true` to opt out — intended only for single-host dev or
+    /// service-mesh-terminated mTLS, and matches the helm chart's
+    /// `tls.allowInsecurePeer`.
+    pub allow_insecure_peer: bool,
 }
 
 pub enum DriverConfig {

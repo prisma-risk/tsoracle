@@ -63,3 +63,33 @@ pub async fn lease_port() -> (SocketAddr, PortLease) {
         },
     )
 }
+
+/// Mint a self-signed CA + node leaf (SAN `127.0.0.1`) and write all
+/// three PEMs into `dir`. Returns `(cert, key, ca)` as paths — the
+/// triple consumed by `tsoracle_standalone::PeerTlsConfig`.
+///
+/// Suitable for build-time guard tests: the cert is well-formed enough
+/// to pass `peer_tls::build_peer_tls` dry-validation, which is all the
+/// `peer_tls.is_some()` arm of the guard needs.
+pub fn write_peer_pems(
+    dir: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = CertificateParams::new(vec!["tso-peer-ca".into()]).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+    let node_key = KeyPair::generate().unwrap();
+    let node_params = CertificateParams::new(vec!["127.0.0.1".into()]).unwrap();
+    let node_cert = node_params.signed_by(&node_key, &ca_cert, &ca_key).unwrap();
+
+    let cert_path = dir.join("peer.crt");
+    let key_path = dir.join("peer.key");
+    let ca_path = dir.join("peer-ca.crt");
+    std::fs::write(&cert_path, node_cert.pem()).unwrap();
+    std::fs::write(&key_path, node_key.serialize_pem()).unwrap();
+    std::fs::write(&ca_path, ca_cert.pem()).unwrap();
+    (cert_path, key_path, ca_path)
+}

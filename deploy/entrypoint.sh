@@ -23,6 +23,11 @@ if [ -n "${TLS_DIR:-}" ] && [ -f "${TLS_DIR}/tls.crt" ]; then
     peer_tls="--peer-tls-cert ${TLS_DIR}/tls.crt --peer-tls-key ${TLS_DIR}/tls.key --peer-tls-ca ${TLS_DIR}/ca.crt"
 fi
 
+allow_insecure_peer=""
+if [ -z "${TLS_DIR:-}" ] && [ "${ALLOW_INSECURE_PEER:-false}" = "true" ]; then
+    allow_insecure_peer="--allow-insecure-peer"
+fi
+
 # Server knobs common to every serve subcommand (the bin reads --log as its
 # tracing filter; RUST_LOG is not consulted).
 : "${WINDOW_AHEAD:=3s}"
@@ -76,7 +81,7 @@ openraft|paxos)
             --listen "0.0.0.0:${TSO_PORT}" \
             --admin-listen "127.0.0.1:${ADMIN_PORT}" \
             --raft-dir "${DATA_DIR}/raft" \
-            $peer_tls $client_tls $common $bootstrap
+            $peer_tls $client_tls $common $bootstrap $allow_insecure_peer
     else
         # shellcheck disable=SC2086
         exec tsoracle serve paxos \
@@ -86,7 +91,7 @@ openraft|paxos)
             --peers "$peers" \
             --tso-peers "$tso_peers" \
             --data-dir "${DATA_DIR}" \
-            $peer_tls $client_tls $common
+            $peer_tls $client_tls $common $allow_insecure_peer
     fi
     ;;
 *)

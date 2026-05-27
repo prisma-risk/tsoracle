@@ -140,6 +140,26 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         return Err(StandaloneError::AdminInsecureRoutable { addr: listen });
     }
 
+    // Mirror the admin secure-by-default guard for the peer listener.
+    // Dry-build peer TLS first so a bad PEM surfaces as Tls (operator's
+    // explicit intent) before the routable guard fires.
+    let peer_tls = match &cfg.peer_tls {
+        Some(p) => Some(crate::peer_tls::build_peer_tls(p)?),
+        None => None,
+    };
+    if peer_tls.is_none() && !cfg.raft_addr.ip().is_loopback() {
+        if !cfg.allow_insecure_peer {
+            return Err(StandaloneError::PeerInsecureRoutable {
+                addr: cfg.raft_addr,
+            });
+        }
+        tracing::warn!(
+            addr = %cfg.raft_addr,
+            "peer listener bound without TLS via --allow-insecure-peer; \
+             relying on out-of-band transport security"
+        );
+    }
+
     std::fs::create_dir_all(&cfg.raft_dir).map_err(|source| StandaloneError::Storage {
         path: cfg.raft_dir.clone(),
         source: Box::new(source),
@@ -206,11 +226,6 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
         .validate()
         .map_err(|e| StandaloneError::Config(e.to_string()))?,
     );
-
-    let peer_tls = match &cfg.peer_tls {
-        Some(p) => Some(crate::peer_tls::build_peer_tls(p)?),
-        None => None,
-    };
 
     let network = PeerFactory::new(
         peer_tls.as_ref().map(|m| m.client.clone()),
@@ -299,9 +314,8 @@ pub(crate) async fn build_openraft(cfg: OpenraftConfig) -> Result<Standalone, St
 
     // First production caller of PeerCapabilitySource (it has been
     // #[allow(dead_code)] in network.rs:273-285 waiting for this wire-up).
-    // The peer TLS config is `Option<PeerTlsMaterial>` (mod.rs:210-211);
-    // extract the client side with `.as_ref().map(|m| m.client.clone())`
-    // — same pattern the existing peer factory uses at mod.rs:216.
+    // The peer TLS config is `Option<PeerTlsMaterial>`; extract the client
+    // side with `.as_ref().map(|m| m.client.clone())`.
     let capability_source = std::sync::Arc::new(
         crate::drivers::openraft::network::PeerCapabilitySource::new(
             peer_tls.as_ref().map(|m| m.client.clone()),

@@ -110,6 +110,7 @@ async fn main() -> Result<()> {
         peer_tls,
         admin_listen: None,
         admin_tls: None,
+        allow_insecure_peer: false,
     });
     let mut node = build(cfg).await?;
     let drain = node.take_drain();
