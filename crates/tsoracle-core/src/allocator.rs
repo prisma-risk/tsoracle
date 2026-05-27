@@ -26,6 +26,66 @@
 
 use crate::{Epoch, LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp};
 
+/// A `u64` physical-millisecond value proven `<= PHYSICAL_MS_MAX` at
+/// construction.
+///
+/// The 46-bit physical field of [`Timestamp`] cannot represent any value above
+/// [`PHYSICAL_MS_MAX`]; every allocator entry point used to re-check that
+/// bound on bare `u64` parameters (`fence_floor`, `committed_ceiling`,
+/// `now_ms`, `persisted_high_water`) — three different methods, each carrying
+/// its own `if value > PHYSICAL_MS_MAX { ... }` line. `PhysicalMs` collapses
+/// those per-method runtime checks into one construction-site check, so:
+///
+/// * a method signature taking `PhysicalMs` is compile-time proof that the
+///   46-bit bound has already been validated for that argument; and
+/// * an accidental swap of `now_ms` and `committed_ceiling` at a call site no
+///   longer type-checks against bare `u64` clocks, durations, or counters.
+///
+/// Constructed via [`try_new`](Self::try_new) (or the equivalent
+/// [`TryFrom<u64>`] impl). The inner value can be recovered with
+/// [`get`](Self::get) for arithmetic; the result must be re-wrapped through
+/// `try_new` before crossing back into a `PhysicalMs`-typed boundary.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PhysicalMs(u64);
+
+impl PhysicalMs {
+    /// The largest in-range value, `2^46 - 1` (equal to [`PHYSICAL_MS_MAX`]).
+    pub const MAX: PhysicalMs = PhysicalMs(PHYSICAL_MS_MAX);
+    /// The zero value. Available as `const`, matching `Duration::ZERO` style.
+    pub const ZERO: PhysicalMs = PhysicalMs(0);
+
+    /// Validate `value <= PHYSICAL_MS_MAX` and wrap. Returns
+    /// [`CoreError::PhysicalMsOutOfRange`] otherwise.
+    ///
+    /// Declared `const fn` so [`MAX`](Self::MAX) and any other compile-time
+    /// `PhysicalMs` constant can be built without unsafe direct-field
+    /// construction outside this module.
+    pub const fn try_new(value: u64) -> Result<Self, CoreError> {
+        if value > PHYSICAL_MS_MAX {
+            return Err(CoreError::PhysicalMsOutOfRange(value));
+        }
+        Ok(PhysicalMs(value))
+    }
+
+    /// Recover the underlying `u64`. `Copy`, so the receiver remains usable.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl TryFrom<u64> for PhysicalMs {
+    type Error = CoreError;
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl core::fmt::Display for PhysicalMs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /// A contiguous block of `count` timestamps starting at
 /// `(physical_ms, logical_start)`, all sharing one leadership `epoch`.
 ///
@@ -222,26 +282,20 @@ impl Allocator {
     /// `try_grant` immediately without an additional extension round-trip.
     pub fn try_on_leadership_gained(
         &mut self,
-        fence_floor: u64,
-        committed_ceiling: u64,
+        fence_floor: PhysicalMs,
+        committed_ceiling: PhysicalMs,
         epoch: Epoch,
     ) -> Result<(), CoreError> {
-        if fence_floor > PHYSICAL_MS_MAX {
-            return Err(CoreError::PhysicalMsOutOfRange(fence_floor));
-        }
-        if committed_ceiling > PHYSICAL_MS_MAX {
-            return Err(CoreError::PhysicalMsOutOfRange(committed_ceiling));
-        }
         if committed_ceiling < fence_floor {
             return Err(CoreError::InvalidLeadershipWindow {
-                fence_floor,
-                committed_ceiling,
+                fence_floor: fence_floor.get(),
+                committed_ceiling: committed_ceiling.get(),
             });
         }
         self.state = State::Leader {
             epoch,
-            committed_high_water: committed_ceiling,
-            next_physical_ms: fence_floor,
+            committed_high_water: committed_ceiling.get(),
+            next_physical_ms: fence_floor.get(),
             next_logical: 0,
         };
         Ok(())
@@ -438,9 +492,9 @@ impl Allocator {
     /// proceed as if preparation had succeeded.
     pub fn try_prepare_window_extension(
         &self,
-        now_ms: u64,
+        now_ms: PhysicalMs,
         ahead_ms: u64,
-    ) -> Result<u64, CoreError> {
+    ) -> Result<PhysicalMs, CoreError> {
         match &self.state {
             State::NotLeader => Err(CoreError::NotLeader),
             State::Leader {
@@ -450,6 +504,7 @@ impl Allocator {
                 let floor = committed_high_water
                     .checked_add(1)
                     .ok_or(CoreError::PhysicalMsOutOfRange(*committed_high_water))?;
+                let now_ms = now_ms.get();
                 let requested = core::cmp::max(floor, now_ms).checked_add(ahead_ms).ok_or(
                     CoreError::WindowExtensionOverflow {
                         floor,
@@ -457,10 +512,10 @@ impl Allocator {
                         ahead_ms,
                     },
                 )?;
-                if requested > PHYSICAL_MS_MAX {
-                    return Err(CoreError::PhysicalMsOutOfRange(requested));
-                }
-                Ok(requested)
+                // Re-wrap via `PhysicalMs::try_new`: the only remaining bound
+                // check on this path is on the *derived* sum, no longer on
+                // each input parameter.
+                PhysicalMs::try_new(requested)
             }
         }
     }
@@ -477,17 +532,19 @@ impl Allocator {
     /// epoch N+M.
     ///
     /// Returns [`CommitOutcome`]: `Applied` when the bound advanced, or
-    /// `Ignored` (with the reason) for the three benign drop cases. A value
-    /// exceeding the 46-bit physical ceiling is an invariant violation, not a
-    /// benign drop, so it stays `Err(PhysicalMsOutOfRange)`.
+    /// `Ignored` (with the reason) for the three benign drop cases. The 46-bit
+    /// physical-ceiling invariant on `persisted_high_water` is now enforced by
+    /// the [`PhysicalMs`] parameter type itself ([`PhysicalMs::try_new`]);
+    /// the `Result<_, CoreError>` shape is retained for source compatibility
+    /// with [`try_on_leadership_gained`] / [`try_prepare_window_extension`],
+    /// so callers can stay uniform under `?`, but no current code path here
+    /// produces `Err`.
     pub fn try_commit_window_extension(
         &mut self,
-        persisted_high_water: u64,
+        persisted_high_water: PhysicalMs,
         expected_epoch: Epoch,
     ) -> Result<CommitOutcome, CoreError> {
-        if persisted_high_water > PHYSICAL_MS_MAX {
-            return Err(CoreError::PhysicalMsOutOfRange(persisted_high_water));
-        }
+        let persisted_high_water = persisted_high_water.get();
         let State::Leader {
             epoch,
             committed_high_water,
@@ -526,6 +583,17 @@ impl Default for Allocator {
 mod tests {
     use super::*;
 
+    // Tiny helper to keep the bound-validated literals readable. Every
+    // pre-newtype `try_on_leadership_gained(1_000, 5_000, …)` call carried an
+    // implicit "these literals are within the 46-bit field" precondition;
+    // wrapping each in `PhysicalMs::try_new(_).unwrap()` would have buried
+    // every test in unwrap noise without adding coverage (the literals are
+    // tiny constants under static review). `pms()` keeps the precondition
+    // explicit at the type level while reading the same as the original.
+    fn pms(value: u64) -> PhysicalMs {
+        PhysicalMs::try_new(value).expect("test literal exceeds PHYSICAL_MS_MAX")
+    }
+
     #[test]
     fn new_allocator_is_not_leader() {
         let allocator = Allocator::new();
@@ -537,26 +605,21 @@ mod tests {
     fn on_leadership_gained_sets_epoch() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, 5000, Epoch(5))
+            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(5))
             .unwrap();
         assert!(allocator.is_leader());
         assert_eq!(allocator.epoch(), Some(Epoch(5)));
     }
 
     #[test]
-    fn try_on_leadership_gained_rejects_out_of_range_window() {
+    fn try_on_leadership_gained_rejects_inverted_window() {
+        // The per-argument PHYSICAL_MS_MAX checks are now enforced one layer
+        // out at `PhysicalMs::try_new` (see the `physical_ms` test block below),
+        // so this method's only remaining error is the cross-argument
+        // `committed_ceiling < fence_floor` invariant.
         let mut allocator = Allocator::new();
         assert_eq!(
-            allocator.try_on_leadership_gained(PHYSICAL_MS_MAX + 1, PHYSICAL_MS_MAX + 1, Epoch(5)),
-            Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
-        );
-        // fence_floor in-range, ceiling out-of-range — separate guard.
-        assert_eq!(
-            allocator.try_on_leadership_gained(1_000, PHYSICAL_MS_MAX + 1, Epoch(5)),
-            Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
-        );
-        assert_eq!(
-            allocator.try_on_leadership_gained(5000, 4000, Epoch(5)),
+            allocator.try_on_leadership_gained(pms(5000), pms(4000), Epoch(5)),
             Err(CoreError::InvalidLeadershipWindow {
                 fence_floor: 5000,
                 committed_ceiling: 4000
@@ -568,7 +631,7 @@ mod tests {
     fn on_leadership_lost_clears_state() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, 5000, Epoch(5))
+            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(5))
             .unwrap();
         allocator.on_leadership_lost();
         assert!(!allocator.is_leader());
@@ -581,17 +644,17 @@ mod tests {
         assert_eq!(allocator.committed_high_water(), None);
 
         allocator
-            .try_on_leadership_gained(1_000, 5_000, Epoch(1))
+            .try_on_leadership_gained(pms(1_000), pms(5_000), Epoch(1))
             .unwrap();
         assert_eq!(allocator.committed_high_water(), Some(5_000));
 
         let target = allocator
-            .try_prepare_window_extension(2_000, 3_000)
+            .try_prepare_window_extension(pms(2_000), 3_000)
             .unwrap();
         allocator
             .try_commit_window_extension(target, Epoch(1))
             .unwrap();
-        assert_eq!(allocator.committed_high_water(), Some(target));
+        assert_eq!(allocator.committed_high_water(), Some(target.get()));
 
         allocator.on_leadership_lost();
         assert_eq!(allocator.committed_high_water(), None);
@@ -607,7 +670,7 @@ mod tests {
     fn try_grant_zero_count() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(1))
             .unwrap();
         assert_eq!(
             allocator.try_grant(1000, 0),
@@ -619,7 +682,7 @@ mod tests {
     fn try_grant_oversized_count() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(1))
             .unwrap();
         let oversized = LOGICAL_MAX + 2;
         assert_eq!(
@@ -635,7 +698,7 @@ mod tests {
         let mut allocator = Allocator::new();
         // fence_floor=5_000, ceiling=5_000 (tight window, no pre-extended gap).
         allocator
-            .try_on_leadership_gained(5_000, 5_000, Epoch(1))
+            .try_on_leadership_gained(pms(5_000), pms(5_000), Epoch(1))
             .unwrap();
         // now_ms below floor: clamps to floor=5_000, which equals the ceiling → succeeds.
         allocator.try_grant(4_999, 1).unwrap();
@@ -654,7 +717,7 @@ mod tests {
         let mut allocator = Allocator::new();
         // Tight initial window: fence_floor == ceiling == 1_000.
         allocator
-            .try_on_leadership_gained(1_000, 1_000, Epoch(1))
+            .try_on_leadership_gained(pms(1_000), pms(1_000), Epoch(1))
             .unwrap();
         // now_ms far past the ceiling exhausts the window.
         assert_eq!(
@@ -662,8 +725,10 @@ mod tests {
             Err(CoreError::WindowExhausted)
         );
         // Extend the durable bound to exactly 2_000.
-        let target = allocator.try_prepare_window_extension(2_000, 0).unwrap();
-        assert_eq!(target, 2_000); // max(committed+1=1_001, now=2_000) + 0
+        let target = allocator
+            .try_prepare_window_extension(pms(2_000), 0)
+            .unwrap();
+        assert_eq!(target, pms(2_000)); // max(committed+1=1_001, now=2_000) + 0
         allocator
             .try_commit_window_extension(target, Epoch(1))
             .unwrap();
@@ -682,7 +747,7 @@ mod tests {
         // can serve immediately. Grants start at fence_floor regardless of now_ms.
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(5_000, 10_000, Epoch(1))
+            .try_on_leadership_gained(pms(5_000), pms(10_000), Epoch(1))
             .unwrap();
         let grant = allocator.try_grant(1_000, 1).unwrap();
         // now_ms=1_000 < fence_floor=5_000, so next_physical_ms stays at 5_000.
@@ -697,7 +762,7 @@ mod tests {
         // return a `0` that a caller could mistake for a prepared bound.
         let allocator = Allocator::new();
         assert_eq!(
-            allocator.try_prepare_window_extension(1000, 3000),
+            allocator.try_prepare_window_extension(pms(1000), 3000),
             Err(CoreError::NotLeader)
         );
     }
@@ -706,51 +771,62 @@ mod tests {
     fn prepare_window_extension_uses_now_ms_when_ahead_of_high_water() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, 1000, Epoch(1))
+            .try_on_leadership_gained(pms(1000), pms(1000), Epoch(1))
             .unwrap();
-        let target = allocator.try_prepare_window_extension(2000, 3000).unwrap();
-        assert_eq!(target, 5000); // max(1001, 2000) + 3000
+        let target = allocator
+            .try_prepare_window_extension(pms(2000), 3000)
+            .unwrap();
+        assert_eq!(target, pms(5000)); // max(1001, 2000) + 3000
     }
 
     #[test]
     fn prepare_window_extension_uses_high_water_floor_when_clock_behind() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(10_000, 10_000, Epoch(1))
+            .try_on_leadership_gained(pms(10_000), pms(10_000), Epoch(1))
             .unwrap();
-        let target = allocator.try_prepare_window_extension(500, 3000).unwrap();
+        let target = allocator
+            .try_prepare_window_extension(pms(500), 3000)
+            .unwrap();
         // floor = 10_001, clock = 500. max = 10_001. + 3000 = 13_001.
-        assert_eq!(target, 13_001);
+        assert_eq!(target, pms(13_001));
     }
 
     #[test]
     fn prepare_window_extension_rejects_out_of_range_target() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(PHYSICAL_MS_MAX, PHYSICAL_MS_MAX, Epoch(1))
+            .try_on_leadership_gained(PhysicalMs::MAX, PhysicalMs::MAX, Epoch(1))
             .unwrap();
         assert_eq!(
-            allocator.try_prepare_window_extension(PHYSICAL_MS_MAX, 1),
+            allocator.try_prepare_window_extension(PhysicalMs::MAX, 1),
             Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 2))
         );
     }
 
     #[test]
     fn prepare_window_extension_overflow_names_all_operands() {
-        // A saturated clock (SystemClock::now_ms saturates to u64::MAX) plus any
-        // non-zero ahead_ms overflows max(floor, now_ms) + ahead_ms. The error
-        // must name the three real operands so the log points at the clock, not
-        // a phantom "someone passed an absurd physical_ms".
+        // Pre-newtype, the canonical overflow scenario was a saturated clock
+        // (SystemClock::now_ms saturates to u64::MAX) plus any non-zero
+        // ahead_ms. The PhysicalMs newtype now rejects that scenario at the
+        // boundary wrap (PhysicalMs::try_new(u64::MAX) → PhysicalMsOutOfRange),
+        // surfacing an earlier, more precise error.
+        //
+        // The internal overflow path is still reachable, but only via a
+        // pathologically large `ahead_ms` (a duration, not a physical-ms, so
+        // it stays an unbounded u64). The error must still name all three
+        // real operands so the log points at the offending duration, not a
+        // phantom "someone passed an absurd physical_ms".
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1_000, 1_000, Epoch(1))
+            .try_on_leadership_gained(pms(1_000), pms(1_000), Epoch(1))
             .unwrap();
         assert_eq!(
-            allocator.try_prepare_window_extension(u64::MAX, 1),
+            allocator.try_prepare_window_extension(pms(1_000), u64::MAX),
             Err(CoreError::WindowExtensionOverflow {
                 floor: 1_001,
-                now_ms: u64::MAX,
-                ahead_ms: 1,
+                now_ms: 1_000,
+                ahead_ms: u64::MAX,
             })
         );
     }
@@ -759,35 +835,37 @@ mod tests {
     fn commit_then_try_grant_succeeds() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, 1000, Epoch(7))
+            .try_on_leadership_gained(pms(1000), pms(1000), Epoch(7))
             .unwrap();
-        let target = allocator.try_prepare_window_extension(1000, 3000).unwrap();
+        let target = allocator
+            .try_prepare_window_extension(pms(1000), 3000)
+            .unwrap();
         assert_eq!(
             allocator.try_commit_window_extension(target, Epoch(7)),
-            Ok(CommitOutcome::Applied(target))
+            Ok(CommitOutcome::Applied(target.get()))
         );
         let grant = allocator.try_grant(1000, 5).unwrap();
         assert_eq!(grant.count, 5);
         assert_eq!(grant.logical_start, 0);
         assert_eq!(grant.epoch, Epoch(7));
         // physical_ms should be at most the persisted high-water.
-        assert!(grant.physical_ms <= target);
+        assert!(grant.physical_ms <= target.get());
     }
 
     #[test]
     fn commit_with_lower_value_is_ignored() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, 1000, Epoch(1))
+            .try_on_leadership_gained(pms(1000), pms(1000), Epoch(1))
             .unwrap();
         assert_eq!(
-            allocator.try_commit_window_extension(5000, Epoch(1)),
+            allocator.try_commit_window_extension(pms(5000), Epoch(1)),
             Ok(CommitOutcome::Applied(5000))
         );
         // A non-advancing commit reports the values so the caller can tell a
         // monotonic-bound regression (persist reordering) from epoch churn.
         assert_eq!(
-            allocator.try_commit_window_extension(3000, Epoch(1)),
+            allocator.try_commit_window_extension(pms(3000), Epoch(1)),
             Ok(CommitOutcome::Ignored(IgnoreReason::NotAdvanced {
                 persisted: 3000,
                 committed: 5000,
@@ -804,10 +882,10 @@ mod tests {
         // equal value moves nothing, so it is Ignored(NotAdvanced), not Applied.
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(1))
             .unwrap();
         assert_eq!(
-            allocator.try_commit_window_extension(5000, Epoch(1)),
+            allocator.try_commit_window_extension(pms(5000), Epoch(1)),
             Ok(CommitOutcome::Ignored(IgnoreReason::NotAdvanced {
                 persisted: 5000,
                 committed: 5000,
@@ -815,23 +893,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn commit_rejects_out_of_range_high_water() {
-        let mut allocator = Allocator::new();
-        allocator
-            .try_on_leadership_gained(1000, 1000, Epoch(1))
-            .unwrap();
-        assert_eq!(
-            allocator.try_commit_window_extension(PHYSICAL_MS_MAX + 1, Epoch(1)),
-            Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1))
-        );
-    }
+    // (`commit_rejects_out_of_range_high_water` migrated to the `physical_ms`
+    // test block: the bound check is now at `PhysicalMs::try_new`, so the
+    // bad value can no longer reach `try_commit_window_extension`.)
 
     #[test]
     fn try_grant_rejects_out_of_range_clock() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, PHYSICAL_MS_MAX, Epoch(1))
+            .try_on_leadership_gained(pms(1000), PhysicalMs::MAX, Epoch(1))
             .unwrap();
         assert_eq!(
             allocator.try_grant(PHYSICAL_MS_MAX + 1, 1),
@@ -844,12 +914,12 @@ mod tests {
         let mut allocator = Allocator::new();
         // fence_floor=1000, ceiling=1000: tight initial window.
         allocator
-            .try_on_leadership_gained(1000, 1000, Epoch(5))
+            .try_on_leadership_gained(pms(1000), pms(1000), Epoch(5))
             .unwrap();
         // A late persist from epoch 4 (the prior leader) — fenced out. The
         // outcome names both epochs so the caller can metric epoch churn.
         assert_eq!(
-            allocator.try_commit_window_extension(9_999, Epoch(4)),
+            allocator.try_commit_window_extension(pms(9_999), Epoch(4)),
             Ok(CommitOutcome::Ignored(IgnoreReason::EpochMismatch {
                 expected: Epoch(4),
                 current: Epoch(5),
@@ -868,11 +938,11 @@ mod tests {
     fn commit_after_leadership_lost_is_ignored() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1000, 5000, Epoch(1))
+            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(1))
             .unwrap();
         allocator.on_leadership_lost();
         assert_eq!(
-            allocator.try_commit_window_extension(9_999, Epoch(1)),
+            allocator.try_commit_window_extension(pms(9_999), Epoch(1)),
             Ok(CommitOutcome::Ignored(IgnoreReason::NotLeader))
         );
         assert!(!allocator.is_leader());
@@ -885,7 +955,7 @@ mod tests {
         assert!(!allocator.would_grant(1_000, 1));
         // Invalid counts: never grants.
         allocator
-            .try_on_leadership_gained(1_000, 5_000, Epoch(1))
+            .try_on_leadership_gained(pms(1_000), pms(5_000), Epoch(1))
             .unwrap();
         assert!(!allocator.would_grant(1_000, 0));
         assert!(!allocator.would_grant(1_000, LOGICAL_MAX + 2));
@@ -905,7 +975,7 @@ mod tests {
         // advance leaves the window, would_grant must return false.
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(1_000, 1_000, Epoch(1))
+            .try_on_leadership_gained(pms(1_000), pms(1_000), Epoch(1))
             .unwrap();
         // count >= LOGICAL_MAX + 1 forces the advance branch on a fresh
         // window: logical(0) + count(LOGICAL_MAX+1) doesn't overflow on its
@@ -923,7 +993,7 @@ mod tests {
         // crosses the 46-bit ceiling and the predicate refuses.
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(PHYSICAL_MS_MAX, PHYSICAL_MS_MAX, Epoch(1))
+            .try_on_leadership_gained(PhysicalMs::MAX, PhysicalMs::MAX, Epoch(1))
             .unwrap();
         // Fill the logical range so the next would_grant call has to
         // advance physical_ms.
@@ -944,8 +1014,12 @@ mod tests {
     fn logical_wraps_to_next_physical_ms() {
         let mut allocator = Allocator::new();
         // fence_floor=0, ceiling=0; extend to 10 before granting.
-        allocator.try_on_leadership_gained(0, 0, Epoch(1)).unwrap();
-        allocator.try_commit_window_extension(10, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(PhysicalMs::ZERO, PhysicalMs::ZERO, Epoch(1))
+            .unwrap();
+        allocator
+            .try_commit_window_extension(pms(10), Epoch(1))
+            .unwrap();
         // Issue LOGICAL_MAX+1 logicals at physical_ms=1, then one more should bump to 2.
         let first = allocator.try_grant(1, LOGICAL_MAX + 1).unwrap();
         assert_eq!(first.physical_ms, 1);
@@ -965,8 +1039,12 @@ mod tests {
         // The write-back normalizes it to the already-rolled position
         // (physical_ms + 1, 0), so stored state is always directly packable.
         let mut allocator = Allocator::new();
-        allocator.try_on_leadership_gained(0, 0, Epoch(1)).unwrap();
-        allocator.try_commit_window_extension(10, Epoch(1)).unwrap();
+        allocator
+            .try_on_leadership_gained(PhysicalMs::ZERO, PhysicalMs::ZERO, Epoch(1))
+            .unwrap();
+        allocator
+            .try_commit_window_extension(pms(10), Epoch(1))
+            .unwrap();
         // Fill physical_ms=1 exactly: logical [0, LOGICAL_MAX].
         let grant = allocator.try_grant(1, LOGICAL_MAX + 1).unwrap();
         assert_eq!(grant.physical_ms, 1);
@@ -1047,5 +1125,112 @@ mod tests {
                 count: 2
             })
         );
+    }
+
+    // ----------------------------------------------------------------
+    // PhysicalMs newtype: the construction-site bound check that the
+    // three Allocator entry points used to re-implement inline. Every
+    // assertion below was previously expressed as a runtime check
+    // *inside* try_on_leadership_gained, try_prepare_window_extension,
+    // or try_commit_window_extension; they now belong to the type.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn physical_ms_accepts_zero() {
+        assert_eq!(PhysicalMs::try_new(0).unwrap().get(), 0);
+    }
+
+    #[test]
+    fn physical_ms_accepts_max() {
+        assert_eq!(
+            PhysicalMs::try_new(PHYSICAL_MS_MAX).unwrap().get(),
+            PHYSICAL_MS_MAX,
+        );
+    }
+
+    #[test]
+    fn physical_ms_rejects_one_past_max() {
+        // The previously-inline checks in try_on_leadership_gained and
+        // try_commit_window_extension lived at this exact boundary;
+        // they now live here.
+        assert_eq!(
+            PhysicalMs::try_new(PHYSICAL_MS_MAX + 1),
+            Err(CoreError::PhysicalMsOutOfRange(PHYSICAL_MS_MAX + 1)),
+        );
+    }
+
+    #[test]
+    fn physical_ms_rejects_u64_max() {
+        // The saturated-clock scenario the old `try_prepare_window_extension`
+        // overflow test probed by passing u64::MAX is now caught one layer
+        // out, at construction.
+        assert_eq!(
+            PhysicalMs::try_new(u64::MAX),
+            Err(CoreError::PhysicalMsOutOfRange(u64::MAX)),
+        );
+    }
+
+    #[test]
+    fn physical_ms_max_const_matches_try_new() {
+        assert_eq!(
+            PhysicalMs::MAX,
+            PhysicalMs::try_new(PHYSICAL_MS_MAX).unwrap(),
+        );
+    }
+
+    #[test]
+    fn physical_ms_zero_const_matches_try_new_and_default() {
+        // ZERO, Default::default(), and try_new(0) must all coincide so
+        // callers can use any spelling without semantic difference.
+        assert_eq!(PhysicalMs::ZERO, PhysicalMs::try_new(0).unwrap());
+        assert_eq!(PhysicalMs::default(), PhysicalMs::ZERO);
+    }
+
+    #[test]
+    fn physical_ms_try_from_matches_try_new() {
+        // TryFrom<u64> is required for generic conversion code; it must
+        // produce identical Ok/Err to the inherent try_new on every input.
+        let good: u64 = 1_234_567;
+        let from_inherent = PhysicalMs::try_new(good).unwrap();
+        let from_trait: PhysicalMs = good.try_into().unwrap();
+        assert_eq!(from_inherent, from_trait);
+
+        let bad = PHYSICAL_MS_MAX + 1;
+        let bad_inherent = PhysicalMs::try_new(bad);
+        let bad_trait: Result<PhysicalMs, CoreError> = bad.try_into();
+        assert_eq!(bad_inherent, bad_trait);
+    }
+
+    #[test]
+    fn physical_ms_display_passes_through_inner_value() {
+        // Display is a thin passthrough — it must format identically to the
+        // underlying u64 so log lines and error messages read the same after
+        // the refactor.
+        let v: u64 = 4_242_424_242;
+        assert_eq!(
+            format!("{}", PhysicalMs::try_new(v).unwrap()),
+            format!("{v}"),
+        );
+    }
+
+    #[test]
+    fn physical_ms_ordering_follows_inner_value() {
+        // The wrapper exposes Ord/PartialOrd so the allocator can compare
+        // bounds (e.g. committed_ceiling < fence_floor) without stripping to
+        // u64 — this test pins that the derived ordering matches the inner.
+        let a = PhysicalMs::try_new(5).unwrap();
+        let b = PhysicalMs::try_new(10).unwrap();
+        assert!(a < b);
+        assert!(b > a);
+        assert!(a <= a);
+    }
+
+    #[test]
+    fn physical_ms_is_copy_and_eq() {
+        // Compile-time witness: if a future edit accidentally drops `Copy`
+        // or `Eq`, several allocator call sites that consume the value
+        // twice or compare it inside `assert_eq!` would silently break.
+        fn assert_copy_eq<T: Copy + Eq>() {}
+        assert_copy_eq::<PhysicalMs>();
     }
 }

@@ -52,7 +52,9 @@ use tokio::sync::{
     Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
     watch,
 };
-use tsoracle_core::{Allocator, CommitOutcome, CoreError, Epoch, PeerEndpoint, WindowGrant};
+use tsoracle_core::{
+    Allocator, CommitOutcome, CoreError, Epoch, PeerEndpoint, PhysicalMs, WindowGrant,
+};
 
 use crate::server::ServingState;
 
@@ -189,6 +191,11 @@ impl ServingCore {
         committed_ceiling: u64,
         epoch: Epoch,
     ) -> Result<(), CoreError> {
+        // PhysicalMs wrap at the ServingCore boundary — the per-parameter
+        // PHYSICAL_MS_MAX check that used to live inside the allocator now
+        // lives in PhysicalMs::try_new and surfaces here.
+        let serving_floor = PhysicalMs::try_new(serving_floor)?;
+        let committed_ceiling = PhysicalMs::try_new(committed_ceiling)?;
         self.allocator
             .lock()
             .try_on_leadership_gained(serving_floor, committed_ceiling, epoch)
@@ -199,6 +206,7 @@ impl ServingCore {
         actual: u64,
         epoch: Epoch,
     ) -> Result<CommitOutcome, CoreError> {
+        let actual = PhysicalMs::try_new(actual)?;
         self.allocator
             .lock()
             .try_commit_window_extension(actual, epoch)
@@ -254,7 +262,10 @@ impl<'a> ExtensionSlot<'a> {
         let Some(epoch) = allocator.epoch() else {
             return Err(CoreError::NotLeader);
         };
-        let requested = allocator.try_prepare_window_extension(now_ms, window_ahead_ms)?;
+        let now_ms = PhysicalMs::try_new(now_ms)?;
+        let requested = allocator
+            .try_prepare_window_extension(now_ms, window_ahead_ms)?
+            .get();
         Ok((requested, epoch))
     }
 

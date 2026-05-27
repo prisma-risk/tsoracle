@@ -33,7 +33,7 @@ mod timestamp;
 
 pub mod docs;
 
-pub use allocator::{Allocator, CommitOutcome, CoreError, IgnoreReason, WindowGrant};
+pub use allocator::{Allocator, CommitOutcome, CoreError, IgnoreReason, PhysicalMs, WindowGrant};
 pub use epoch::Epoch;
 pub use peer::{PeerEndpoint, PeerEndpointError, TsoPeer};
 pub use timestamp::{LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp, TimestampError};
