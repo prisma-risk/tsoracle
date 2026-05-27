@@ -44,6 +44,16 @@ mod drivers;
 #[cfg(feature = "file")]
 pub use drivers::file::init_file_seeded;
 
+/// Test-only entry point that builds an openraft node from pre-bound listeners
+/// instead of binding internally. See `drivers::openraft::build_openraft_with_listeners`.
+#[cfg(all(any(test, feature = "test-support"), feature = "openraft"))]
+pub use drivers::openraft::build_openraft_with_listeners;
+
+/// Test-only entry point that builds a paxos node from a pre-bound peer
+/// listener. See `drivers::paxos::build_paxos_with_listeners`.
+#[cfg(all(any(test, feature = "test-support"), feature = "paxos"))]
+pub use drivers::paxos::build_paxos_with_listeners;
+
 mod error;
 pub use error::StandaloneError;
 

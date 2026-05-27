@@ -57,6 +57,27 @@ fn open_rocksdb(dir: &std::path::Path) -> Result<Arc<DB>, StandaloneError> {
 }
 
 pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, StandaloneError> {
+    build_paxos_inner(cfg, None).await
+}
+
+/// Test-only entry point: build with a pre-bound `TcpListener` for the paxos
+/// peer port, bypassing the internal `TcpListener::bind`. Lets a test hold an
+/// OS-assigned ephemeral port continuously from `lease_port()` through `build`,
+/// eliminating the close/rebind race that periodically surfaces as `EADDRINUSE`
+/// under parallel-test load. Sibling of `build_openraft_with_listeners` in the
+/// openraft driver.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn build_paxos_with_listeners(
+    cfg: PaxosConfig,
+    peer_listener: tokio::net::TcpListener,
+) -> Result<Standalone, StandaloneError> {
+    build_paxos_inner(cfg, Some(peer_listener)).await
+}
+
+async fn build_paxos_inner(
+    cfg: PaxosConfig,
+    peer_listener: Option<tokio::net::TcpListener>,
+) -> Result<Standalone, StandaloneError> {
     // Mirror the openraft peer secure-by-default guard (drivers/openraft/mod.rs):
     // dry-build peer TLS first so a bad PEM surfaces as Tls (operator's
     // explicit intent) before the routable guard fires.
@@ -119,13 +140,17 @@ pub(crate) async fn build_paxos(cfg: PaxosConfig) -> Result<Standalone, Standalo
         .map_err(|e| StandaloneError::Bootstrap(Box::new(e)))?,
     ));
 
-    // Bind the peer listener BEFORE spawning.
-    let listener = tokio::net::TcpListener::bind(cfg.peer_listen)
-        .await
-        .map_err(|source| StandaloneError::PeerBind {
-            addr: cfg.peer_listen,
-            source,
-        })?;
+    // Bind the peer listener BEFORE spawning. Tests can hand in a `TcpListener`
+    // they've held since `lease_port()` to skip the close/rebind race window.
+    let listener = match peer_listener {
+        Some(l) => l,
+        None => tokio::net::TcpListener::bind(cfg.peer_listen)
+            .await
+            .map_err(|source| StandaloneError::PeerBind {
+                addr: cfg.peer_listen,
+                source,
+            })?,
+    };
     let peer_service = peer_server(omnipaxos.clone());
     let mut builder = tonic::transport::Server::builder();
     if let Some(material) = &peer_tls {

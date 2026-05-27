@@ -34,23 +34,40 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 /// Holds an open ephemeral-port listener so the kernel will not re-assign
-/// that port to any other `bind(:0)` in the system. Drop just before the
-/// consumer's own bind to keep the residual TOCTOU window microscopic.
+/// that port to any other `bind(:0)` in the system. Either drop it (the
+/// kernel frees the port; the consumer must immediately rebind, racing any
+/// other `bind(:0)` in the meantime) or hand the listener directly to a
+/// consumer that supports pre-bound listeners — eliminating the close/rebind
+/// window entirely. The latter is the only race-free path; see
+/// `into_listener`.
 pub struct PortLease {
-    _listener: Option<TcpListener>,
+    listener: Option<TcpListener>,
+}
+
+impl PortLease {
+    /// Consume the lease and return the underlying open `TcpListener`. Hand
+    /// this to a build path that accepts a pre-bound listener (e.g.
+    /// `tsoracle_standalone::build_openraft_with_listeners`) so the port is
+    /// never released between lease and use.
+    pub fn into_listener(mut self) -> TcpListener {
+        self.listener
+            .take()
+            .expect("PortLease already consumed (into_listener called twice?)")
+    }
 }
 
 /// Bind an ephemeral port and return its address paired with a `PortLease`
-/// holding the listener open. Drop the `PortLease` at the exact moment the
-/// consumer is about to bind the address.
+/// holding the listener open. Prefer `PortLease::into_listener` to hand the
+/// bound socket directly to the consumer; only `drop` the lease when the
+/// consumer cannot accept a pre-bound listener (legacy path).
 ///
-/// The earlier helper just dropped the listener and returned the address —
-/// a classic TOCTOU race. Under parallel `#[tokio::test]` execution (each
-/// integration-test binary spreads tests across worker threads), the kernel
-/// would re-issue a freshly-freed ephemeral port to another test's
+/// History: the original helper just dropped the listener and returned the
+/// address — a classic TOCTOU race. Under parallel `#[tokio::test]` execution
+/// (each integration-test binary spreads tests across worker threads), the
+/// kernel would re-issue a freshly-freed ephemeral port to another test's
 /// `bind(:0)` before the original test's consumer got around to binding,
-/// causing `EADDRINUSE` panics. Holding the listener until the consumer is
-/// ready makes the port unassignable for the entire lease window.
+/// causing `EADDRINUSE` panics. Holding the listener narrowed the window;
+/// `into_listener` closes it.
 pub async fn lease_port() -> (SocketAddr, PortLease) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -59,7 +76,7 @@ pub async fn lease_port() -> (SocketAddr, PortLease) {
     (
         addr,
         PortLease {
-            _listener: Some(listener),
+            listener: Some(listener),
         },
     )
 }
