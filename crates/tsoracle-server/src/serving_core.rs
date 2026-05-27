@@ -160,7 +160,7 @@ impl ServingCore {
         leader_endpoint: Option<PeerEndpoint>,
         leader_epoch: Option<Epoch>,
     ) {
-        self.allocator.lock().on_leadership_lost();
+        self.allocator.lock().step_down();
         self.state_tx.send_replace(ServingState::NotServing {
             leader_endpoint,
             leader_epoch,
@@ -198,7 +198,7 @@ impl ServingCore {
         let committed_ceiling = PhysicalMs::try_new(committed_ceiling)?;
         self.allocator
             .lock()
-            .try_on_leadership_gained(serving_floor, committed_ceiling, epoch)
+            .become_leader(serving_floor, committed_ceiling, epoch)
     }
 
     pub(crate) fn commit_extension(
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn seed_then_try_grant_succeeds_at_seeded_epoch() {
-        // try_on_leadership_gained(floor, ceiling, epoch) seeds a serveable
+        // become_leader(floor, ceiling, epoch) seeds a serveable
         // window; a grant at the floor returns timestamps stamped with the
         // seeded epoch.
         let core = ServingCore::new(Duration::from_secs(3));

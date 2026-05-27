@@ -215,8 +215,8 @@ pub enum CoreError {
 /// a leading indicator of epoch churn or persist reordering.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CommitOutcome {
-    /// The durable bound advanced to this value.
-    Applied(u64),
+    /// The durable bound advanced to `high_water`.
+    Applied { high_water: u64 },
     /// The bound did not move; see [`IgnoreReason`] for why.
     Ignored(IgnoreReason),
 }
@@ -280,7 +280,7 @@ impl Allocator {
     /// already persisted (typically `fence_floor + window_ms`). It must
     /// satisfy `committed_ceiling >= fence_floor` so the allocator can serve
     /// `try_grant` immediately without an additional extension round-trip.
-    pub fn try_on_leadership_gained(
+    pub fn become_leader(
         &mut self,
         fence_floor: PhysicalMs,
         committed_ceiling: PhysicalMs,
@@ -301,7 +301,7 @@ impl Allocator {
         Ok(())
     }
 
-    pub fn on_leadership_lost(&mut self) {
+    pub fn step_down(&mut self) {
         self.state = State::NotLeader;
     }
 
@@ -544,7 +544,7 @@ impl Allocator {
     /// physical-ceiling invariant on `persisted_high_water` is now enforced by
     /// the [`PhysicalMs`] parameter type itself ([`PhysicalMs::try_new`]);
     /// the `Result<_, CoreError>` shape is retained for source compatibility
-    /// with [`try_on_leadership_gained`] / [`try_prepare_window_extension`],
+    /// with [`become_leader`] / [`try_prepare_window_extension`],
     /// so callers can stay uniform under `?`, but no current code path here
     /// produces `Err`.
     pub fn try_commit_window_extension(
@@ -577,7 +577,9 @@ impl Allocator {
             }));
         }
         *committed_high_water = persisted_high_water;
-        Ok(CommitOutcome::Applied(persisted_high_water))
+        Ok(CommitOutcome::Applied {
+            high_water: persisted_high_water,
+        })
     }
 }
 
@@ -592,7 +594,7 @@ mod tests {
     use super::*;
 
     // Tiny helper to keep the bound-validated literals readable. Every
-    // pre-newtype `try_on_leadership_gained(1_000, 5_000, …)` call carried an
+    // pre-newtype `become_leader(1_000, 5_000, …)` call carried an
     // implicit "these literals are within the 46-bit field" precondition;
     // wrapping each in `PhysicalMs::try_new(_).unwrap()` would have buried
     // every test in unwrap noise without adding coverage (the literals are
@@ -610,24 +612,24 @@ mod tests {
     }
 
     #[test]
-    fn on_leadership_gained_sets_epoch() {
+    fn become_leader_sets_epoch() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(5))
+            .become_leader(pms(1000), pms(5000), Epoch(5))
             .unwrap();
         assert!(allocator.is_leader());
         assert_eq!(allocator.epoch(), Some(Epoch(5)));
     }
 
     #[test]
-    fn try_on_leadership_gained_rejects_inverted_window() {
+    fn become_leader_rejects_inverted_window() {
         // The per-argument PHYSICAL_MS_MAX checks are now enforced one layer
         // out at `PhysicalMs::try_new` (see the `physical_ms` test block below),
         // so this method's only remaining error is the cross-argument
         // `committed_ceiling < fence_floor` invariant.
         let mut allocator = Allocator::new();
         assert_eq!(
-            allocator.try_on_leadership_gained(pms(5000), pms(4000), Epoch(5)),
+            allocator.become_leader(pms(5000), pms(4000), Epoch(5)),
             Err(CoreError::InvalidLeadershipWindow {
                 fence_floor: 5000,
                 committed_ceiling: 4000
@@ -636,12 +638,12 @@ mod tests {
     }
 
     #[test]
-    fn on_leadership_lost_clears_state() {
+    fn step_down_clears_state() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(5))
+            .become_leader(pms(1000), pms(5000), Epoch(5))
             .unwrap();
-        allocator.on_leadership_lost();
+        allocator.step_down();
         assert!(!allocator.is_leader());
         assert_eq!(allocator.epoch(), None);
     }
@@ -652,7 +654,7 @@ mod tests {
         assert_eq!(allocator.committed_high_water(), None);
 
         allocator
-            .try_on_leadership_gained(pms(1_000), pms(5_000), Epoch(1))
+            .become_leader(pms(1_000), pms(5_000), Epoch(1))
             .unwrap();
         assert_eq!(allocator.committed_high_water(), Some(5_000));
 
@@ -664,7 +666,7 @@ mod tests {
             .unwrap();
         assert_eq!(allocator.committed_high_water(), Some(target.get()));
 
-        allocator.on_leadership_lost();
+        allocator.step_down();
         assert_eq!(allocator.committed_high_water(), None);
     }
 
@@ -678,7 +680,7 @@ mod tests {
     fn try_grant_zero_count() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(1))
+            .become_leader(pms(1000), pms(5000), Epoch(1))
             .unwrap();
         assert_eq!(
             allocator.try_grant(1000, 0),
@@ -690,7 +692,7 @@ mod tests {
     fn try_grant_oversized_count() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(1))
+            .become_leader(pms(1000), pms(5000), Epoch(1))
             .unwrap();
         let oversized = LOGICAL_MAX + 2;
         assert_eq!(
@@ -706,7 +708,7 @@ mod tests {
         let mut allocator = Allocator::new();
         // fence_floor=5_000, ceiling=5_000 (tight window, no pre-extended gap).
         allocator
-            .try_on_leadership_gained(pms(5_000), pms(5_000), Epoch(1))
+            .become_leader(pms(5_000), pms(5_000), Epoch(1))
             .unwrap();
         // now_ms below floor: clamps to floor=5_000, which equals the ceiling → succeeds.
         allocator.try_grant(4_999, 1).unwrap();
@@ -725,7 +727,7 @@ mod tests {
         let mut allocator = Allocator::new();
         // Tight initial window: fence_floor == ceiling == 1_000.
         allocator
-            .try_on_leadership_gained(pms(1_000), pms(1_000), Epoch(1))
+            .become_leader(pms(1_000), pms(1_000), Epoch(1))
             .unwrap();
         // now_ms far past the ceiling exhausts the window.
         assert_eq!(
@@ -755,7 +757,7 @@ mod tests {
         // can serve immediately. Grants start at fence_floor regardless of now_ms.
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(5_000), pms(10_000), Epoch(1))
+            .become_leader(pms(5_000), pms(10_000), Epoch(1))
             .unwrap();
         let grant = allocator.try_grant(1_000, 1).unwrap();
         // now_ms=1_000 < fence_floor=5_000, so next_physical_ms stays at 5_000.
@@ -779,7 +781,7 @@ mod tests {
     fn prepare_window_extension_uses_now_ms_when_ahead_of_high_water() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), pms(1000), Epoch(1))
+            .become_leader(pms(1000), pms(1000), Epoch(1))
             .unwrap();
         let target = allocator
             .try_prepare_window_extension(pms(2000), 3000)
@@ -791,7 +793,7 @@ mod tests {
     fn prepare_window_extension_uses_high_water_floor_when_clock_behind() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(10_000), pms(10_000), Epoch(1))
+            .become_leader(pms(10_000), pms(10_000), Epoch(1))
             .unwrap();
         let target = allocator
             .try_prepare_window_extension(pms(500), 3000)
@@ -804,7 +806,7 @@ mod tests {
     fn prepare_window_extension_rejects_out_of_range_target() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(PhysicalMs::MAX, PhysicalMs::MAX, Epoch(1))
+            .become_leader(PhysicalMs::MAX, PhysicalMs::MAX, Epoch(1))
             .unwrap();
         assert_eq!(
             allocator.try_prepare_window_extension(PhysicalMs::MAX, 1),
@@ -827,7 +829,7 @@ mod tests {
         // phantom "someone passed an absurd physical_ms".
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1_000), pms(1_000), Epoch(1))
+            .become_leader(pms(1_000), pms(1_000), Epoch(1))
             .unwrap();
         assert_eq!(
             allocator.try_prepare_window_extension(pms(1_000), u64::MAX),
@@ -843,14 +845,16 @@ mod tests {
     fn commit_then_try_grant_succeeds() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), pms(1000), Epoch(7))
+            .become_leader(pms(1000), pms(1000), Epoch(7))
             .unwrap();
         let target = allocator
             .try_prepare_window_extension(pms(1000), 3000)
             .unwrap();
         assert_eq!(
             allocator.try_commit_window_extension(target, Epoch(7)),
-            Ok(CommitOutcome::Applied(target.get()))
+            Ok(CommitOutcome::Applied {
+                high_water: target.get()
+            })
         );
         let grant = allocator.try_grant(1000, 5).unwrap();
         assert_eq!(grant.count, 5);
@@ -864,11 +868,11 @@ mod tests {
     fn commit_with_lower_value_is_ignored() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), pms(1000), Epoch(1))
+            .become_leader(pms(1000), pms(1000), Epoch(1))
             .unwrap();
         assert_eq!(
             allocator.try_commit_window_extension(pms(5000), Epoch(1)),
-            Ok(CommitOutcome::Applied(5000))
+            Ok(CommitOutcome::Applied { high_water: 5000 })
         );
         // A non-advancing commit reports the values so the caller can tell a
         // monotonic-bound regression (persist reordering) from epoch churn.
@@ -890,7 +894,7 @@ mod tests {
         // equal value moves nothing, so it is Ignored(NotAdvanced), not Applied.
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(1))
+            .become_leader(pms(1000), pms(5000), Epoch(1))
             .unwrap();
         assert_eq!(
             allocator.try_commit_window_extension(pms(5000), Epoch(1)),
@@ -909,7 +913,7 @@ mod tests {
     fn try_grant_rejects_out_of_range_clock() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), PhysicalMs::MAX, Epoch(1))
+            .become_leader(pms(1000), PhysicalMs::MAX, Epoch(1))
             .unwrap();
         assert_eq!(
             allocator.try_grant(PHYSICAL_MS_MAX + 1, 1),
@@ -922,7 +926,7 @@ mod tests {
         let mut allocator = Allocator::new();
         // fence_floor=1000, ceiling=1000: tight initial window.
         allocator
-            .try_on_leadership_gained(pms(1000), pms(1000), Epoch(5))
+            .become_leader(pms(1000), pms(1000), Epoch(5))
             .unwrap();
         // A late persist from epoch 4 (the prior leader) — fenced out. The
         // outcome names both epochs so the caller can metric epoch churn.
@@ -946,9 +950,9 @@ mod tests {
     fn commit_after_leadership_lost_is_ignored() {
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1000), pms(5000), Epoch(1))
+            .become_leader(pms(1000), pms(5000), Epoch(1))
             .unwrap();
-        allocator.on_leadership_lost();
+        allocator.step_down();
         assert_eq!(
             allocator.try_commit_window_extension(pms(9_999), Epoch(1)),
             Ok(CommitOutcome::Ignored(IgnoreReason::NotLeader))
@@ -963,7 +967,7 @@ mod tests {
         assert!(!allocator.would_grant(1_000, 1));
         // Invalid counts: never grants.
         allocator
-            .try_on_leadership_gained(pms(1_000), pms(5_000), Epoch(1))
+            .become_leader(pms(1_000), pms(5_000), Epoch(1))
             .unwrap();
         assert!(!allocator.would_grant(1_000, 0));
         assert!(!allocator.would_grant(1_000, LOGICAL_MAX + 2));
@@ -983,7 +987,7 @@ mod tests {
         // advance leaves the window, would_grant must return false.
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(pms(1_000), pms(1_000), Epoch(1))
+            .become_leader(pms(1_000), pms(1_000), Epoch(1))
             .unwrap();
         // count >= LOGICAL_MAX + 1 forces the advance branch on a fresh
         // window: logical(0) + count(LOGICAL_MAX+1) doesn't overflow on its
@@ -1001,7 +1005,7 @@ mod tests {
         // crosses the 46-bit ceiling and the predicate refuses.
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(PhysicalMs::MAX, PhysicalMs::MAX, Epoch(1))
+            .become_leader(PhysicalMs::MAX, PhysicalMs::MAX, Epoch(1))
             .unwrap();
         // Fill the logical range so the next would_grant call has to
         // advance physical_ms.
@@ -1023,7 +1027,7 @@ mod tests {
         let mut allocator = Allocator::new();
         // fence_floor=0, ceiling=0; extend to 10 before granting.
         allocator
-            .try_on_leadership_gained(PhysicalMs::ZERO, PhysicalMs::ZERO, Epoch(1))
+            .become_leader(PhysicalMs::ZERO, PhysicalMs::ZERO, Epoch(1))
             .unwrap();
         allocator
             .try_commit_window_extension(pms(10), Epoch(1))
@@ -1048,7 +1052,7 @@ mod tests {
         // (physical_ms + 1, 0), so stored state is always directly packable.
         let mut allocator = Allocator::new();
         allocator
-            .try_on_leadership_gained(PhysicalMs::ZERO, PhysicalMs::ZERO, Epoch(1))
+            .become_leader(PhysicalMs::ZERO, PhysicalMs::ZERO, Epoch(1))
             .unwrap();
         allocator
             .try_commit_window_extension(pms(10), Epoch(1))
@@ -1139,7 +1143,7 @@ mod tests {
     // PhysicalMs newtype: the construction-site bound check that the
     // three Allocator entry points used to re-implement inline. Every
     // assertion below was previously expressed as a runtime check
-    // *inside* try_on_leadership_gained, try_prepare_window_extension,
+    // *inside* become_leader, try_prepare_window_extension,
     // or try_commit_window_extension; they now belong to the type.
     // ----------------------------------------------------------------
 
@@ -1158,7 +1162,7 @@ mod tests {
 
     #[test]
     fn physical_ms_rejects_one_past_max() {
-        // The previously-inline checks in try_on_leadership_gained and
+        // The previously-inline checks in become_leader and
         // try_commit_window_extension lived at this exact boundary;
         // they now live here.
         assert_eq!(
