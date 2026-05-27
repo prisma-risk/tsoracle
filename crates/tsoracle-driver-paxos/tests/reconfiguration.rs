@@ -43,7 +43,7 @@
 //! intra-config behavior verified here is the load-bearing contract
 //! for the stopsign path.
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 use omnipaxos::ClusterConfig;

@@ -39,7 +39,7 @@
 //! fires during `apply_once`, so the whole scenario converges in simulated
 //! steps with no real-time budget to overrun.
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::{HighWaterCommand, SnapshotPolicy};
 
 #[path = "common/mod.rs"]

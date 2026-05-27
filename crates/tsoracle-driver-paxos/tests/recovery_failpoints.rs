@@ -39,8 +39,9 @@ use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
 use parking_lot::Mutex;
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tempfile::TempDir;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::{
-    AdvancePayload, ApplyState, HighWaterCommand, drain_decided_into, max_logged_barrier_seq,
+    ApplyState, HighWaterCommand, drain_decided_into, max_logged_barrier_seq,
 };
 use tsoracle_paxos_toolkit::storage::RocksdbStorage;
 

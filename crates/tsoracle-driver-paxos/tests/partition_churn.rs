@@ -34,7 +34,7 @@
 //! isolation/heal behave exactly as on the async path — but election +
 //! re-election + catch-up converge in simulated steps with no real-time budget.
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 #[path = "common/mod.rs"]

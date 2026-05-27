@@ -35,7 +35,7 @@
 //! instead of async runner/pump tasks + real-time `drive_until`, so the
 //! liveness contracts are exercised without wall-clock variance.
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 #[path = "common/mod.rs"]
