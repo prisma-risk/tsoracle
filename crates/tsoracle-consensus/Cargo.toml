@@ -15,7 +15,6 @@ categories    = ["network-programming", "concurrency", "rust-patterns"]
 [features]
 default = []
 serde   = ["dep:serde", "tsoracle-core/serde"]
-bt      = ["tsoracle-core/bt"]
 
 [package.metadata.docs.rs]
 features       = ["serde"]

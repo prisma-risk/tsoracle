@@ -18,7 +18,6 @@ metrics    = ["dep:metrics"]
 tls-rustls = ["tonic/tls-aws-lc"]
 tls-native = ["tonic/tls-native-roots"]
 tracing    = ["dep:tracing"]
-bt         = ["tsoracle-core/bt"]
 
 [package.metadata.docs.rs]
 features       = ["tls-rustls", "tracing", "metrics"]

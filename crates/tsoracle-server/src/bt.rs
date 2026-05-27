@@ -33,7 +33,7 @@
 //! Embedding `Bt` in a `thiserror` enum variant:
 //!
 //! ```ignore
-//! use tsoracle_core::Bt;
+//! use tsoracle_server::Bt;
 //!
 //! #[derive(Debug, thiserror::Error)]
 //! pub enum MyError {

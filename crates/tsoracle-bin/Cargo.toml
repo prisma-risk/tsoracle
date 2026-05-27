@@ -19,7 +19,7 @@ file       = ["tsoracle-standalone/file"]
 openraft   = ["tsoracle-standalone/openraft"]
 paxos      = ["tsoracle-standalone/paxos"]
 reflection = ["tsoracle-server/reflection"]
-bt         = ["tsoracle-core/bt", "tsoracle-server/bt"]
+bt         = ["tsoracle-server/bt"]
 # Pass through `e2e-max-readable-next` to the standalone crate so the
 # production image (`deploy/Dockerfile` passing `--build-arg FEATURES=...`)
 # can opt in for the mixed-version kube-e2e lane. NEVER set in production

@@ -10,6 +10,7 @@ Wires four pieces together: the sync window allocator from [`tsoracle-core`](htt
 - `BuildError` — surfaces invalid configurations at build time (missing driver, conflicting TLS settings, …).
 - `ServerError` — runtime errors from the serving task.
 - `ServingState` — observability snapshot for the leader-watch state machine.
+- `Bt` — backtrace-on-error helper embedded in instrumented `ServerError` variants. ZST and no-op unless the `bt` feature is on; with it on, capture is still gated by `RUST_BACKTRACE` / `RUST_LIB_BACKTRACE`.
 
 ## Usage shape
 
@@ -43,6 +44,7 @@ Followers respond to RPCs with `FAILED_PRECONDITION` and a `tsoracle-leader-hint
 - `failpoints` — enables `fail` crate injection for chaos coverage.
 - `yieldpoints` — enables `tsoracle-yieldpoint` injection sites (async sibling of failpoints; off by default since production carries zero overhead).
 - `test-fakes` / `test-support` — test-only fixtures for downstream integration suites.
+- `bt` — captures `std::backtrace::Backtrace` in instrumented `ServerError` variants. Off by default to keep cold paths free.
 
 ## Documentation
 
