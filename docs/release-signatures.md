@@ -67,11 +67,44 @@ landed) use `--source-tag` per the example above.
 
 `slsa-verifier` confirms, against the Sigstore transparency log:
 
-- The provenance was signed by GitHub's OIDC identity for the
-  `prisma-risk/tsoracle` repository.
-- The `.crate` artifact's SHA-256 matches the digest recorded in the
-  provenance.
+- The provenance was signed by GitHub's OIDC identity for the `prisma-risk/tsoracle` repository.
+- The `.crate` artifact's SHA-256 matches the digest recorded in the provenance.
 - The build ran from the source repository and tag you specified.
 
-Together these prove the artifact you hold was built by *this* repository's
-CI from the source at *this* tag — no manual signing key trust required.
+Together these prove the artifact you hold was built by *this* repository's CI from the source at *this* tag — no manual signing key trust required.
+
+## Verifying release tags
+
+Release tags themselves are also signed (in addition to the release artifacts above). Signing uses [Sigstore gitsign](https://github.com/sigstore/gitsign) — the same keyless, transparency-log-anchored model as the SLSA provenance. The signing identity is the `release-plz` workflow's GitHub Actions OIDC token, attested by Fulcio and logged to Rekor; there is no long-lived key to rotate or revoke.
+
+### Quick verification
+
+For any release tag (e.g., `tsoracle-v1.0.0`):
+
+```sh
+# Fetch tags if you don't have them locally
+git fetch --tags
+
+# Show signature metadata and validate
+git verify-tag --raw tsoracle-v1.0.0
+```
+
+The output includes the Fulcio-issued certificate, the Rekor transparency-log entry, and the OIDC identity (the `release-plz` workflow at `github.com/prisma-risk/tsoracle/.github/workflows/release-plz.yml`).
+
+### Looking up the Sigstore Rekor entry
+
+Each signed tag also has a Rekor entry searchable at <https://search.sigstore.dev/>:
+
+1. Run `git verify-tag --raw <tag>` and copy the Rekor `logIndex` or entry UUID from the output.
+2. Open `https://search.sigstore.dev/?logIndex=<INDEX>` (or `?uuid=<UUID>`) in a browser.
+3. Confirm the entry's subject identity matches the expected GitHub Actions workflow.
+
+### Trust model
+
+Tag signatures attest to **build provenance**: a specific workflow run, at a specific commit, on a specific branch, in a specific repository, signed by GitHub's OIDC. They do not attest to human review of the released content; that is gated separately by branch protection on `main` and the project's required CI checks.
+
+Because the signature identity is the workflow, not a person, the verification target is the workflow identity, not a key fingerprint. Rotating the signing identity therefore means changing the workflow definition (and a future tag will sign under the new identity); there is no key to rotate or revoke.
+
+### Pre-gitsign tags
+
+Releases tagged before the gitsign integration landed are annotated but unsigned. `git verify-tag` will report `no signature found` for those tags; their provenance is still verifiable via the `.intoto.jsonl` SLSA attestation as documented above.
