@@ -42,7 +42,7 @@
 use std::time::Duration;
 
 use omnipaxos::util::LogEntry;
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_driver_paxos::host::PaxosHighWaterHost;
 

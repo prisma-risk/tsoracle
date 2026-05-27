@@ -25,7 +25,7 @@
 
 use std::time::Duration;
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_driver_paxos::host::PaxosHighWaterHost;
 use tsoracle_yieldpoint as yieldpoint;

@@ -35,7 +35,7 @@
 //! election + replication + catch-up converge in simulated steps with no
 //! wall-clock budget to overrun. Real RocksDB storage + replay stay under test.
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 #[path = "common/mod.rs"]

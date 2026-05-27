@@ -36,9 +36,8 @@
 use std::future::Future;
 use std::task::{Context, Poll};
 
-use tsoracle_consensus::{ConsensusDriver, ConsensusError};
+use tsoracle_consensus::{AdvancePayload, ConsensusDriver, ConsensusError};
 use tsoracle_core::Epoch;
-use tsoracle_driver_paxos::AdvancePayload;
 use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, encode_epoch};
 
 #[path = "common/mod.rs"]

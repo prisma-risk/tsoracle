@@ -33,7 +33,7 @@
 //! loop immediately — so decided entries are never drained into the in-memory
 //! high-water, and reads that wait on the apply notifier hang forever.
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 
 #[path = "common/mod.rs"]

@@ -32,7 +32,7 @@
 //! plus any missing entries replicated from peers bring the node back
 //! to the latest decided state.
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::{HighWaterCommand, SnapshotPolicy};
 
 #[path = "common/mod.rs"]

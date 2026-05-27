@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::{HighWaterCommand, HighWaterSnapshot};
 
 fn fuzz_corpus_dir(target: &str) -> PathBuf {

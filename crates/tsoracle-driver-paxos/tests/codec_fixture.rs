@@ -25,7 +25,7 @@
 //! exact bytes `RocksdbStorage` persists per entry. A layout change trips this
 //! and forces a `SCHEMA_VERSION` bump.
 
-use tsoracle_driver_paxos::AdvancePayload;
+use tsoracle_consensus::AdvancePayload;
 use tsoracle_driver_paxos::HighWaterCommand;
 use tsoracle_paxos_toolkit::codec::{SCHEMA_VERSION, encode};
 
