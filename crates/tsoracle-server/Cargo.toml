@@ -23,7 +23,10 @@ tracing    = ["dep:tracing"]
 test-fakes = []
 test-support = ["test-fakes"]
 reflection = ["dep:tonic-reflection", "tsoracle-proto/reflection"]
-bt         = ["tsoracle-core/bt", "tsoracle-consensus/bt"]
+# Capture a `std::backtrace::Backtrace` in instrumented error variants. With
+# this off, `Bt` is a ZST and `Bt::capture()` is a no-op. With it on, capture
+# is still gated at runtime by `RUST_BACKTRACE`/`RUST_LIB_BACKTRACE`.
+bt         = []
 
 [package.metadata.docs.rs]
 features       = ["tls-rustls", "tracing", "reflection", "metrics"]
