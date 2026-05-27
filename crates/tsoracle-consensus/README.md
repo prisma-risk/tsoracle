@@ -7,8 +7,15 @@ Implement this trait against your preferred mechanism (openraft, raft-rs, etcd, 
 ## What's in the box
 
 - `ConsensusDriver` — the three-method trait the server calls into: `leadership_events`, `load_high_water`, `persist_high_water`. About fifty lines of trait surface.
-- `LeaderState` — the role-class enum the driver's `leadership_events` stream carries (Leader / Follower / Candidate / NoLeader).
+- `LeaderState` — the role-class enum the driver's `leadership_events` stream carries: `Leader { epoch }`, `Follower { leader_endpoint, leader_epoch }`, `Unknown`.
 - `ConsensusError` — the error type all three trait methods return.
+- `AdvancePayload` + `reject_out_of_range_advance` — the shared "advance the high-water to at least N" command payload and the range guard every driver MUST call before persisting it. See [Required pre-persist guard](#required-pre-persist-guard).
+
+## Required pre-persist guard
+
+Every `ConsensusDriver::persist_high_water` implementation MUST call `reject_out_of_range_advance(at_least)` before durably appending the advance. The check rejects any value above `tsoracle_core::PHYSICAL_MS_MAX` (the 46-bit physical-millisecond cap) as `ConsensusError::PermanentDriver`.
+
+This is a poison-write guard, not a styling preference. The high-water only ratchets up, so once an out-of-range value is durably committed every subsequent leadership gain reloads it, `PhysicalMs::try_new` rejects it (`CoreError::PhysicalMsOutOfRange`), and the new leader can never serve — there is no path to self-heal. The single-node `FileDriver` already guards at its persist site; consensus-backed drivers append through a replicated log and apply with an unchecked `max`, so this shared check is what keeps them aligned with the same contract.
 
 ## Documentation
 
@@ -25,4 +32,3 @@ If you want a ready-made driver rather than implementing one yourself:
 ## Feature flags
 
 - `serde` — derives `Serialize` / `Deserialize` on the public types so they cross wire and storage boundaries cleanly. Propagates to `tsoracle-core`.
-- `bt` — enables backtrace capture in error variants (propagates to `tsoracle-core`).
