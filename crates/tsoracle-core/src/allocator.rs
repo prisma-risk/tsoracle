@@ -393,6 +393,28 @@ impl Allocator {
         Ok((physical_ms, logical))
     }
 
+    /// Normalize the post-grant cursor into a packable `(physical_ms, logical)`
+    /// pair. `project_grant` admits a grant that exactly fills the millisecond,
+    /// so `logical_start + count` can reach `LOGICAL_MAX + 1` — a logical the
+    /// packed layout cannot hold. Roll that exact-fill case to the next
+    /// millisecond at logical 0: this is precisely the position the next
+    /// `project_grant` call would compute, so behavior is unchanged; the stored
+    /// state just no longer depends on the implicit "next call always wraps or
+    /// resets" invariant. (The returned `physical_ms` may equal
+    /// `PHYSICAL_MS_MAX + 1`, which is never packed directly and is rejected as
+    /// out-of-range by the next grant's `project_grant`.)
+    ///
+    /// Caller contract: `logical_start + count <= LOGICAL_MAX + 1`, which
+    /// `project_grant`'s logical-range bound already enforces for `try_grant`.
+    fn advance_cursor(physical_ms: u64, logical_start: u32, count: u32) -> (u64, u32) {
+        let next_logical = logical_start + count;
+        if next_logical > LOGICAL_MAX {
+            (physical_ms + 1, 0)
+        } else {
+            (physical_ms, next_logical)
+        }
+    }
+
     /// Hot path. Issue `count` timestamps from the in-memory window.
     ///
     /// Returns `WindowExhausted` when the in-memory remainder cannot cover the request;
@@ -426,25 +448,8 @@ impl Allocator {
         // than panicking should that invariant ever be violated, and keeps this
         // path free of the unwrap/expect the crate's panic policy bans.
         let grant = WindowGrant::try_new(physical_ms, logical_start, count, *epoch)?;
-        // Normalize the write-back so the stored cursor is always a packable
-        // (physical_ms, logical) pair. `project_grant` admits a grant that fills
-        // the millisecond exactly, so `logical_start + count` can reach
-        // LOGICAL_MAX + 1 — a logical the packed layout cannot hold. Rather than
-        // store that sentinel and rely on the next `project_grant` call to wrap
-        // it, roll to the next millisecond at logical 0 here. This is precisely
-        // the position the next call would compute, so behavior is unchanged;
-        // the stored state just no longer depends on the implicit
-        // "next call always wraps or resets" invariant. (`next_physical_ms` may
-        // become PHYSICAL_MS_MAX + 1, which is never packed directly and is
-        // rejected as out-of-range by the next grant's `project_grant`.)
-        let next_logical_after = logical_start + count;
-        if next_logical_after > LOGICAL_MAX {
-            *next_physical_ms = physical_ms + 1;
-            *next_logical = 0;
-        } else {
-            *next_physical_ms = physical_ms;
-            *next_logical = next_logical_after;
-        }
+        (*next_physical_ms, *next_logical) =
+            Self::advance_cursor(physical_ms, logical_start, count);
         Ok(grant)
     }
 
