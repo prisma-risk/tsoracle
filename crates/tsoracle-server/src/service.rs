@@ -312,6 +312,16 @@ impl TsoServiceImpl {
                 PersistDisposition::Permanent(source) => {
                     return Err(Status::internal(format!("persist: {source}")));
                 }
+                // Pre-persist range guard rejected the advance. Same wire
+                // contract as Permanent (INTERNAL, do NOT silently retry) but
+                // the typed at_least value reaches here without a Box<dyn
+                // Error> hop, so the message names the offending value
+                // directly instead of routing it through `source.to_string()`.
+                PersistDisposition::AdvanceOutOfRange { at_least } => {
+                    return Err(Status::internal(format!(
+                        "persist: high-water advance {at_least} exceeds the 46-bit physical_ms maximum"
+                    )));
+                }
             },
         };
         let commit_outcome = self

@@ -408,8 +408,11 @@ mod tests {
             .await
             .expect_err("an out-of-range advance must be rejected, not appended");
         assert!(
-            matches!(err, ConsensusError::PermanentDriver(_)),
-            "out-of-range advance must classify as PermanentDriver, got {err:?}"
+            matches!(
+                err,
+                ConsensusError::AdvanceOutOfRange { at_least } if at_least == PHYSICAL_MS_MAX + 1
+            ),
+            "out-of-range advance must classify as AdvanceOutOfRange, got {err:?}"
         );
 
         // The boundary value is in range and still reaches the host.

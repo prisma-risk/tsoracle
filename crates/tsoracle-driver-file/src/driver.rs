@@ -392,7 +392,12 @@ mod tests {
             .persist_high_water(PHYSICAL_MS_MAX + 1, Epoch::ZERO)
             .await
             .unwrap_err();
-        assert!(matches!(err, ConsensusError::PermanentDriver(_)));
+        assert!(matches!(
+            err,
+            ConsensusError::AdvanceOutOfRange {
+                at_least: v,
+            } if v == PHYSICAL_MS_MAX + 1
+        ));
     }
 
     #[tokio::test]

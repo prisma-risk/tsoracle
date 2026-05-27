@@ -362,6 +362,16 @@ pub(crate) async fn run_leader_watch(
                                         ConsensusError::PermanentDriver(source),
                                     ));
                                 }
+                                // Range-guard rejection: fatal-and-poison like
+                                // Permanent (the high-water only ratchets up so
+                                // an out-of-range value can never self-heal),
+                                // but reconstituted as the typed variant so the
+                                // propagated error keeps its shape end-to-end.
+                                PersistDisposition::AdvanceOutOfRange { at_least } => {
+                                    return Err(ServerError::Consensus(
+                                        ConsensusError::AdvanceOutOfRange { at_least },
+                                    ));
+                                }
                             }
                         }
                         // A non-consensus fault (e.g. a Core allocator invariant

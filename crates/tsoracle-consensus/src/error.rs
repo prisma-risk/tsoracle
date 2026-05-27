@@ -31,12 +31,13 @@ use tsoracle_core::Epoch;
 /// `TransientDriver` or `PermanentDriver`. The server uses that classification
 /// directly to pick a gRPC status code:
 ///
-/// | Variant            | gRPC code            | Client expectation         |
-/// |--------------------|----------------------|----------------------------|
-/// | `NotLeader`        | `FAILED_PRECONDITION` + `LeaderHint` | Retry against the new leader |
-/// | `Fenced`           | `FAILED_PRECONDITION` + `LeaderHint` | Retry against the new leader |
-/// | `TransientDriver`  | `UNAVAILABLE`        | Safe to retry              |
-/// | `PermanentDriver`  | `INTERNAL`           | Do NOT silently retry      |
+/// | Variant              | gRPC code            | Client expectation         |
+/// |----------------------|----------------------|----------------------------|
+/// | `NotLeader`          | `FAILED_PRECONDITION` + `LeaderHint` | Retry against the new leader |
+/// | `Fenced`             | `FAILED_PRECONDITION` + `LeaderHint` | Retry against the new leader |
+/// | `TransientDriver`    | `UNAVAILABLE`        | Safe to retry              |
+/// | `PermanentDriver`    | `INTERNAL`           | Do NOT silently retry      |
+/// | `AdvanceOutOfRange`  | `INTERNAL`           | Do NOT silently retry — saturated/misconfigured clock |
 #[derive(Debug, thiserror::Error)]
 pub enum ConsensusError {
     #[error("not leader (current epoch: {observed:?})")]
@@ -53,6 +54,16 @@ pub enum ConsensusError {
     /// storage device, bad driver implementation, invariant violation.
     #[error("permanent driver error: {0}")]
     PermanentDriver(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The shared pre-persist range guard rejected a high-water advance whose
+    /// `physical_ms` value exceeds [`tsoracle_core::PHYSICAL_MS_MAX`]. Promoted
+    /// out of `PermanentDriver` so callers (and the server's gRPC mapping) can
+    /// react to this one well-known shape without a `downcast_ref`. Classified
+    /// as `INTERNAL` at the wire — the same disposition `PermanentDriver` would
+    /// have produced — because an out-of-range advance signals a saturated or
+    /// misconfigured clock, not a transient condition. See
+    /// [`reject_out_of_range_advance`](crate::reject_out_of_range_advance).
+    #[error("high-water advance {at_least} exceeds the 46-bit physical_ms maximum")]
+    AdvanceOutOfRange { at_least: u64 },
 }
 
 #[cfg(test)]
@@ -82,5 +93,11 @@ mod tests {
         let permanent = ConsensusError::PermanentDriver(Box::new(std::io::Error::other("corrupt")));
         assert!(permanent.to_string().contains("permanent"));
         assert!(permanent.to_string().contains("corrupt"));
+
+        let advance_out_of_range = ConsensusError::AdvanceOutOfRange { at_least: u64::MAX };
+        let text = advance_out_of_range.to_string();
+        assert!(text.contains("high-water advance"));
+        assert!(text.contains(&u64::MAX.to_string()));
+        assert!(text.contains("46-bit"));
     }
 }

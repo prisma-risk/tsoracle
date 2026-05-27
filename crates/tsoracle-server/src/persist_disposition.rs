@@ -71,6 +71,16 @@ pub(crate) enum PersistDisposition {
     ///
     /// [`Transient`]: PersistDisposition::Transient
     Permanent(Box<dyn std::error::Error + Send + Sync>),
+    /// The shared pre-persist range guard rejected a high-water advance whose
+    /// `physical_ms` value exceeds [`tsoracle_core::PHYSICAL_MS_MAX`]. Same wire
+    /// disposition as [`Permanent`] (the caller MUST NOT silently retry), but
+    /// kept as its own variant so the typed `at_least` value flows to the gRPC
+    /// mapping site without re-boxing into `Box<dyn Error>` — a saturated or
+    /// misconfigured clock has one well-known shape, and the type system can
+    /// carry it intact.
+    ///
+    /// [`Permanent`]: PersistDisposition::Permanent
+    AdvanceOutOfRange { at_least: u64 },
 }
 
 /// Classify a consensus persist/load failure into its policy-neutral
@@ -88,6 +98,9 @@ pub(crate) fn classify(error: ConsensusError) -> PersistDisposition {
         ConsensusError::NotLeader { .. } => PersistDisposition::SteppedDown { fenced_by: None },
         ConsensusError::TransientDriver(source) => PersistDisposition::Transient(source),
         ConsensusError::PermanentDriver(source) => PersistDisposition::Permanent(source),
+        ConsensusError::AdvanceOutOfRange { at_least } => {
+            PersistDisposition::AdvanceOutOfRange { at_least }
+        }
     }
 }
 
@@ -146,6 +159,18 @@ mod tests {
         match disposition {
             PersistDisposition::Permanent(source) => assert_eq!(source.to_string(), "corrupted"),
             other => panic!("expected Permanent, got a different disposition: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_out_of_range_threads_typed_value_through_classify() {
+        // The variant exists precisely so this path does NOT re-box into a
+        // Box<dyn Error>: the at_least value flows typed from the consensus
+        // guard all the way to the gRPC mapping site.
+        let disposition = classify(ConsensusError::AdvanceOutOfRange { at_least: u64::MAX });
+        match disposition {
+            PersistDisposition::AdvanceOutOfRange { at_least } => assert_eq!(at_least, u64::MAX),
+            other => panic!("expected AdvanceOutOfRange, got a different disposition: {other:?}"),
         }
     }
 }
