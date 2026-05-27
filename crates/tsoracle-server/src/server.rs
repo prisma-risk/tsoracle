@@ -201,7 +201,6 @@ pub struct Server {
     /// gate *synchronously* at shutdown, leaving the watch task's later
     /// `step_down` a harmless idempotent repeat.
     pub(crate) core: Arc<ServingCore>,
-    #[allow(dead_code)]
     pub(crate) reporter: Arc<crate::reporter::Reporter>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub(crate) tls_config: Option<tonic::transport::ServerTlsConfig>,
@@ -273,10 +272,12 @@ impl Server {
         // the returned guard can bound its own shutdown wait identically to the
         // `serve_*` paths.
         let shutdown_grace = self.shutdown_grace;
-        // Clone the shared core before `into_router_parts` consumes `self`, so
-        // the guard can close the serving gate synchronously on drop / shutdown
-        // rather than relying on the watch task's later publish.
+        // Clone the shared core and reporter before `into_router_parts` consumes
+        // `self`, so the guard can close the serving gate synchronously on drop /
+        // shutdown rather than relying on the watch task's later publish, and can
+        // record the shutdown_watch_aborted counter if the grace-bounded reap fires.
         let core = self.core.clone();
+        let reporter = self.reporter.clone();
         let (routes, cancel_tx, handle) = self.into_router_parts()?;
         Ok((
             routes,
@@ -285,6 +286,7 @@ impl Server {
                 handle: Some(handle),
                 shutdown_grace,
                 core,
+                reporter,
             },
         ))
     }
@@ -393,10 +395,11 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        // Read the `Copy` grace and clone the shared core before
+        // Read the `Copy` grace and clone the shared core and reporter before
         // `into_router_parts` consumes `self`.
         let shutdown_grace = self.shutdown_grace;
         let core = self.core.clone();
+        let reporter = self.reporter.clone();
         let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
@@ -416,6 +419,7 @@ impl Server {
             cancel_tx,
             shutdown_grace,
             core,
+            reporter,
         )
         .await
     }
@@ -450,10 +454,11 @@ impl Server {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
         let tls_config = self.tls_config.clone();
 
-        // Read the `Copy` grace and clone the shared core before
+        // Read the `Copy` grace and clone the shared core and reporter before
         // `into_router_parts` consumes `self`.
         let shutdown_grace = self.shutdown_grace;
         let core = self.core.clone();
+        let reporter = self.reporter.clone();
         let (routes, watch_cancel_tx, watch_handle) = self.into_router_parts()?;
         let (combined_shutdown, cancel_tx) = combined_shutdown_with_cancel(shutdown);
 
@@ -475,6 +480,7 @@ impl Server {
             cancel_tx,
             shutdown_grace,
             core,
+            reporter,
         )
         .await
     }
@@ -507,6 +513,9 @@ pub struct WatchGuard {
     /// watch task to observe cancellation and publish `NotServing` on its own
     /// timeline — a window during which the fast gate would still admit RPCs.
     core: Arc<ServingCore>,
+    /// Metrics reporter, cloned from the `Server`. Used to record the
+    /// `shutdown_watch_aborted` counter if the grace-bounded reap fires.
+    reporter: Arc<crate::reporter::Reporter>,
 }
 
 impl WatchGuard {
@@ -529,7 +538,7 @@ impl WatchGuard {
         self.cancel_tx.take();
         match self.handle.take() {
             Some(mut handle) => join_to_server_result(
-                await_watch_within_grace(&mut handle, self.shutdown_grace).await,
+                await_watch_within_grace(&mut handle, self.shutdown_grace, &self.reporter).await,
             ),
             None => Ok(()),
         }
@@ -626,12 +635,12 @@ fn combined_shutdown_with_cancel(
 async fn await_watch_within_grace(
     watch_handle: &mut tokio::task::JoinHandle<Result<(), ServerError>>,
     grace: Duration,
+    reporter: &Arc<crate::reporter::Reporter>,
 ) -> Result<Result<(), ServerError>, tokio::task::JoinError> {
     match tokio::time::timeout(grace, &mut *watch_handle).await {
         Ok(join_result) => join_result,
         Err(_elapsed) => {
-            #[cfg(feature = "metrics")]
-            metrics::counter!("tsoracle.shutdown.watch_aborted.total").increment(1);
+            reporter.shutdown_watch_aborted.increment(1);
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 grace_ms = grace.as_millis() as u64,
@@ -674,6 +683,7 @@ async fn serve_inner<S>(
     tonic_cancel_tx: tokio::sync::oneshot::Sender<()>,
     shutdown_grace: Duration,
     core: Arc<ServingCore>,
+    reporter: Arc<crate::reporter::Reporter>,
 ) -> Result<(), ServerError>
 where
     S: Future<Output = Result<(), tonic::transport::Error>>,
@@ -722,7 +732,7 @@ where
             // task's own cooperative-cancel publish.
             core.step_down(None, None);
             drop(watch_cancel_tx);
-            let _ = await_watch_within_grace(&mut watch_handle, shutdown_grace).await;
+            let _ = await_watch_within_grace(&mut watch_handle, shutdown_grace, &reporter).await;
             serve_result?;
             Ok(())
         }
@@ -1040,6 +1050,7 @@ mod tests {
             handle: Some(handle),
             shutdown_grace: Duration::from_secs(10),
             core: core.clone(),
+            reporter: Arc::new(crate::reporter::Reporter::new()),
         };
 
         drop(guard);
@@ -1080,6 +1091,7 @@ mod tests {
             tonic_cancel_tx,
             Duration::from_millis(0),
             core.clone(),
+            Arc::new(crate::reporter::Reporter::new()),
         )
         .await;
 
