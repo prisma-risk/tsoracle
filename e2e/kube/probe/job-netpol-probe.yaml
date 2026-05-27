@@ -1,0 +1,80 @@
+# NetworkPolicy enforcement probe — runs in a namespace separate from the
+# chart's, with labels that intentionally do NOT match the chart's podSelector,
+# and confirms that:
+#
+#   - the peer port (`peer`, default 5100 under the kube-e2e workflow) is
+#     DROPPED by the chart's NetworkPolicy because the prober is neither a
+#     sibling replica nor in the chart's namespace. The `nc -z` connect should
+#     time out at the iptables drop (no RST), so we use `-w 8` to bound the
+#     wait and `! ` to flip the expected failure into a positive assertion.
+#   - the `tso` port (default 5051) is ALLOWED for any source (the chart's
+#     ingress rule on `tso` has no `from:` clause).
+#
+# Issue #486. The chart's NetworkPolicy is rendered for any HA driver
+# (openraft|paxos) with `networkPolicy.enabled=true` (the default); PR #452
+# introduced both the policy and a values default that keeps it on. kindnet's
+# bundled kube-network-policies sidecar enforces NetworkPolicy as of the kind
+# version helm/kind-action@v1.14.0 ships (v0.31.0), so no CNI swap is needed.
+#
+# TARGET_RELEASE / TARGET_NAMESPACE are envsubst'd in the workflow so one
+# manifest covers both the insecure and TLS cells.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tsoracle-e2e-netpol-probe
+  labels:
+    # Explicitly NOT `app.kubernetes.io/name=tsoracle` — the chart's
+    # NetworkPolicy `from:` clause keys on that label, so a mis-named prober
+    # is exactly the negative test we want.
+    app.kubernetes.io/name: tsoracle-netpol-probe
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsoracle-netpol-probe
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: probe
+          # alpine ships busybox `nc` which supports `-z`/`-v`/`-w`. ~5 MB
+          # image — pulls fast in CI even without registry mirroring.
+          image: alpine:3.20
+          env:
+            - name: TARGET_RELEASE
+              value: "${TARGET_RELEASE}"
+            - name: TARGET_NAMESPACE
+              value: "${TARGET_NAMESPACE}"
+            # Port numbers track the workflow's `--set ports.client=5051,ports.peer=5100`.
+            # If those ever drift, this probe drifts with them; we don't want a
+            # silently-green probe if the workflow remaps ports.
+            - name: PEER_PORT
+              value: "5100"
+            - name: TSO_PORT
+              value: "5051"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              TARGET="${TARGET_RELEASE}-0.${TARGET_RELEASE}-peer.${TARGET_NAMESPACE}.svc.cluster.local"
+              echo "probe: target=${TARGET} peer=${PEER_PORT} tso=${TSO_PORT}"
+
+              echo "== probing peer port ${PEER_PORT} (NetworkPolicy must DENY) =="
+              # busybox nc: -z connect-only, -v verbose, -w timeout-secs.
+              # Without enforcement, the SYN/SYN-ACK completes in <100ms and
+              # the probe fails. Under enforcement, the SYN is silently dropped
+              # and nc gives up at -w; we positively assert that here.
+              if nc -zv -w 8 "$TARGET" "$PEER_PORT" 2>&1; then
+                  echo "FAIL: peer port ${PEER_PORT} reachable from outside the StatefulSet labels — NetworkPolicy did not deny"
+                  exit 1
+              fi
+              echo "OK: peer port blocked"
+
+              echo "== probing tso port ${TSO_PORT} (NetworkPolicy must ALLOW) =="
+              if ! nc -zv -w 8 "$TARGET" "$TSO_PORT" 2>&1; then
+                  echo "FAIL: tso port ${TSO_PORT} unreachable — NetworkPolicy or routing rejected an ALLOWED port"
+                  exit 1
+              fi
+              echo "OK: tso port reachable"
+
+              echo "netpol probe passed"

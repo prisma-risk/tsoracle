@@ -114,3 +114,11 @@ What the TLS cell proves that the insecure cell does not:
 1. The chart's render guard accepts the happy path (`tls.enabled=true` with `tls.secretName`) without `tls.allowInsecurePeer`.
 2. Peer mTLS handshakes survive rolling restarts and SIGKILL-leader recovery: kube DNS / Pod-IP rotation does not invalidate the per-pod SNI against the fan-SAN leaf.
 3. The driver's TLS client (configured with the cluster's CA) interoperates with the chart's server-auth TLS on the client API, including under leader-redirect across cells.
+
+## NetworkPolicy probe
+
+After each cell's assertion lane completes, the workflow runs a small probe Job (`e2e/kube/probe/`) from a *separate* namespace (`e2e-netpol-probe-insecure` / `e2e-netpol-probe-tls`) with intentionally non-matching pod labels. The probe asserts that the chart's NetworkPolicy from PR #452 actually applies at runtime: the `peer` consensus port is DENIED to any source outside the StatefulSet's labels, and the `tso` client port is ALLOWED. Issue #486.
+
+The probe runs against both cells because the chart's NetworkPolicy is rendered independently of TLS — any HA driver with `networkPolicy.enabled=true` (the chart default) gets it. Catching a future widening of the peer-port `from:` clause in either cell is the test the issue called for.
+
+CNI requirement: kindnet's bundled `kube-network-policies` sidecar enforces NetworkPolicy as of kind v0.27+. The workflow's `helm/kind-action@v1.14.0` pins kind v0.31.0, comfortably above that floor, so no CNI swap was needed. A regression that downgrades the action below v0.27 would not silently mask the test — the policy would become unenforced, the peer port would become reachable, and the probe would FAIL on the deny assertion.
