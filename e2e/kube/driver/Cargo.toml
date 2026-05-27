@@ -21,7 +21,7 @@ name = "gen-certs"
 path = "src/bin/gen-certs.rs"
 
 [dependencies]
-tsoracle-client = { path = "../../../crates/tsoracle-client", version = "1.0.0" }
+tsoracle-client = { path = "../../../crates/tsoracle-client", version = "1.0.1" }
 anyhow          = { workspace = true }
 clap            = { workspace = true }
 rcgen           = { workspace = true }
