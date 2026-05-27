@@ -29,9 +29,9 @@ use tokio::sync::watch;
 use tonic::service::Routes;
 use tonic::transport::Server as TonicServer;
 use tsoracle_consensus::ConsensusDriver;
-use tsoracle_core::{Epoch, PeerEndpoint};
 #[cfg(any(test, feature = "test-fakes"))]
 use tsoracle_core::{CoreError, WindowGrant};
+use tsoracle_core::{Epoch, PeerEndpoint};
 use tsoracle_proto::v1::tso_service_server::TsoServiceServer;
 
 use crate::bt::Bt;
