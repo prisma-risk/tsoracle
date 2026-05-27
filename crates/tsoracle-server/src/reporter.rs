@@ -77,6 +77,31 @@ impl ReporterHistogram {
     }
 }
 
+pub struct ReporterTimestamp {
+    local: Arc<AtomicU64>,
+}
+
+impl ReporterTimestamp {
+    pub(crate) fn new() -> Self {
+        Self {
+            local: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Record `SystemTime::now()` as unix-ms. Idempotent under concurrent
+    /// callers — the last writer wins under `Relaxed`, which matches the
+    /// "approximate last transition time" semantics the heartbeat needs.
+    pub(crate) fn touch_now(&self) {
+        self.local.store(now_unix_ms(), Ordering::Relaxed);
+    }
+
+    /// `None` if never touched, else the most recent unix-ms.
+    pub(crate) fn snapshot(&self) -> Option<u64> {
+        let v = self.local.load(Ordering::Relaxed);
+        (v != 0).then_some(v)
+    }
+}
+
 pub(crate) fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -153,6 +178,25 @@ mod tests {
         assert!(
             snap.iter().any(|(k, ..)| *k == key),
             "histogram key not recorded"
+        );
+    }
+
+    #[test]
+    fn timestamp_zero_is_none() {
+        let t = ReporterTimestamp::new();
+        assert_eq!(t.snapshot(), None);
+    }
+
+    #[test]
+    fn timestamp_touch_records_now() {
+        let before = now_unix_ms();
+        let t = ReporterTimestamp::new();
+        t.touch_now();
+        let after = now_unix_ms();
+        let observed = t.snapshot().expect("touch_now should produce Some");
+        assert!(
+            observed >= before && observed <= after,
+            "timestamp {observed} not within [{before}, {after}]"
         );
     }
 }
