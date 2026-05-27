@@ -39,6 +39,7 @@ mod signal;
 
 pub mod docs;
 
+pub use crate::reporter::Reporter;
 pub use bt::Bt;
 pub use clock::{Clock, SystemClock};
 pub use server::{BuildError, Server, ServerBuilder, ServerError, ServingState, WatchGuard};

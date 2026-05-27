@@ -177,6 +177,7 @@ impl ServerBuilder {
             failover_advance: self.failover_advance,
             shutdown_grace: self.shutdown_grace,
             core: Arc::new(ServingCore::new(self.window_ahead)),
+            reporter: Arc::new(crate::reporter::Reporter::new()),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: self.tls_config,
         })
@@ -200,6 +201,8 @@ pub struct Server {
     /// gate *synchronously* at shutdown, leaving the watch task's later
     /// `step_down` a harmless idempotent repeat.
     pub(crate) core: Arc<ServingCore>,
+    #[allow(dead_code)]
+    pub(crate) reporter: Arc<crate::reporter::Reporter>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     pub(crate) tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
