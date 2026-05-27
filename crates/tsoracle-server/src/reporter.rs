@@ -28,8 +28,10 @@
 //! both the global `metrics::` recorder (Prometheus path, unchanged) and a
 //! local `Arc<AtomicU64>` that the heartbeat task can read without depending
 //! on any installed recorder.
-
-// Items are scaffolded here and wired up in later tasks (T3–T11).
+//!
+//! **Scaffold note**: items are introduced here and wired up in later plan
+//! tasks (T3–T11). `#![allow(dead_code)]` is present for that reason and
+//! will become unnecessary once the call sites land in Task 7.
 #![allow(dead_code)]
 
 use std::sync::Arc;
@@ -49,13 +51,13 @@ impl ReporterCounter {
         }
     }
 
-    pub fn increment(&self, n: u64) {
+    pub(crate) fn increment(&self, n: u64) {
         #[cfg(feature = "metrics")]
         metrics::counter!(self.name).increment(n);
         self.local.fetch_add(n, Ordering::Relaxed);
     }
 
-    pub fn snapshot(&self) -> u64 {
+    pub(crate) fn snapshot(&self) -> u64 {
         self.local.load(Ordering::Relaxed)
     }
 }
