@@ -27,6 +27,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod bt;
+mod clock;
 mod fence;
 mod leader_hint;
 mod persist_disposition;
@@ -38,6 +39,7 @@ mod signal;
 pub mod docs;
 
 pub use bt::Bt;
+pub use clock::{Clock, SystemClock};
 pub use server::{BuildError, Server, ServerBuilder, ServerError, ServingState, WatchGuard};
 pub use signal::shutdown_signal;
 

@@ -21,7 +21,13 @@
 //  limitations under the License.
 //
 
-//! In-memory `ConsensusDriver` for integration tests.
+//! Hand-rolled fakes used by integration tests: an in-memory `ConsensusDriver`
+//! family (`InMemoryDriver`, `StallableDriver`, `FaultyDriver`) and a
+//! deterministic `Clock` (`MockClock`).
+
+mod mock_clock;
+
+pub use mock_clock::MockClock;
 
 use core::pin::Pin;
 use futures::{Stream, StreamExt};

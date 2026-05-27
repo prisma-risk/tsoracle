@@ -16,7 +16,6 @@ categories    = ["algorithms", "date-and-time", "concurrency"]
 default    = ["std"]
 std        = []
 serde      = ["dep:serde"]
-test-clock = []
 
 [package.metadata.docs.rs]
 features       = ["std", "serde"]

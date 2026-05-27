@@ -37,9 +37,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tsoracle_client::{Client, ClientBuilder, ClientError};
-use tsoracle_core::{Clock, Epoch, PeerEndpoint};
-use tsoracle_server::Server;
+use tsoracle_core::{Epoch, PeerEndpoint};
 use tsoracle_server::test_fakes::InMemoryDriver;
+use tsoracle_server::{Clock, Server};
 use tsoracle_server_testkit::{into_sim_parts, serve, sim_channel};
 
 const PORT: u16 = 9_999;
@@ -47,9 +47,7 @@ const EPOCH_BASE_MS: u64 = 1_700_000_000_001;
 const EPOCH_THRESHOLD: u64 = 1_700_000_000_000;
 
 /// A fixed `Clock` seeded near a real wall-clock epoch so granted timestamps
-/// clear the `> 1.7e12` epoch assertions. (`tsoracle_core::testing::MockClock`
-/// is gated behind `test-clock`, which this crate doesn't pull, so DST tests
-/// supply their own `Clock`.)
+/// clear the `> 1.7e12` epoch assertions.
 struct FixedClock(u64);
 
 impl Clock for FixedClock {

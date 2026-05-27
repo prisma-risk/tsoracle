@@ -54,7 +54,7 @@ tsoracle-failpoint = { workspace = true }
 [dev-dependencies]
 tokio        = { workspace = true, features = ["test-util"] }
 metrics-util = { workspace = true }
-tsoracle-core = { path = "../tsoracle-core", version = "1.0.0", features = ["test-clock"] }
+tsoracle-core = { path = "../tsoracle-core", version = "1.0.0" }
 tracing-subscriber = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]

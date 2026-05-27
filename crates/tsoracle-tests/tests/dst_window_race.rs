@@ -42,10 +42,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tsoracle_core::{Clock, Epoch};
+use tsoracle_core::Epoch;
 use tsoracle_proto::v1::GetTsRequest;
-use tsoracle_server::Server;
 use tsoracle_server::test_fakes::StallableDriver;
+use tsoracle_server::{Clock, Server};
 use tsoracle_server_testkit::{client, into_sim_parts, serve};
 use turmoil::Builder;
 

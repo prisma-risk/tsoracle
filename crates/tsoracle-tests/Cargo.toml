@@ -18,7 +18,7 @@ failpoints = ["tsoracle-server/failpoints", "tsoracle-failpoint/failpoints"]
 # Opt-in mirror of `tsoracle-client`'s `metrics` feature so `client_metrics`
 # can drive the recorder-fake test that asserts the documented client signals.
 metrics = ["tsoracle-client/metrics", "dep:metrics", "dep:metrics-util", "dep:tokio-stream"]
-dst = ["dep:turmoil", "dep:tsoracle-server-testkit", "dep:tsoracle-consensus", "dep:async-trait", "tsoracle-core/test-clock"]
+dst = ["dep:turmoil", "dep:tsoracle-server-testkit", "dep:tsoracle-consensus", "dep:async-trait", "tsoracle-server/test-fakes"]
 
 [dependencies]
 futures         = { workspace = true }
