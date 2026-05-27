@@ -12,7 +12,7 @@ Every GitHub Release published by `release-plz` carries three assets:
   manual integrity checks.
 
 The provenance asset proves the `.crate` was produced by the
-`release-sign.yml` workflow in this repository, at the commit pointed at by
+`release-plz.yml` workflow in this repository, at the commit pointed at by
 the release tag, on GitHub-hosted runners. No private signing key is
 involved — verification is anchored in Sigstore's transparency log.
 
@@ -34,9 +34,16 @@ gh release download tsoracle-v0.1.14 \
 slsa-verifier verify-artifact \
     --provenance-path tsoracle-0.1.14.crate.intoto.jsonl \
     --source-uri github.com/prisma-risk/tsoracle \
-    --source-tag tsoracle-v0.1.14 \
+    --source-branch main \
     tsoracle-0.1.14.crate
 ```
+
+The signing workflow is triggered by `push: main` (release-plz publishes
+inside that workflow run), so the SLSA generator records the source ref as
+`refs/heads/main`. Verification uses `--source-branch main`, not
+`--source-tag`. The specific release tag is still verifiable via
+`git verify-tag` (see [Verifying release tags](#verifying-release-tags)
+below) and via the commit SHA recorded in the provenance.
 
 Successful output ends with:
 
