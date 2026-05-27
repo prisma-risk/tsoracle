@@ -162,6 +162,10 @@ pub struct CommonServeArgs {
     /// Advance on leadership gain.
     #[arg(long, value_parser = parse_duration, default_value = "1s")]
     pub failover_advance: Duration,
+    /// Interval between proof-of-life heartbeat log lines. Default 10s.
+    /// Pass `0s` to disable.
+    #[arg(long, value_parser = parse_duration, default_value = "10s")]
+    pub heartbeat_interval: Duration,
     /// Log level.
     #[arg(long, default_value = "info")]
     pub log: String,
