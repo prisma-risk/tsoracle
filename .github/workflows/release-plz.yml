@@ -74,6 +74,18 @@ jobs:
           git config --global gpg.x509.program gitsign
           git config --global gpg.format x509
           git config --global tag.gpgSign true
+          # Use gitsign's offline Rekor mode: the inclusion proof is embedded
+          # in the tag signature itself (keyed to the CMS signed-attributes
+          # hash), rather than relying on the Rekor Search API at verify time.
+          # gitsign's default ("online") mode reconstructs the signed object
+          # with the signature as a `gpgsig` header (commit form) when logging
+          # to Rekor, but `git verify-tag` reconstructs annotated tags with the
+          # signature in-body (tag form) — the two hashes never match, so
+          # `git verify-tag --raw` always fails with "could not find matching
+          # tlog entry" for annotated tags. Offline mode is object-type-
+          # agnostic and round-trips for tags. (gitsign upstream is migrating
+          # its default to offline for this reason.)
+          git config --global gitsign.rekorMode offline
       - uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db  # v0.5
         id: release-plz
         with:
