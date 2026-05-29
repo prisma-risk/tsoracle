@@ -46,7 +46,8 @@ fuzz_target!(|data: &[u8]| {
     let Ok(value) = decode::<HighWaterSnapshot>(SCHEMA_VERSION, data) else {
         return;
     };
-    let reencoded = encode(SCHEMA_VERSION, &value).expect("re-encoding a decoded value must succeed");
+    let reencoded =
+        encode(SCHEMA_VERSION, &value).expect("re-encoding a decoded value must succeed");
     let roundtripped: HighWaterSnapshot =
         decode(SCHEMA_VERSION, &reencoded).expect("re-encoded bytes must decode");
     assert_eq!(
