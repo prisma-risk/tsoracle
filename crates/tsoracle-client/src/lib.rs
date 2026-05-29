@@ -657,4 +657,174 @@ mod tests {
             other => panic!("count=0 must return InvalidCount, got {other:?}"),
         }
     }
+
+    /// Regression guard for the dense classification bug: a bare
+    /// `FailedPrecondition` from the server (NO leader-hint trailer) — e.g.
+    /// `SeqOverflow` — must surface immediately as that definitive error,
+    /// preserving the server's message, NOT be misread as a NOT_LEADER
+    /// "no leader yet" and ridden out across passes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_bare_failed_precondition_surfaces_definitive_error() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct OverflowServer {
+            calls: Arc<AtomicU64>,
+        }
+
+        #[tonic::async_trait]
+        impl TsoService for OverflowServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::failed_precondition("not leader"))
+            }
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                // Bare FailedPrecondition, NO leader-hint trailer — mirrors the
+                // server's SeqOverflow mapping.
+                Err(tonic::Status::failed_precondition("dense counter overflow"))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(OverflowServer {
+                    calls: server_calls,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        match client.get_seq("orders", 1).await {
+            Err(ClientError::Rpc(status)) => {
+                assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+                assert!(
+                    status.message().contains("overflow"),
+                    "must surface the server's overflow message, not a synthetic \
+                     'no leader yet'; got {:?}",
+                    status.message()
+                );
+            }
+            other => panic!("expected the overflow FailedPrecondition, got {other:?}"),
+        }
+        // Definitive-error path: bounded attempts, never an unbounded ride-out.
+        let n = calls.load(Ordering::SeqCst);
+        assert!((1..=3).contains(&n), "expected bounded attempts, got {n}");
+    }
+
+    /// The non-idempotency contract: a post-send transport failure
+    /// (`Unavailable` after the request reached the server) is ambiguous — the
+    /// advance may have committed — so `get_seq` returns `SeqUncertain` and must
+    /// NOT transparently retry (a retry could silently spend a second block).
+    /// Asserts the server is invoked exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_ambiguous_post_send_failure_is_uncertain_without_retry() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct FlakyServer {
+            calls: Arc<AtomicU64>,
+        }
+
+        #[tonic::async_trait]
+        impl TsoService for FlakyServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::failed_precondition("not leader"))
+            }
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(tonic::Status::unavailable("connection reset mid-call"))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(FlakyServer {
+                    calls: server_calls,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        match client.get_seq("orders", 1).await {
+            Err(ClientError::SeqUncertain) => {}
+            other => panic!("post-send Unavailable must be SeqUncertain, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "non-idempotent get_seq must NOT retry an ambiguous post-send failure"
+        );
+    }
 }

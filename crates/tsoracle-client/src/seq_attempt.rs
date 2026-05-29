@@ -46,7 +46,10 @@ pub(crate) enum SeqAttemptOutcome {
         endpoint: String,
         epoch: Option<u128>,
     },
-    NoLeaderYet,
+    /// A reachable peer reported no leader yet (an absent-hint NOT_LEADER). The
+    /// original server status is carried so the retry loop can surface the
+    /// server's own message rather than a synthetic one.
+    NoLeaderYet(tonic::Status),
     /// Ambiguous post-send failure: surfaced, never silently retried.
     Uncertain,
     Err(ClientError),
@@ -60,7 +63,7 @@ pub(crate) fn classify_seq_status(status: tonic::Status, sent: bool) -> SeqAttem
     use tonic::Code;
     match status.code() {
         Code::Unavailable | Code::DeadlineExceeded if sent => SeqAttemptOutcome::Uncertain,
-        Code::Unavailable | Code::DeadlineExceeded => SeqAttemptOutcome::NoLeaderYet,
+        Code::Unavailable | Code::DeadlineExceeded => SeqAttemptOutcome::NoLeaderYet(status),
         Code::InvalidArgument => SeqAttemptOutcome::Err(ClientError::InvalidSeqKey),
         _ => SeqAttemptOutcome::Err(ClientError::from(status)),
     }
@@ -82,6 +85,6 @@ mod tests {
     fn classify_unavailable_before_send_is_no_leader_yet() {
         let status = tonic::Status::unavailable("no connection established");
         let outcome = classify_seq_status(status, false);
-        assert!(matches!(outcome, SeqAttemptOutcome::NoLeaderYet));
+        assert!(matches!(outcome, SeqAttemptOutcome::NoLeaderYet(_)));
     }
 }

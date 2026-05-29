@@ -524,42 +524,54 @@ pub(crate) async fn issue_seq_rpc(
                     });
                 }
                 Ok(Err(status)) if status.code() == tonic::Code::FailedPrecondition => {
-                    // NOT_LEADER: classify via the shared hint helper. This is
-                    // pre-commit-certain — the server rejected the request before
-                    // any durable advance. Keep the channel (no eviction).
                     use crate::attempt::{AttemptOutcome as AO, HintUnusableReason};
-                    match classify_not_leader_hint(pool, &endpoint, status) {
-                        AO::LeaderHint {
-                            endpoint: hinted,
-                            epoch,
-                        } => SeqAttemptOutcome::LeaderHint {
-                            endpoint: hinted,
-                            epoch,
-                        },
-                        AO::NoLeaderYet(_) => SeqAttemptOutcome::NoLeaderYet,
-                        AO::HintUnusable {
-                            status,
-                            reason: HintUnusableReason::StaleEpoch,
-                        } => {
-                            // A lagging peer pointed at an older-epoch leader.
-                            // Treat as an election signal (ride-out), no budget charge.
-                            #[cfg(feature = "metrics")]
-                            metrics::counter!("tsoracle.client.leader_hint.stale.total")
-                                .increment(1);
-                            saw_election_signal = true;
-                            election_signal = Some(status.clone());
-                            last_err = Some(ClientError::Rpc(status));
-                            continue;
-                        }
-                        AO::HintUnusable {
-                            status,
-                            reason: HintUnusableReason::Rejected,
-                        } => SeqAttemptOutcome::Err(ClientError::Rpc(status)),
-                        AO::Ok { .. } | AO::Err(_) => {
-                            unreachable!(
-                                "classify_not_leader_hint on FailedPrecondition \
-                                 cannot produce Ok/Err"
-                            )
+                    use crate::channel_pool::{LeaderHintLookup, decode_leader_hint};
+                    // A bare FailedPrecondition carrying NO leader-hint trailer is
+                    // a definitive server rejection — e.g. SeqOverflow — NOT a
+                    // NOT_LEADER redirect. Surface it via classify_seq_status
+                    // (definitive Err, preserving the server's message) instead of
+                    // misreading it as "no leader yet" and riding out the deadline.
+                    // (Unlike the timestamp path, get_seq has a bare-FailedPrecondition
+                    // case, so the trailer presence must be checked explicitly.)
+                    if matches!(decode_leader_hint(&status), LeaderHintLookup::Absent) {
+                        classify_seq_status(status, false)
+                    } else {
+                        // NOT_LEADER (hint trailer present, possibly malformed):
+                        // classify via the shared helper. Pre-commit-certain — the
+                        // server rejected before any durable advance. Keep the channel.
+                        match classify_not_leader_hint(pool, &endpoint, status) {
+                            AO::LeaderHint {
+                                endpoint: hinted,
+                                epoch,
+                            } => SeqAttemptOutcome::LeaderHint {
+                                endpoint: hinted,
+                                epoch,
+                            },
+                            AO::NoLeaderYet(status) => SeqAttemptOutcome::NoLeaderYet(status),
+                            AO::HintUnusable {
+                                status,
+                                reason: HintUnusableReason::StaleEpoch,
+                            } => {
+                                // A lagging peer pointed at an older-epoch leader.
+                                // Treat as an election signal (ride-out), no budget charge.
+                                #[cfg(feature = "metrics")]
+                                metrics::counter!("tsoracle.client.leader_hint.stale.total")
+                                    .increment(1);
+                                saw_election_signal = true;
+                                election_signal = Some(status.clone());
+                                last_err = Some(ClientError::Rpc(status));
+                                continue;
+                            }
+                            AO::HintUnusable {
+                                status,
+                                reason: HintUnusableReason::Rejected,
+                            } => SeqAttemptOutcome::Err(ClientError::Rpc(status)),
+                            AO::Ok { .. } | AO::Err(_) => {
+                                unreachable!(
+                                    "classify_not_leader_hint on FailedPrecondition \
+                                     cannot produce Ok/Err"
+                                )
+                            }
                         }
                     }
                 }
@@ -622,9 +634,10 @@ pub(crate) async fn issue_seq_rpc(
                     worklist.redirect_to(hinted);
                     continue;
                 }
-                SeqAttemptOutcome::NoLeaderYet => {
+                SeqAttemptOutcome::NoLeaderYet(status) => {
+                    // Preserve the server's own status text rather than synthesizing
+                    // a generic "no leader yet" message.
                     saw_election_signal = true;
-                    let status = tonic::Status::failed_precondition("dense: no leader yet");
                     election_signal = Some(status.clone());
                     last_err = Some(ClientError::Rpc(status));
                     continue;
