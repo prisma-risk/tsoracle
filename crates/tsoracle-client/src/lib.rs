@@ -541,78 +541,36 @@ mod tests {
     async fn get_seq_returns_gapless_blocks_and_rejects_invalid_inputs() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
         const EPOCH: u128 = 42;
 
-        struct LeaderServer {
-            counter: Arc<AtomicU64>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for LeaderServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                Err(tonic::Status::failed_precondition("not leader"))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-
-            async fn get_seq(
-                &self,
-                request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
-            {
-                let req = request.into_inner();
-                if req.key.is_empty() {
-                    return Err(tonic::Status::invalid_argument("invalid sequence key"));
-                }
-                if req.count == 0 {
-                    return Err(tonic::Status::invalid_argument(
-                        "count must be between 1 and the maximum",
-                    ));
-                }
-                // Atomic fetch-add: gapless per the single server
-                let start = self
-                    .counter
-                    .fetch_add(u64::from(req.count), Ordering::SeqCst);
-                let (hi, lo) = tsoracle_core::Epoch(EPOCH).to_wire();
-                Ok(tonic::Response::new(tsoracle_proto::v1::GetSeqResponse {
-                    key: req.key,
-                    start,
-                    count: req.count,
-                    epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
-                }))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let counter = Arc::new(AtomicU64::new(0));
         let server_counter = counter.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(LeaderServer {
-                    counter: server_counter,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // A leader serving gapless blocks from a single atomic counter, rejecting
+        // empty keys / zero counts as InvalidArgument.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |req| {
+                let counter = server_counter.clone();
+                async move {
+                    if req.key.is_empty() {
+                        return Err(tonic::Status::invalid_argument("invalid sequence key"));
+                    }
+                    if req.count == 0 {
+                        return Err(tonic::Status::invalid_argument(
+                            "count must be between 1 and the maximum",
+                        ));
+                    }
+                    let start = counter.fetch_add(u64::from(req.count), Ordering::SeqCst);
+                    let (hi, lo) = tsoracle_core::Epoch(EPOCH).to_wire();
+                    Ok(tsoracle_proto::v1::GetSeqResponse {
+                        key: req.key,
+                        start,
+                        count: req.count,
+                        epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                    })
+                }
+            })
+            .spawn()
+            .await;
 
         let endpoint = format!("http://{addr}");
         let client = ClientBuilder::endpoints(vec![endpoint])
@@ -667,56 +625,20 @@ mod tests {
     async fn get_seq_bare_failed_precondition_surfaces_definitive_error() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct OverflowServer {
-            calls: Arc<AtomicU64>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for OverflowServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                Err(tonic::Status::failed_precondition("not leader"))
-            }
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-            async fn get_seq(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
-            {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                // Bare FailedPrecondition, NO leader-hint trailer — mirrors the
-                // server's SeqOverflow mapping.
-                Err(tonic::Status::failed_precondition("dense counter overflow"))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicU64::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(OverflowServer {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // Bare FailedPrecondition with NO leader-hint trailer — mirrors the
+        // server's SeqOverflow mapping. Counts calls to prove bounded attempts.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::failed_precondition("dense counter overflow"))
+                }
+            })
+            .spawn()
+            .await;
 
         let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
             .retry_policy(RetryPolicy {
@@ -756,54 +678,20 @@ mod tests {
     async fn get_seq_ambiguous_post_send_failure_is_uncertain_without_retry() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct FlakyServer {
-            calls: Arc<AtomicU64>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for FlakyServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                Err(tonic::Status::failed_precondition("not leader"))
-            }
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-            async fn get_seq(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
-            {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Err(tonic::Status::unavailable("connection reset mid-call"))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicU64::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(FlakyServer {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // A post-send transport failure (Unavailable after the request reached
+        // the server) — ambiguous; counts calls to prove no retry.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::unavailable("connection reset mid-call"))
+                }
+            })
+            .spawn()
+            .await;
 
         let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
             .retry_policy(RetryPolicy {
@@ -838,54 +726,20 @@ mod tests {
     async fn get_seq_post_send_internal_is_uncertain_without_retry() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct InternalServer {
-            calls: Arc<AtomicU64>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for InternalServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                Err(tonic::Status::failed_precondition("not leader"))
-            }
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-            async fn get_seq(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
-            {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Err(tonic::Status::internal("permanent dense driver fault"))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicU64::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(InternalServer {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // A post-send INTERNAL (permanent dense driver fault) — ambiguous; counts
+        // calls to prove no retry.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::internal("permanent dense driver fault"))
+                }
+            })
+            .spawn()
+            .await;
 
         let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
             .retry_policy(RetryPolicy {
@@ -919,62 +773,26 @@ mod tests {
     async fn get_seq_response_count_mismatch_is_uncertain() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct MismatchedCountServer {
-            calls: Arc<AtomicU64>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for MismatchedCountServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                Err(tonic::Status::failed_precondition("not leader"))
-            }
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-            async fn get_seq(
-                &self,
-                request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
-            {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                let req = request.into_inner();
-                let (hi, lo) = tsoracle_core::Epoch(7).to_wire();
-                // Honour the key, but return a count the caller did NOT request.
-                Ok(tonic::Response::new(tsoracle_proto::v1::GetSeqResponse {
-                    key: req.key,
-                    start: 0,
-                    count: req.count + 1,
-                    epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
-                }))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicU64::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(MismatchedCountServer {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // Honour the key but return a count the caller did NOT request — a
+        // protocol violation; counts calls to prove no (double-spending) retry.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let (hi, lo) = tsoracle_core::Epoch(7).to_wire();
+                    Ok(tsoracle_proto::v1::GetSeqResponse {
+                        key: req.key,
+                        start: 0,
+                        count: req.count + 1,
+                        epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                    })
+                }
+            })
+            .spawn()
+            .await;
 
         let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
             .retry_policy(RetryPolicy {
@@ -1005,62 +823,26 @@ mod tests {
     async fn get_seq_response_key_mismatch_is_uncertain() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct MismatchedKeyServer {
-            calls: Arc<AtomicU64>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for MismatchedKeyServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                Err(tonic::Status::failed_precondition("not leader"))
-            }
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-            async fn get_seq(
-                &self,
-                request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
-            {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                let req = request.into_inner();
-                let (hi, lo) = tsoracle_core::Epoch(7).to_wire();
-                // Echo a DIFFERENT key than the caller requested.
-                Ok(tonic::Response::new(tsoracle_proto::v1::GetSeqResponse {
-                    key: format!("{}-tampered", req.key),
-                    start: 0,
-                    count: req.count,
-                    epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
-                }))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicU64::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(MismatchedKeyServer {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // Echo a DIFFERENT key than requested — a protocol violation; counts
+        // calls to prove the malformed success is not retried.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let (hi, lo) = tsoracle_core::Epoch(7).to_wire();
+                    Ok(tsoracle_proto::v1::GetSeqResponse {
+                        key: format!("{}-tampered", req.key),
+                        start: 0,
+                        count: req.count,
+                        epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                    })
+                }
+            })
+            .spawn()
+            .await;
 
         let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
             .retry_policy(RetryPolicy {
