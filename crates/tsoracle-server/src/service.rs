@@ -300,7 +300,15 @@ impl TsoService for TsoServiceImpl {
                 &self.server.reporter,
                 leader_hint_from(&self.server),
             )),
-            Err(other) => Err(Status::unavailable(other.to_string())),
+            // A transient driver fault (storage hiccup, momentary quorum loss)
+            // is safe to retry → UNAVAILABLE. Everything else reaching here is a
+            // permanent fault (PermanentDriver, AdvanceOutOfRange) the client
+            // MUST NOT silently retry → INTERNAL, matching the ConsensusError
+            // contract and the get_ts extension path's PersistDisposition split.
+            Err(ConsensusError::TransientDriver(source)) => {
+                Err(Status::unavailable(source.to_string()))
+            }
+            Err(other) => Err(Status::internal(other.to_string())),
         }
     }
 }

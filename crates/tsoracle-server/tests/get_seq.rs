@@ -90,7 +90,11 @@ async fn get_seq_returns_contiguous_blocks() {
     assert_eq!(resp.key, "orders");
     assert_eq!(resp.start, 0);
     assert_eq!(resp.count, 5);
-    assert!(resp.epoch.is_some(), "epoch must be present on success");
+    // Epoch must be present on success and pinned to the FileDriver's
+    // Epoch::ZERO (both halves zero) — guards against a future client ever
+    // mistaking a zero-valued epoch for an absent one.
+    let epoch = resp.epoch.expect("epoch must be present on success");
+    assert_eq!((epoch.hi, epoch.lo), (0, 0));
 
     // Second block: [5, 8) — contiguous, no gap.
     let resp2 = client
