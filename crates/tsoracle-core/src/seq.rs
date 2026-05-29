@@ -99,6 +99,138 @@ impl SeqGrant {
     }
 }
 
+#[derive(Debug)]
+enum SeqState {
+    NotLeader,
+    Leader { epoch: Epoch },
+}
+
+/// Leadership/epoch gate plus request validation for the dense path. Holds NO
+/// per-key counter state — counters live in the durable layer and `start` is
+/// assigned there. This type only decides "may this request proceed, and is it
+/// well-formed?".
+pub struct SeqAllocator {
+    state: SeqState,
+}
+
+impl SeqAllocator {
+    pub fn new() -> Self {
+        SeqAllocator {
+            state: SeqState::NotLeader,
+        }
+    }
+
+    pub fn become_leader(&mut self, epoch: Epoch) {
+        self.state = SeqState::Leader { epoch };
+    }
+
+    pub fn step_down(&mut self) {
+        self.state = SeqState::NotLeader;
+    }
+
+    pub fn is_leader(&self) -> bool {
+        matches!(self.state, SeqState::Leader { .. })
+    }
+
+    pub fn epoch(&self) -> Option<Epoch> {
+        match self.state {
+            SeqState::Leader { epoch } => Some(epoch),
+            SeqState::NotLeader => None,
+        }
+    }
+
+    /// Validate a request without touching durable state. Leadership is checked
+    /// first; then key and count bounds. Returns the validated [`SeqKey`].
+    pub fn validate_request(&self, key: &str, count: u32) -> Result<SeqKey, CoreError> {
+        if !self.is_leader() {
+            return Err(CoreError::NotLeader);
+        }
+        if count == 0 {
+            return Err(CoreError::SeqCountZero);
+        }
+        if count > MAX_SEQ_COUNT {
+            return Err(CoreError::SeqCountTooLarge {
+                count,
+                max: MAX_SEQ_COUNT,
+            });
+        }
+        SeqKey::try_new(key)
+    }
+}
+
+impl Default for SeqAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod seqallocator_tests {
+    use super::*;
+
+    #[test]
+    fn new_is_not_leader() {
+        let a = SeqAllocator::new();
+        assert!(!a.is_leader());
+        assert_eq!(a.epoch(), None);
+    }
+
+    #[test]
+    fn become_leader_then_step_down() {
+        let mut a = SeqAllocator::new();
+        a.become_leader(Epoch(3));
+        assert!(a.is_leader());
+        assert_eq!(a.epoch(), Some(Epoch(3)));
+        a.step_down();
+        assert!(!a.is_leader());
+        assert_eq!(a.epoch(), None);
+    }
+
+    #[test]
+    fn validate_request_off_leader_is_not_leader() {
+        let a = SeqAllocator::new();
+        assert_eq!(a.validate_request("orders", 1), Err(CoreError::NotLeader));
+    }
+
+    #[test]
+    fn validate_request_rejects_zero_count() {
+        let mut a = SeqAllocator::new();
+        a.become_leader(Epoch(1));
+        assert_eq!(
+            a.validate_request("orders", 0),
+            Err(CoreError::SeqCountZero)
+        );
+    }
+
+    #[test]
+    fn validate_request_rejects_oversized_count() {
+        let mut a = SeqAllocator::new();
+        a.become_leader(Epoch(1));
+        assert_eq!(
+            a.validate_request("orders", MAX_SEQ_COUNT + 1),
+            Err(CoreError::SeqCountTooLarge {
+                count: MAX_SEQ_COUNT + 1,
+                max: MAX_SEQ_COUNT
+            })
+        );
+    }
+
+    #[test]
+    fn validate_request_rejects_bad_key() {
+        let mut a = SeqAllocator::new();
+        a.become_leader(Epoch(1));
+        assert_eq!(a.validate_request("", 1), Err(CoreError::SeqKeyEmpty));
+    }
+
+    #[test]
+    fn validate_request_ok_returns_key() {
+        let mut a = SeqAllocator::new();
+        a.become_leader(Epoch(1));
+        let k = a.validate_request("orders", 10).unwrap();
+        assert_eq!(k.as_str(), "orders");
+    }
+}
+
 #[cfg(test)]
 mod seqgrant_tests {
     use super::*;

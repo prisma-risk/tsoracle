@@ -37,5 +37,5 @@ pub mod docs;
 pub use allocator::{Allocator, CommitOutcome, CoreError, IgnoreReason, PhysicalMs, WindowGrant};
 pub use epoch::Epoch;
 pub use peer::{PeerEndpoint, PeerEndpointError, TsoPeer};
-pub use seq::{MAX_SEQ_COUNT, MAX_SEQ_KEY_LEN, SeqGrant, SeqKey};
+pub use seq::{MAX_SEQ_COUNT, MAX_SEQ_KEY_LEN, SeqAllocator, SeqGrant, SeqKey};
 pub use timestamp::{LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp, TimestampError};
