@@ -53,7 +53,7 @@ runs:
         # Explicit target -> @user lookup. CODEOWNERS controls PR review
         # routing; this map controls issue assignment.
         case "${{ inputs.target }}" in
-          record_decode|record_roundtrip|proto_get_ts_request_decode|proto_get_ts_response_decode|proto_leader_hint_decode)
+          record_decode|record_roundtrip|dense_record_decode|dense_record_roundtrip|proto_get_ts_request_decode|proto_get_ts_response_decode|proto_leader_hint_decode)
             echo "user=SebastianThiebaud" >> "$GITHUB_OUTPUT"
             ;;
           *)
@@ -106,6 +106,8 @@ runs:
         case "$TARGET" in
           record_decode)                   DESC="record::decode never panics on any input bytes" ;;
           record_roundtrip)                DESC="record::encode/decode roundtrip in both directions" ;;
+          dense_record_decode)             DESC="dense_record::decode never panics on any input bytes" ;;
+          dense_record_roundtrip)          DESC="dense_record::encode/decode roundtrip in both directions" ;;
           proto_get_ts_request_decode)     DESC="prost decode of GetTsRequest from arbitrary bytes" ;;
           proto_get_ts_response_decode)    DESC="prost decode of GetTsResponse from arbitrary bytes" ;;
           proto_leader_hint_decode)        DESC="prost decode of LeaderHint from arbitrary bytes" ;;
