@@ -101,6 +101,7 @@ pub fn decode(bytes: &[u8]) -> Result<(BTreeMap<String, u64>, u64), DenseRecordE
     );
     let mut pos = 17;
     let mut map = BTreeMap::new();
+    let mut prev_key: Option<String> = None;
     for _ in 0..key_count {
         if pos + 2 > body.len() {
             return Err(DenseRecordError::Malformed);
@@ -124,6 +125,20 @@ pub fn decode(bytes: &[u8]) -> Result<(BTreeMap<String, u64>, u64), DenseRecordE
                 .map_err(|_| DenseRecordError::Malformed)?,
         );
         pos += 8;
+        // Keys must appear in strictly ascending order. `encode` emits them in
+        // `BTreeMap` order (sorted, unique), so any record this codec produced
+        // satisfies this. Enforcing it on decode (a) rejects duplicate keys,
+        // which `BTreeMap::insert` would otherwise silently coalesce — dropping
+        // a counter and decoding to a different map than the bytes describe —
+        // and (b) rejects non-canonical orderings, making decode canonical so
+        // that re-encoding a decoded record reproduces the exact input bytes
+        // (the strict round-trip the fuzz target asserts).
+        if let Some(prev) = &prev_key {
+            if key <= *prev {
+                return Err(DenseRecordError::Malformed);
+            }
+        }
+        prev_key = Some(key.clone());
         map.insert(key, counter);
     }
     if pos != body.len() {
@@ -212,5 +227,54 @@ mod tests {
             decode(&[0u8; 3]),
             Err(DenseRecordError::TooShort(3))
         ));
+    }
+
+    /// Build a record with an arbitrary, possibly non-canonical key list and a
+    /// valid CRC — so the body survives the checksum gate and the structural
+    /// (ordering) checks are what the test exercises.
+    fn encode_raw(cap: u64, entries: &[(&str, u64)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(MAGIC);
+        body.push(VERSION);
+        body.extend_from_slice(&cap.to_le_bytes());
+        body.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for (k, c) in entries {
+            body.extend_from_slice(&(k.len() as u16).to_le_bytes());
+            body.extend_from_slice(k.as_bytes());
+            body.extend_from_slice(&c.to_le_bytes());
+        }
+        let crc = crc32c::crc32c(&body);
+        body.extend_from_slice(&crc.to_le_bytes());
+        body
+    }
+
+    #[test]
+    fn rejects_duplicate_keys() {
+        // A valid-CRC record listing the same key twice would silently drop one
+        // counter under `BTreeMap::insert`, decoding to a different map than the
+        // bytes describe. Reject it.
+        let bytes = encode_raw(10_000, &[("orders", 1), ("orders", 2)]);
+        assert_eq!(decode(&bytes), Err(DenseRecordError::Malformed));
+    }
+
+    #[test]
+    fn rejects_out_of_order_keys() {
+        // The encoder emits keys in ascending (BTreeMap) order, so a descending
+        // pair is non-canonical: decoding it and re-encoding would reorder the
+        // bytes, violating the strict round-trip the codec guarantees.
+        // ("users" > "orders", so listing them in this order is descending.)
+        let bytes = encode_raw(10_000, &[("users", 7), ("orders", 42)]);
+        assert_eq!(decode(&bytes), Err(DenseRecordError::Malformed));
+    }
+
+    #[test]
+    fn accepts_canonical_ascending_keys() {
+        let bytes = encode_raw(10_000, &[("orders", 42), ("users", 7)]);
+        let (map, cap) = decode(&bytes).unwrap();
+        assert_eq!(cap, 10_000);
+        assert_eq!(map.get("orders"), Some(&42));
+        assert_eq!(map.get("users"), Some(&7));
+        // A canonical record re-encodes to the exact input (strict round-trip).
+        assert_eq!(encode(&map, cap), bytes);
     }
 }
