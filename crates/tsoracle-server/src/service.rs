@@ -101,6 +101,10 @@ fn core_status(error: CoreError) -> Status {
         | CoreError::SeqKeyTooLong { .. }
         | CoreError::SeqCountZero
         | CoreError::SeqCountTooLarge { .. } => Status::invalid_argument(error.to_string()),
+        // A block-range overflow is a server-side invariant breach, not a
+        // malformed client request — surface it as Internal. Unreachable on the
+        // get_ts path (which never builds a SeqGrant); present for exhaustiveness.
+        CoreError::SeqBlockOverflow { .. } => Status::internal(error.to_string()),
     }
 }
 
@@ -274,7 +278,12 @@ impl TsoService for TsoServiceImpl {
                     .increment(u64::from(count));
                 // Route through the core SeqGrant (spec §7.2) so the response is
                 // derived from the validated grant, not assembled ad hoc.
-                let grant = tsoracle_core::SeqGrant::new(seq_key, start, count, epoch);
+                // try_new only fails on count==0 or a block-range overflow,
+                // neither of which can occur here (count is validated 1..=MAX
+                // and advance_dense already rejected an overflowing advance), so
+                // an Err is a server invariant breach → Internal.
+                let grant = tsoracle_core::SeqGrant::try_new(seq_key, start, count, epoch)
+                    .map_err(core_status)?;
                 let (hi, lo) = grant.epoch().to_wire();
                 Ok(Response::new(GetSeqResponse {
                     key: grant.key().as_str().to_string(),

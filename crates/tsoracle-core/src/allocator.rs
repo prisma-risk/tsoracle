@@ -241,6 +241,8 @@ pub enum CoreError {
     SeqCountZero,
     #[error("sequence count {count} exceeds maximum {max}")]
     SeqCountTooLarge { count: u32, max: u32 },
+    #[error("sequence block [{start}, {start}+{count}) overflows u64")]
+    SeqBlockOverflow { start: u64, count: u32 },
 }
 
 /// The result of a `try_commit_window_extension` that passed range validation.
