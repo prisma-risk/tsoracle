@@ -83,13 +83,13 @@ message GetTsResponse {
 }
 
 message GetSeqRequest {
-  string key = 1;    // bounded UTF-8 sequence key
-  uint32 count = 2;  // must be >= 1
+  string key = 1; // bounded UTF-8 sequence key
+  uint32 count = 2; // must be >= 1
 }
 
 message GetSeqResponse {
   string key = 1;
-  uint64 start = 2;   // first ordinal of the contiguous block [start, start+count)
+  uint64 start = 2; // first ordinal of the contiguous block [start, start+count)
   uint32 count = 3;
   // Leader epoch that issued this block, as a single nested message so its
   // presence implies both halves — bundling makes a half-populated (corrupt)
