@@ -73,6 +73,7 @@ pub struct SeqGrant {
 
 impl SeqGrant {
     pub fn new(key: SeqKey, start: u64, count: u32, epoch: Epoch) -> Self {
+        debug_assert!(count != 0, "SeqGrant::new: count must be >= 1");
         SeqGrant {
             key,
             start,
@@ -93,7 +94,8 @@ impl SeqGrant {
         self.epoch
     }
     /// The last ordinal in the block: `start + count - 1`. `count >= 1`, so this
-    /// does not underflow.
+    /// does not underflow. The addition cannot overflow in any reachable counter
+    /// range (u64::MAX / MAX_SEQ_COUNT exceeds 10^14 blocks).
     pub fn last(&self) -> u64 {
         self.start + u64::from(self.count) - 1
     }
@@ -120,6 +122,8 @@ impl SeqAllocator {
         }
     }
 
+    /// Transition to leader state for `epoch`. The caller must already hold
+    /// consensus leadership for `epoch` before calling this.
     pub fn become_leader(&mut self, epoch: Epoch) {
         self.state = SeqState::Leader { epoch };
     }
@@ -140,7 +144,8 @@ impl SeqAllocator {
     }
 
     /// Validate a request without touching durable state. Leadership is checked
-    /// first; then key and count bounds. Returns the validated [`SeqKey`].
+    /// first; then count bounds (zero, then oversized), then key validity.
+    /// Returns the validated [`SeqKey`].
     pub fn validate_request(&self, key: &str, count: u32) -> Result<SeqKey, CoreError> {
         if !self.is_leader() {
             return Err(CoreError::NotLeader);
@@ -229,6 +234,13 @@ mod seqallocator_tests {
         let k = a.validate_request("orders", 10).unwrap();
         assert_eq!(k.as_str(), "orders");
     }
+
+    #[test]
+    fn validate_request_accepts_max_count_exactly() {
+        let mut a = SeqAllocator::new();
+        a.become_leader(Epoch(1));
+        assert!(a.validate_request("orders", MAX_SEQ_COUNT).is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +257,12 @@ mod seqgrant_tests {
         assert_eq!(g.epoch(), Epoch(7));
         // [100, 105): last issued ordinal is 104.
         assert_eq!(g.last(), 104);
+    }
+
+    #[test]
+    fn last_equals_start_when_count_is_one() {
+        let g1 = SeqGrant::new(SeqKey::try_new("x").unwrap(), 42, 1, Epoch(1));
+        assert_eq!(g1.last(), 42);
     }
 }
 

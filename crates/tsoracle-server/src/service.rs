@@ -407,6 +407,24 @@ mod tests {
                 .message()
                 .contains(&format!("ahead_ms {}", u64::MAX))
         );
+
+        assert_eq!(
+            core_status(CoreError::SeqKeyEmpty).code(),
+            tonic::Code::InvalidArgument
+        );
+        let too_long = core_status(CoreError::SeqKeyTooLong { len: 200, max: 128 });
+        assert_eq!(too_long.code(), tonic::Code::InvalidArgument);
+        assert!(too_long.message().contains("200"));
+        assert_eq!(
+            core_status(CoreError::SeqCountZero).code(),
+            tonic::Code::InvalidArgument
+        );
+        let too_large = core_status(CoreError::SeqCountTooLarge {
+            count: 70_000,
+            max: 65_536,
+        });
+        assert_eq!(too_large.code(), tonic::Code::InvalidArgument);
+        assert!(too_large.message().contains("70000"));
     }
 
     #[test]
