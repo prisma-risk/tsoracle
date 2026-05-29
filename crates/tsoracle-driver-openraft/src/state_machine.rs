@@ -175,6 +175,14 @@ impl VersionedCodec for PersistedSnapshot {
 /// (poison semantics would just mask the originating panic).
 struct Core {
     current_value: u64,
+    /// Per-key dense counters. Deterministic iteration (BTreeMap) so snapshots
+    /// are byte-identical across replicas.
+    dense: std::collections::BTreeMap<String, u64>,
+    /// Immutable, cluster-wide genesis cardinality cap. Seeded from the SM
+    /// constructor (identical config on every node) or restored from a
+    /// snapshot; never mutated at runtime. Stored in the replicated snapshot so
+    /// replay/restore reproduces the same accept/reject decisions (spec §6.2).
+    dense_cap: u64,
     last_applied: Option<LogId>,
     last_membership: StoredMem,
     /// Snapshot index counter, used to make snapshot ids unique even when two
@@ -266,6 +274,26 @@ impl HighWaterStateMachine {
         Self::with_store(store).expect("InMemorySnapshotStore::load is infallible")
     }
 
+    /// Build a state machine with a custom genesis cardinality cap, backed by
+    /// an in-memory snapshot store. The cap is immutable after construction and
+    /// must be identical on every cluster member. Intended for tests that need
+    /// a small cap to exercise `DenseCardinalityExceeded`; production callers
+    /// use [`new`](Self::new) which defaults to
+    /// [`DEFAULT_DENSE_CARDINALITY_CAP`](crate::DEFAULT_DENSE_CARDINALITY_CAP).
+    #[cfg(test)]
+    #[expect(
+        clippy::expect_used,
+        reason = "`with_store_and_dense_cap` only fails when `store.load()` returns Err; \
+                  `InMemorySnapshotStore::load` is `Ok(None)` for a fresh \
+                  store, so this branch is unreachable."
+    )]
+    fn new_with_dense_cap(dense_cap: u64) -> Self {
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let sm = Self::with_store(store).expect("InMemorySnapshotStore::load is infallible");
+        sm.core.lock().dense_cap = dense_cap;
+        sm
+    }
+
     /// Build a state machine backed by `store` and rehydrated from whatever
     /// snapshot the store currently holds.
     ///
@@ -291,6 +319,8 @@ impl HighWaterStateMachine {
     ) -> io::Result<Self> {
         let mut core = Core {
             current_value: 0,
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: crate::DEFAULT_DENSE_CARDINALITY_CAP,
             last_applied: None,
             last_membership: StoredMembership::default(),
             snapshot_idx: 0,
@@ -338,6 +368,12 @@ impl HighWaterStateMachine {
     /// before calling.
     pub async fn current_value(&self) -> u64 {
         self.core.lock().current_value
+    }
+
+    /// Read a dense counter by key, returning 0 if absent. State-machine-local
+    /// read; callers needing linearizability must issue a read barrier first.
+    pub fn dense_value(&self, key: &str) -> u64 {
+        self.core.lock().dense.get(key).copied().unwrap_or(0)
     }
 
     fn snapshot_id_for(last_applied: Option<&LogId>, idx: u64) -> String {
@@ -596,6 +632,30 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                             value: core.current_value,
                             outcome,
                         }
+                    }
+                }
+                EntryPayload::Normal(HighWaterCommand::AdvanceDense { key, count }) => {
+                    let mut core = self.core.lock();
+                    let key_str = key.as_str();
+                    let present = core.dense.contains_key(key_str);
+                    let outcome = if !present && core.dense.len() as u64 >= core.dense_cap {
+                        ApplyOutcome::DenseCardinalityExceeded {
+                            cap: core.dense_cap,
+                        }
+                    } else {
+                        let start = core.dense.get(key_str).copied().unwrap_or(0);
+                        match start.checked_add(u64::from(*count)) {
+                            Some(next) => {
+                                core.dense.insert(key_str.to_string(), next);
+                                ApplyOutcome::DenseAdvanced { start }
+                            }
+                            None => ApplyOutcome::DenseOverflow,
+                        }
+                    };
+                    core.last_applied = Some(log_id);
+                    HighWaterApplied {
+                        value: core.current_value,
+                        outcome,
                     }
                 }
                 EntryPayload::Membership(membership) => {
@@ -2290,6 +2350,189 @@ mod tests {
         assert!(
             store.load().expect("load").is_none(),
             "rejected install must not persist an envelope"
+        );
+    }
+
+    // ---- AdvanceDense apply tests ----
+    //
+    // Drive the `AdvanceDense` apply arm directly via `apply_one` and verify
+    // the observable side effects through `dense_value()` (the pre/post
+    // counter), the `last_applied` log position, and the fact that the
+    // high-water is NOT touched by a dense advance.
+    //
+    // The four cases the plan mandates:
+    //  1. First advance of "orders" by 5 → start=0, dense["orders"]=5.
+    //  2. Second advance of "orders" by 3 → start=5, dense["orders"]=8.
+    //  3. A new key when the cap is full → DenseCardinalityExceeded: counter
+    //     stays 0 and the map size does not grow.
+    //  4. A counter at u64::MAX with count=1 → DenseOverflow: counter
+    //     stays at u64::MAX.
+    //
+    // We verify start and outcome by observing `dense_value` BEFORE the apply
+    // (which gives `start`) and AFTER (which gives `start + count` on success,
+    // unchanged on rejection). The high-water is pinned at 0 throughout (no
+    // `Advance` entries), which confirms the apply arm does NOT touch it.
+
+    fn dense_key(s: &str) -> tsoracle_core::SeqKey {
+        tsoracle_core::SeqKey::try_new(s).expect("valid key")
+    }
+
+    #[tokio::test]
+    async fn dense_advance_first_key_starts_at_zero() {
+        let mut sm = HighWaterStateMachine::new();
+        let key = dense_key("orders");
+
+        // Pre-condition: key is absent → start would be 0.
+        assert_eq!(sm.dense_value("orders"), 0);
+
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: key.clone(),
+                count: 5,
+            }),
+        )
+        .await;
+
+        // Post-condition: counter advanced by 5; start was 0.
+        assert_eq!(
+            sm.dense_value("orders"),
+            5,
+            "first advance by 5: dense[orders] = 5 (start=0)"
+        );
+        // High-water must be untouched.
+        assert_eq!(
+            sm.current_value().await,
+            0,
+            "AdvanceDense must not touch the high-water"
+        );
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(last.map(|l| l.index), Some(1));
+    }
+
+    #[tokio::test]
+    async fn dense_advance_second_apply_starts_at_previous_value() {
+        let mut sm = HighWaterStateMachine::new();
+        let key = dense_key("orders");
+
+        // First advance: start=0, next=5.
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: key.clone(),
+                count: 5,
+            }),
+        )
+        .await;
+        assert_eq!(sm.dense_value("orders"), 5);
+
+        // Capture start before second apply.
+        let start_before = sm.dense_value("orders"); // == 5
+
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: key.clone(),
+                count: 3,
+            }),
+        )
+        .await;
+
+        // The second block starts at 5 (the pre-advance value).
+        assert_eq!(
+            start_before, 5,
+            "second advance: start must be the prior counter value (5)"
+        );
+        assert_eq!(
+            sm.dense_value("orders"),
+            8,
+            "second advance by 3: dense[orders] = 8"
+        );
+    }
+
+    #[tokio::test]
+    async fn dense_advance_cardinality_cap_rejects_new_key() {
+        // Cap set to 1: one key is allowed; a second new key must be rejected.
+        let mut sm = HighWaterStateMachine::new_with_dense_cap(1);
+        let k1 = dense_key("orders");
+        let k2 = dense_key("users");
+
+        // First key is accepted (map was empty, cap=1 → len 0 < 1 → OK).
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: k1.clone(),
+                count: 1,
+            }),
+        )
+        .await;
+        assert_eq!(sm.dense_value("orders"), 1, "first key accepted");
+
+        // Second NEW key: map len==1 >= cap=1 → DenseCardinalityExceeded.
+        // The counter for the new key must stay at 0 (rejection is a no-op on
+        // the dense map).
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: k2.clone(),
+                count: 1,
+            }),
+        )
+        .await;
+        assert_eq!(
+            sm.dense_value("users"),
+            0,
+            "new key rejected by cardinality cap: dense[users] must be 0"
+        );
+        // Existing key still advances (already present → cap check skipped).
+        apply_one(
+            &mut sm,
+            3,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: k1.clone(),
+                count: 4,
+            }),
+        )
+        .await;
+        assert_eq!(
+            sm.dense_value("orders"),
+            5,
+            "existing key still advances despite cap being full"
+        );
+    }
+
+    #[tokio::test]
+    async fn dense_advance_overflow_leaves_counter_unchanged() {
+        // Seed the counter at u64::MAX by using a large initial count and then
+        // bridging up. Since count is u32 (max 2^32-1) we need multiple applies
+        // to reach u64::MAX. It is simpler to directly manipulate the core in
+        // the test module (same file, so private access is allowed).
+        let sm = HighWaterStateMachine::new();
+        {
+            let mut core = sm.core.lock();
+            core.dense.insert("x".to_string(), u64::MAX);
+        }
+        // Apply AdvanceDense with count=1: checked_add(u64::MAX, 1) overflows.
+        let mut sm_mut = sm;
+        apply_one(
+            &mut sm_mut,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: dense_key("x"),
+                count: 1,
+            }),
+        )
+        .await;
+        // Overflow: counter must remain at u64::MAX (rejection is a no-op).
+        assert_eq!(
+            sm_mut.dense_value("x"),
+            u64::MAX,
+            "overflow must not modify the counter"
         );
     }
 }
