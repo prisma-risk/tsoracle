@@ -152,3 +152,82 @@ async fn get_seq_empty_key_returns_invalid_argument() {
 
     booted.shutdown().await.unwrap();
 }
+
+/// A driver that is a healthy leader for the timestamp path but has no dense
+/// support (it inherits the trait's default `advance_dense` → `DenseUnsupported`,
+/// exactly like the openraft/paxos drivers do until their follow-up PRs). Used
+/// to assert how the GetSeq handler surfaces an unsupported driver.
+struct DenseUnsupportedDriver;
+
+#[async_trait::async_trait]
+impl tsoracle_consensus::ConsensusDriver for DenseUnsupportedDriver {
+    fn leadership_events(
+        &self,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = tsoracle_consensus::LeaderState> + Send>>
+    {
+        use futures::StreamExt;
+        // Honour the first-item-synchronous contract by emitting Leader
+        // immediately, then stay open (`pending`) so the fence holds Serving — a
+        // finished stream would read as the driver relinquishing leadership.
+        Box::pin(
+            futures::stream::once(async {
+                tsoracle_consensus::LeaderState::Leader {
+                    epoch: tsoracle_core::Epoch::ZERO,
+                }
+            })
+            .chain(futures::stream::pending()),
+        )
+    }
+
+    async fn load_high_water(&self) -> Result<u64, tsoracle_consensus::ConsensusError> {
+        Ok(0)
+    }
+
+    async fn persist_high_water(
+        &self,
+        at_least: u64,
+        _epoch: tsoracle_core::Epoch,
+    ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+        Ok(at_least)
+    }
+    // advance_dense / load_dense_seq: trait defaults → DenseUnsupported.
+}
+
+/// A leader whose driver does not support dense sequences must surface GetSeq as
+/// `UNIMPLEMENTED`, not be disguised as a NOT_LEADER redirect. Folding
+/// `DenseUnsupported` into the not-leader status makes a healthy leader claim it
+/// is not the leader, sending the client into a pointless election ride-out and
+/// polluting not-leader metrics. `UNIMPLEMENTED` is immediately diagnosable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_seq_unsupported_driver_returns_unimplemented() {
+    let server = Server::builder()
+        .consensus_driver(std::sync::Arc::new(DenseUnsupportedDriver))
+        .window_ahead(Duration::from_secs(1))
+        .failover_advance(Duration::from_millis(500))
+        .build()
+        .unwrap();
+
+    let mut booted = boot_server(server).await;
+    wait_until_serving(&mut booted.state_rx).await;
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
+    let mut client = TsoServiceClient::connect(format!("http://{}", booted.addr))
+        .await
+        .unwrap();
+
+    let err = client
+        .get_seq(GetSeqRequest {
+            key: "orders".to_string(),
+            count: 1,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        tonic::Code::Unimplemented,
+        "a leader without dense support must return UNIMPLEMENTED, got: {err:?}"
+    );
+
+    booted.shutdown().await.unwrap();
+}

@@ -294,11 +294,16 @@ impl TsoService for TsoServiceImpl {
             Err(ConsensusError::SeqOverflow) => {
                 Err(Status::failed_precondition("dense counter overflow"))
             }
-            Err(ConsensusError::NotLeader { .. })
-            | Err(ConsensusError::Fenced { .. })
-            | Err(ConsensusError::DenseUnsupported) => Err(not_leader_status(
-                &self.server.reporter,
-                leader_hint_from(&self.server),
+            Err(ConsensusError::NotLeader { .. }) | Err(ConsensusError::Fenced { .. }) => Err(
+                not_leader_status(&self.server.reporter, leader_hint_from(&self.server)),
+            ),
+            // The driver has no dense support (openraft/paxos until their
+            // follow-up PRs). This is a healthy leader, so masking it as
+            // NOT_LEADER would send the client into a pointless election
+            // ride-out and inflate not-leader metrics. Surface it plainly so
+            // clients/operators can diagnose it at a glance.
+            Err(ConsensusError::DenseUnsupported) => Err(Status::unimplemented(
+                "dense sequences are not supported by this consensus driver",
             )),
             // A transient driver fault (storage hiccup, momentary quorum loss)
             // is safe to retry → UNAVAILABLE. Everything else reaching here is a
