@@ -26,6 +26,7 @@
 // for the lib's own unit tests; integration tests are separate compilation units.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod dense_record;
 mod driver;
 pub mod record;
 
