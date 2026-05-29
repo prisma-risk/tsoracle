@@ -102,6 +102,14 @@ tsoracle is a small, embeddable Rust implementation. The consensus layer is left
 - [`docs/assurance-case.md`](docs/assurance-case.md) — safety and security claims with supporting evidence.
 - [`docs/release-signatures.md`](docs/release-signatures.md) — verifying release provenance and signed tags.
 
+## Maintainers
+
+- **Sebastian Thiebaud** ([@sebastianthiebaud](https://github.com/sebastianthiebaud)) — lead maintainer.
+- **Charles Merill** ([@crmerrill](https://github.com/crmerrill)) — co-maintainer.
+- **Idriss Maoui** ([@idmao](https://github.com/idmao)) — co-maintainer.
+
+See [`GOVERNANCE.md`](GOVERNANCE.md) for roles, authorities, and the continuity-of-access plan.
+
 ## Examples
 
 - [examples/embedded-server](examples/embedded-server) — embed `tsoracle-server` with the file driver in your own binary, with graceful shutdown.

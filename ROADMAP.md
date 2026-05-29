@@ -36,8 +36,8 @@ This roadmap captures direction at three horizons. Specific issues track in <htt
 
 ### Project maturity
 
-- Designate a second active maintainer (not just continuity contact) and update [`GOVERNANCE.md`](GOVERNANCE.md) §6.1 accordingly. This is the prerequisite for flipping `bus_factor` to Met.
-- Enable branch protection `required reviewers ≥ 2` once the second maintainer is active.
+- ~~Designate a second active maintainer (not just continuity contact) and update [`GOVERNANCE.md`](GOVERNANCE.md) §6.1 accordingly.~~ **Done** — Charles Merill and Idriss Maoui are active co-maintainers ([`GOVERNANCE.md`](GOVERNANCE.md) §3.1); `bus_factor` is now Met.
+- ~~Enable branch protection so changes require review.~~ **Done** — `main` requires at least one approving review from a non-author and blocks self-merge; with multiple active maintainers, two-person review is enforced for all changes.
 - Continue growing the contributor base; aim for the `contributors_unassociated` criterion.
 
 ### Consensus and storage
