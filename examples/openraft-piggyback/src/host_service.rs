@@ -275,6 +275,22 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
                         tso: Some(core.high_water),
                     }
                 }
+                EntryPayload::Normal(HostCommand::Tso(HighWaterCommand::AdvanceDense {
+                    ..
+                })) => {
+                    // The piggyback example does not implement dense sequence
+                    // state. This arm handles the exhaustiveness requirement
+                    // introduced when `AdvanceDense` was added in Task 2 of the
+                    // dense-openraft plan. A real piggyback host that supports
+                    // dense sequences would forward this entry to a
+                    // `HighWaterStateMachine` (Task 6 of that plan).
+                    let mut core = self.core.lock();
+                    core.last_applied = Some(log_id);
+                    HostApplied {
+                        kv: None,
+                        tso: Some(core.high_water),
+                    }
+                }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
                     core.last_membership = StoredMembership::new(Some(log_id), membership.clone());

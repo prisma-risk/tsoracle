@@ -315,7 +315,13 @@ fn classify_activation_outcome(
         }
         ApplyOutcome::FormatActivated { .. }
         | ApplyOutcome::FormatActivationNoop { .. }
-        | ApplyOutcome::Advanced => {
+        | ApplyOutcome::Advanced
+        // Dense outcomes are impossible for a SetFormatVersion entry, but must
+        // be handled for exhaustiveness. Map them as membership-changed so the
+        // operator sees a non-success rather than an incorrect Ok.
+        | ApplyOutcome::DenseAdvanced { .. }
+        | ApplyOutcome::DenseCardinalityExceeded { .. }
+        | ApplyOutcome::DenseOverflow => {
             Err(FormatActivationError::MembershipChangedSinceGate { target })
         }
     }

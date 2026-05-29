@@ -121,6 +121,16 @@ pub enum ApplyOutcome {
     /// gate at proposal time normally prevents this from being committed
     /// (see `target_in_local_readable_range`).
     FormatActivationTargetOutOfRange { target: u8 },
+    /// An `AdvanceDense` applied successfully: `start` is the pre-advance dense
+    /// counter for the key (the issued block's first ordinal). `value` on the
+    /// enclosing `HighWaterApplied` is the high-water, untouched.
+    DenseAdvanced { start: u64 },
+    /// An `AdvanceDense` applied as a deterministic rejection: the key was new
+    /// and the cluster is at its immutable genesis cardinality cap.
+    DenseCardinalityExceeded { cap: u64 },
+    /// An `AdvanceDense` applied as a deterministic rejection: the counter would
+    /// exceed u64::MAX.
+    DenseOverflow,
 }
 
 /// Per-entry apply result.
