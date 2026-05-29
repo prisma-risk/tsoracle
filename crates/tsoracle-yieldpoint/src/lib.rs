@@ -69,7 +69,7 @@ pub use registry::{cfg, get, remove};
 /// zero overhead. When on, an armed entry parks the calling task on
 /// `Notify::notified().await` — yielding the tokio worker so timers and
 /// other tasks continue to run. Release with `notify_one()` on the
-/// handle returned by [`cfg`].
+/// handle returned by [`cfg`](cfg()).
 #[cfg(feature = "yieldpoints")]
 #[macro_export]
 macro_rules! yieldpoint {

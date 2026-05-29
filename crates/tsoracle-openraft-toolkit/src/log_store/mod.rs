@@ -388,7 +388,7 @@ where
     ///
     /// Reads only each record's leading byte (no postcard body parse), so a
     /// record from any version in the readable range contributes its byte
-    /// without needing its parser. Bounded by `lo` like [`last_log_id_in_cf`]:
+    /// without needing its parser. Bounded by `lo` like `last_log_id_in_cf`:
     /// for `GroupPrefixed` the reverse iterator can walk into a neighbouring
     /// group's bytes, so any key below `lo` ends the scan.
     pub fn highest_log_record_version(&self) -> io::Result<Option<u8>> {

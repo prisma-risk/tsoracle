@@ -71,7 +71,7 @@ pub enum HighWaterCommand {
     SetFormatVersion(SetFormatVersionPayload),
     /// Advance the dense counter for `key` by `count`, lazily creating the key
     /// at 0. The pre-advance value is the issued block's start; it is returned
-    /// to the proposer via [`ApplyOutcome`] (the apply path computes it in
+    /// to the proposer via [`ApplyOutcome`](crate::ApplyOutcome) (the apply path computes it in
     /// committed log order). Only ever appended under write version
     /// >= DENSE_WRITE_VERSION (gated by activation).
     AdvanceDense {

@@ -333,7 +333,7 @@ impl TsoService for FixedHintService {
 /// Bind a TLS gRPC peer on `127.0.0.1:0` that always replies `NOT_LEADER` with a
 /// leader-hint trailer pointing at `hint_endpoint`, and return its address. The
 /// spawned task is detached and lives until the test process exits. See
-/// [`FixedHintService`] for why tests inject the hint here rather than through a
+/// the private `FixedHintService` for why tests inject the hint here rather than through a
 /// real server's leader-watch path.
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub async fn boot_fixed_hint_server_tls(

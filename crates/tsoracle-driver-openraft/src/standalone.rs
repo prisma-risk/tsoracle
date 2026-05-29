@@ -26,7 +26,7 @@
 //! Use this when you want a dedicated TSO raft, separate from any other
 //! consensus state your service runs. For services that already run an
 //! openraft cluster (e.g. a placement driver), implement
-//! [`OpenraftHighWaterHost`](crate::OpenraftHighWaterHost) directly against
+//! [`OpenraftHighWaterHost`] directly against
 //! that existing cluster instead.
 
 use std::collections::BTreeSet;

@@ -193,7 +193,7 @@ impl HostState {
 ///
 /// Pure with respect to consensus — does not lock any OmniPaxos handle, does
 /// not signal the apply notifier. Callers that drain a decided suffix should
-/// invoke this per entry and then call [`HostState::apply_notify`].
+/// invoke this per entry and then call the private `HostState::apply_notify`.
 ///
 /// Half-isolation: `Kv` variants touch only the KV map; `HighWater` variants
 /// touch only the high-water cell (or the barrier ledger). `Advance` is

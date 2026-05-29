@@ -114,7 +114,7 @@ pub enum ApplyOutcome {
     /// defense-in-depth range check: `target` was outside the LOCAL
     /// binary's `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]` so the
     /// shared cell was left untouched. Distinct from
-    /// [`FormatActivationNoop`] because the failure class is "this entry
+    /// [`ApplyOutcome::FormatActivationNoop`] because the failure class is "this entry
     /// should never have been proposed" (a gate bug or a log committed
     /// by an older binary), not "the membership drifted" — different
     /// remediation, different counter, different operator surface. The

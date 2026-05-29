@@ -95,7 +95,7 @@ impl core::fmt::Display for PhysicalMs {
 /// this type is therefore proof that [`first`](Self::first) and
 /// [`last`](Self::last) can pack without panicking — the in-range invariant is
 /// guaranteed by the type, not by the constructors that happen to build it.
-/// The crate-internal back door [`new_unchecked`](Self::new_unchecked) skips
+/// The crate-internal back door `new_unchecked` skips
 /// the validation but documents the same invariant as a caller obligation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WindowGrant {
@@ -108,7 +108,7 @@ pub struct WindowGrant {
 impl WindowGrant {
     /// Construct a grant, checking that every timestamp it covers packs
     /// cleanly. This is the only *validating* constructor; the
-    /// crate-internal [`new_unchecked`](Self::new_unchecked) skips the
+    /// crate-internal `new_unchecked` skips the
     /// checks but requires the caller to have established the invariant
     /// some other way. Either way, a constructed value witnesses that
     /// `first`/`last` are infallible.
@@ -579,7 +579,7 @@ impl Allocator {
     /// physical-ceiling invariant on `persisted_high_water` is now enforced by
     /// the [`PhysicalMs`] parameter type itself ([`PhysicalMs::try_new`]);
     /// the `Result<_, CoreError>` shape is retained for source compatibility
-    /// with [`become_leader`] / [`try_prepare_window_extension`],
+    /// with [`become_leader`](Self::become_leader) / [`try_prepare_window_extension`](Self::try_prepare_window_extension),
     /// so callers can stay uniform under `?`, but no current code path here
     /// produces `Err`.
     pub fn try_commit_window_extension(

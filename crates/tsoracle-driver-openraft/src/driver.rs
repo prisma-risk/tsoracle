@@ -91,7 +91,8 @@ where
     /// by-value entry point) rather than `leadership_events(&raft)` to
     /// side-step a Rust 2024 lifetime-over-capture issue: the `&raft` form
     /// would require the returned stream to borrow from `raft`, but we want
-    /// `'static`. The cloned host then rides along inside [`KeepAlive`] so
+    /// `'static`. The cloned host then rides along inside the private
+    /// `KeepAlive` stream wrapper so
     /// dropping the outer driver doesn't shut the raft down.
     fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
         let host = Arc::clone(&self.host);
