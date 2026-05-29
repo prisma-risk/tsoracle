@@ -64,6 +64,12 @@ pub enum ConsensusError {
     /// [`reject_out_of_range_advance`]: crate::reject_out_of_range_advance
     #[error("high-water advance {0} exceeds the 46-bit physical_ms maximum")]
     AdvanceOutOfRange(u64),
+    #[error("dense sequences are not supported by this driver")]
+    DenseUnsupported,
+    #[error("dense key-cardinality cap {cap} reached")]
+    SeqKeyCardinalityExceeded { cap: u64 },
+    #[error("dense counter overflow for the requested key")]
+    SeqOverflow,
 }
 
 #[cfg(test)]

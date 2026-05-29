@@ -98,6 +98,15 @@ pub(crate) fn classify(error: ConsensusError) -> PersistDisposition {
         ConsensusError::TransientDriver(source) => PersistDisposition::Transient(source),
         ConsensusError::PermanentDriver(source) => PersistDisposition::Permanent(source),
         ConsensusError::AdvanceOutOfRange(at_least) => PersistDisposition::OutOfRange(at_least),
+        // Dense-path variants: these are never produced by persist_high_water /
+        // load_high_water, but the exhaustiveness check requires them. Treat as
+        // permanent (the caller must not silently retry an unexpected dense error
+        // on the timestamp persist path).
+        ConsensusError::DenseUnsupported
+        | ConsensusError::SeqKeyCardinalityExceeded { .. }
+        | ConsensusError::SeqOverflow => {
+            PersistDisposition::Permanent(Box::new(std::io::Error::other(error.to_string())))
+        }
     }
 }
 
