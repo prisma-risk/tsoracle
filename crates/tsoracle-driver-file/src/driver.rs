@@ -287,6 +287,8 @@ fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
     Ok(())
 }
 
+/// Atomically persist the dense map. Mirrors `write_record`'s tmp+fsync+rename+dir-fsync
+/// protocol (and its failpoint structure) for the dense `dense` file.
 fn write_dense_record(
     dir: &Path,
     map: &std::collections::BTreeMap<String, u64>,
@@ -488,14 +490,54 @@ mod dense_tests {
     }
 
     #[tokio::test]
-    async fn overflow_is_rejected() {
+    async fn fresh_key_advance_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let d = FileDriver::open_or_init(dir.path()).unwrap();
-        // Drive the counter near u64::MAX by seeding via repeated max-count adds is
-        // impractical; instead assert the checked_add guard by requesting from a
-        // near-max state is covered in core/property tests. Here assert a fresh key
-        // plus an enormous count within MAX_SEQ_COUNT cannot overflow (sanity).
+        // Sanity: a fresh key with a small count succeeds.
         assert!(d.advance_dense(&key("k"), 1, Epoch(1)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn advance_past_u64_max_is_seq_overflow() {
+        use std::collections::BTreeMap;
+        let dir = tempfile::tempdir().unwrap();
+        // Seed a dense record with "k" already near the ceiling.
+        let mut m = BTreeMap::new();
+        m.insert("k".to_string(), u64::MAX - 1);
+        let bytes = crate::dense_record::encode(&m, DEFAULT_DENSE_CARDINALITY_CAP);
+        std::fs::write(dir.path().join("dense"), bytes).unwrap();
+        let d = FileDriver::open_or_init(dir.path()).unwrap();
+        // count=2 would need u64::MAX-1 + 2 = overflow.
+        let err = d.advance_dense(&key("k"), 2, Epoch(1)).await;
+        assert!(matches!(
+            err,
+            Err(tsoracle_consensus::ConsensusError::SeqOverflow)
+        ));
+        // count=1 is exactly representable (lands at u64::MAX), so it succeeds.
+        assert_eq!(
+            d.advance_dense(&key("k"), 1, Epoch(1)).await.unwrap(),
+            u64::MAX - 1
+        );
+    }
+
+    #[tokio::test]
+    async fn cardinality_cap_rejects_new_keys_when_full() {
+        use std::collections::BTreeMap;
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = BTreeMap::new();
+        m.insert("a".to_string(), 1u64);
+        m.insert("b".to_string(), 1u64);
+        let bytes = crate::dense_record::encode(&m, 2); // cap = 2, already full
+        std::fs::write(dir.path().join("dense"), bytes).unwrap();
+        let d = FileDriver::open_or_init(dir.path()).unwrap();
+        // Existing keys still advance.
+        assert!(d.advance_dense(&key("a"), 1, Epoch(1)).await.is_ok());
+        // A NEW key is rejected at the cap.
+        let err = d.advance_dense(&key("c"), 1, Epoch(1)).await;
+        assert!(matches!(
+            err,
+            Err(tsoracle_consensus::ConsensusError::SeqKeyCardinalityExceeded { cap: 2 })
+        ));
     }
 }
 

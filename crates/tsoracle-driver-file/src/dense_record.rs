@@ -34,8 +34,8 @@ pub const VERSION: u8 = 1;
 pub enum DenseRecordError {
     #[error("dense record too short: {0} bytes")]
     TooShort(usize),
-    #[error("bad magic")]
-    BadMagic,
+    #[error("bad magic: {0:?}")]
+    BadMagic([u8; 4]),
     #[error("unsupported dense record version {0}")]
     UnsupportedVersion(u8),
     #[error("checksum mismatch: stored {stored:#010x}, computed {computed:#010x}")]
@@ -47,6 +47,7 @@ pub enum DenseRecordError {
 }
 
 pub fn encode(map: &BTreeMap<String, u64>, cap: u64) -> Vec<u8> {
+    debug_assert!(map.len() <= u32::MAX as usize, "key_count exceeds u32");
     let mut buf = Vec::with_capacity(4 + 1 + 8 + 4 + map.len() * 24 + 4);
     buf.extend_from_slice(MAGIC);
     buf.push(VERSION);
@@ -55,6 +56,7 @@ pub fn encode(map: &BTreeMap<String, u64>, cap: u64) -> Vec<u8> {
     for (key, counter) in map {
         let kb = key.as_bytes();
         // key length is bounded by MAX_SEQ_KEY_LEN (<= u16::MAX) at the API edge.
+        debug_assert!(kb.len() <= u16::MAX as usize, "key length exceeds u16");
         buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
         buf.extend_from_slice(kb);
         buf.extend_from_slice(&counter.to_le_bytes());
@@ -70,7 +72,9 @@ pub fn decode(bytes: &[u8]) -> Result<(BTreeMap<String, u64>, u64), DenseRecordE
         return Err(DenseRecordError::TooShort(bytes.len()));
     }
     if &bytes[0..4] != MAGIC {
-        return Err(DenseRecordError::BadMagic);
+        return Err(DenseRecordError::BadMagic([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        ]));
     }
     if bytes[4] != VERSION {
         return Err(DenseRecordError::UnsupportedVersion(bytes[4]));
@@ -173,7 +177,33 @@ mod tests {
         let mut bytes = encode(&sample(), 1);
         bytes[0] = b'X';
         // crc will also fail, but magic is checked first.
-        assert_eq!(decode(&bytes), Err(DenseRecordError::BadMagic));
+        assert!(matches!(decode(&bytes), Err(DenseRecordError::BadMagic(_))));
+    }
+
+    #[test]
+    fn rejects_unsupported_version() {
+        let mut bytes = encode(&sample(), 1);
+        bytes[4] = 0; // flip version to 0
+        // crc will now mismatch too, but version is checked before crc.
+        assert!(matches!(
+            decode(&bytes),
+            Err(DenseRecordError::UnsupportedVersion(0))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_utf8_key() {
+        let mut body = Vec::new();
+        body.extend_from_slice(MAGIC);
+        body.push(VERSION);
+        body.extend_from_slice(&1u64.to_le_bytes()); // cap
+        body.extend_from_slice(&1u32.to_le_bytes()); // key_count = 1
+        body.extend_from_slice(&2u16.to_le_bytes()); // key_len = 2
+        body.extend_from_slice(&[0xff, 0xfe]); // invalid utf8 key bytes
+        body.extend_from_slice(&7u64.to_le_bytes()); // counter
+        let crc = crc32c::crc32c(&body);
+        body.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(decode(&body), Err(DenseRecordError::NonUtf8Key));
     }
 
     #[test]
