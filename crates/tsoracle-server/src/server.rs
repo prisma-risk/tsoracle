@@ -102,6 +102,7 @@ pub struct ServerBuilder {
     failover_advance: Duration,
     shutdown_grace: Duration,
     heartbeat_interval: Duration,
+    max_seq_count: u32,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -115,6 +116,7 @@ impl Default for ServerBuilder {
             failover_advance: Duration::from_secs(1),
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
             heartbeat_interval: Duration::from_secs(10),
+            max_seq_count: tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: None,
         }
@@ -183,6 +185,23 @@ impl ServerBuilder {
         self
     }
 
+    /// Per-call ceiling on `GetSeq`'s `count` — the largest contiguous block a
+    /// single dense-sequence request may reserve. Defaults to
+    /// [`tsoracle_core::DEFAULT_MAX_SEQ_COUNT`] (`65_536`).
+    ///
+    /// This is a soft anti-abuse guardrail, not a representational limit: a
+    /// dense block is permanently consumed (the gapless counter only moves
+    /// forward), so the cap bounds how much one call can irrevocably reserve.
+    /// Raise it for batch-allocation workloads or lower it to tighten abuse
+    /// control. The server is the sole authority — clients no longer pre-check
+    /// `count` against a fixed constant, so changing this needs no client
+    /// rebuild; an over-cap request is rejected with `INVALID_ARGUMENT`. The
+    /// `count >= 1` floor is always enforced regardless of this value.
+    pub fn max_seq_count(mut self, max_seq_count: u32) -> Self {
+        self.max_seq_count = max_seq_count;
+        self
+    }
+
     pub fn build(self) -> Result<Server, BuildError> {
         let consensus = self.consensus.ok_or(BuildError::MissingConsensusDriver)?;
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
@@ -193,7 +212,7 @@ impl ServerBuilder {
             failover_advance: self.failover_advance,
             shutdown_grace: self.shutdown_grace,
             heartbeat_interval: self.heartbeat_interval,
-            core: Arc::new(ServingCore::new(self.window_ahead)),
+            core: Arc::new(ServingCore::new(self.window_ahead, self.max_seq_count)),
             reporter: Arc::new(crate::reporter::Reporter::new()),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: self.tls_config,
@@ -1203,7 +1222,10 @@ mod tests {
         // test runtime no other task can run between the synchronous `drop` and
         // the synchronous `serving_state` read, so observing `NotServing` proves
         // `Drop` closed the gate synchronously rather than the watch task.
-        let core = Arc::new(ServingCore::new(Duration::from_secs(3)));
+        let core = Arc::new(ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+        ));
         core.publish_serving();
 
         let handle: tokio::task::JoinHandle<Result<(), ServerError>> =
@@ -1237,7 +1259,10 @@ mod tests {
         // would stay open unless `serve_inner` closes it itself. Seed `Serving`,
         // run the user-shutdown arm with a zero grace (immediate abort), and
         // assert the gate is closed on return.
-        let core = Arc::new(ServingCore::new(Duration::from_secs(3)));
+        let core = Arc::new(ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+        ));
         core.publish_serving();
 
         let watch_handle: tokio::task::JoinHandle<Result<(), ServerError>> =
