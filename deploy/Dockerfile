@@ -23,6 +23,16 @@ RUN apt-get update \
     && useradd --system --uid 10001 --create-home tsoracle
 COPY --from=build /src/target/release/tsoracle /usr/local/bin/tsoracle
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# Pre-create the default DATA_DIR (entrypoint.sh defaults to /data) owned by the
+# non-root runtime user. Without this the dir never exists in the image, so a
+# bare `docker run` (no volume) can't mkdir it at / as uid 10001, and a fresh
+# named volume mounted at /data is seeded root-owned -> "Permission denied". With
+# the dir present, Docker seeds a fresh named volume from it (carrying ownership),
+# and the no-volume case has a writable dir. Kubernetes is unaffected: the chart's
+# podSecurityContext.fsGroup still re-owns the PVC on top (OnRootMismatch skips the
+# re-chown since this already matches).
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+    && mkdir -p /data \
+    && chown tsoracle:tsoracle /data
 USER tsoracle
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
