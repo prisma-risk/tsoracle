@@ -163,6 +163,16 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
             // activation, so dropping it is lossless). This is what
             // build_snapshot emits while the active write version is still 4.
             v if v == BASELINE_WRITE_VERSION => {
+                // Fail loud in ALL build profiles (not just debug): a non-empty
+                // dense map at this point means write-version 5 data is being
+                // encoded into a v4 snapshot, which would silently drop it.
+                // The invariant (dense only populated after activation flips the
+                // write version to 5) is maintained by the rollout gate, so
+                // reaching here with a non-empty map indicates a protocol
+                // violation that must be surfaced rather than silently lost.
+                if !self.dense.is_empty() {
+                    return Err(tsoracle_codec::CodecError::NotRepresentable { version });
+                }
                 debug_assert!(
                     self.dense.is_empty(),
                     "v4 snapshot with non-empty dense map: dense={:?}",
@@ -392,6 +402,12 @@ impl HighWaterStateMachine {
             core.current_value = payload.current_value;
             core.last_applied = payload.last_applied;
             core.last_membership = payload.last_membership;
+            core.dense = payload.dense;
+            // A v4 snapshot carries dense_cap == 0 (absent sentinel); keep the
+            // constructor-seeded genesis cap. A v5 snapshot carries the real cap.
+            if payload.dense_cap != 0 {
+                core.dense_cap = payload.dense_cap;
+            }
             core.current_snapshot = Some(StoredSnapshot {
                 meta: persisted.meta,
                 data: persisted.data,
@@ -789,6 +805,12 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
             core.current_value = payload.current_value;
             core.last_applied = payload.last_applied;
             core.last_membership = payload.last_membership;
+            core.dense = payload.dense;
+            // A v4 snapshot carries dense_cap == 0 (absent sentinel); keep the
+            // constructor-seeded genesis cap. A v5 snapshot carries the real cap.
+            if payload.dense_cap != 0 {
+                core.dense_cap = payload.dense_cap;
+            }
         })?;
         Ok(())
     }
