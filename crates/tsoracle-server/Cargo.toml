@@ -55,7 +55,9 @@ tsoracle-failpoint = { workspace = true }
 tokio        = { workspace = true, features = ["test-util"] }
 metrics-util = { workspace = true }
 tsoracle-core = { path = "../tsoracle-core", version = "2.0.0" }
+tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "1.0.1" }
 tracing-subscriber = { workspace = true }
+tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 nix = { workspace = true }
@@ -95,3 +97,7 @@ required-features = ["yieldpoints", "test-fakes"]
 [[test]]
 name = "heartbeat_into_router"
 required-features = ["test-support", "tracing"]
+
+[[test]]
+name = "get_seq"
+required-features = ["test-support"]

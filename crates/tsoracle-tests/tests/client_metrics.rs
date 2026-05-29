@@ -173,6 +173,15 @@ impl TsoService for MalformedHintService {
             tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
         ))
     }
+
+    async fn get_seq(
+        &self,
+        _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+    ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "get_seq not implemented in test stub",
+        ))
+    }
 }
 
 /// Bind a malformed-hint fake server on a random port. Returns its socket

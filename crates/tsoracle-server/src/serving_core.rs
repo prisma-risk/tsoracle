@@ -53,13 +53,18 @@ use tokio::sync::{
     watch,
 };
 use tsoracle_core::{
-    Allocator, CommitOutcome, CoreError, Epoch, PeerEndpoint, PhysicalMs, WindowGrant,
+    Allocator, CommitOutcome, CoreError, Epoch, PeerEndpoint, PhysicalMs, SeqAllocator, SeqKey,
+    WindowGrant,
 };
 
 use crate::server::ServingState;
 
 pub(crate) struct ServingCore {
     allocator: Mutex<Allocator>,
+    /// Leadership/epoch gate for the dense-sequence path. Tracks the same
+    /// leadership transitions as `allocator` so `get_seq` cannot proceed
+    /// during fencing. Held in a `parking_lot::Mutex` to match `allocator`.
+    seq_allocator: Mutex<SeqAllocator>,
     /// Source of truth for serving state. Mints receivers for `subscribe` and is
     /// read synchronously via `serving_state`; publish sites use `send_replace`
     /// so transitions land even with zero receivers (see #346).
@@ -87,6 +92,7 @@ impl ServingCore {
         });
         ServingCore {
             allocator: Mutex::new(Allocator::new()),
+            seq_allocator: Mutex::new(SeqAllocator::new()),
             state_tx,
             extension_lock: AsyncMutex::new(()),
             extension_gate: RwLock::new(()),
@@ -161,6 +167,7 @@ impl ServingCore {
         leader_epoch: Option<Epoch>,
     ) {
         self.allocator.lock().step_down();
+        self.seq_allocator.lock().step_down();
         self.state_tx.send_replace(ServingState::NotServing {
             leader_endpoint,
             leader_epoch,
@@ -198,7 +205,18 @@ impl ServingCore {
         let committed_ceiling = PhysicalMs::try_new(committed_ceiling)?;
         self.allocator
             .lock()
-            .become_leader(serving_floor, committed_ceiling, epoch)
+            .become_leader(serving_floor, committed_ceiling, epoch)?;
+        // Mirror leadership gain on the dense gate so get_seq requests track
+        // the same epoch as get_ts: both paths must be fenced in lockstep.
+        self.seq_allocator.lock().become_leader(epoch);
+        Ok(())
+    }
+
+    /// Validate a dense-sequence request through the leadership/epoch gate.
+    /// Returns the validated [`SeqKey`] on success; maps gate errors to
+    /// [`CoreError`] for the service layer to translate into gRPC statuses.
+    pub(crate) fn seq_validate(&self, key: &str, count: u32) -> Result<SeqKey, CoreError> {
+        self.seq_allocator.lock().validate_request(key, count)
     }
 
     pub(crate) fn commit_extension(

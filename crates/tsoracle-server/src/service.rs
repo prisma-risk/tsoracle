@@ -28,8 +28,8 @@ use tonic::{Request, Response, Status};
 use tsoracle_consensus::ConsensusError;
 use tsoracle_core::{CommitOutcome, CoreError, Epoch, PeerEndpoint};
 use tsoracle_proto::v1::{
-    EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetTsRequest, GetTsResponse,
-    LeaderHint, tso_service_server::TsoService,
+    EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetSeqRequest, GetSeqResponse,
+    GetTsRequest, GetTsResponse, LeaderHint, tso_service_server::TsoService,
 };
 
 use crate::leader_hint::not_leader_status;
@@ -211,6 +211,97 @@ impl TsoService for TsoServiceImpl {
             epoch_hi,
             epoch_lo,
         }))
+    }
+
+    async fn get_seq(
+        &self,
+        req: Request<GetSeqRequest>,
+    ) -> Result<Response<GetSeqResponse>, Status> {
+        let GetSeqRequest { key, count } = req.into_inner();
+
+        self.server.reporter.get_seq_requests.increment(1);
+
+        if !self.server.core.is_serving() {
+            return Err(not_leader_status(
+                &self.server.reporter,
+                leader_hint_from(&self.server),
+            ));
+        }
+
+        // Core gate: leadership + key/count validation. NotLeader → redirect.
+        let seq_key = match self.server.core.seq_validate(&key, count) {
+            Ok(k) => k,
+            Err(tsoracle_core::CoreError::NotLeader) => {
+                return Err(not_leader_status(
+                    &self.server.reporter,
+                    leader_hint_from(&self.server),
+                ));
+            }
+            Err(tsoracle_core::CoreError::SeqKeyEmpty)
+            | Err(tsoracle_core::CoreError::SeqKeyTooLong { .. }) => {
+                return Err(Status::invalid_argument("invalid sequence key"));
+            }
+            Err(tsoracle_core::CoreError::SeqCountZero)
+            | Err(tsoracle_core::CoreError::SeqCountTooLarge { .. }) => {
+                return Err(Status::invalid_argument(
+                    "count must be between 1 and the maximum",
+                ));
+            }
+            Err(other) => return Err(Status::internal(other.to_string())),
+        };
+
+        let epoch = match self.server.core.current_epoch() {
+            Some(e) => e,
+            None => {
+                return Err(not_leader_status(
+                    &self.server.reporter,
+                    leader_hint_from(&self.server),
+                ));
+            }
+        };
+
+        match self
+            .server
+            .consensus
+            .advance_dense(&seq_key, count, epoch)
+            .await
+        {
+            Ok(start) => {
+                self.server.reporter.get_seq_success.increment(1);
+                self.server
+                    .reporter
+                    .seq_values_issued
+                    .increment(u64::from(count));
+                // Route through the core SeqGrant (spec §7.2) so the response is
+                // derived from the validated grant, not assembled ad hoc.
+                let grant = tsoracle_core::SeqGrant::new(seq_key, start, count, epoch);
+                let (hi, lo) = grant.epoch().to_wire();
+                Ok(Response::new(GetSeqResponse {
+                    key: grant.key().as_str().to_string(),
+                    start: grant.start(),
+                    count: grant.count(),
+                    // EpochWire is already imported (used by the leader-hint
+                    // path's `wire_epoch` helper).
+                    epoch: Some(EpochWire { hi, lo }),
+                }))
+            }
+            Err(ConsensusError::SeqKeyCardinalityExceeded { cap }) => {
+                self.server.reporter.seq_cardinality_rejected.increment(1);
+                Err(Status::resource_exhausted(format!(
+                    "dense key cardinality cap {cap} reached"
+                )))
+            }
+            Err(ConsensusError::SeqOverflow) => {
+                Err(Status::failed_precondition("dense counter overflow"))
+            }
+            Err(ConsensusError::NotLeader { .. })
+            | Err(ConsensusError::Fenced { .. })
+            | Err(ConsensusError::DenseUnsupported) => Err(not_leader_status(
+                &self.server.reporter,
+                leader_hint_from(&self.server),
+            )),
+            Err(other) => Err(Status::unavailable(other.to_string())),
+        }
     }
 }
 

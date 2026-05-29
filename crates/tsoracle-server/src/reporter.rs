@@ -138,6 +138,12 @@ pub struct Reporter {
     pub get_ts_success: ReporterCounter,
     pub timestamps_issued: ReporterCounter,
 
+    // get_seq hot path
+    pub get_seq_requests: ReporterCounter,
+    pub get_seq_success: ReporterCounter,
+    pub seq_values_issued: ReporterCounter,
+    pub seq_cardinality_rejected: ReporterCounter,
+
     // leader / fence
     pub not_leader: ReporterCounter,
     pub leader_transitions: ReporterCounter,
@@ -162,6 +168,12 @@ impl Reporter {
             get_ts_requests: ReporterCounter::new("tsoracle.get_ts.requests.total"),
             get_ts_success: ReporterCounter::new("tsoracle.get_ts.success.total"),
             timestamps_issued: ReporterCounter::new("tsoracle.get_ts.timestamps_issued"),
+            get_seq_requests: ReporterCounter::new("tsoracle.get_seq.requests.total"),
+            get_seq_success: ReporterCounter::new("tsoracle.get_seq.success.total"),
+            seq_values_issued: ReporterCounter::new("tsoracle.get_seq.values_issued"),
+            seq_cardinality_rejected: ReporterCounter::new(
+                "tsoracle.get_seq.cardinality_rejected.total",
+            ),
             not_leader: ReporterCounter::new("tsoracle.not_leader.total"),
             leader_transitions: ReporterCounter::new("tsoracle.leader_transition.total"),
             fence_transient_retries: ReporterCounter::new(

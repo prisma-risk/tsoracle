@@ -633,6 +633,15 @@ mod tests {
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
                 ))
             }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -729,6 +738,15 @@ mod tests {
             {
                 Ok(tonic::Response::new(
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
                 ))
             }
         }
@@ -854,6 +872,15 @@ mod tests {
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
                 ))
             }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -959,6 +986,15 @@ mod tests {
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
                 ))
             }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1051,6 +1087,15 @@ mod tests {
             {
                 Ok(tonic::Response::new(
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
                 ))
             }
         }
@@ -1198,6 +1243,15 @@ mod tests {
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
                 ))
             }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1295,6 +1349,15 @@ mod tests {
             {
                 Ok(tonic::Response::new(
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
                 ))
             }
         }
@@ -1417,6 +1480,15 @@ mod tests {
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
                 ))
             }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
+                ))
+            }
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1495,6 +1567,15 @@ mod tests {
             {
                 Ok(tonic::Response::new(
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
                 ))
             }
         }
@@ -1612,6 +1693,15 @@ mod tests {
             {
                 Ok(tonic::Response::new(
                     tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_seq not implemented in test stub",
                 ))
             }
         }
