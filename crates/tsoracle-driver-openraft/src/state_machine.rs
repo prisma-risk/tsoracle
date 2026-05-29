@@ -111,15 +111,19 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
             // the layout evolves and MIN_READABLE_VERSION/MAX_READABLE_VERSION
             // widen.
             v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
-            // `BASELINE + 1` alias: a test-only harness affordance. The body
-            // is byte-identical to BASELINE — only the version byte changes
-            // — so the activation machinery (gate -> propose -> commit ->
-            // apply -> cell flip) can run end-to-end in a mixed-version e2e
-            // without shipping a real new format. Gated off in production.
-            // The guard derives from BASELINE so a future baseline bump
-            // moves the alias version with no edit here.
+            // v5 (DENSE_WRITE_VERSION): real dense-sequence codec arm added in
+            // P2-T4. Under `e2e-max-readable-next` this alias keeps v5 in the
+            // readable range [BASELINE..=BASELINE+2] while the real arm is
+            // pending; the alias will be replaced by the actual layout in P2-T4.
             #[cfg(feature = "e2e-max-readable-next")]
             v if v == BASELINE_WRITE_VERSION + 1 => decode_postcard_exact(body),
+            // v6 (BASELINE + 2): synthetic activation-test alias. Body is
+            // byte-identical to BASELINE — only the version byte changes — so
+            // the activation machinery (gate -> propose -> commit -> apply ->
+            // cell flip) can run end-to-end in a mixed-version e2e without
+            // shipping a real new format. Gated off in production. (#583)
+            #[cfg(feature = "e2e-max-readable-next")]
+            v if v == BASELINE_WRITE_VERSION + 2 => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -131,8 +135,12 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
             v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
+            // v5 alias under e2e harness — see decode_version comment above.
             #[cfg(feature = "e2e-max-readable-next")]
             v if v == BASELINE_WRITE_VERSION + 1 => encode_postcard(self),
+            // v6 synthetic alias — see decode_version comment above.
+            #[cfg(feature = "e2e-max-readable-next")]
+            v if v == BASELINE_WRITE_VERSION + 2 => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -146,8 +154,12 @@ impl VersionedCodec for PersistedSnapshot {
     fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
         match version {
             v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
+            // v5 alias under e2e harness — see HighWaterStateMachineSnapshot decode_version.
             #[cfg(feature = "e2e-max-readable-next")]
             v if v == BASELINE_WRITE_VERSION + 1 => decode_postcard_exact(body),
+            // v6 synthetic alias — see HighWaterStateMachineSnapshot decode_version.
+            #[cfg(feature = "e2e-max-readable-next")]
+            v if v == BASELINE_WRITE_VERSION + 2 => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -159,8 +171,12 @@ impl VersionedCodec for PersistedSnapshot {
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
             v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
+            // v5 alias under e2e harness — see HighWaterStateMachineSnapshot decode_version.
             #[cfg(feature = "e2e-max-readable-next")]
             v if v == BASELINE_WRITE_VERSION + 1 => encode_postcard(self),
+            // v6 synthetic alias — see HighWaterStateMachineSnapshot decode_version.
+            #[cfg(feature = "e2e-max-readable-next")]
+            v if v == BASELINE_WRITE_VERSION + 2 => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -905,13 +921,13 @@ mod tests {
         // The flip is only observable when the local binary's readable
         // range contains a target distinct from BASELINE. The
         // `e2e-max-readable-next` test harness raises MAX to
-        // BASELINE + 1; in default builds MIN == MAX == BASELINE, so any
+        // BASELINE + 2; in default builds MIN == MAX == BASELINE, so any
         // distinct target is out of range and the apply-arm
         // defense-in-depth (correctly) no-ops it. The behavior pinned by
         // this test — "subset OK + in-range target ⇒ cell flips" — is
         // unchanged; only the in-range target is feature-dependent.
         let mut sm = HighWaterStateMachine::new();
-        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 1;
+        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 2;
         // Establish membership {1, 2} at index 1.
         apply_one(
             &mut sm,
@@ -1190,7 +1206,7 @@ mod tests {
     #[cfg(feature = "e2e-max-readable-next")]
     #[tokio::test]
     async fn successful_activation_survives_replay() {
-        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 1;
+        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 2;
         let log = vec![
             (1u64, ReplayEntry::Membership(vec![1, 2])),
             (
@@ -1296,7 +1312,7 @@ mod tests {
     #[cfg(feature = "e2e-max-readable-next")]
     #[tokio::test]
     async fn replay_is_deterministic() {
-        let in_range = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 1;
+        let in_range = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 2;
         let log = vec![
             (1u64, ReplayEntry::Membership(vec![1, 2])),
             (
@@ -1526,27 +1542,28 @@ mod tests {
     #[test]
     fn e2e_max_readable_next_aliases_to_baseline_bytewise() {
         // The test-only `e2e-max-readable-next` feature raises
-        // `MAX_READABLE_VERSION` to `BASELINE_WRITE_VERSION + 1` in the
+        // `MAX_READABLE_VERSION` to `BASELINE_WRITE_VERSION + 2` in the
         // toolkit and adds matching alias arms in this file's
         // `VersionedCodec` impls that delegate to the baseline body. This
-        // pins the alias contract: a `BASELINE + 1`-stamped envelope is
+        // pins the alias contract: a `BASELINE + 2`-stamped envelope is
         // byte-identical to a BASELINE-stamped one beyond the leading
         // version byte, and round-trips cross-version. That is what lets
         // a mixed-version e2e drive a real activation flip from BASELINE
         // to the next version end-to-end (gate -> propose -> commit ->
         // apply -> cell flip) without shipping a real new format — the
         // activation control plane runs because every encoder/decoder
-        // accepts the next version as an alias of BASELINE. Version-
-        // neutral assertions so this test survives a future baseline
-        // bump unchanged.
+        // accepts the next version as an alias of BASELINE. (`BASELINE + 1`
+        // = 5 is `DENSE_WRITE_VERSION`; synthetic harness uses `BASELINE + 2`
+        // = 6 — interim until #583.) Version-neutral assertions so this
+        // test survives a future baseline bump unchanged.
         use tsoracle_codec::{decode_framed, encode_framed};
         use tsoracle_openraft_toolkit::{BASELINE_WRITE_VERSION, MAX_READABLE_VERSION};
 
         let baseline = BASELINE_WRITE_VERSION;
-        let next = baseline + 1;
+        let next = baseline + 2;
         assert_eq!(
             MAX_READABLE_VERSION, next,
-            "feature must raise MAX to BASELINE+1"
+            "feature must raise MAX to BASELINE+2"
         );
 
         let payload = HighWaterStateMachineSnapshot {

@@ -13,10 +13,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 source "$here/_assertions_lib.sh"
 
 # Activation target. BASELINE_WRITE_VERSION is 4 today; e2e-max-readable-next
-# raises MAX_READABLE_VERSION to BASELINE+1 = 5. If BASELINE bumps, this
-# constant trips a visible mismatch on the next run rather than silently
-# activating to an unintended version.
-ACTIVATION_TARGET=5
+# raises MAX_READABLE_VERSION to BASELINE+2 = 6 (BASELINE+1 = 5 is reserved
+# for DENSE_WRITE_VERSION — see #583). If BASELINE bumps, this constant trips
+# a visible mismatch on the next run rather than silently activating to an
+# unintended version.
+ACTIVATION_TARGET=6
 # Loopback admin port; matches deploy/entrypoint.sh:12 ADMIN_PORT default
 # and the chart values.yaml ports.admin entry added in Task 7.
 ADMIN_PORT=51002

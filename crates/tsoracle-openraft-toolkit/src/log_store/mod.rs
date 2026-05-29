@@ -767,7 +767,7 @@ mod record_codec_tests {
     }
 
     // Pinned to BASELINE in the default build; the test-only
-    // `e2e-max-readable-next` feature lifts MAX to `BASELINE + 1`, so
+    // `e2e-max-readable-next` feature lifts MAX to `BASELINE + 2`, so
     // skip the MAX assertion under that feature (covered by
     // `version_constants_under_e2e_max_readable_next_feature` in
     // `codec.rs`).
