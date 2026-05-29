@@ -773,10 +773,11 @@ mod record_codec_tests {
     // `codec.rs`).
     #[cfg(not(feature = "e2e-max-readable-next"))]
     #[test]
-    fn version_constants_are_at_four() {
+    fn version_constants_are_at_expected_values() {
         assert_eq!(BASELINE_WRITE_VERSION, 4);
         assert_eq!(MIN_READABLE_VERSION, 4);
-        assert_eq!(MAX_READABLE_VERSION, 4);
+        // MAX raised to 5 to cover the dense write version (DENSE_WRITE_VERSION).
+        assert_eq!(MAX_READABLE_VERSION, 5);
     }
 }
 

@@ -62,7 +62,7 @@ pub const MIN_READABLE_VERSION: u8 = 4;
 /// derives from `BASELINE_WRITE_VERSION` so a future baseline bump moves
 /// MAX automatically with no edit here.
 #[cfg(not(feature = "e2e-max-readable-next"))]
-pub const MAX_READABLE_VERSION: u8 = 4;
+pub const MAX_READABLE_VERSION: u8 = 5;
 #[cfg(feature = "e2e-max-readable-next")]
 pub const MAX_READABLE_VERSION: u8 = BASELINE_WRITE_VERSION + 1;
 
@@ -78,6 +78,13 @@ const _: () = assert!(MIN_READABLE_VERSION <= MAX_READABLE_VERSION);
 /// cell only ever advances via a successful, committed activation apply (P5),
 /// so in this release every framed record still leads with this byte.
 pub const BASELINE_WRITE_VERSION: u8 = 4;
+
+/// The write version that introduces the `AdvanceDense` log command and the
+/// dense fields in the state-machine snapshot. A leader must not append an
+/// `AdvanceDense` entry (and `GetSeq` is refused) until the active write
+/// version has been activated to at least this value through the all-members
+/// gate — otherwise an older member could receive an entry it cannot decode.
+pub const DENSE_WRITE_VERSION: u8 = 5;
 
 /// Process-shared, runtime-mutable active write version.
 ///
@@ -188,10 +195,12 @@ mod tests {
 
     #[cfg(not(feature = "e2e-max-readable-next"))]
     #[test]
-    fn version_constants_are_at_the_v4_baseline() {
+    fn version_constants_are_at_expected_values() {
         assert_eq!(MIN_READABLE_VERSION, 4);
-        assert_eq!(MAX_READABLE_VERSION, 4);
+        // MAX raised to 5 to cover the dense write version (DENSE_WRITE_VERSION).
+        assert_eq!(MAX_READABLE_VERSION, 5);
         assert_eq!(BASELINE_WRITE_VERSION, 4);
+        assert_eq!(DENSE_WRITE_VERSION, 5);
     }
 
     #[cfg(feature = "e2e-max-readable-next")]

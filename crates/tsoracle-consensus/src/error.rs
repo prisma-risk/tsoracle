@@ -70,6 +70,10 @@ pub enum ConsensusError {
     SeqKeyCardinalityExceeded { cap: u64 },
     #[error("dense counter overflow for the requested key")]
     SeqOverflow,
+    #[error(
+        "dense sequences require write version {required} but the cluster is at {active}; activate the format first"
+    )]
+    DenseNotActivated { required: u8, active: u8 },
 }
 
 #[cfg(test)]
