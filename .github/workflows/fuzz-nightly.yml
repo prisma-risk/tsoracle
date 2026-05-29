@@ -101,7 +101,7 @@ jobs:
           version: 1
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd  # v2.79.9
+        uses: taiki-e/install-action@6ed6112eb9893c58dd600eebccdf6e77ab7bfa9c  # v2.79.12
         with:
           tool: cargo-fuzz@0.13.1
 
