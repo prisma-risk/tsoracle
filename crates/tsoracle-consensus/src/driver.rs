@@ -206,6 +206,23 @@ mod tests {
                 42,
                 "persist returns the at_least argument unchanged",
             );
+            // The dense methods are not overridden by `Dummy`, so these exercise
+            // the trait's default bodies, which report the capability as absent.
+            let key = tsoracle_core::SeqKey::try_new("k").unwrap();
+            assert!(
+                matches!(
+                    driver.load_dense_seq(&key).await,
+                    Err(ConsensusError::DenseUnsupported)
+                ),
+                "default load_dense_seq is DenseUnsupported",
+            );
+            assert!(
+                matches!(
+                    driver.advance_dense(&key, 1, Epoch(1)).await,
+                    Err(ConsensusError::DenseUnsupported)
+                ),
+                "default advance_dense is DenseUnsupported",
+            );
         });
     }
 }

@@ -268,6 +268,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_truncated_key_entry() {
+        // A record that claims a key but is cut off mid-entry must be Malformed,
+        // not silently accepted. Start from a valid single-key record, then lop
+        // off the trailing counter bytes (and fix the CRC so the truncation —
+        // not the checksum — is what trips the decoder).
+        let mut body = Vec::new();
+        body.extend_from_slice(MAGIC);
+        body.push(VERSION);
+        body.extend_from_slice(&1u64.to_le_bytes()); // cap
+        body.extend_from_slice(&1u32.to_le_bytes()); // key_count = 1
+        body.extend_from_slice(&3u16.to_le_bytes()); // key_len = 3
+        body.extend_from_slice(b"abc"); // key
+        // Counter (8 bytes) omitted entirely → the entry runs past body end.
+        let crc = crc32c::crc32c(&body);
+        body.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(decode(&body), Err(DenseRecordError::Malformed));
+    }
+
+    #[test]
     fn accepts_canonical_ascending_keys() {
         let bytes = encode_raw(10_000, &[("orders", 42), ("users", 7)]);
         let (map, cap) = decode(&bytes).unwrap();

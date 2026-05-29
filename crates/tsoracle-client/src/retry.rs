@@ -2155,4 +2155,409 @@ mod tests {
             other => panic!("expected the last transport error, got {other:?}"),
         }
     }
+
+    /// Dense-path analogue of `redirect_chain_longer_than_max_attempts_reaches_leader`:
+    /// a GetSeq redirected by NOT_LEADER+hint several times must follow the chain
+    /// to the live leader and return its block. A redirect is pre-commit-certain
+    /// (the server refused before any durable advance), so following it is safe
+    /// for the non-idempotent dense path. Exercises issue_seq_rpc's LeaderHint
+    /// redirect arm and the redirect-count bookkeeping.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_follows_leader_hint_chain_to_leader() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        const REDIRECTS: usize = 3;
+
+        struct RedirectingSeqLeader {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl TsoService for RedirectingSeqLeader {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented("get_ts not used in this test"))
+            }
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n < REDIRECTS {
+                    // Hint at a fresh (unvisited) endpoint with no epoch, so the
+                    // worklist advances and the hint is followed unconditionally.
+                    Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                        leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                        leader_epoch: None,
+                    }))
+                } else {
+                    let req = request.into_inner();
+                    let (hi, lo) = tsoracle_core::Epoch(9).to_wire();
+                    Ok(tonic::Response::new(tsoracle_proto::v1::GetSeqResponse {
+                        key: req.key,
+                        start: 100,
+                        count: req.count,
+                        epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                    }))
+                }
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(RedirectingSeqLeader {
+                    calls: server_calls,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        // Every hinted endpoint resolves to the one backend; the chain lives in
+        // the server's call counter, not in distinct listeners.
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                }) as Pin<Box<dyn Future<Output = Result<_, _>> + Send>>
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
+
+        let block = issue_seq_rpc(&pool, "orders", 5)
+            .await
+            .expect("a redirect chain ending at a live leader must yield a block");
+        assert_eq!(block.start, 100);
+        assert_eq!(block.count, 5);
+        assert_eq!(block.epoch, 9);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            REDIRECTS + 1,
+            "the loop must dial through all {REDIRECTS} redirects to the leader",
+        );
+    }
+
+    /// A NOT_LEADER whose hint trailer is present but carries no endpoint (the
+    /// hint cannot be followed) classifies as `HintUnusable { Rejected }` on the
+    /// dense path — a definitive rejection, not an election ride-out — so
+    /// issue_seq_rpc fails fast within its attempt bound rather than looping to
+    /// the overall deadline. Exercises the `Err` outcome arm and its backoff.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_endpointless_hint_fails_fast() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct EndpointlessHintServer;
+
+        #[tonic::async_trait]
+        impl TsoService for EndpointlessHintServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented("get_ts not used in this test"))
+            }
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                // Hint trailer present, endpoint absent → unfollowable hint.
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: None,
+                    leader_epoch: None,
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(EndpointlessHintServer))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec![format!("http://{addr}")], None, false, policy);
+
+        let start = Instant::now();
+        let result = issue_seq_rpc(&pool, "orders", 1).await;
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(result, Err(ClientError::Rpc(_))),
+            "an unfollowable hint must surface a definitive Rpc error, got {result:?}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "an unfollowable hint must fail fast, not ride out the deadline; took {elapsed:?}",
+        );
+    }
+
+    /// A pool whose endpoints all refuse to connect exercises issue_seq_rpc's
+    /// connect-failure arm: every attempt fails before any bytes reach the wire
+    /// (pre-commit-certain), so the loop surfaces a transport error fast rather
+    /// than riding out the overall deadline — and never risks a double-spend.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_dead_pool_surfaces_error_fast() {
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_millis(100),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(
+            vec!["http://127.0.0.1:1".into(), "http://127.0.0.1:2".into()],
+            None,
+            false,
+            policy,
+        );
+        let start = Instant::now();
+        let result = issue_seq_rpc(&pool, "orders", 1).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "all-dead pool must surface an error");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a dead pool must fail fast, not ride out the full deadline; took {elapsed:?}",
+        );
+    }
+
+    /// A `GetSeq` that succeeds at the wire but omits the leader epoch is a
+    /// protocol violation: the block cannot be trusted (the client seats its
+    /// confirmed leader from that epoch). issue_seq_rpc must surface
+    /// `SeqUncertain` rather than hand back an unverifiable block.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_success_without_epoch_is_uncertain() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct EpochlessSuccessServer;
+
+        #[tonic::async_trait]
+        impl TsoService for EpochlessSuccessServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented("get_ts not used in this test"))
+            }
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                let req = request.into_inner();
+                // Matching key/count, but NO epoch — the protocol violation.
+                Ok(tonic::Response::new(tsoracle_proto::v1::GetSeqResponse {
+                    key: req.key,
+                    start: 0,
+                    count: req.count,
+                    epoch: None,
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(EpochlessSuccessServer))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let pool = ChannelPool::new(vec![format!("http://{addr}")], None, false, short_policy());
+        match issue_seq_rpc(&pool, "orders", 1).await {
+            Err(ClientError::SeqUncertain) => {}
+            other => panic!("epoch-less success must be SeqUncertain, got {other:?}"),
+        }
+    }
+
+    /// A cluster that hints an endless redirect chain (never settling) must be
+    /// bounded by the absolute cross-pass redirect cap rather than looping
+    /// forever: issue_seq_rpc breaks out and surfaces an error. Exercises the
+    /// per-pass and absolute redirect-cap arms and the end-of-pass ride-out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_endless_redirect_is_bounded_by_cap() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct EndlessRedirectServer {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl TsoService for EndlessRedirectServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented("get_ts not used in this test"))
+            }
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                // Always hint at a fresh, unvisited endpoint → the worklist keeps
+                // advancing and the chain never settles.
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                    leader_epoch: None,
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(EndlessRedirectServer {
+                    calls: server_calls,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                }) as Pin<Box<dyn Future<Output = Result<_, _>> + Send>>
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
+
+        let start = Instant::now();
+        let err = issue_seq_rpc(&pool, "orders", 1)
+            .await
+            .expect_err("an endless redirect chain must surface an error, not a block");
+        let elapsed = start.elapsed();
+        let dials = calls.load(Ordering::SeqCst);
+
+        // The absolute cap (not the 10s deadline) must terminate the churn, and
+        // it surfaces a FAILED_PRECONDITION naming that cap.
+        match err {
+            ClientError::Rpc(status) => {
+                assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+                assert!(
+                    status
+                        .message()
+                        .contains("absolute leader-hint redirect cap"),
+                    "must surface the absolute-cap rejection, got {:?}",
+                    status.message(),
+                );
+            }
+            other => panic!("expected a bounded ClientError::Rpc, got {other:?}"),
+        }
+        // Each pass follows up to MAX_LEADER_REDIRECTS pivots then a per-pass-cap
+        // dial, so the total lands a little above MAX_TOTAL_LEADER_REDIRECTS.
+        assert!(
+            dials >= MAX_TOTAL_LEADER_REDIRECTS as usize
+                && dials <= (MAX_TOTAL_LEADER_REDIRECTS + 2 * MAX_LEADER_REDIRECTS) as usize,
+            "dials must be bounded by the absolute cap, not the deadline; got {dials}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the cap (not the 10s deadline) must terminate the churn; took {elapsed:?}",
+        );
+    }
 }
