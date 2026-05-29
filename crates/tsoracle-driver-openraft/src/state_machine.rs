@@ -283,7 +283,7 @@ impl HighWaterStateMachine {
     #[cfg(test)]
     #[expect(
         clippy::expect_used,
-        reason = "`with_store_and_dense_cap` only fails when `store.load()` returns Err; \
+        reason = "`new_with_dense_cap` only fails when `store.load()` returns Err; \
                   `InMemorySnapshotStore::load` is `Ok(None)` for a fresh \
                   store, so this branch is unreachable."
     )]

@@ -315,14 +315,18 @@ fn classify_activation_outcome(
         }
         ApplyOutcome::FormatActivated { .. }
         | ApplyOutcome::FormatActivationNoop { .. }
-        | ApplyOutcome::Advanced
-        // Dense outcomes are impossible for a SetFormatVersion entry, but must
-        // be handled for exhaustiveness. Map them as membership-changed so the
-        // operator sees a non-success rather than an incorrect Ok.
-        | ApplyOutcome::DenseAdvanced { .. }
-        | ApplyOutcome::DenseCardinalityExceeded { .. }
-        | ApplyOutcome::DenseOverflow => {
+        | ApplyOutcome::Advanced => {
             Err(FormatActivationError::MembershipChangedSinceGate { target })
+        }
+        // A SetFormatVersion entry's apply can only yield a Format*/Advanced
+        // outcome; a dense outcome here would be a state-machine bug, not an
+        // activation result. Fail loud rather than misreport it as a benign
+        // membership change (which would send the operator down the wrong
+        // remediation path).
+        other @ (ApplyOutcome::DenseAdvanced { .. }
+        | ApplyOutcome::DenseCardinalityExceeded { .. }
+        | ApplyOutcome::DenseOverflow) => {
+            unreachable!("dense ApplyOutcome {other:?} returned from a SetFormatVersion entry")
         }
     }
 }
