@@ -26,7 +26,7 @@
 //! `allocator.rs`. Unlike `Allocator`, this holds NO per-key counter state: every
 //! counter lives in the durable layer and every block `start` is assigned there.
 
-use crate::CoreError;
+use crate::{CoreError, Epoch};
 
 /// Maximum length, in bytes, of a sequence key's UTF-8 encoding.
 pub const MAX_SEQ_KEY_LEN: usize = 128;
@@ -57,6 +57,62 @@ impl SeqKey {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A contiguous block of `count` dense ordinals for one key, starting at
+/// `start`, issued under one leadership `epoch`. Covers `[start, start + count)`.
+/// `count >= 1` is a caller invariant established by `SeqAllocator::validate_request`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeqGrant {
+    key: SeqKey,
+    start: u64,
+    count: u32,
+    epoch: Epoch,
+}
+
+impl SeqGrant {
+    pub fn new(key: SeqKey, start: u64, count: u32, epoch: Epoch) -> Self {
+        SeqGrant {
+            key,
+            start,
+            count,
+            epoch,
+        }
+    }
+    pub fn key(&self) -> &SeqKey {
+        &self.key
+    }
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+    pub fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+    /// The last ordinal in the block: `start + count - 1`. `count >= 1`, so this
+    /// does not underflow.
+    pub fn last(&self) -> u64 {
+        self.start + u64::from(self.count) - 1
+    }
+}
+
+#[cfg(test)]
+mod seqgrant_tests {
+    use super::*;
+
+    #[test]
+    fn exposes_fields_and_last() {
+        let key = SeqKey::try_new("users").unwrap();
+        let g = SeqGrant::new(key.clone(), 100, 5, Epoch(7));
+        assert_eq!(g.key().as_str(), "users");
+        assert_eq!(g.start(), 100);
+        assert_eq!(g.count(), 5);
+        assert_eq!(g.epoch(), Epoch(7));
+        // [100, 105): last issued ordinal is 104.
+        assert_eq!(g.last(), 104);
     }
 }
 
