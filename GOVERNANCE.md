@@ -16,21 +16,26 @@ tsoracle is an Apache-2.0 timestamp oracle providing strictly monotonic, lineari
 
 ## 3. Roles and responsibilities
 
-### 3.1 Maintainer
+### 3.1 Maintainers
 
-The maintainer holds final design, merge, and release authority.
+Maintainers hold design, merge, and review authority. The **lead maintainer** additionally holds final release authority and is the trust root for project credentials (see §4.4 and §6).
 
-- Currently: **Sebastian Thiebaud** (`@sebastianthiebaud`, <sebastian@prismarisk.com>).
+- **Lead maintainer:** **Sebastian Thiebaud** (`@sebastianthiebaud`, <sebastian@prismarisk.com>).
+- **Co-maintainers:**
+  - **Charles Merill** (`@crmerrill`, <charles@prismarisk.com>).
+  - **Idriss Maoui** (`@idmao`, <idriss@prismarisk.com>).
 - Authorities and responsibilities:
-  - Final design and merge authority on all PRs.
-  - `crates.io` release authority (per workspace crate).
-  - `ghcr.io` image release authority.
-  - Security advisory authority (CVE coordination via the GitHub CNA, per [`SECURITY.md`](SECURITY.md)).
-  - Code-of-Conduct enforcement, except where the maintainer is involved in the report — see §6.
+  - Final design and merge authority on all PRs (all maintainers).
+  - `crates.io` release authority (per workspace crate) — held by the lead maintainer.
+  - `ghcr.io` image release authority — held by the lead maintainer.
+  - Security advisory authority (CVE coordination via the GitHub CNA, per [`SECURITY.md`](SECURITY.md)) — coordinated by the lead maintainer.
+  - Code-of-Conduct enforcement, except where a maintainer is involved in the report — see §6.
+
+Where this document refers to "the maintainer" in the singular — the security single-point-of-decision (§4.3), the release trust root (§4.4), and the tiebreaker (§4.2) — it means the lead maintainer.
 
 ### 3.2 Reviewer
 
-Anyone listed in [`.github/CODEOWNERS`](.github/CODEOWNERS). The maintainer is currently the only code owner. As outside contributors land sustained substantive PRs, the maintainer will invite them to `CODEOWNERS` for the area they contribute to.
+Anyone listed in [`.github/CODEOWNERS`](.github/CODEOWNERS). The maintainers are currently the only code owners. As outside contributors land sustained substantive PRs, the maintainers will invite them to `CODEOWNERS` for the area they contribute to.
 
 Reviewer authority: approve PRs, request changes, request additional review.
 
@@ -46,7 +51,7 @@ Anyone opening a PR. Contributor responsibilities:
 
 ### 4.1 Day-to-day
 
-PRs are decided by the maintainer with CI required-checks gating merge. Substantive design changes (new crate, protocol change, breaking change) should be initiated by opening an issue at <https://github.com/prisma-risk/tsoracle/issues> to discuss the approach **before** submitting a pull request, so the design conversation happens up front rather than as back-and-forth on a PR whose implementation is already done.
+PRs are decided by the maintainers with CI required-checks gating merge. Substantive design changes (new crate, protocol change, breaking change) should be initiated by opening an issue at <https://github.com/prisma-risk/tsoracle/issues> to discuss the approach **before** submitting a pull request, so the design conversation happens up front rather than as back-and-forth on a PR whose implementation is already done.
 
 ### 4.2 Contentious decisions
 
@@ -62,7 +67,7 @@ Releases are automated via release-plz on every `feat:`/`fix:`/`perf:` merge to 
 
 ## 5. Becoming a maintainer
 
-Path: sustained substantive contributions (typically ≥6 months, ≥10 non-trivial PRs in code, docs, or test infrastructure) plus alignment with project direction. The current maintainer invites by issue or PR discussion. Once designated, the new maintainer is added to:
+Path: sustained substantive contributions (typically ≥6 months, ≥10 non-trivial PRs in code, docs, or test infrastructure) plus alignment with project direction. The current maintainers invite by issue or PR discussion. Once designated, the new maintainer is added to:
 
 - [`.github/CODEOWNERS`](.github/CODEOWNERS) for the relevant areas (or `*` for full).
 - The GitHub repository admin team.
@@ -75,7 +80,7 @@ This section is the canonical list of credential surfaces. Each row names who ho
 
 | Credential surface | Holder | Backup / recovery path |
 | --- | --- | --- |
-| `github.com/prisma-risk` organization admin | Sebastian Thiebaud (<sebastian@prismarisk.com>) | Charles Merill (<charles@prismarisk.com>) |
+| `github.com/prisma-risk` organization admin | Sebastian Thiebaud (<sebastian@prismarisk.com>) | Charles Merill (<charles@prismarisk.com>), Idriss Maoui (<idriss@prismarisk.com>) |
 | `crates.io` owners — `tsoracle` and all workspace crates | Sebastian Thiebaud | Owner-add by the holder; team-owner addition planned. Recovery via `crates.io` support if the holder is unreachable. |
 | `ghcr.io/prisma-risk` package maintainers | Members of the `prisma-risk` org with `write` permission | GitHub org admin can add members. |
 | Sigstore signing identity (release SLSA provenance and tag signing) | Per-workflow OIDC token (no long-lived key) | No recovery needed — keyless. |
@@ -86,8 +91,8 @@ This section is the canonical list of credential surfaces. Each row names who ho
 **Charles Merill** (<charles@prismarisk.com>) is the designated secondary contact. The secondary contact:
 
 - Holds read-only access to the credential inventory above (the specific mechanism — shared password manager vault — is recorded outside the repository).
-- Acts as the Code-of-Conduct escalation point for conflicts involving the maintainer.
-- Is not currently an active maintainer (does not review PRs or cut releases). The OpenSSF `bus_factor` criterion is about active maintainership, not access continuity, and is therefore not considered met by this designation alone.
+- Acts as the Code-of-Conduct escalation point for conflicts involving the lead maintainer.
+- Is also an active co-maintainer (see §3.1). With Charles Merill and Idriss Maoui now active alongside the lead maintainer, the project has more than one active maintainer and the OpenSSF `bus_factor` criterion is met.
 
 ### 6.2 If the maintainer becomes unavailable
 
