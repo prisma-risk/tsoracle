@@ -48,6 +48,7 @@ use futures::{Stream, StreamExt};
 use openraft::RaftTypeConfig;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
+use tsoracle_openraft_toolkit::DENSE_WRITE_VERSION;
 use tsoracle_openraft_toolkit::LeadershipState;
 use tsoracle_openraft_toolkit::leadership_events_from_metrics;
 
@@ -117,6 +118,37 @@ where
         // committed poison value can never be served and cannot self-heal.
         tsoracle_consensus::reject_out_of_range_advance(at_least)?;
         self.host.submit_advance(at_least).await
+    }
+
+    /// Advance the dense counter for `key` by `count`, gated on format
+    /// activation.
+    ///
+    /// The `_expected_epoch` arg is intentionally ignored, mirroring
+    /// `persist_high_water`: openraft's leadership fence rejects a stale
+    /// leader's `client_write`, and the per-key fetch-add is linearized by the
+    /// committed log.
+    async fn advance_dense(
+        &self,
+        key: &tsoracle_core::SeqKey,
+        count: u32,
+        _expected_epoch: Epoch,
+    ) -> Result<u64, ConsensusError> {
+        // Rollout gate: refuse until the dense format is active cluster-wide.
+        // Appending an `AdvanceDense` entry before activation could hand an
+        // un-upgraded follower an entry it cannot decode.
+        let active = self.host.active_write_version();
+        if active < DENSE_WRITE_VERSION {
+            return Err(ConsensusError::DenseNotActivated {
+                required: DENSE_WRITE_VERSION,
+                active,
+            });
+        }
+        self.host.submit_advance_dense(key, count).await
+    }
+
+    /// Read a key's committed dense counter (0 if absent), linearized.
+    async fn load_dense_seq(&self, key: &tsoracle_core::SeqKey) -> Result<u64, ConsensusError> {
+        self.host.current_dense_seq(key).await
     }
 }
 
@@ -310,6 +342,25 @@ mod tests {
             at_least: u64,
         ) -> Result<u64, tsoracle_consensus::ConsensusError> {
             Ok(at_least)
+        }
+
+        fn active_write_version(&self) -> u8 {
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION
+        }
+
+        async fn submit_advance_dense(
+            &self,
+            _key: &tsoracle_core::SeqKey,
+            _count: u32,
+        ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Err(tsoracle_consensus::ConsensusError::DenseUnsupported)
+        }
+
+        async fn current_dense_seq(
+            &self,
+            _key: &tsoracle_core::SeqKey,
+        ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Err(tsoracle_consensus::ConsensusError::DenseUnsupported)
         }
     }
 
