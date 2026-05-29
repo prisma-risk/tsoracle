@@ -97,6 +97,10 @@ fn core_status(error: CoreError) -> Status {
         } => Status::internal(format!(
             "window extension overflow: max(floor {floor}, now_ms {now_ms}) + ahead_ms {ahead_ms} exceeds u64::MAX"
         )),
+        CoreError::SeqKeyEmpty
+        | CoreError::SeqKeyTooLong { .. }
+        | CoreError::SeqCountZero
+        | CoreError::SeqCountTooLarge { .. } => Status::invalid_argument(error.to_string()),
     }
 }
 
