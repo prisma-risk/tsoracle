@@ -359,12 +359,22 @@ impl HighWaterStateMachine {
     /// snapshot the store currently holds.
     ///
     /// If `store.load()` returns a snapshot, the state machine's
-    /// `current_value`, `last_applied`, `last_membership`, and
+    /// `current_value`, `last_applied`, `last_membership`, dense state, and
     /// `get_current_snapshot()` all reflect that snapshot on return. This is
     /// the contract that lets openraft re-enable the default snapshot policy:
     /// after a restart the log store's `last_purged_log_id` may sit above
     /// index 0, and the state machine must already cover those purged entries
     /// or openraft will panic during recovery.
+    ///
+    /// The active write version is recovered to at least the persisted
+    /// snapshot's leading version byte, so a store holding a v5/dense snapshot
+    /// does not come back at the baseline (which would trip the fail-loud
+    /// `NotRepresentable` guard on the next `build_snapshot`). For full
+    /// max-of-evidence recovery — folding in the highest version byte among
+    /// durable *log* records as well — seed the cell via
+    /// [`recover_active_write_version`](tsoracle_openraft_toolkit::recover_active_write_version)
+    /// and pass it to [`with_store_and_active_version`](Self::with_store_and_active_version);
+    /// `with_store` only sees the snapshot store.
     pub fn with_store(store: Arc<dyn SnapshotStore>) -> io::Result<Self> {
         Self::with_store_and_active_version(store, ActiveWriteVersion::default())
     }
@@ -407,6 +417,25 @@ impl HighWaterStateMachine {
                 meta: persisted.meta,
                 data: persisted.data,
             });
+            // Recover the active write version from the persisted envelope's
+            // leading version byte, mirroring `install_snapshot`'s
+            // max-of-evidence rule (and `recover_active_write_version`'s).
+            // Without this, the bare `with_store` path — which hands in a fresh
+            // BASELINE cell — would rehydrate a populated dense map (from a v5
+            // snapshot) while leaving the cell at v4, then trip the fail-loud
+            // `NotRepresentable` guard on its next `build_snapshot`. The byte is
+            // a safe floor: a v5 snapshot proves a `SetFormatVersion` to at
+            // least that version already committed cluster-wide. Only ever
+            // advances, so a caller (e.g. standalone bootstrap) that already
+            // seeded the cell from richer log+snapshot evidence is unaffected.
+            // `decode_framed` accepted the byte above, so it is within
+            // `[MIN, MAX_READABLE_VERSION]` and never exceeds what this binary
+            // can write.
+            if let Some(&snapshot_version) = bytes.first() {
+                if snapshot_version > active_write_version.get() {
+                    active_write_version.set(snapshot_version);
+                }
+            }
         }
         let state_machine = Self {
             core: Arc::new(Mutex::new(core)),
@@ -2934,5 +2963,88 @@ mod tests {
             .build_snapshot()
             .await
             .expect("build_snapshot on target after install must NOT return NotRepresentable");
+    }
+
+    // ---- Regression test: with_store recovers active_write_version ----
+    //
+    // Sibling of `install_snapshot_advances_active_write_version_to_snapshot_byte`.
+    // Bug: the public `with_store` / `with_store_and_active_version` load path
+    // rehydrated `core.dense` (and `dense_cap`) from a persisted v5 snapshot but
+    // left the freshly-defaulted `active_write_version` cell at
+    // `BASELINE_WRITE_VERSION` (4). The next `build_snapshot` would then select
+    // the v4 encode arm with a non-empty dense map and hit the fail-loud
+    // `NotRepresentable` guard; `advance_dense` would also stay gated.
+    //
+    // Production dodges this because standalone bootstrap recovers the cell from
+    // log + snapshot evidence *before* constructing the SM, but the public
+    // `with_store` API documents durable-snapshot rehydration, so the bare path
+    // must recover the version byte too (a safe floor: the snapshot byte proves
+    // an activation to at least that version committed cluster-wide).
+    //
+    // Fix: after `store.load()`, advance the cell to the persisted envelope's
+    // leading version byte when it exceeds the cell's current value.
+
+    #[tokio::test]
+    async fn with_store_recovers_active_write_version_from_v5_snapshot() {
+        // ---- Step 1: persist a v5/dense snapshot through a source SM ----
+        let v5_cell = ActiveWriteVersion::default();
+        v5_cell.set(DENSE_WRITE_VERSION);
+
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        {
+            let mut src = HighWaterStateMachine::with_store_and_active_version(
+                store.clone(),
+                v5_cell.clone(),
+            )
+            .expect("source SM");
+            apply_one(
+                &mut src,
+                1,
+                EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                    key: dense_key("orders"),
+                    count: 42,
+                }),
+            )
+            .await;
+            src.build_snapshot().await.expect("build v5 snapshot");
+        }
+
+        // Confirm the persisted envelope is v5-framed.
+        let persisted_bytes = store.load().expect("load").expect("snapshot present");
+        assert_eq!(
+            persisted_bytes[0], DENSE_WRITE_VERSION,
+            "persisted envelope must be v5-framed"
+        );
+
+        // ---- Step 2: reopen via the bare public API (fresh BASELINE cell) ----
+        // This models an embedder that uses `with_store` with a durable backend
+        // holding v5 data — the pre-bug state left the cell at baseline.
+        let mut reopened =
+            HighWaterStateMachine::with_store(store.clone()).expect("reopen via with_store");
+
+        // ---- Step 3: regression assertions ----
+
+        // PRIMARY: the cell must recover to DENSE_WRITE_VERSION from the
+        // snapshot's leading byte. Before the fix this stayed at BASELINE (4).
+        assert_eq!(
+            reopened.active_write_version(),
+            DENSE_WRITE_VERSION,
+            "with_store must recover active_write_version from the persisted \
+             snapshot's leading version byte (regression: was left at BASELINE)"
+        );
+
+        // Dense state must be rehydrated from the snapshot.
+        assert_eq!(
+            reopened.dense_value("orders"),
+            42,
+            "dense map must be rehydrated from the persisted snapshot"
+        );
+
+        // CRITICAL: build_snapshot must now SUCCEED. Before the fix, the v4
+        // encode arm (cell=4) with a non-empty dense map hit NotRepresentable.
+        reopened
+            .build_snapshot()
+            .await
+            .expect("build_snapshot after reopen must NOT return NotRepresentable");
     }
 }

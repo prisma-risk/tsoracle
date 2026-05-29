@@ -52,7 +52,9 @@ use tsoracle_driver_openraft::{
     TypeConfig,
 };
 use tsoracle_openraft_toolkit::test_fakes::{MemNetwork, PartitionController};
-use tsoracle_openraft_toolkit::{Flat, RocksdbLogStore};
+use tsoracle_openraft_toolkit::{
+    ActiveWriteVersion, Flat, RocksdbLogStore, recover_active_write_version,
+};
 
 /// One node in a test cluster. Holds the raft handle, a clone of the state
 /// machine for direct reads, the rocksdb `Arc<DB>` (so subsequent reopens can
@@ -206,6 +208,53 @@ fn open_log_and_snapshot_stores(
     (log_store, snapshot_store)
 }
 
+/// Recover the single, process-shared `ActiveWriteVersion` cell from durable
+/// evidence and thread it into the log store, exactly as standalone bootstrap
+/// does (`drivers/openraft/mod.rs`): the cell is the max of the baseline, the
+/// persisted snapshot's leading version byte, and the highest version byte
+/// among durable log records. Threading the *same* cell into both the log store
+/// (which stamps appended records) and the state machine (which stamps
+/// snapshots) is what makes a runtime format activation take effect on every
+/// writer — without it, activation flips only the SM and the log store keeps
+/// stamping at the baseline. Returns the wired log store and the shared cell to
+/// hand to [`HighWaterStateMachine::with_store_and_active_version`].
+fn wire_shared_active_write_version(
+    log_store: RocksdbLogStore<TypeConfig, Flat, OpenraftLogCodec>,
+    snapshot_store: &Arc<dyn tsoracle_driver_openraft::SnapshotStore>,
+) -> (
+    RocksdbLogStore<TypeConfig, Flat, OpenraftLogCodec>,
+    ActiveWriteVersion,
+) {
+    let snapshot_leading_byte = snapshot_store
+        .load()
+        .expect("load snapshot for version recovery")
+        .as_deref()
+        .and_then(|bytes| bytes.first().copied());
+    let highest_log_record_byte = log_store
+        .highest_log_record_version()
+        .expect("scan log records for version recovery");
+    let cell = ActiveWriteVersion::new(
+        recover_active_write_version(snapshot_leading_byte, highest_log_record_byte)
+            .expect("recover active write version"),
+    );
+    let log_store = log_store.with_active_write_version(cell.clone());
+    (log_store, cell)
+}
+
+/// The highest leading version byte among `node`'s durable log records, read
+/// by attaching a fresh read-only log store to the node's live `Arc<DB>`. This
+/// is the same on-disk evidence standalone bootstrap feeds to
+/// `recover_active_write_version`; tests use it to assert that records appended
+/// after a format activation are actually framed at the activated write
+/// version (not the baseline).
+pub fn highest_log_record_version(node: &TestNode) -> Option<u8> {
+    let log_store: RocksdbLogStore<TypeConfig, Flat, OpenraftLogCodec> =
+        RocksdbLogStore::open(node.db.clone(), LOG_CF, META_CF, Flat).unwrap();
+    log_store
+        .highest_log_record_version()
+        .expect("scan log record versions")
+}
+
 // Builders below are stubs filled in by subsequent tasks:
 // - build_three_node: cluster constructor
 // - reopen_node: restart-replay primitive
@@ -222,7 +271,9 @@ pub async fn build_single_node_with_config(config: Arc<Config>) -> TestCluster {
     let dir = TempDir::new().unwrap();
     let db = open_rocksdb(&dir);
     let (log_store, snapshot_store) = open_log_and_snapshot_stores(db.clone());
-    let sm = HighWaterStateMachine::with_store(snapshot_store).expect("hydrate SM");
+    let (log_store, cell) = wire_shared_active_write_version(log_store, &snapshot_store);
+    let sm = HighWaterStateMachine::with_store_and_active_version(snapshot_store, cell)
+        .expect("hydrate SM");
     let sm_clone = sm.clone();
 
     let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
@@ -276,7 +327,9 @@ pub async fn build_three_node() -> TestCluster {
         let dir = TempDir::new().unwrap();
         let db = open_rocksdb(&dir);
         let (log_store, snapshot_store) = open_log_and_snapshot_stores(db.clone());
-        let sm = HighWaterStateMachine::with_store(snapshot_store).expect("hydrate SM");
+        let (log_store, cell) = wire_shared_active_write_version(log_store, &snapshot_store);
+        let sm = HighWaterStateMachine::with_store_and_active_version(snapshot_store, cell)
+            .expect("hydrate SM");
         let sm_clone = sm.clone();
         let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
             id,
@@ -357,7 +410,12 @@ pub async fn reopen_node_with_config(prior: TestNode, config: Arc<Config>) -> Te
     drop(raft);
 
     let (log_store, snapshot_store) = open_log_and_snapshot_stores(db.clone());
-    let sm = HighWaterStateMachine::with_store(snapshot_store).expect("rehydrate SM on reopen");
+    // Recover the shared active-write-version cell from durable evidence, just
+    // as standalone bootstrap does on restart, so a node that activated a newer
+    // write version before shutdown comes back up still stamping at it.
+    let (log_store, cell) = wire_shared_active_write_version(log_store, &snapshot_store);
+    let sm = HighWaterStateMachine::with_store_and_active_version(snapshot_store, cell)
+        .expect("rehydrate SM on reopen");
     let sm_clone = sm.clone();
     let raft = Raft::<TypeConfig, HighWaterStateMachine>::new(
         id,

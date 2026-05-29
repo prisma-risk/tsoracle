@@ -46,7 +46,7 @@ use tsoracle_driver_openraft::{
 };
 use tsoracle_openraft_toolkit::DENSE_WRITE_VERSION;
 
-use common::{TestCluster, build_single_node, reopen_node};
+use common::{TestCluster, build_single_node, highest_log_record_version, reopen_node};
 
 /// A `CapabilitySource` for single-node clusters that must never be called:
 /// the local node short-circuit answers entirely from itself without any peer
@@ -197,4 +197,61 @@ async fn restart_replays_dense_map_from_rocksdb_log() {
         .await
         .expect("advance a new key after restart — genesis cap must survive");
     assert_eq!(start_new, 0, "new key after restart starts at 0");
+}
+
+/// The rollout safety property the harness must actually exercise: once write
+/// version 5 is activated, dense records are *persisted at v5* (not the
+/// baseline), and a restart recovers the active write version from that durable
+/// log evidence.
+///
+/// This pins the fix for the harness wiring bug where the log store and the
+/// state machine held *separate* `ActiveWriteVersion` cells: activation flipped
+/// only the SM's cell, so the log store kept stamping appended dense records at
+/// the baseline (v4). Production threads one shared cell into both writers
+/// (standalone bootstrap), and the harness now mirrors that.
+#[tokio::test(start_paused = true)]
+async fn dense_records_persist_at_v5_and_recover_on_restart() {
+    let cluster = build_single_node().await;
+    let TestCluster {
+        mut nodes, drivers, ..
+    } = cluster;
+    let driver = drivers[0].clone();
+
+    wait_for_leadership(&driver).await;
+
+    let host = StandaloneHost::new(nodes[0].raft.clone(), nodes[0].sm.clone());
+    host.initiate_format_activation(DENSE_WRITE_VERSION, &UnusedSource)
+        .await
+        .expect("activation must succeed on a single-node cluster");
+
+    // Append a dense record *after* activation. With one shared cell this is
+    // stamped at the activated write version (5); with the prior split-cell bug
+    // the log store still stamped it at the baseline (4).
+    let key_orders = SeqKey::try_new("orders").unwrap();
+    driver
+        .advance_dense(&key_orders, 5, Epoch::ZERO)
+        .await
+        .expect("advance orders by 5");
+
+    // PRIMARY: the dense record is durably framed at v5.
+    assert_eq!(
+        highest_log_record_version(&nodes[0]),
+        Some(DENSE_WRITE_VERSION),
+        "dense log record appended after activation must be stamped at the \
+         activated write version (regression: split cells stamped it at baseline)"
+    );
+
+    drop(driver);
+    drop(drivers);
+
+    // Restart: recovery must lift the active write version back to v5 from the
+    // durable log evidence (no snapshot was taken in this test), so subsequent
+    // appends and snapshot builds continue at v5.
+    let prior = nodes.remove(0);
+    let reopened = reopen_node(prior).await;
+    assert_eq!(
+        reopened.sm.active_write_version(),
+        DENSE_WRITE_VERSION,
+        "restart must recover active_write_version from durable log evidence"
+    );
 }
