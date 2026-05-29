@@ -173,11 +173,6 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
                 if !self.dense.is_empty() {
                     return Err(tsoracle_codec::CodecError::NotRepresentable { version });
                 }
-                debug_assert!(
-                    self.dense.is_empty(),
-                    "v4 snapshot with non-empty dense map: dense={:?}",
-                    self.dense
-                );
                 encode_postcard(&HighWaterStateMachineSnapshotV4 {
                     current_value: self.current_value,
                     last_applied: self.last_applied,
@@ -784,6 +779,25 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                     meta.last_log_id, payload.last_applied
                 ),
             ));
+        }
+
+        // The snapshot's leading version byte is evidence that the sending
+        // leader's active write version was at least this high — which means a
+        // `SetFormatVersion` activation to that version already committed
+        // cluster-wide (the all-members gate required every member, including
+        // this one, to be able to read it). Advance our cell to match, mirroring
+        // `recover_active_write_version`'s max-of-evidence rule. Without this, a
+        // follower that receives a v5 snapshot whose `SetFormatVersion` entry was
+        // purged into the snapshot would keep `active_write_version` at the
+        // baseline while holding a populated dense map, then trip the fail-loud
+        // v4-encode `NotRepresentable` guard on its next `build_snapshot`. The
+        // byte is already within `[MIN, MAX_READABLE_VERSION]` (decode_framed
+        // accepted it above), so this never exceeds what this binary can write.
+        if let Some(&snapshot_version) = bytes.first() {
+            if snapshot_version > self.active_write_version.get() {
+                self.active_write_version.set(snapshot_version);
+                crate::observability::record_active_write_version(snapshot_version);
+            }
         }
 
         let persisted = PersistedSnapshot {
@@ -2812,5 +2826,113 @@ mod tests {
             u64::MAX,
             "overflow must not modify the counter"
         );
+    }
+
+    // ---- Regression test: install_snapshot advances active_write_version ----
+    //
+    // Bug: a follower that received a v5 snapshot whose `SetFormatVersion` entry
+    // had already been purged into the snapshot would keep `active_write_version`
+    // at `BASELINE_WRITE_VERSION` (4) while now holding a populated dense map.
+    // The next `build_snapshot` call would then hit the fail-loud
+    // `NotRepresentable` guard in `encode_version`'s v4 arm and return an error.
+    //
+    // Fix: after decoding the incoming snapshot, `install_snapshot` now advances
+    // the `active_write_version` cell to the snapshot's leading version byte if
+    // it exceeds the current cell value.
+
+    #[tokio::test]
+    async fn install_snapshot_advances_active_write_version_to_snapshot_byte() {
+        // ---- Step 1: build a v5-framed snapshot on a source SM ----
+        //
+        // Create a source SM whose active_write_version is DENSE_WRITE_VERSION
+        // (5) and whose dense map is non-empty — the combination that would have
+        // triggered the NotRepresentable guard on the follower.
+        let v5_cell = ActiveWriteVersion::default();
+        v5_cell.set(DENSE_WRITE_VERSION);
+
+        let store_src: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let mut src =
+            HighWaterStateMachine::with_store_and_active_version(store_src, v5_cell.clone())
+                .expect("source SM");
+
+        // Populate the dense map and advance the high-water so the snapshot is
+        // non-trivial.  `with_store_and_active_version` starts at the genesis
+        // cardinality cap; apply an AdvanceDense to ensure dense is non-empty.
+        apply_one(
+            &mut src,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: dense_key("orders"),
+                count: 42,
+            }),
+        )
+        .await;
+
+        assert_eq!(src.active_write_version(), DENSE_WRITE_VERSION);
+        assert_eq!(src.dense_value("orders"), 42, "source dense populated");
+
+        // Build the v5 snapshot: the bytes handed back by openraft are what
+        // gets streamed to the follower via `begin_receiving_snapshot` +
+        // `install_snapshot`.
+        let snap = src
+            .build_snapshot()
+            .await
+            .expect("build_snapshot on source");
+        let snap_meta = snap.meta.clone();
+        // `snap.snapshot` is a `Cursor<Vec<u8>>`; the inner Vec is the framed
+        // payload bytes that `install_snapshot` receives.
+        let snap_bytes = snap.snapshot.into_inner();
+
+        // Confirm the snapshot is v5-framed (the first byte is the version).
+        assert_eq!(
+            snap_bytes[0], DENSE_WRITE_VERSION,
+            "source snapshot must be v5-framed"
+        );
+
+        // ---- Step 2: build a fresh target SM at BASELINE_WRITE_VERSION ----
+        //
+        // This models a newly-joining follower that never applied the
+        // SetFormatVersion entry (it was already purged into the snapshot it is
+        // about to receive).
+        let mut target = HighWaterStateMachine::new();
+        assert_eq!(
+            target.active_write_version(),
+            BASELINE_WRITE_VERSION,
+            "target must start at baseline (the pre-bug state)"
+        );
+        assert_eq!(target.dense_value("orders"), 0, "target dense starts empty");
+
+        // ---- Step 3: install the v5 snapshot onto the target ----
+        target
+            .install_snapshot(&snap_meta, std::io::Cursor::new(snap_bytes))
+            .await
+            .expect("install_snapshot must succeed");
+
+        // ---- Step 4: regression assertions ----
+
+        // PRIMARY: the cell must advance to DENSE_WRITE_VERSION after install.
+        // Before the fix this stayed at BASELINE_WRITE_VERSION (4) — the exact
+        // bug being pinned by this test.
+        assert_eq!(
+            target.active_write_version(),
+            DENSE_WRITE_VERSION,
+            "install_snapshot must advance active_write_version to the snapshot's \
+             leading version byte (regression: was left at BASELINE before fix)"
+        );
+
+        // Dense state must be restored from the snapshot.
+        assert_eq!(
+            target.dense_value("orders"),
+            42,
+            "dense map must be restored from the installed snapshot"
+        );
+
+        // CRITICAL: build_snapshot on the target must now SUCCEED.  Before the
+        // fix, this would error with NotRepresentable because the v4 encode arm
+        // would be selected (cell=4) while dense is non-empty.
+        target
+            .build_snapshot()
+            .await
+            .expect("build_snapshot on target after install must NOT return NotRepresentable");
     }
 }
