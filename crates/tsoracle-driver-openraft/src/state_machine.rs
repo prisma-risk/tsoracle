@@ -61,8 +61,8 @@ use tsoracle_codec::{
     VersionedCodec, decode_framed, decode_postcard_exact, encode_framed, encode_postcard,
 };
 use tsoracle_openraft_toolkit::{
-    ActiveWriteVersion, BASELINE_WRITE_VERSION, MAX_READABLE_VERSION, MIN_READABLE_VERSION,
-    codec_io_error,
+    ActiveWriteVersion, BASELINE_WRITE_VERSION, DENSE_WRITE_VERSION, MAX_READABLE_VERSION,
+    MIN_READABLE_VERSION, codec_io_error,
 };
 
 use crate::log_entry::{HighWaterCommand, SetFormatVersionPayload};
@@ -89,6 +89,24 @@ pub struct HighWaterStateMachineSnapshot {
     pub current_value: u64,
     pub last_applied: Option<LogId>,
     pub last_membership: StoredMem,
+    /// Per-key dense counters (v5+). Empty in a v4 snapshot (pre-dense); the
+    /// restore path keeps the genesis cap seeded from the constructor.
+    pub dense: std::collections::BTreeMap<String, u64>,
+    /// Genesis cardinality cap (v5+). Zero in a v4 snapshot ("absent
+    /// sentinel"); the restore path keeps the cap seeded from the constructor.
+    pub dense_cap: u64,
+}
+
+/// The v4 on-disk snapshot layout, frozen. Used only to decode
+/// `BASELINE_WRITE_VERSION` bytes written before the dense fields existed;
+/// converted into the current payload (empty dense map, sentinel cap 0 =
+/// "absent") on decode. Do not edit its field set — it must remain
+/// byte-identical to the pre-dense layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HighWaterStateMachineSnapshotV4 {
+    current_value: u64,
+    last_applied: Option<LogId>,
+    last_membership: StoredMem,
 }
 
 /// On-disk envelope written to the [`SnapshotStore`]: pairs the openraft
@@ -106,22 +124,29 @@ struct PersistedSnapshot {
 impl VersionedCodec for HighWaterStateMachineSnapshot {
     fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
         match version {
-            // v4 (BASELINE_WRITE_VERSION): whole-value postcard, byte-identical
-            // to the pre-seam frame. Later phases add older/newer arms here as
-            // the layout evolves and MIN_READABLE_VERSION/MAX_READABLE_VERSION
-            // widen.
-            v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
-            // v5 (DENSE_WRITE_VERSION): real dense-sequence codec arm added in
-            // P2-T4. Under `e2e-max-readable-next` this alias keeps v5 in the
-            // readable range [BASELINE..=BASELINE+2] while the real arm is
-            // pending; the alias will be replaced by the actual layout in P2-T4.
-            #[cfg(feature = "e2e-max-readable-next")]
-            v if v == BASELINE_WRITE_VERSION + 1 => decode_postcard_exact(body),
+            // v4 (BASELINE_WRITE_VERSION): decode the frozen old layout, lift
+            // into the current payload. Pre-dense snapshots carry no dense
+            // bytes; dense is empty and cap is the sentinel 0 ("absent") — the
+            // restore path keeps the genesis cap seeded from the constructor.
+            v if v == BASELINE_WRITE_VERSION => {
+                let old: HighWaterStateMachineSnapshotV4 = decode_postcard_exact(body)?;
+                Ok(HighWaterStateMachineSnapshot {
+                    current_value: old.current_value,
+                    last_applied: old.last_applied,
+                    last_membership: old.last_membership,
+                    dense: std::collections::BTreeMap::new(),
+                    dense_cap: 0,
+                })
+            }
+            // v5 (DENSE_WRITE_VERSION): the current layout decodes directly.
+            // Ungated — production reads dense snapshots from v5-activated
+            // clusters without any feature flag.
+            v if v == DENSE_WRITE_VERSION => decode_postcard_exact(body),
             // v6 (BASELINE + 2): synthetic activation-test alias. Body is
-            // byte-identical to BASELINE — only the version byte changes — so
-            // the activation machinery (gate -> propose -> commit -> apply ->
-            // cell flip) can run end-to-end in a mixed-version e2e without
-            // shipping a real new format. Gated off in production. (#583)
+            // byte-identical to the current layout — only the version byte
+            // changes — so the activation machinery (gate -> propose -> commit
+            // -> apply -> cell flip) can run end-to-end in a mixed-version e2e
+            // without shipping a real new format. Gated off in production. (#583)
             #[cfg(feature = "e2e-max-readable-next")]
             v if v == BASELINE_WRITE_VERSION + 2 => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
@@ -134,10 +159,23 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
 
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
-            v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
-            // v5 alias under e2e harness — see decode_version comment above.
-            #[cfg(feature = "e2e-max-readable-next")]
-            v if v == BASELINE_WRITE_VERSION + 1 => encode_postcard(self),
+            // v4: project to the frozen old layout (dense is always empty before
+            // activation, so dropping it is lossless). This is what
+            // build_snapshot emits while the active write version is still 4.
+            v if v == BASELINE_WRITE_VERSION => {
+                debug_assert!(
+                    self.dense.is_empty(),
+                    "v4 snapshot with non-empty dense map: dense={:?}",
+                    self.dense
+                );
+                encode_postcard(&HighWaterStateMachineSnapshotV4 {
+                    current_value: self.current_value,
+                    last_applied: self.last_applied,
+                    last_membership: self.last_membership.clone(),
+                })
+            }
+            // v5: the current (dense) layout encodes directly. Ungated.
+            v if v == DENSE_WRITE_VERSION => encode_postcard(self),
             // v6 synthetic alias — see decode_version comment above.
             #[cfg(feature = "e2e-max-readable-next")]
             v if v == BASELINE_WRITE_VERSION + 2 => encode_postcard(self),
@@ -153,10 +191,13 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
 impl VersionedCodec for PersistedSnapshot {
     fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
         match version {
+            // v4: envelope layout unchanged — opaque `data` bytes hold the
+            // version-framed payload.
             v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
-            // v5 alias under e2e harness — see HighWaterStateMachineSnapshot decode_version.
-            #[cfg(feature = "e2e-max-readable-next")]
-            v if v == BASELINE_WRITE_VERSION + 1 => decode_postcard_exact(body),
+            // v5: envelope layout still unchanged (only the payload data blob
+            // inside gains dense bytes). Ungated — production reads v5
+            // envelopes once activated.
+            v if v == DENSE_WRITE_VERSION => decode_postcard_exact(body),
             // v6 synthetic alias — see HighWaterStateMachineSnapshot decode_version.
             #[cfg(feature = "e2e-max-readable-next")]
             v if v == BASELINE_WRITE_VERSION + 2 => decode_postcard_exact(body),
@@ -171,9 +212,8 @@ impl VersionedCodec for PersistedSnapshot {
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
             v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
-            // v5 alias under e2e harness — see HighWaterStateMachineSnapshot decode_version.
-            #[cfg(feature = "e2e-max-readable-next")]
-            v if v == BASELINE_WRITE_VERSION + 1 => encode_postcard(self),
+            // v5: envelope layout unchanged; real ungated arm for production.
+            v if v == DENSE_WRITE_VERSION => encode_postcard(self),
             // v6 synthetic alias — see HighWaterStateMachineSnapshot decode_version.
             #[cfg(feature = "e2e-max-readable-next")]
             v if v == BASELINE_WRITE_VERSION + 2 => encode_postcard(self),
@@ -467,6 +507,8 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
                 current_value: core.current_value,
                 last_applied: core.last_applied,
                 last_membership: core.last_membership.clone(),
+                dense: core.dense.clone(),
+                dense_cap: core.dense_cap,
             };
             let snapshot_id = Self::snapshot_id_for(core.last_applied.as_ref(), core.snapshot_idx);
             let meta = SnapMeta {
@@ -1505,10 +1547,16 @@ mod tests {
         // what makes an OLD-version on-disk snapshot readable after the
         // active version moves forward. Asserted against the codec range
         // directly so it documents the contract even while MIN==MAX today.
+        // Empty dense map + cap 0 so the v4 encode arm (which projects to the
+        // frozen V4 struct) is lossless; assert_eq!(decoded, payload) holds
+        // for every version in the readable range because the decode-and-lift
+        // path restores dense=empty, dense_cap=0 from a v4 blob.
         let payload = HighWaterStateMachineSnapshot {
             current_value: 5,
             last_applied: Some(log_id(2)),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
         for version in tsoracle_openraft_toolkit::MIN_READABLE_VERSION
             ..=tsoracle_openraft_toolkit::MAX_READABLE_VERSION
@@ -1540,74 +1588,98 @@ mod tests {
 
     #[cfg(feature = "e2e-max-readable-next")]
     #[test]
-    fn e2e_max_readable_next_aliases_to_baseline_bytewise() {
+    fn e2e_max_readable_next_aliases_to_dense_version_bytewise() {
         // The test-only `e2e-max-readable-next` feature raises
         // `MAX_READABLE_VERSION` to `BASELINE_WRITE_VERSION + 2` in the
         // toolkit and adds matching alias arms in this file's
-        // `VersionedCodec` impls that delegate to the baseline body. This
-        // pins the alias contract: a `BASELINE + 2`-stamped envelope is
-        // byte-identical to a BASELINE-stamped one beyond the leading
-        // version byte, and round-trips cross-version. That is what lets
-        // a mixed-version e2e drive a real activation flip from BASELINE
-        // to the next version end-to-end (gate -> propose -> commit ->
-        // apply -> cell flip) without shipping a real new format — the
-        // activation control plane runs because every encoder/decoder
-        // accepts the next version as an alias of BASELINE. (`BASELINE + 1`
-        // = 5 is `DENSE_WRITE_VERSION`; synthetic harness uses `BASELINE + 2`
-        // = 6 — interim until #583.) Version-neutral assertions so this
-        // test survives a future baseline bump unchanged.
+        // `VersionedCodec` impls that encode and decode as the current
+        // (v5/dense) layout. This pins the alias contract for the
+        // activation machinery harness:
+        //
+        //  - v6 = `BASELINE + 2` is the synthetic "next" activation target,
+        //    chosen above `DENSE_WRITE_VERSION` = 5 so the e2e harness does
+        //    not collide with the real dense format (#583).
+        //  - v6 encodes the current (full, dense-capable) layout — its body
+        //    is byte-identical to a v5-encoded blob, not to a v4 blob (v4
+        //    projects to the frozen `HighWaterStateMachineSnapshotV4` struct
+        //    which omits `dense` + `dense_cap`).
+        //  - The activation control plane (gate -> propose -> commit ->
+        //    apply -> cell flip) exercises end-to-end without a real new
+        //    format because the framing machinery accepts v6 just like v5.
+        //
+        // Version-neutral assertions so this test survives a future baseline
+        // bump unchanged.
         use tsoracle_codec::{decode_framed, encode_framed};
-        use tsoracle_openraft_toolkit::{BASELINE_WRITE_VERSION, MAX_READABLE_VERSION};
+        use tsoracle_openraft_toolkit::{
+            BASELINE_WRITE_VERSION, DENSE_WRITE_VERSION, MAX_READABLE_VERSION,
+        };
 
         let baseline = BASELINE_WRITE_VERSION;
+        let dense = DENSE_WRITE_VERSION;
         let next = baseline + 2;
         assert_eq!(
             MAX_READABLE_VERSION, next,
             "feature must raise MAX to BASELINE+2"
         );
 
+        // Use empty dense map + cap 0 so the v4 encode arm (V4 projection) is
+        // lossless when we round-trip through v4, and the v6 body equals the
+        // v5 body (both encode the full current layout).
         let payload = HighWaterStateMachineSnapshot {
             current_value: 7,
             last_applied: None,
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
 
-        let framed_baseline = encode_framed(baseline, &payload).expect("encode baseline");
-        let framed_next = encode_framed(next, &payload).expect("encode next (alias)");
+        let framed_dense = encode_framed(dense, &payload).expect("encode dense (v5)");
+        let framed_next = encode_framed(next, &payload).expect("encode next (v6 alias)");
 
-        // Byte-identical except the leading version byte: the alias is
-        // structural, not a real layout change.
-        assert_eq!(framed_baseline[0], baseline);
+        // v6 body is byte-identical to v5 body (both encode the full layout).
+        assert_eq!(framed_dense[0], dense);
         assert_eq!(framed_next[0], next);
         assert_eq!(
-            &framed_baseline[1..],
+            &framed_dense[1..],
             &framed_next[1..],
-            "alias body must be byte-identical to baseline — only the version byte differs"
+            "v6 alias body must be byte-identical to v5 — only the version byte differs"
         );
 
-        // Cross-version round-trip: a next-stamped envelope decodes through
-        // the readable range, and a baseline reader can still consume it
-        // because the body is the same shape.
+        // v4 body is SHORTER (no dense/cap bytes) — confirm it is NOT
+        // byte-identical to v6. This documents the intentional divergence from
+        // the pre-T4 state where all three were aliased.
+        let framed_baseline = encode_framed(baseline, &payload).expect("encode baseline (v4)");
+        assert_ne!(
+            &framed_baseline[1..],
+            &framed_next[1..],
+            "v4 body must differ from v6 body: v4 omits dense/dense_cap"
+        );
+
+        // Cross-version round-trip: every version in the readable range
+        // decodes into the same logical value (empty dense, cap 0).
         let back_baseline: HighWaterStateMachineSnapshot =
             decode_framed(baseline, next, &framed_baseline).expect("decode baseline");
+        let back_dense: HighWaterStateMachineSnapshot =
+            decode_framed(baseline, next, &framed_dense).expect("decode v5");
         let back_next: HighWaterStateMachineSnapshot =
-            decode_framed(baseline, next, &framed_next).expect("decode next (alias)");
+            decode_framed(baseline, next, &framed_next).expect("decode next (v6 alias)");
         assert_eq!(back_baseline, payload);
+        assert_eq!(back_dense, payload);
         assert_eq!(back_next, payload);
 
-        // The envelope-shape carrier (`PersistedSnapshot`) must alias too
-        // — it is what `build_snapshot` actually emits at the active
-        // write version when the cell flips.
+        // The envelope-shape carrier (`PersistedSnapshot`) must also alias
+        // v5 at v6 — it is what `build_snapshot` actually emits at the
+        // active write version when the cell flips to v6.
         let envelope = PersistedSnapshot {
             meta: SnapMeta::default(),
             data: framed_next.clone(),
         };
-        let framed_env_baseline = encode_framed(baseline, &envelope).expect("envelope baseline");
-        let framed_env_next = encode_framed(next, &envelope).expect("envelope next");
+        let framed_env_dense = encode_framed(dense, &envelope).expect("envelope v5");
+        let framed_env_next = encode_framed(next, &envelope).expect("envelope v6");
         assert_eq!(
-            &framed_env_baseline[1..],
+            &framed_env_dense[1..],
             &framed_env_next[1..],
-            "PersistedSnapshot next-version envelope must alias baseline"
+            "PersistedSnapshot v6 envelope must be byte-identical to v5 envelope"
         );
     }
 
@@ -1668,8 +1740,11 @@ mod tests {
 
         let snap = sm.build_snapshot().await.expect("build_snapshot");
         let bytes = snap.snapshot.into_inner();
-        let payload: HighWaterStateMachineSnapshot = tsoracle_openraft_toolkit::decode(
-            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+        // Use decode_framed (VersionedCodec) so the v4 bytes are decoded via
+        // the frozen-V4-struct + lift path, not a raw postcard deserialize.
+        let payload: HighWaterStateMachineSnapshot = tsoracle_codec::decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
             &bytes,
         )
         .expect("decode snapshot");
@@ -1702,8 +1777,10 @@ mod tests {
             current_value: 999,
             last_applied: Some(log_id(5)),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
-        let bytes = tsoracle_openraft_toolkit::encode(
+        let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &payload,
         )
@@ -1888,8 +1965,10 @@ mod tests {
             current_value: 700,
             last_applied: Some(log_id(10)),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
-        let bytes = tsoracle_openraft_toolkit::encode(
+        let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &payload,
         )
@@ -1918,8 +1997,10 @@ mod tests {
             current_value: value,
             last_applied: Some(last_applied),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
-        let bytes = tsoracle_openraft_toolkit::encode(
+        let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &payload,
         )
@@ -2104,8 +2185,10 @@ mod tests {
             current_value: 123,
             last_applied: Some(log_id(5)),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
-        let bytes = tsoracle_openraft_toolkit::encode(
+        let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &payload,
         )
@@ -2225,24 +2308,43 @@ mod tests {
     #[test]
     fn snapshot_payload_versioned_codec_matches_legacy_frame() {
         use tsoracle_codec::{decode_framed, encode_framed};
-        // The framed bytes through the new VersionedCodec seam must equal the
-        // legacy `tsoracle_openraft_toolkit::encode(BASELINE_WRITE_VERSION, ..)` frame —
-        // proving the on-disk format did not move.
+        // The v4 encode arm projects to the frozen `HighWaterStateMachineSnapshotV4`
+        // struct (3 fields, no dense/cap). This test proves:
+        //
+        //  1. The v4 framed bytes are `[4, 7, 0, 0, 0, 0]` — the on-disk v4
+        //     layout did not change from the pre-dense era.
+        //  2. Those bytes equal what the frozen V4 struct produces when encoded
+        //     directly — a real pre-dense reader can still decode the output.
+        //  3. A v4-decode-and-lift roundtrip restores the original value with
+        //     empty dense map + cap 0 ("absent" sentinel).
         let payload = HighWaterStateMachineSnapshot {
             current_value: 7,
             last_applied: None,
             last_membership: StoredMembership::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
         let via_seam = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
             .expect("encode_framed");
-        let legacy = tsoracle_openraft_toolkit::encode(
+
+        // Prove the v4 body equals encoding the frozen V4 struct directly.
+        let v4_direct = tsoracle_openraft_toolkit::encode(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
-            &payload,
+            &HighWaterStateMachineSnapshotV4 {
+                current_value: 7,
+                last_applied: None,
+                last_membership: StoredMembership::default(),
+            },
         )
-        .expect("legacy encode");
-        assert_eq!(via_seam, legacy);
+        .expect("v4 direct encode");
+        assert_eq!(
+            via_seam, v4_direct,
+            "v4 encode must project to the frozen V4 struct"
+        );
         assert_eq!(via_seam, vec![4, 7, 0, 0, 0, 0]);
 
+        // decode-and-lift: v4 bytes decode into the current layout with empty
+        // dense map and cap 0 (the "absent" sentinel), which matches `payload`.
         let back: HighWaterStateMachineSnapshot = decode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
@@ -2271,24 +2373,29 @@ mod tests {
     #[test]
     fn snapshot_payload_pins_v4_layout() {
         use tsoracle_codec::encode_framed;
-        // Hand-built v4 frame: [BASELINE_WRITE_VERSION | postcard(payload)],
-        // now produced through the VersionedCodec seam that build_snapshot
-        // uses. Leading byte advanced 3 -> 4 when OpenraftPeer gained the
-        // admin_endpoint field (a breaking on-disk change for membership);
+        // Hand-built v4 frame: [BASELINE_WRITE_VERSION | postcard(V4_payload)],
+        // produced through the VersionedCodec seam that build_snapshot uses
+        // when active_write_version == BASELINE_WRITE_VERSION. The v4 encode
+        // arm projects to the frozen `HighWaterStateMachineSnapshotV4` struct
+        // (3 fields, no dense/cap), so the body bytes are unchanged from the
+        // pre-dense era. Leading byte advanced 3 -> 4 when OpenraftPeer gained
+        // the admin_endpoint field (a breaking on-disk change for membership);
         // the postcard body is unchanged. Body [7, 0, 0, 0, 0] =
         // current_value 7, last_applied None, then default StoredMembership
-        // (None log id + empty configs + empty nodes). Reordering or
-        // inserting a field changes these bytes and trips this test, forcing
-        // a deliberate version bump (a future evolution would advance
-        // MAX_READABLE_VERSION + BASELINE_WRITE_VERSION through an
-        // activation barrier rather than the historical stop-the-world bump).
+        // (None log id + empty configs + empty nodes). Reordering or inserting
+        // a field in the V4 struct changes these bytes and trips this test,
+        // forcing a deliberate review.
         let payload = HighWaterStateMachineSnapshot {
             current_value: 7,
             last_applied: None,
             last_membership: StoredMembership::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
         let framed = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
             .expect("encode");
+        // v4 encode projects to the frozen V4 struct: body is still
+        // [7, 0, 0, 0, 0] — the dense/cap bytes are NOT in the output.
         assert_eq!(framed, vec![4, 7, 0, 0, 0, 0]);
     }
 
@@ -2367,6 +2474,138 @@ mod tests {
         assert!(
             store.load().expect("load").is_none(),
             "rejected install must not persist an envelope"
+        );
+    }
+
+    // ---- Snapshot codec cross-version tests (Task 4) ----
+    //
+    // These tests pin the postcard correctness guarantees added by Task 4:
+    //  - v5 round-trip: encode a dense snapshot, decode back equal.
+    //  - v4 forward-compat: encode an empty-dense snapshot at v4; the bytes
+    //    equal what the frozen V4 struct produces; decode lifts to empty dense.
+    //  - v4 old-bytes: hand-encode a V4 struct, decode as current → empty dense.
+
+    #[test]
+    fn snapshot_codec_v5_roundtrip_with_nonempty_dense_map() {
+        use tsoracle_codec::{decode_framed, encode_framed};
+        use tsoracle_openraft_toolkit::DENSE_WRITE_VERSION;
+
+        let mut dense = std::collections::BTreeMap::new();
+        dense.insert("orders".to_string(), 42u64);
+        dense.insert("invoices".to_string(), 1000u64);
+
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 777,
+            last_applied: Some(log_id(9)),
+            last_membership: StoredMem::default(),
+            dense: dense.clone(),
+            dense_cap: 500,
+        };
+
+        let framed = encode_framed(DENSE_WRITE_VERSION, &payload).expect("v5 encode");
+        assert_eq!(framed[0], DENSE_WRITE_VERSION, "leading byte must be v5");
+
+        let decoded: HighWaterStateMachineSnapshot = decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            &framed,
+        )
+        .expect("v5 decode");
+        assert_eq!(
+            decoded, payload,
+            "v5 roundtrip must produce the original payload"
+        );
+        assert_eq!(decoded.dense, dense, "dense map must survive roundtrip");
+        assert_eq!(decoded.dense_cap, 500, "dense_cap must survive roundtrip");
+    }
+
+    #[test]
+    fn snapshot_codec_v4_forward_compat_empty_dense() {
+        use tsoracle_codec::{decode_framed, encode_framed};
+
+        // A pre-dense snapshot: dense is empty, cap is 0.
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 42,
+            last_applied: Some(log_id(3)),
+            last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
+        };
+
+        let framed = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
+            .expect("v4 encode");
+
+        // The v4 bytes must equal encoding the frozen V4 struct directly,
+        // so a pre-dense reader can still decode them.
+        let v4_struct_bytes = tsoracle_openraft_toolkit::encode(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            &HighWaterStateMachineSnapshotV4 {
+                current_value: 42,
+                last_applied: Some(log_id(3)),
+                last_membership: StoredMem::default(),
+            },
+        )
+        .expect("v4 struct direct encode");
+        assert_eq!(
+            framed, v4_struct_bytes,
+            "v4 encode of empty-dense payload must be byte-identical to frozen V4 struct"
+        );
+
+        // Decode: the v4 bytes lift into the current layout with empty dense, cap 0.
+        let decoded: HighWaterStateMachineSnapshot = decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            &framed,
+        )
+        .expect("v4 decode");
+        assert_eq!(
+            decoded, payload,
+            "v4 forward-compat decode must produce empty-dense payload"
+        );
+        assert!(decoded.dense.is_empty(), "decoded v4 dense must be empty");
+        assert_eq!(
+            decoded.dense_cap, 0,
+            "decoded v4 cap must be 0 (absent sentinel)"
+        );
+    }
+
+    #[test]
+    fn snapshot_codec_v4_old_bytes_decode_lifts_to_empty_dense() {
+        use tsoracle_codec::{decode_framed, encode_postcard};
+
+        // Hand-encode a V4 struct (the 3-field pre-dense layout) as postcard,
+        // then frame it as a v4 record. This simulates bytes written by an old
+        // (pre-dense) node.
+        let v4 = HighWaterStateMachineSnapshotV4 {
+            current_value: 99,
+            last_applied: Some(log_id(7)),
+            last_membership: StoredMem::default(),
+        };
+        let v4_body = encode_postcard(&v4).expect("postcard encode V4");
+        let mut framed = vec![tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION];
+        framed.extend_from_slice(&v4_body);
+
+        // Decode through the VersionedCodec path.
+        let decoded: HighWaterStateMachineSnapshot = decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            &framed,
+        )
+        .expect("decode old v4 bytes");
+
+        assert_eq!(decoded.current_value, 99, "current_value lifts correctly");
+        assert_eq!(
+            decoded.last_applied.map(|l| l.index),
+            Some(7),
+            "last_applied lifts correctly"
+        );
+        assert!(
+            decoded.dense.is_empty(),
+            "old v4 bytes must lift to empty dense map"
+        );
+        assert_eq!(
+            decoded.dense_cap, 0,
+            "old v4 bytes must lift to cap 0 (absent)"
         );
     }
 

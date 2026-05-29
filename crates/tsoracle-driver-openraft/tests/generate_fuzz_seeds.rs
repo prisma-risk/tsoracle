@@ -83,6 +83,8 @@ fn generate_snapshot_payload_decode_seeds() {
         current_value: 0,
         last_applied: None,
         last_membership: StoredMembershipOf::<TypeConfig>::default(),
+        dense: std::collections::BTreeMap::new(),
+        dense_cap: 0,
     };
     write_seed(
         target,
@@ -95,6 +97,8 @@ fn generate_snapshot_payload_decode_seeds() {
         current_value: u64::MAX,
         last_applied: None,
         last_membership: StoredMembershipOf::<TypeConfig>::default(),
+        dense: std::collections::BTreeMap::new(),
+        dense_cap: 0,
     };
     write_seed(
         target,
