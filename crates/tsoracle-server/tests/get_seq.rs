@@ -159,6 +159,53 @@ async fn get_seq_empty_key_returns_invalid_argument() {
 /// to assert how the GetSeq handler surfaces an unsupported driver.
 struct DenseUnsupportedDriver;
 
+/// A driver that supports dense sequences but returns `DenseNotActivated` from
+/// `advance_dense`, simulating a cluster that has not yet activated write
+/// version 5 across all members.
+struct DenseNotActivatedDriver;
+
+#[async_trait::async_trait]
+impl tsoracle_consensus::ConsensusDriver for DenseNotActivatedDriver {
+    fn leadership_events(
+        &self,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = tsoracle_consensus::LeaderState> + Send>>
+    {
+        use futures::StreamExt;
+        Box::pin(
+            futures::stream::once(async {
+                tsoracle_consensus::LeaderState::Leader {
+                    epoch: tsoracle_core::Epoch::ZERO,
+                }
+            })
+            .chain(futures::stream::pending()),
+        )
+    }
+
+    async fn load_high_water(&self) -> Result<u64, tsoracle_consensus::ConsensusError> {
+        Ok(0)
+    }
+
+    async fn persist_high_water(
+        &self,
+        at_least: u64,
+        _epoch: tsoracle_core::Epoch,
+    ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+        Ok(at_least)
+    }
+
+    async fn advance_dense(
+        &self,
+        _key: &tsoracle_core::SeqKey,
+        _count: u32,
+        _epoch: tsoracle_core::Epoch,
+    ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+        Err(tsoracle_consensus::ConsensusError::DenseNotActivated {
+            required: 5,
+            active: 4,
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl tsoracle_consensus::ConsensusDriver for DenseUnsupportedDriver {
     fn leadership_events(
@@ -227,6 +274,49 @@ async fn get_seq_unsupported_driver_returns_unimplemented() {
         err.code(),
         tonic::Code::Unimplemented,
         "a leader without dense support must return UNIMPLEMENTED, got: {err:?}"
+    );
+
+    booted.shutdown().await.unwrap();
+}
+
+/// A leader whose driver returns `DenseNotActivated` must surface GetSeq as
+/// `FAILED_PRECONDITION` with a "not yet activated" message — not as `INTERNAL`
+/// (the catch-all). The response carries no leader-hint trailer so the client
+/// surfaces it definitively rather than riding out an election.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_seq_dense_not_activated_returns_failed_precondition() {
+    let server = Server::builder()
+        .consensus_driver(std::sync::Arc::new(DenseNotActivatedDriver))
+        .window_ahead(Duration::from_secs(1))
+        .failover_advance(Duration::from_millis(500))
+        .build()
+        .unwrap();
+
+    let mut booted = boot_server(server).await;
+    wait_until_serving(&mut booted.state_rx).await;
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
+    let mut client = TsoServiceClient::connect(format!("http://{}", booted.addr))
+        .await
+        .unwrap();
+
+    let err = client
+        .get_seq(GetSeqRequest {
+            key: "orders".to_string(),
+            count: 1,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "DenseNotActivated must return FAILED_PRECONDITION, got: {err:?}"
+    );
+    assert!(
+        err.message().contains("not yet activated"),
+        "message must mention 'not yet activated', got: {:?}",
+        err.message()
     );
 
     booted.shutdown().await.unwrap();

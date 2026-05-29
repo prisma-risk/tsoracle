@@ -314,6 +314,15 @@ impl TsoService for TsoServiceImpl {
             Err(ConsensusError::DenseUnsupported) => Err(Status::unimplemented(
                 "dense sequences are not supported by this consensus driver",
             )),
+            // The driver supports dense sequences but the cluster has not yet
+            // activated write version 5 across all members. Surfaces as
+            // FAILED_PRECONDITION (bare — no leader-hint trailer) so the
+            // client raises it definitively rather than riding out an election.
+            Err(ConsensusError::DenseNotActivated { required, active }) => {
+                Err(Status::failed_precondition(format!(
+                    "dense sequence format not yet activated (cluster at write version {active}, requires {required})"
+                )))
+            }
             // A transient driver fault (storage hiccup, momentary quorum loss)
             // is safe to retry → UNAVAILABLE. Everything else reaching here is a
             // permanent fault (PermanentDriver, AdvanceOutOfRange) the client
