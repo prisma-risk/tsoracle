@@ -84,6 +84,8 @@ Together these prove the artifact you hold was built by *this* repository's CI f
 
 Release tags themselves are also signed (in addition to the release artifacts above). Signing uses [Sigstore gitsign](https://github.com/sigstore/gitsign) — the same keyless, transparency-log-anchored model as the SLSA provenance. The signing identity is the `release-plz` workflow's GitHub Actions OIDC token, attested by Fulcio and logged to Rekor; there is no long-lived key to rotate or revoke.
 
+Tags are signed in gitsign's *offline* Rekor mode (`gitsign.rekorMode offline`): the Rekor inclusion proof is embedded directly in the tag signature, keyed to the hash of the CMS signed attributes. Verification is therefore self-contained — it does not depend on the Rekor Search API and keeps working after the ephemeral signing certificate expires. (This is also what makes `git verify-tag` reliable for annotated tags; see [Tags from the first gitsign release](#tags-from-the-first-gitsign-release) for why the default *online* mode does not.)
+
 ### Quick verification
 
 For any release tag (e.g., `tsoracle-v1.0.0`):
@@ -115,3 +117,7 @@ Because the signature identity is the workflow, not a person, the verification t
 ### Pre-gitsign tags
 
 Releases tagged before the gitsign integration landed are annotated but unsigned. `git verify-tag` will report `no signature found` for those tags; their provenance is still verifiable via the `.intoto.jsonl` SLSA attestation as documented above.
+
+### Tags from the first gitsign release
+
+The first release signed by gitsign (the 2026-05-27 batch — `tsoracle-v2.0.0`, `tsoracle-core-v2.0.0`, and the sibling `*-v2.0.0` / `*-v1.0.1` tags) was produced in gitsign's *online* Rekor mode, before the switch to offline mode. Those tags carry a valid Fulcio-issued signature and a real Rekor entry (resolvable at <https://search.sigstore.dev/>), but `git verify-tag --raw` reports `could not find matching tlog entry` for them. The cause is a gitsign limitation for annotated tags: in online mode gitsign logs Rekor a hash of the tag *reconstructed with the signature as a `gpgsig` header* (commit form), whereas `git verify-tag` reconstructs an annotated tag with the signature *in-body* (tag form) — the two hashes never coincide, so the lookup misses. The signature itself is cryptographically valid and the Rekor entry is genuine; only the `git verify-tag` ↔ Rekor binding is broken. This is fixed forward by signing in offline mode; the affected tags cannot be re-signed retroactively (their ephemeral signing certificates have long since expired), but their provenance remains verifiable via the `.intoto.jsonl` SLSA attestation as documented above.
