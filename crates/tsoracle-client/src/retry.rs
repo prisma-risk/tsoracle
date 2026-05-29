@@ -506,6 +506,16 @@ pub(crate) async fn issue_seq_rpc(
             let outcome = match tokio::time::timeout(rpc_budget, rpc).await {
                 Ok(Ok(response)) => {
                     let inner = response.into_inner();
+                    // Validate the payload before trusting it. A success means the
+                    // server committed an advance, so a response that does not
+                    // describe the block we asked for is a protocol violation we
+                    // cannot resolve into a safe block: surface SeqUncertain (a
+                    // commit occurred; the caller must reconcile) rather than hand
+                    // back a malformed block or silently retry into a double-spend.
+                    // Mirrors the None-epoch protocol-violation handling below.
+                    if inner.key != key || inner.count != count {
+                        return Err(ClientError::SeqUncertain);
+                    }
                     // Decode the epoch from the nested EpochWire. A None epoch on
                     // a success response is a protocol violation → SeqUncertain.
                     let epoch = match inner.epoch {
@@ -576,15 +586,19 @@ pub(crate) async fn issue_seq_rpc(
                     }
                 }
                 Ok(Err(status)) => {
-                    // Post-connect RPC failure. Ambiguous if transport-class.
+                    // Post-connect RPC failure: the request reached the wire (the
+                    // server returned a status), so this is always post-send.
+                    // Transport-class failures additionally evict the now-suspect
+                    // channel, but that does not change the fact that the outcome
+                    // is post-send. classify_seq_status is fail-uncertain by default
+                    // and keeps only provably-pre-commit codes definitive, so a
+                    // post-send INTERNAL (the advance may already be committed)
+                    // surfaces as Uncertain rather than a retry-safe error — no
+                    // silent double-spend.
                     if is_transport_failure(&ClientError::Rpc(status.clone())) {
                         pool.evict_if_current(&endpoint, &cell);
-                        classify_seq_status(status, true)
-                    } else {
-                        // Non-transport application error (e.g. Internal, ResourceExhausted):
-                        // definitively failed, not ambiguous. Channel stays cached.
-                        classify_seq_status(status, false)
                     }
+                    classify_seq_status(status, true)
                 }
                 Err(_) => {
                     // RPC timed out post-connect — ambiguous.

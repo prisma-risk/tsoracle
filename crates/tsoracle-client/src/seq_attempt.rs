@@ -56,15 +56,42 @@ pub(crate) enum SeqAttemptOutcome {
 }
 
 /// Classify a failed GetSeq RPC. `sent` indicates the request reached the wire,
-/// making a commit possible (post-send ambiguity → Uncertain). A NOT_LEADER
-/// hint is decoded by the caller via the shared leader_hint helper before this
-/// is reached; this handles the non-hint statuses.
+/// making a commit possible. A NOT_LEADER hint is decoded by the caller via the
+/// shared leader_hint helper before this is reached; this handles the non-hint
+/// statuses.
+///
+/// The dense path is non-idempotent, so the post-send (`sent == true`) default
+/// is **fail-uncertain**: any status that is not *explicitly* known to be
+/// pre-commit-certain is surfaced as [`SeqAttemptOutcome::Uncertain`] (never a
+/// definitive, retry-safe error). The server can only emit a post-send
+/// `INTERNAL` after attempting the durable fetch-add — the file driver maps a
+/// post-rename directory-fsync failure to a permanent fault → `INTERNAL` — so
+/// the advance may already be committed; treating it as retry-safe would let
+/// the caller double-spend a block. Only these codes are pre-commit-certain by
+/// construction and stay definitive even post-send:
+///   * `InvalidArgument` — request validation, before any state is touched.
+///   * `ResourceExhausted` — the per-key cardinality cap is checked before the
+///     durable write.
+///   * `Unimplemented` — the driver has no dense support and never advances.
+///
+/// `FailedPrecondition` (overflow / NOT_LEADER) is intercepted by the caller
+/// before this function and is likewise pre-commit; it only reaches here with
+/// `sent == false`.
 pub(crate) fn classify_seq_status(status: tonic::Status, sent: bool) -> SeqAttemptOutcome {
     use tonic::Code;
     match status.code() {
-        Code::Unavailable | Code::DeadlineExceeded if sent => SeqAttemptOutcome::Uncertain,
-        Code::Unavailable | Code::DeadlineExceeded => SeqAttemptOutcome::NoLeaderYet(status),
+        // Pre-commit-certain regardless of send → definitive.
         Code::InvalidArgument => SeqAttemptOutcome::Err(ClientError::InvalidSeqKey),
+        Code::ResourceExhausted | Code::Unimplemented => {
+            SeqAttemptOutcome::Err(ClientError::from(status))
+        }
+        // Post-send and not provably pre-commit → ambiguous (incl. INTERNAL,
+        // UNKNOWN, ABORTED, and transport-class Unavailable/DeadlineExceeded).
+        _ if sent => SeqAttemptOutcome::Uncertain,
+        // Pre-send transport failure: no bytes reached the server → ride out as
+        // an absent-leader signal rather than a hard error.
+        Code::Unavailable | Code::DeadlineExceeded => SeqAttemptOutcome::NoLeaderYet(status),
+        // Pre-send, non-transport (e.g. bare FailedPrecondition overflow) → definitive.
         _ => SeqAttemptOutcome::Err(ClientError::from(status)),
     }
 }
@@ -86,5 +113,45 @@ mod tests {
         let status = tonic::Status::unavailable("no connection established");
         let outcome = classify_seq_status(status, false);
         assert!(matches!(outcome, SeqAttemptOutcome::NoLeaderYet(_)));
+    }
+
+    #[test]
+    fn classify_internal_after_send_is_uncertain() {
+        // INTERNAL is the server's mapping for a permanent driver fault, which
+        // the file driver can emit *after* the durable rename (a failed dir
+        // fsync) — the advance may already be committed. Post-send it is
+        // therefore ambiguous and MUST surface as Uncertain, never a definitive
+        // (retry-safe) error, or the caller could double-spend a block.
+        let status = tonic::Status::internal("permanent driver fault");
+        let outcome = classify_seq_status(status, true);
+        assert!(
+            matches!(outcome, SeqAttemptOutcome::Uncertain),
+            "post-send INTERNAL must be Uncertain",
+        );
+    }
+
+    #[test]
+    fn classify_resource_exhausted_after_send_is_definitive() {
+        // The cardinality cap is checked before any durable write, so
+        // ResourceExhausted is pre-commit-certain even once the request reached
+        // the wire — a definitive error, not Uncertain.
+        let status = tonic::Status::resource_exhausted("cardinality cap reached");
+        let outcome = classify_seq_status(status, true);
+        assert!(
+            matches!(outcome, SeqAttemptOutcome::Err(_)),
+            "post-send ResourceExhausted is pre-commit-certain → definitive Err",
+        );
+    }
+
+    #[test]
+    fn classify_unimplemented_after_send_is_definitive() {
+        // UNIMPLEMENTED means the driver has no dense support and rejected the
+        // request before any durable advance — pre-commit-certain → definitive.
+        let status = tonic::Status::unimplemented("dense sequences unsupported");
+        let outcome = classify_seq_status(status, true);
+        assert!(
+            matches!(outcome, SeqAttemptOutcome::Err(_)),
+            "post-send UNIMPLEMENTED is pre-commit-certain → definitive Err",
+        );
     }
 }
