@@ -398,17 +398,26 @@ fn surface_error(
 ///
 /// Mirrors `issue_rpc`'s loop structure — per-attempt budget, overall deadline,
 /// redirect bounds, election ride-out — but applies the **non-idempotent dense
-/// retry policy**:
+/// retry policy**. Every outcome below is pre-commit-certain (the server
+/// rejected before any durable advance) except the explicitly-ambiguous one:
 ///
-/// - `NOT_LEADER` (hint or no-hint) → follow the hint / re-poll within the same
-///   redirect and attempt bounds as `issue_rpc`. These are pre-commit-certain
-///   rejections: the server refused before any durable advance.
-/// - `Unavailable` / `DeadlineExceeded` **after** the RPC was put on the wire
-///   → return `SeqUncertain` immediately. A commit may have occurred; retrying
+/// - `FAILED_PRECONDITION` with **no** leader-hint trailer → a definitive server
+///   rejection (e.g. `SeqOverflow`), surfaced as-is. Unlike the timestamp path,
+///   GetSeq overloads bare `FAILED_PRECONDITION`, so an absent trailer is *not*
+///   read as "no leader yet".
+/// - `FAILED_PRECONDITION` with a usable leader-endpoint hint → follow the hint
+///   within the redirect and attempt bounds.
+/// - `FAILED_PRECONDITION` whose hint cannot outrank the cached leader (an
+///   older-epoch / epoch-less hint) → an election signal: ride it out without
+///   charging the attempt budget.
+/// - `FAILED_PRECONDITION` whose hint is malformed or unfollowable → a definitive
+///   rejection, surfaced fast (no ride-out).
+/// - `Unavailable` / `DeadlineExceeded` **after** the RPC was put on the wire →
+///   return `SeqUncertain` immediately. A commit may have occurred; retrying
 ///   transparently would risk silently spending a second block.
-/// - `Unavailable` / `DeadlineExceeded` **before** the RPC reached the wire (a
-///   failed connect, or a timeout before any bytes were sent) → treated as
-///   `NoLeaderYet` and ridden out exactly like `issue_rpc` does.
+/// - A connect-phase failure **before** the RPC reached the wire → pre-commit-
+///   certain (no bytes sent); retried within the per-attempt budget and, if every
+///   attempt fails, surfaced as the last transport error.
 ///
 /// "Sent" is determined by whether `pool.client_with_cell` succeeded (i.e., a
 /// channel was acquired and the RPC future was created). Once we hold a live
@@ -557,13 +566,22 @@ pub(crate) async fn issue_seq_rpc(
                                 endpoint: hinted,
                                 epoch,
                             },
-                            AO::NoLeaderYet(status) => SeqAttemptOutcome::NoLeaderYet(status),
-                            AO::HintUnusable {
+                            // An election-in-progress signal: either a peer with no
+                            // leader to name yet (`NoLeaderYet`) or a lagging peer
+                            // pointing at an older-epoch leader (`StaleEpoch`). Both
+                            // are pre-commit-certain — the server rejected before any
+                            // durable advance — so ride out (no budget charge) rather
+                            // than surfacing a hard error. The bare-FailedPrecondition
+                            // pre-check above routes an absent trailer to the
+                            // definitive branch, so in practice only `StaleEpoch`
+                            // reaches here; folding `NoLeaderYet` into the same arm
+                            // keeps both election signals on one ride-out path and
+                            // stays correct if that pre-check ever changes.
+                            AO::NoLeaderYet(status)
+                            | AO::HintUnusable {
                                 status,
                                 reason: HintUnusableReason::StaleEpoch,
                             } => {
-                                // A lagging peer pointed at an older-epoch leader.
-                                // Treat as an election signal (ride-out), no budget charge.
                                 #[cfg(feature = "metrics")]
                                 metrics::counter!("tsoracle.client.leader_hint.stale.total")
                                     .increment(1);
@@ -646,14 +664,6 @@ pub(crate) async fn issue_seq_rpc(
                     #[cfg(feature = "metrics")]
                     metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
                     worklist.redirect_to(hinted);
-                    continue;
-                }
-                SeqAttemptOutcome::NoLeaderYet(status) => {
-                    // Preserve the server's own status text rather than synthesizing
-                    // a generic "no leader yet" message.
-                    saw_election_signal = true;
-                    election_signal = Some(status.clone());
-                    last_err = Some(ClientError::Rpc(status));
                     continue;
                 }
                 SeqAttemptOutcome::Err(err) => {
@@ -2559,5 +2569,102 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "the cap (not the 10s deadline) must terminate the churn; took {elapsed:?}",
         );
+    }
+
+    /// A follower that hints at an *older-epoch* leader than the one the client
+    /// has cached: the epoch-monotone gate drops the hint as `StaleEpoch`, which
+    /// the dense loop treats as an election-in-progress signal and rides out
+    /// (no budget charge) rather than surfacing a hard error — until the overall
+    /// deadline elapses and the recorded election signal is surfaced. Covers the
+    /// folded NoLeaderYet/StaleEpoch ride-out arm.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_stale_epoch_hint_rides_out_then_surfaces_election() {
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        struct StaleHintingSeqFollower;
+
+        #[tonic::async_trait]
+        impl TsoService for StaleHintingSeqFollower {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented("get_ts not used in this test"))
+            }
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+            async fn get_seq(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                // Well-formed hint at epoch 5, strictly behind the epoch-10 leader
+                // the client has cached → dropped as StaleEpoch.
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: Some("b:1".into()),
+                    leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(StaleHintingSeqFollower))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let endpoint = format!("http://{addr}");
+        let pool = ChannelPool::new(vec![endpoint.clone()], None, false, short_policy());
+
+        // Wait until the fake peer is accepting and replying FAILED_PRECONDITION.
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(mut client) = pool.client(&endpoint).await {
+                let replied = client
+                    .get_seq(tsoracle_proto::v1::GetSeqRequest {
+                        key: "orders".into(),
+                        count: 1,
+                    })
+                    .await
+                    .err()
+                    .is_some_and(|s| s.code() == tonic::Code::FailedPrecondition);
+                if replied {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "fake follower never came up"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Cache the only endpoint as leader at epoch 10 so the epoch-5 hint is
+        // strictly stale and is dropped (ride-out) rather than followed.
+        pool.record_success(&endpoint, 10);
+
+        match issue_seq_rpc(&pool, "orders", 1).await {
+            Err(ClientError::Rpc(status)) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "a stale-hint ride-out must surface the election FAILED_PRECONDITION",
+            ),
+            other => panic!("expected a ridden-out FAILED_PRECONDITION, got {other:?}"),
+        }
     }
 }

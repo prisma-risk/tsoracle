@@ -46,10 +46,6 @@ pub(crate) enum SeqAttemptOutcome {
         endpoint: String,
         epoch: Option<u128>,
     },
-    /// A reachable peer reported no leader yet (an absent-hint NOT_LEADER). The
-    /// original server status is carried so the retry loop can surface the
-    /// server's own message rather than a synthetic one.
-    NoLeaderYet(tonic::Status),
     /// Ambiguous post-send failure: surfaced, never silently retried.
     Uncertain,
     Err(ClientError),
@@ -76,7 +72,9 @@ pub(crate) enum SeqAttemptOutcome {
 ///
 /// `FailedPrecondition` (overflow / NOT_LEADER) is intercepted by the caller
 /// before this function and is likewise pre-commit; it only reaches here with
-/// `sent == false`.
+/// `sent == false`, where it is surfaced as a definitive error. Connect-phase
+/// transport failures never reach this function — the retry loop handles them
+/// in its connect arm — so there is no pre-send "ride-out" outcome here.
 pub(crate) fn classify_seq_status(status: tonic::Status, sent: bool) -> SeqAttemptOutcome {
     use tonic::Code;
     match status.code() {
@@ -88,10 +86,8 @@ pub(crate) fn classify_seq_status(status: tonic::Status, sent: bool) -> SeqAttem
         // Post-send and not provably pre-commit → ambiguous (incl. INTERNAL,
         // UNKNOWN, ABORTED, and transport-class Unavailable/DeadlineExceeded).
         _ if sent => SeqAttemptOutcome::Uncertain,
-        // Pre-send transport failure: no bytes reached the server → ride out as
-        // an absent-leader signal rather than a hard error.
-        Code::Unavailable | Code::DeadlineExceeded => SeqAttemptOutcome::NoLeaderYet(status),
-        // Pre-send, non-transport (e.g. bare FailedPrecondition overflow) → definitive.
+        // Pre-send (only the bare-FailedPrecondition path passes `sent == false`)
+        // → definitive.
         _ => SeqAttemptOutcome::Err(ClientError::from(status)),
     }
 }
@@ -109,10 +105,17 @@ mod tests {
     }
 
     #[test]
-    fn classify_unavailable_before_send_is_no_leader_yet() {
+    fn classify_unavailable_before_send_is_definitive() {
+        // Connect-phase transport failures are handled by the retry loop's
+        // connect arm, never here, so a transport status reaching this function
+        // with `sent == false` (an unusual case) is surfaced as a definitive
+        // error rather than a ride-out signal.
         let status = tonic::Status::unavailable("no connection established");
         let outcome = classify_seq_status(status, false);
-        assert!(matches!(outcome, SeqAttemptOutcome::NoLeaderYet(_)));
+        assert!(matches!(
+            outcome,
+            SeqAttemptOutcome::Err(ClientError::Rpc(_))
+        ));
     }
 
     #[test]
