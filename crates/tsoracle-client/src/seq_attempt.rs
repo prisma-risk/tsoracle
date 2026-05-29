@@ -64,8 +64,10 @@ pub(crate) enum SeqAttemptOutcome {
 /// post-rename directory-fsync failure to a permanent fault → `INTERNAL` — so
 /// the advance may already be committed; treating it as retry-safe would let
 /// the caller double-spend a block. Only these codes are pre-commit-certain by
-/// construction and stay definitive even post-send:
-///   * `InvalidArgument` — request validation, before any state is touched.
+/// construction and stay definitive even post-send (each is surfaced as
+/// [`ClientError::Rpc`], preserving the server's status and message):
+///   * `InvalidArgument` — request validation, before any state is touched
+///     (e.g. an over-cap `count` the server rejects as `SeqCountTooLarge`).
 ///   * `ResourceExhausted` — the per-key cardinality cap is checked before the
 ///     durable write.
 ///   * `Unimplemented` — the driver has no dense support and never advances.
@@ -78,9 +80,13 @@ pub(crate) enum SeqAttemptOutcome {
 pub(crate) fn classify_seq_status(status: tonic::Status, sent: bool) -> SeqAttemptOutcome {
     use tonic::Code;
     match status.code() {
-        // Pre-commit-certain regardless of send → definitive.
-        Code::InvalidArgument => SeqAttemptOutcome::Err(ClientError::InvalidSeqKey),
-        Code::ResourceExhausted | Code::Unimplemented => {
+        // Pre-commit-certain regardless of send → definitive. The server's
+        // status is preserved (surfaced as `ClientError::Rpc`) so the caller
+        // sees the real reason — e.g. an over-cap `count` rejected as
+        // INVALID_ARGUMENT (`SeqCountTooLarge`) — rather than a lossy
+        // reclassification. `InvalidSeqKey` stays reserved for the client-side
+        // pre-check in `Client::get_seq`, not server-reported validation.
+        Code::InvalidArgument | Code::ResourceExhausted | Code::Unimplemented => {
             SeqAttemptOutcome::Err(ClientError::from(status))
         }
         // Post-send and not provably pre-commit → ambiguous (incl. INTERNAL,

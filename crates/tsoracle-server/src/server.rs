@@ -43,6 +43,12 @@ use crate::serving_core::ServingCore;
 pub enum BuildError {
     #[error("consensus_driver is required")]
     MissingConsensusDriver,
+    /// `max_seq_count` was set to 0. Every positive `count` would then be
+    /// rejected as `SeqCountTooLarge` (the `count >= 1` floor leaves no valid
+    /// value), silently disabling `GetSeq`. Rejected at build time so the
+    /// misconfiguration surfaces immediately rather than at first request.
+    #[error("max_seq_count must be >= 1 (0 would reject every GetSeq request)")]
+    ZeroMaxSeqCount,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -197,6 +203,11 @@ impl ServerBuilder {
     /// `count` against a fixed constant, so changing this needs no client
     /// rebuild; an over-cap request is rejected with `INVALID_ARGUMENT`. The
     /// `count >= 1` floor is always enforced regardless of this value.
+    ///
+    /// A value of `0` is rejected by [`Self::build`] with
+    /// [`BuildError::ZeroMaxSeqCount`]: it would leave no valid `count` (the
+    /// floor is 1), silently disabling `GetSeq`, so the misconfiguration is
+    /// surfaced at build time rather than at first request.
     pub fn max_seq_count(mut self, max_seq_count: u32) -> Self {
         self.max_seq_count = max_seq_count;
         self
@@ -204,6 +215,9 @@ impl ServerBuilder {
 
     pub fn build(self) -> Result<Server, BuildError> {
         let consensus = self.consensus.ok_or(BuildError::MissingConsensusDriver)?;
+        if self.max_seq_count == 0 {
+            return Err(BuildError::ZeroMaxSeqCount);
+        }
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
         Ok(Server {
             consensus,
@@ -1102,6 +1116,35 @@ mod tests {
             .build()
             .expect("build with tls_config must succeed");
         assert!(server.tls_config.is_some());
+    }
+
+    #[test]
+    fn build_rejects_zero_max_seq_count() {
+        // max_seq_count(0) makes every positive `count` fail as
+        // SeqCountTooLarge{max:0} (the count>=1 floor leaves no valid value) —
+        // GetSeq is silently dead. build() must fail-fast rather than ship a
+        // server where GetSeq can never succeed.
+        // `Server` is not `Debug`, so match rather than `expect_err`.
+        match Server::builder()
+            .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .max_seq_count(0)
+            .build()
+        {
+            Err(BuildError::ZeroMaxSeqCount) => {}
+            Err(other) => panic!("expected ZeroMaxSeqCount, got {other:?}"),
+            Ok(_) => panic!("max_seq_count(0) must be rejected at build, but build succeeded"),
+        }
+    }
+
+    #[test]
+    fn build_accepts_max_seq_count_of_one() {
+        // 1 is the smallest usable cap: a single-ordinal block is valid, so the
+        // floor and the cap coincide and GetSeq still works. Must build.
+        Server::builder()
+            .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .max_seq_count(1)
+            .build()
+            .expect("max_seq_count(1) must build");
     }
 
     #[tokio::test]

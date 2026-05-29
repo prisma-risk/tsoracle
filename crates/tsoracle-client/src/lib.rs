@@ -667,6 +667,71 @@ mod tests {
         assert_eq!(block.count, big);
     }
 
+    /// The rejection companion to `get_seq_forwards_large_count_to_server`: when
+    /// the server's configured `ServerBuilder::max_seq_count` is smaller than the
+    /// requested `count`, it rejects with `INVALID_ARGUMENT`
+    /// (`CoreError::SeqCountTooLarge`). Because the client no longer pre-checks the
+    /// upper bound, that rejection must surface through `Client::get_seq` as
+    /// `ClientError::Rpc` preserving the server's message — exactly as the `get_seq`
+    /// doc contract promises — and must NOT be mislabelled `InvalidSeqKey`: a valid
+    /// key was supplied; only the count was over-cap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_over_cap_count_surfaces_rpc_invalid_argument() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        // Mirrors the server's SeqCountTooLarge → INVALID_ARGUMENT mapping for a
+        // count above the configured max_seq_count. Counts calls to prove the
+        // definitive-error path stays bounded (no unbounded ride-out).
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::invalid_argument(
+                        "count must be between 1 and the maximum",
+                    ))
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // A valid key with an over-cap count: the key is fine, so InvalidSeqKey
+        // would be the wrong label — the docs promise ClientError::Rpc.
+        let big = tsoracle_core::DEFAULT_MAX_SEQ_COUNT + 1;
+        match client.get_seq("orders", big).await {
+            Err(ClientError::Rpc(status)) => {
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                assert!(
+                    status.message().contains("maximum"),
+                    "must surface the server's over-cap message, not a synthetic \
+                     or mislabelled error; got {:?}",
+                    status.message()
+                );
+            }
+            other => panic!(
+                "an over-cap count with a valid key must surface as \
+                 ClientError::Rpc(InvalidArgument), not InvalidSeqKey; got {other:?}"
+            ),
+        }
+        // Definitive-error path: bounded attempts, never an unbounded ride-out.
+        let n = calls.load(Ordering::SeqCst);
+        assert!((1..=3).contains(&n), "expected bounded attempts, got {n}");
+    }
+
     /// Regression guard for the dense classification bug: a bare
     /// `FailedPrecondition` from the server (NO leader-hint trailer) — e.g.
     /// `SeqOverflow` — must surface immediately as that definitive error,
