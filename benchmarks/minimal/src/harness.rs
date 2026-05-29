@@ -68,7 +68,9 @@ pub fn is_transient(err: &ClientError) -> bool {
         | ClientError::InvalidEndpoint(_)
         | ClientError::InvalidCount(_)
         | ClientError::Connector(_)
-        | ClientError::DriverGone => false,
+        | ClientError::DriverGone
+        | ClientError::SeqUncertain
+        | ClientError::InvalidSeqKey => false,
     }
 }
 

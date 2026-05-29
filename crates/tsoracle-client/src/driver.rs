@@ -410,6 +410,10 @@ fn clone_client_error(error: &ClientError) -> ClientError {
         ClientError::InvalidCount(count) => ClientError::InvalidCount(*count),
         ClientError::Connector(source) => ClientError::Connector(source.to_string().into()),
         ClientError::DriverGone => ClientError::DriverGone,
+        // Dense-sequence errors are not produced by the timestamp driver,
+        // but must be exhaustively matched.
+        ClientError::SeqUncertain => ClientError::SeqUncertain,
+        ClientError::InvalidSeqKey => ClientError::InvalidSeqKey,
     }
 }
 

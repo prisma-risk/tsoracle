@@ -36,6 +36,7 @@ mod leader_hint;
 mod response;
 mod retry;
 mod retry_policy;
+mod seq_attempt;
 mod transport;
 mod worklist;
 
@@ -44,6 +45,7 @@ mod test_support;
 
 pub use error::ClientError;
 pub use retry_policy::RetryPolicy;
+pub use seq_attempt::SeqBlock;
 pub use transport::BoxError;
 
 use std::sync::Arc;
@@ -203,6 +205,27 @@ impl Client {
             return Err(ClientError::InvalidCount(count));
         }
         self.driver.request(count).await
+    }
+
+    /// Request a contiguous block of `count` dense ordinals for the given
+    /// sequence `key`.
+    ///
+    /// **Non-idempotent:** if this call returns `ClientError::SeqUncertain` it
+    /// means a commit may or may not have occurred on the server — do NOT
+    /// silently retry, as that would risk spending a second block. The caller
+    /// must resolve the ambiguity (e.g. by reading back the current counter
+    /// with a coordinator-level read) before re-issuing.
+    ///
+    /// All other errors are pre-commit-certain (the server rejected the request
+    /// before any durable advance) and are safe to retry.
+    pub async fn get_seq(&self, key: &str, count: u32) -> Result<SeqBlock, ClientError> {
+        if key.is_empty() || key.len() > tsoracle_core::MAX_SEQ_KEY_LEN {
+            return Err(ClientError::InvalidSeqKey);
+        }
+        if count == 0 || count > tsoracle_core::MAX_SEQ_COUNT {
+            return Err(ClientError::InvalidCount(count));
+        }
+        retry::issue_seq_rpc(&self.pool, key, count).await
     }
 
     /// Read the leader's current safe-point in physical-millisecond units.
@@ -507,5 +530,131 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "deadline must short-circuit; took {elapsed:?}"
         );
+    }
+
+    /// Integration test: `get_seq` against a real loopback gRPC server that
+    /// simulates a file-driver leader. The server uses a fake `TsoService`
+    /// with a real `get_seq` implementation (incrementing an atomic counter).
+    /// Asserts: consecutive blocks are gapless, the epoch is propagated, and
+    /// invalid inputs are rejected up-front.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_returns_gapless_blocks_and_rejects_invalid_inputs() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+
+        const EPOCH: u128 = 42;
+
+        struct LeaderServer {
+            counter: Arc<AtomicU64>,
+        }
+
+        #[tonic::async_trait]
+        impl TsoService for LeaderServer {
+            async fn get_ts(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::failed_precondition("not leader"))
+            }
+
+            async fn get_current_max_safe(
+                &self,
+                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
+                ))
+            }
+
+            async fn get_seq(
+                &self,
+                request: tonic::Request<tsoracle_proto::v1::GetSeqRequest>,
+            ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqResponse>, tonic::Status>
+            {
+                let req = request.into_inner();
+                if req.key.is_empty() {
+                    return Err(tonic::Status::invalid_argument("invalid sequence key"));
+                }
+                if req.count == 0 {
+                    return Err(tonic::Status::invalid_argument(
+                        "count must be between 1 and the maximum",
+                    ));
+                }
+                // Atomic fetch-add: gapless per the single server
+                let start = self
+                    .counter
+                    .fetch_add(u64::from(req.count), Ordering::SeqCst);
+                let (hi, lo) = tsoracle_core::Epoch(EPOCH).to_wire();
+                Ok(tonic::Response::new(tsoracle_proto::v1::GetSeqResponse {
+                    key: req.key,
+                    start,
+                    count: req.count,
+                    epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        let counter = Arc::new(AtomicU64::new(0));
+        let server_counter = counter.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(LeaderServer {
+                    counter: server_counter,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+
+        let endpoint = format!("http://{addr}");
+        let client = ClientBuilder::endpoints(vec![endpoint])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .expect("client must build");
+
+        // First call: block [0, 5).
+        let block1 = client
+            .get_seq("orders", 5)
+            .await
+            .expect("first get_seq must succeed");
+        assert_eq!(block1.start, 0, "first block must start at 0");
+        assert_eq!(block1.count, 5, "first block must have count 5");
+        assert_eq!(block1.epoch, EPOCH, "epoch must match the server's epoch");
+
+        // Second call: block [5, 8) — gapless continuation.
+        let block2 = client
+            .get_seq("orders", 3)
+            .await
+            .expect("second get_seq must succeed");
+        assert_eq!(block2.start, 5, "second block must start at 5 (gapless)");
+        assert_eq!(block2.count, 3);
+        assert_eq!(block2.epoch, EPOCH);
+
+        // Empty key is rejected up-front by the client, not the server.
+        match client.get_seq("", 1).await {
+            Err(ClientError::InvalidSeqKey) => {}
+            other => panic!("empty key must return InvalidSeqKey, got {other:?}"),
+        }
+
+        // Zero count is rejected up-front by the client.
+        match client.get_seq("orders", 0).await {
+            Err(ClientError::InvalidCount(0)) => {}
+            other => panic!("count=0 must return InvalidCount, got {other:?}"),
+        }
     }
 }
