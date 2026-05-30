@@ -218,12 +218,21 @@ impl Client {
     ///
     /// All other errors are pre-commit-certain (the server rejected the request
     /// before any durable advance) and are safe to retry.
+    ///
+    /// The client only pre-rejects universally-invalid inputs — an empty/oversized
+    /// `key` and a zero `count` (a block always covers at least one ordinal).
+    /// The upper bound on `count` is the server's configured
+    /// `ServerBuilder::max_seq_count`, which is deployment-specific, so the client
+    /// does not second-guess it: an over-cap `count` is forwarded and the server
+    /// rejects it with `INVALID_ARGUMENT` (surfaced as `ClientError::Rpc`). This
+    /// keeps a client built against one cap correct against a server configured
+    /// with another.
     pub async fn get_seq(&self, key: &str, count: u32) -> Result<SeqBlock, ClientError> {
         if key.is_empty() || key.len() > tsoracle_core::MAX_SEQ_KEY_LEN {
             return Err(ClientError::InvalidSeqKey);
         }
-        if count == 0 || count > tsoracle_core::MAX_SEQ_COUNT {
-            return Err(ClientError::InvalidCount(count));
+        if count == 0 {
+            return Err(ClientError::InvalidCount(0));
         }
         retry::issue_seq_rpc(&self.pool, key, count).await
     }
@@ -614,6 +623,113 @@ mod tests {
             Err(ClientError::InvalidCount(0)) => {}
             other => panic!("count=0 must return InvalidCount, got {other:?}"),
         }
+    }
+
+    /// The upper bound on `count` is the server's configured `max_seq_count`, not
+    /// a fixed client-side constant, so the client must forward a large `count`
+    /// rather than short-circuit it with a local `InvalidCount`. Here a count far
+    /// above the old default reaches a cap-less echo server and is served —
+    /// proving the client dropped its hard-coded ceiling check.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_forwards_large_count_to_server() {
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(|req| async move {
+                let (hi, lo) = tsoracle_core::Epoch(1).to_wire();
+                Ok(tsoracle_proto::v1::GetSeqResponse {
+                    key: req.key,
+                    start: 0,
+                    count: req.count,
+                    epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                })
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // Far above the old hard-coded default — would have been a local
+        // InvalidCount before; now it is forwarded and the echo server serves it.
+        let big = tsoracle_core::DEFAULT_MAX_SEQ_COUNT + 1;
+        let block = client
+            .get_seq("orders", big)
+            .await
+            .expect("a large count must be forwarded to the server, not locally rejected");
+        assert_eq!(block.count, big);
+    }
+
+    /// The rejection companion to `get_seq_forwards_large_count_to_server`: when
+    /// the server's configured `ServerBuilder::max_seq_count` is smaller than the
+    /// requested `count`, it rejects with `INVALID_ARGUMENT`
+    /// (`CoreError::SeqCountTooLarge`). Because the client no longer pre-checks the
+    /// upper bound, that rejection must surface through `Client::get_seq` as
+    /// `ClientError::Rpc` preserving the server's message — exactly as the `get_seq`
+    /// doc contract promises — and must NOT be mislabelled `InvalidSeqKey`: a valid
+    /// key was supplied; only the count was over-cap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_over_cap_count_surfaces_rpc_invalid_argument() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        // Mirrors the server's SeqCountTooLarge → INVALID_ARGUMENT mapping for a
+        // count above the configured max_seq_count. Counts calls to prove the
+        // definitive-error path stays bounded (no unbounded ride-out).
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::invalid_argument(
+                        "count must be between 1 and the maximum",
+                    ))
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // A valid key with an over-cap count: the key is fine, so InvalidSeqKey
+        // would be the wrong label — the docs promise ClientError::Rpc.
+        let big = tsoracle_core::DEFAULT_MAX_SEQ_COUNT + 1;
+        match client.get_seq("orders", big).await {
+            Err(ClientError::Rpc(status)) => {
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                assert!(
+                    status.message().contains("maximum"),
+                    "must surface the server's over-cap message, not a synthetic \
+                     or mislabelled error; got {:?}",
+                    status.message()
+                );
+            }
+            other => panic!(
+                "an over-cap count with a valid key must surface as \
+                 ClientError::Rpc(InvalidArgument), not InvalidSeqKey; got {other:?}"
+            ),
+        }
+        // Definitive-error path: bounded attempts, never an unbounded ride-out.
+        let n = calls.load(Ordering::SeqCst);
+        assert!((1..=3).contains(&n), "expected bounded attempts, got {n}");
     }
 
     /// Regression guard for the dense classification bug: a bare

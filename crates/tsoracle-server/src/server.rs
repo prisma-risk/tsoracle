@@ -43,6 +43,12 @@ use crate::serving_core::ServingCore;
 pub enum BuildError {
     #[error("consensus_driver is required")]
     MissingConsensusDriver,
+    /// `max_seq_count` was set to 0. Every positive `count` would then be
+    /// rejected as `SeqCountTooLarge` (the `count >= 1` floor leaves no valid
+    /// value), silently disabling `GetSeq`. Rejected at build time so the
+    /// misconfiguration surfaces immediately rather than at first request.
+    #[error("max_seq_count must be >= 1 (0 would reject every GetSeq request)")]
+    ZeroMaxSeqCount,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -102,6 +108,7 @@ pub struct ServerBuilder {
     failover_advance: Duration,
     shutdown_grace: Duration,
     heartbeat_interval: Duration,
+    max_seq_count: u32,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -115,6 +122,7 @@ impl Default for ServerBuilder {
             failover_advance: Duration::from_secs(1),
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
             heartbeat_interval: Duration::from_secs(10),
+            max_seq_count: tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: None,
         }
@@ -183,8 +191,33 @@ impl ServerBuilder {
         self
     }
 
+    /// Per-call ceiling on `GetSeq`'s `count` — the largest contiguous block a
+    /// single dense-sequence request may reserve. Defaults to
+    /// [`tsoracle_core::DEFAULT_MAX_SEQ_COUNT`] (`65_536`).
+    ///
+    /// This is a soft anti-abuse guardrail, not a representational limit: a
+    /// dense block is permanently consumed (the gapless counter only moves
+    /// forward), so the cap bounds how much one call can irrevocably reserve.
+    /// Raise it for batch-allocation workloads or lower it to tighten abuse
+    /// control. The server is the sole authority — clients no longer pre-check
+    /// `count` against a fixed constant, so changing this needs no client
+    /// rebuild; an over-cap request is rejected with `INVALID_ARGUMENT`. The
+    /// `count >= 1` floor is always enforced regardless of this value.
+    ///
+    /// A value of `0` is rejected by [`Self::build`] with
+    /// [`BuildError::ZeroMaxSeqCount`]: it would leave no valid `count` (the
+    /// floor is 1), silently disabling `GetSeq`, so the misconfiguration is
+    /// surfaced at build time rather than at first request.
+    pub fn max_seq_count(mut self, max_seq_count: u32) -> Self {
+        self.max_seq_count = max_seq_count;
+        self
+    }
+
     pub fn build(self) -> Result<Server, BuildError> {
         let consensus = self.consensus.ok_or(BuildError::MissingConsensusDriver)?;
+        if self.max_seq_count == 0 {
+            return Err(BuildError::ZeroMaxSeqCount);
+        }
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
         Ok(Server {
             consensus,
@@ -193,7 +226,7 @@ impl ServerBuilder {
             failover_advance: self.failover_advance,
             shutdown_grace: self.shutdown_grace,
             heartbeat_interval: self.heartbeat_interval,
-            core: Arc::new(ServingCore::new(self.window_ahead)),
+            core: Arc::new(ServingCore::new(self.window_ahead, self.max_seq_count)),
             reporter: Arc::new(crate::reporter::Reporter::new()),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: self.tls_config,
@@ -1085,6 +1118,35 @@ mod tests {
         assert!(server.tls_config.is_some());
     }
 
+    #[test]
+    fn build_rejects_zero_max_seq_count() {
+        // max_seq_count(0) makes every positive `count` fail as
+        // SeqCountTooLarge{max:0} (the count>=1 floor leaves no valid value) —
+        // GetSeq is silently dead. build() must fail-fast rather than ship a
+        // server where GetSeq can never succeed.
+        // `Server` is not `Debug`, so match rather than `expect_err`.
+        match Server::builder()
+            .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .max_seq_count(0)
+            .build()
+        {
+            Err(BuildError::ZeroMaxSeqCount) => {}
+            Err(other) => panic!("expected ZeroMaxSeqCount, got {other:?}"),
+            Ok(_) => panic!("max_seq_count(0) must be rejected at build, but build succeeded"),
+        }
+    }
+
+    #[test]
+    fn build_accepts_max_seq_count_of_one() {
+        // 1 is the smallest usable cap: a single-ordinal block is valid, so the
+        // floor and the cap coincide and GetSeq still works. Must build.
+        Server::builder()
+            .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .max_seq_count(1)
+            .build()
+            .expect("max_seq_count(1) must build");
+    }
+
     #[tokio::test]
     async fn join_to_server_result_passes_through_clean_outcome() {
         // Ok(Ok(())) — task finished cleanly; forward verbatim.
@@ -1203,7 +1265,10 @@ mod tests {
         // test runtime no other task can run between the synchronous `drop` and
         // the synchronous `serving_state` read, so observing `NotServing` proves
         // `Drop` closed the gate synchronously rather than the watch task.
-        let core = Arc::new(ServingCore::new(Duration::from_secs(3)));
+        let core = Arc::new(ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+        ));
         core.publish_serving();
 
         let handle: tokio::task::JoinHandle<Result<(), ServerError>> =
@@ -1237,7 +1302,10 @@ mod tests {
         // would stay open unless `serve_inner` closes it itself. Seed `Serving`,
         // run the user-shutdown arm with a zero grace (immediate abort), and
         // assert the gate is closed on return.
-        let core = Arc::new(ServingCore::new(Duration::from_secs(3)));
+        let core = Arc::new(ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+        ));
         core.publish_serving();
 
         let watch_handle: tokio::task::JoinHandle<Result<(), ServerError>> =

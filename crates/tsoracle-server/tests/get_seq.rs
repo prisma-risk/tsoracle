@@ -231,3 +231,57 @@ async fn get_seq_unsupported_driver_returns_unimplemented() {
 
     booted.shutdown().await.unwrap();
 }
+
+/// `ServerBuilder::max_seq_count` overrides the default per-call ceiling: a
+/// request above the configured cap is rejected with InvalidArgument, while one
+/// at the cap is served. Proves the cap is the server's configured value, not
+/// the `DEFAULT_MAX_SEQ_COUNT` constant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_seq_honours_configured_max_seq_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let driver = FileDriver::open_or_init(dir.path()).unwrap();
+    let server = Server::builder()
+        .consensus_driver(driver)
+        .window_ahead(Duration::from_secs(1))
+        .failover_advance(Duration::from_millis(500))
+        .max_seq_count(2)
+        .build()
+        .unwrap();
+
+    let mut booted = boot_server(server).await;
+    wait_until_serving(&mut booted.state_rx).await;
+    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
+        .await
+        .expect("tonic never accepted gRPC handshake");
+    let mut client = TsoServiceClient::connect(format!("http://{}", booted.addr))
+        .await
+        .unwrap();
+
+    // count = 3 exceeds the configured cap of 2 → InvalidArgument.
+    let err = client
+        .get_seq(GetSeqRequest {
+            key: "orders".to_string(),
+            count: 3,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        tonic::Code::InvalidArgument,
+        "count above the configured max_seq_count must be rejected, got: {err:?}"
+    );
+
+    // count = 2 is exactly at the cap → served.
+    let resp = client
+        .get_seq(GetSeqRequest {
+            key: "orders".to_string(),
+            count: 2,
+        })
+        .await
+        .expect("count at the configured cap must be served")
+        .into_inner();
+    assert_eq!(resp.count, 2);
+    assert_eq!(resp.start, 0);
+
+    booted.shutdown().await.unwrap();
+}

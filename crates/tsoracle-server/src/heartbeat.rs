@@ -153,7 +153,10 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let reporter = std::sync::Arc::new(Reporter::new());
-        let core = std::sync::Arc::new(ServingCore::new(Duration::from_secs(3)));
+        let core = std::sync::Arc::new(ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+        ));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         // Drive heartbeat and test control in the same async context so the
@@ -226,7 +229,10 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let reporter = std::sync::Arc::new(Reporter::new());
-        let core = std::sync::Arc::new(ServingCore::new(Duration::from_secs(3)));
+        let core = std::sync::Arc::new(ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+        ));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         let hb_fut = run_heartbeat(
@@ -265,7 +271,10 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let reporter = std::sync::Arc::new(Reporter::new());
-        let core = std::sync::Arc::new(ServingCore::new(Duration::from_secs(3)));
+        let core = std::sync::Arc::new(ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+        ));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         let reporter2 = reporter.clone();
@@ -308,7 +317,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn cancel_terminates_promptly_on_sender_drop() {
         let reporter = std::sync::Arc::new(Reporter::new());
-        let core = std::sync::Arc::new(ServingCore::new(Duration::from_secs(3)));
+        let core = std::sync::Arc::new(ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+        ));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         // Drop tx immediately — the biased cancel branch should win without

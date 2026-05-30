@@ -31,8 +31,20 @@ use crate::{CoreError, Epoch};
 /// Maximum length, in bytes, of a sequence key's UTF-8 encoding.
 pub const MAX_SEQ_KEY_LEN: usize = 128;
 
-/// Maximum `count` a single `GetSeq` may reserve in one block.
-pub const MAX_SEQ_COUNT: u32 = 65_536;
+/// Default per-call ceiling on `GetSeq`'s `count` — the largest block a single
+/// request may reserve when the server has not overridden it.
+///
+/// Unlike the timestamp path's `MAX_TIMESTAMPS_PER_RPC` (forced by the 18-bit
+/// logical field in the packed wire format), nothing in the dense format
+/// requires a particular ceiling: `start` is `u64`, the wire `count` is `u32`,
+/// and the durable counter is `u64`. This cap is a soft anti-abuse guardrail —
+/// a dense block is permanently consumed (the gapless counter only moves
+/// forward), so an unbounded `count` would let one call irrevocably burn a huge
+/// span of a key's namespace. The value (`2^16`) is a deliberate round default;
+/// operators tune it via [`ServerBuilder::max_seq_count`].
+///
+/// [`ServerBuilder::max_seq_count`]: https://docs.rs/tsoracle-server
+pub const DEFAULT_MAX_SEQ_COUNT: u32 = 65_536;
 
 /// A validated sequence key: non-empty, valid UTF-8 (guaranteed by `String`),
 /// and at most [`MAX_SEQ_KEY_LEN`] bytes. `try_new` is the single validation
@@ -85,7 +97,7 @@ impl SeqGrant {
     /// least one ordinal, and `last`'s `start + count - 1` would underflow — and
     /// a block whose last ordinal `start + count - 1` exceeds `u64::MAX`
     /// ([`CoreError::SeqBlockOverflow`]). In the server's serving path neither
-    /// can occur (`count` is validated `1..=MAX_SEQ_COUNT` and the durable
+    /// can occur (`count` is validated `1..=max_seq_count` and the durable
     /// fetch-add already rejected an overflowing advance), but `SeqGrant` is
     /// public, so the constructor enforces the invariant for every caller.
     pub fn try_new(key: SeqKey, start: u64, count: u32, epoch: Epoch) -> Result<Self, CoreError> {
@@ -172,17 +184,30 @@ impl SeqAllocator {
     /// Validate a request without touching durable state. Leadership is checked
     /// first; then count bounds (zero, then oversized), then key validity.
     /// Returns the validated [`SeqKey`].
-    pub fn validate_request(&self, key: &str, count: u32) -> Result<SeqKey, CoreError> {
+    ///
+    /// `max_count` is the caller's per-call ceiling — the server's configured
+    /// [`ServerBuilder::max_seq_count`], which defaults to
+    /// [`DEFAULT_MAX_SEQ_COUNT`]. Injecting it (rather than reading the constant
+    /// here) keeps the cap a server-side policy the operator can tune, while the
+    /// `count >= 1` floor stays a hard invariant enforced unconditionally.
+    ///
+    /// [`ServerBuilder::max_seq_count`]: https://docs.rs/tsoracle-server
+    pub fn validate_request(
+        &self,
+        key: &str,
+        count: u32,
+        max_count: u32,
+    ) -> Result<SeqKey, CoreError> {
         if !self.is_leader() {
             return Err(CoreError::NotLeader);
         }
         if count == 0 {
             return Err(CoreError::SeqCountZero);
         }
-        if count > MAX_SEQ_COUNT {
+        if count > max_count {
             return Err(CoreError::SeqCountTooLarge {
                 count,
-                max: MAX_SEQ_COUNT,
+                max: max_count,
             });
         }
         SeqKey::try_new(key)
@@ -220,7 +245,10 @@ mod seqallocator_tests {
     #[test]
     fn validate_request_off_leader_is_not_leader() {
         let a = SeqAllocator::new();
-        assert_eq!(a.validate_request("orders", 1), Err(CoreError::NotLeader));
+        assert_eq!(
+            a.validate_request("orders", 1, DEFAULT_MAX_SEQ_COUNT),
+            Err(CoreError::NotLeader)
+        );
     }
 
     #[test]
@@ -228,7 +256,7 @@ mod seqallocator_tests {
         let mut a = SeqAllocator::new();
         a.become_leader(Epoch(1));
         assert_eq!(
-            a.validate_request("orders", 0),
+            a.validate_request("orders", 0, DEFAULT_MAX_SEQ_COUNT),
             Err(CoreError::SeqCountZero)
         );
     }
@@ -238,11 +266,38 @@ mod seqallocator_tests {
         let mut a = SeqAllocator::new();
         a.become_leader(Epoch(1));
         assert_eq!(
-            a.validate_request("orders", MAX_SEQ_COUNT + 1),
+            a.validate_request("orders", DEFAULT_MAX_SEQ_COUNT + 1, DEFAULT_MAX_SEQ_COUNT),
             Err(CoreError::SeqCountTooLarge {
-                count: MAX_SEQ_COUNT + 1,
-                max: MAX_SEQ_COUNT
+                count: DEFAULT_MAX_SEQ_COUNT + 1,
+                max: DEFAULT_MAX_SEQ_COUNT
             })
+        );
+    }
+
+    #[test]
+    fn validate_request_uses_caller_provided_max() {
+        // The ceiling is the `max_count` argument, not the default constant: a
+        // smaller cap rejects below the default, and a larger cap accepts above
+        // it — proving the cap is injected policy, not a hard-coded limit.
+        let mut a = SeqAllocator::new();
+        a.become_leader(Epoch(1));
+        assert_eq!(
+            a.validate_request("orders", 11, 10),
+            Err(CoreError::SeqCountTooLarge { count: 11, max: 10 }),
+            "count above a small configured cap must be rejected",
+        );
+        assert!(
+            a.validate_request("orders", 10, 10).is_ok(),
+            "count at the configured cap must be accepted",
+        );
+        assert!(
+            a.validate_request(
+                "orders",
+                DEFAULT_MAX_SEQ_COUNT + 1,
+                DEFAULT_MAX_SEQ_COUNT * 2
+            )
+            .is_ok(),
+            "a larger configured cap must accept counts above the default",
         );
     }
 
@@ -250,14 +305,19 @@ mod seqallocator_tests {
     fn validate_request_rejects_bad_key() {
         let mut a = SeqAllocator::new();
         a.become_leader(Epoch(1));
-        assert_eq!(a.validate_request("", 1), Err(CoreError::SeqKeyEmpty));
+        assert_eq!(
+            a.validate_request("", 1, DEFAULT_MAX_SEQ_COUNT),
+            Err(CoreError::SeqKeyEmpty)
+        );
     }
 
     #[test]
     fn validate_request_ok_returns_key() {
         let mut a = SeqAllocator::new();
         a.become_leader(Epoch(1));
-        let k = a.validate_request("orders", 10).unwrap();
+        let k = a
+            .validate_request("orders", 10, DEFAULT_MAX_SEQ_COUNT)
+            .unwrap();
         assert_eq!(k.as_str(), "orders");
     }
 
@@ -265,7 +325,10 @@ mod seqallocator_tests {
     fn validate_request_accepts_max_count_exactly() {
         let mut a = SeqAllocator::new();
         a.become_leader(Epoch(1));
-        assert!(a.validate_request("orders", MAX_SEQ_COUNT).is_ok());
+        assert!(
+            a.validate_request("orders", DEFAULT_MAX_SEQ_COUNT, DEFAULT_MAX_SEQ_COUNT)
+                .is_ok()
+        );
     }
 }
 
