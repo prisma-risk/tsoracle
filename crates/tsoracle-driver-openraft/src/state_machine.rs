@@ -1548,12 +1548,13 @@ mod tests {
         // readable across the multi-version codec and the next
         // build_snapshot re-emits at the cluster's ACTIVE write version.
         //
-        // HONESTY: MIN==MAX==BASELINE today, so there is no genuine lower
-        // production version. This exercises the seam end-to-end at the
-        // only version that exists; the genuine cross-version rewrite
-        // (install vN, flip to vN+1, assert rebuild is vN+1) is the
-        // structural extension a real vN+1 work would make by
-        // parameterizing the installed version.
+        // SCOPE: this drives the same-version axis — persist at the active
+        // write version (BASELINE = 4, since no activation flip is injected
+        // here) and assert the reopen reads it back and re-emits at the active
+        // version. The genuine cross-version rewrite (install v4, activate v5,
+        // assert the rebuild is v5) is the orthogonal axis; the readable range
+        // is now [4, 5], so the v4 lower version genuinely exists on disk
+        // pre-activation.
         let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
 
         // Persist a snapshot via a first SM instance, then drop it.
@@ -1611,7 +1612,8 @@ mod tests {
         // MAX_READABLE_VERSION] and reject anything outside it. This is
         // what makes an OLD-version on-disk snapshot readable after the
         // active version moves forward. Asserted against the codec range
-        // directly so it documents the contract even while MIN==MAX today.
+        // directly so it covers the full readable range [MIN = 4, MAX = 5] —
+        // iterating v4 (decode-and-lift) and v5 (direct decode).
         // Empty dense map + cap 0 so the v4 encode arm (which projects to the
         // frozen V4 struct) is lossless; assert_eq!(decoded, payload) holds
         // for every version in the readable range because the decode-and-lift
