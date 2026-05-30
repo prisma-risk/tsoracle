@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.1.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v2.1.0...tsoracle-core-v2.1.1) - 2026-05-30
+
+### Fixed
+
+- *(seq)* re-validate SeqKey on serde deserialize and dense snapshot restore ([#596](https://github.com/prisma-risk/tsoracle/pull/596))
+
 ## [2.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-core-v2.0.0...tsoracle-core-v2.1.0) - 2026-05-30
 
 ### Added
