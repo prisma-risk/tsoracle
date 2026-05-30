@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}tsoracle — strictly monotonic timestamps in Rust{% endblock %}
-{% block description %}tsoracle is a distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering.{% endblock %}
-{% block og_title %}tsoracle — strictly monotonic timestamps in Rust{% endblock %}
-{% block og_description %}tsoracle is a distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering.{% endblock %}
-{% block twitter_title %}tsoracle — strictly monotonic timestamps in Rust{% endblock %}
-{% block twitter_description %}tsoracle is a distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering.{% endblock %}
+{% block title %}tsoracle — monotonic timestamps and gapless sequences in Rust{% endblock %}
+{% block description %}tsoracle is a distributed oracle for Rust — strictly monotonic timestamps and gapless, dense ID sequences. Raft-replicated, crash-safe, embeddable. Drop-in for MVCC, snapshot isolation, cross-shard ordering, and gapless surrogate keys.{% endblock %}
+{% block og_title %}tsoracle — monotonic timestamps and gapless sequences in Rust{% endblock %}
+{% block og_description %}tsoracle is a distributed oracle for Rust — strictly monotonic timestamps and gapless, dense ID sequences. Raft-replicated, crash-safe, embeddable. Drop-in for MVCC, snapshot isolation, cross-shard ordering, and gapless surrogate keys.{% endblock %}
+{% block twitter_title %}tsoracle — monotonic timestamps and gapless sequences in Rust{% endblock %}
+{% block twitter_description %}tsoracle is a distributed oracle for Rust — strictly monotonic timestamps and gapless, dense ID sequences. Raft-replicated, crash-safe, embeddable. Drop-in for MVCC, snapshot isolation, cross-shard ordering, and gapless surrogate keys.{% endblock %}
 
 {% block extra_head %}
 <script type="application/ld+json">
@@ -14,7 +14,7 @@
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
         "name": "tsoracle",
-        "description": "A distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering.",
+        "description": "A distributed oracle for Rust — strictly monotonic timestamps and gapless, dense ID sequences. Raft-replicated, crash-safe, embeddable. Drop-in for MVCC, snapshot isolation, cross-shard ordering, and gapless surrogate keys.",
         "url": {{ config.base_url | json_encode | safe }},
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "Linux, macOS, Windows",
@@ -33,7 +33,7 @@
         "@context": "https://schema.org",
         "@type": "SoftwareSourceCode",
         "name": "tsoracle",
-        "description": "A distributed timestamp oracle for Rust.",
+        "description": "A distributed timestamp-and-sequence oracle for Rust.",
         "codeRepository": "https://github.com/prisma-risk/tsoracle",
         "programmingLanguage": "Rust",
         "license": "https://www.apache.org/licenses/LICENSE-2.0",
@@ -45,12 +45,12 @@
 
 {% block content %}
 
-<h1 class="visually-hidden">tsoracle — strictly monotonic timestamps in Rust</h1>
+<h1 class="visually-hidden">tsoracle — monotonic timestamps and gapless sequences in Rust</h1>
 
 <section class="hero container-wide">
     <div class="hero-frame">
         <div class="hero-frame__label">tsoracle</div>
-        <p class="hero-frame__line">Strictly monotonic timestamps in Rust.</p>
+        <p class="hero-frame__line">Strictly monotonic timestamps and gapless sequences in Rust.</p>
         <p class="hero-frame__line hero-frame__line--dim">Distributed · highly-available · fault-tolerant · embeddable</p>
     </div>
 
@@ -70,7 +70,8 @@ $ tsoracle</pre>
     <div class="landing-section__rule">── What's a TSO? ──</div>
     <p>A <em>timestamp oracle</em> is a service that hands out strictly increasing integer IDs which order events across a distributed system. You reach for one when you're building a database with MVCC, merging change-data from many shards, or maintaining audit logs with a real happens-before relation across machines.</p>
     <p>Per-host wall clocks aren't monotonic enough. Database sequences don't scale across shards. A TSO is the canonical answer — and the one Spanner, CockroachDB, and FoundationDB all use internally.</p>
-    <p>→ <a href="/posts/why-distributed-systems-need-a-tso/">Read: Why distributed systems need a TSO</a></p>
+    <p>tsoracle goes one step further: the same engine also issues <em>gapless sequences</em>. Where a timestamp only has to be <em>ordered</em>, a sequence has to be <em>contiguous</em> — <code>…, 41, 42, 43, …</code> with nothing skipped — exactly what you want for surrogate keys, invoice and order numbers, or ledger line numbers. One round-trip, one durable counter per named key, no holes across crashes or failover. Call <code>get_seq()</code> instead of <code>get_ts()</code>.</p>
+    <p>→ <a href="/posts/why-distributed-systems-need-a-tso/">Read: Why distributed systems need a TSO</a> · <a href="/posts/gapless-sequences-with-getseq/">Gapless sequences with GetSeq</a></p>
 </section>
 
 <section class="landing-section container-wide">
@@ -79,6 +80,10 @@ $ tsoracle</pre>
         <div class="feature">
             <div class="feature__head">Strictly monotonic</div>
             <p class="feature__body">Every issued timestamp is strictly greater than every previous one. No duplicates, no regression.</p>
+        </div>
+        <div class="feature">
+            <div class="feature__head">Gapless sequences</div>
+            <p class="feature__body">Need contiguous IDs, not just ordered ones? <code>get_seq()</code> hands out dense, gapless runs per named key — nothing skipped, never reused across crashes or failover.</p>
         </div>
         <div class="feature">
             <div class="feature__head">Crash-safe</div>
@@ -90,7 +95,7 @@ $ tsoracle</pre>
         </div>
         <div class="feature">
             <div class="feature__head">gRPC client included</div>
-            <p class="feature__body">Leader discovery, request coalescing, reconnection — handled. Just call <code>get_ts()</code>.</p>
+            <p class="feature__body">Leader discovery, request coalescing, reconnection — handled. Just call <code>get_ts()</code> or <code>get_seq()</code>.</p>
         </div>
         <div class="feature">
             <div class="feature__head">Operational metrics</div>
@@ -116,6 +121,7 @@ $ tsoracle</pre>
         <figcaption>One round-trip allocates a batch of N IDs.</figcaption>
     </figure>
     <p>The leader fsyncs the new high-water mark and replicates it through raft before the range leaves the process. Clients hand out IDs from the batch locally — millions per second on commodity hardware.</p>
+    <p><code>get_seq()</code> rides the same path for gapless IDs: the leader advances a durable per-key counter, fsyncs and replicates the advance, and returns a contiguous block. The one difference is that a gapless advance can't be un-spent, so the call is non-idempotent — an ambiguous failure is surfaced as <code>SeqUncertain</code>, never silently retried.</p>
     <p>→ <a href="/how-it-works/">Read the architecture summary</a></p>
 </section>
 

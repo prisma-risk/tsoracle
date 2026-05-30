@@ -1,5 +1,5 @@
 +++
-title = "tsoracle — strictly monotonic timestamps in Rust"
-description = "tsoracle is a distributed timestamp oracle for Rust — strictly monotonic, raft-replicated, embeddable. Drop-in TSO for MVCC, snapshot isolation, and cross-shard event ordering."
+title = "tsoracle — monotonic timestamps and gapless sequences in Rust"
+description = "tsoracle is a distributed oracle for Rust — strictly monotonic timestamps and gapless, dense ID sequences. Raft-replicated, crash-safe, embeddable. Drop-in for MVCC, snapshot isolation, cross-shard ordering, and gapless surrogate keys."
 template = "index.html"
 +++

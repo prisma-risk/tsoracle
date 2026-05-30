@@ -1,7 +1,7 @@
 +++
 title = "Raft, in pictures: elections, quorum, and tsoracle's high-water mark"
 description = "How Raft elects a leader, replicates entries by quorum, and why tsoracle's high-water mark is just another entry on the same log. With animated diagrams you can play through."
-weight = 6
+weight = 7
 [taxonomies]
 tags = ["distributed-systems", "raft", "consensus", "tsoracle", "internals"]
 +++

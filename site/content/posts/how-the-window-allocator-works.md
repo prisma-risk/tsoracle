@@ -1,7 +1,7 @@
 +++
 title = "How tsoracle's window allocator works"
 description = "Inside tsoracle: the window allocator amortises one fsync into many IDs while keeping every issued timestamp strictly monotonic across crashes."
-weight = 4
+weight = 5
 [taxonomies]
 tags = ["distributed-systems", "tso", "tsoracle", "internals"]
 +++

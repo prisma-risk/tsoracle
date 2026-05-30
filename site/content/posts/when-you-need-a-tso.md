@@ -1,7 +1,7 @@
 +++
 title = "When you need a TSO (and when you don't)"
 description = "A timestamp oracle solves a narrow problem: total order across machines. When you actually need one, and when something weaker is the right call."
-weight = 3
+weight = 4
 [taxonomies]
 tags = ["distributed-systems", "tso", "ids", "decisions"]
 +++
