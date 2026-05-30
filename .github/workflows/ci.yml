@@ -12,16 +12,15 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  test:
+  # fmt + clippy run as their own job so lint failures surface without waiting
+  # behind the full workspace build and test suite. clippy stops at analysis
+  # (no final link), but `--all-targets --all-features` still compiles a large
+  # amount of code, so the same disk reclaim as build/test is applied for
+  # headroom. rust-cache uses default per-job keying, so this job keeps a cache
+  # independent of build/test.
+  lint:
     runs-on: ubuntu-latest
     steps:
-      # The workspace's debug+test binaries for the openraft + rocksdb crates
-      # have grown past the ubuntu-latest runner's free disk budget — the
-      # final link step in `cargo test --workspace --all-features` hits
-      # ENOSPC inside `ld`. Stripping the pre-installed Android SDK / .NET /
-      # Haskell toolchains frees ~30 GB before any cargo work begins; the
-      # Rust toolchain installed below lives in ~/.cargo and is not touched
-      # by `tool-cache: false`.
       - name: free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
         with:
@@ -48,8 +47,69 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  # Compiles the full workspace (lib + bins) in parallel with lint and test.
+  # Linking the debuginfo-heavy bins can hit the same ENOSPC-in-`ld` problem as
+  # the test job, so the disk reclaim below runs first. rust-cache uses default
+  # per-job keying, so this job keeps a cache independent of lint/test.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+      - name: system deps
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
       - name: build
         run: cargo build --workspace --all-features --locked
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # The workspace's debug+test binaries for the openraft + rocksdb crates
+      # have grown past the ubuntu-latest runner's free disk budget — the
+      # final link step in `cargo test --workspace --all-features` hits
+      # ENOSPC inside `ld`. Stripping the pre-installed Android SDK / .NET /
+      # Haskell toolchains frees ~30 GB before any cargo work begins; the
+      # Rust toolchain installed below lives in ~/.cargo and is not touched
+      # by `tool-cache: false`.
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+      - name: system deps
+        timeout-minutes: 5
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        with:
+          packages: protobuf-compiler clang libclang-dev
+          version: 1
       - name: test
         run: cargo test --workspace --all-features --locked
 
