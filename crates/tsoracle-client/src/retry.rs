@@ -435,6 +435,10 @@ pub(crate) async fn issue_seq_rpc(
     let mut total_redirects: u32 = 0;
     let mut attempt_cap: usize = 0;
     let mut pass: u32 = 0;
+    // Whether at least one attempt has been issued this call. Gates the
+    // squeezed-budget ride-out guard below so that a tight `overall_deadline`
+    // still gets one attempt.
+    let mut issued_one = false;
 
     'passes: loop {
         let initial_endpoints = pool.iter_round_robin();
@@ -452,6 +456,21 @@ pub(crate) async fn issue_seq_rpc(
             let Some(attempt_budget) = budget.next_attempt() else {
                 break;
             };
+            // Non-idempotent ride-out guard: once at least one attempt has been
+            // issued, refuse to issue a sub-viable attempt whose budget the
+            // overall deadline has squeezed below a full per-attempt window. On
+            // the dense path such an attempt can only manufacture a post-send
+            // timeout (`SeqUncertain`), masking the sticky election signal and
+            // forcing a needless caller reconciliation. A never-issued RPC is
+            // unambiguous, so break and let `surface_error` return what the
+            // ride-out recorded. (`get_ts` tolerates the squeezed final attempt:
+            // its timeout is a transport `last_err` that `surface_error` already
+            // ranks below the election signal. The dense path cannot, because
+            // that timeout is `Uncertain` and returns immediately.)
+            if issued_one && attempt_budget < policy.per_attempt_deadline {
+                break 'passes;
+            }
+            issued_one = true;
 
             #[cfg(feature = "tracing")]
             tracing::debug!(
@@ -2077,6 +2096,70 @@ mod tests {
                 "a stale-hint ride-out must surface the election FAILED_PRECONDITION",
             ),
             other => panic!("expected a ridden-out FAILED_PRECONDITION, got {other:?}"),
+        }
+    }
+
+    /// Deterministic regression for the seq ride-out flake: a budget-squeezed
+    /// final ride-out attempt must NOT be issued. On the non-idempotent dense
+    /// path such an attempt can only manufacture a post-send timeout
+    /// (`SeqUncertain`), masking the election signal the ride-out already
+    /// recorded — and forcing a needless caller reconciliation. A never-issued
+    /// RPC is unambiguous, so the loop must break and surface the sticky
+    /// election `FAILED_PRECONDITION` instead.
+    ///
+    /// Construction (no wall-clock racing): the server delays *every* reply by
+    /// 300ms while the policy grants a 500ms per-attempt / 500ms overall budget.
+    /// The first attempt (full 500ms budget) gets its stale-epoch
+    /// `FAILED_PRECONDITION` at ~300ms — recording the election signal and
+    /// draining the overall budget to ~200ms. The second attempt is therefore
+    /// squeezed (budget ≤200ms < the 500ms per-attempt window) and, since the
+    /// server cannot reply before its 300ms floor, *would* time out into
+    /// `SeqUncertain` if issued. The server's fixed 300ms floor makes the
+    /// squeeze and the would-be timeout robust to scheduler jitter (only the
+    /// first attempt's 200ms completion margin depends on timing, and loopback
+    /// gRPC clears it comfortably). Without the fix this fails with
+    /// `SeqUncertain`; with it, the squeezed attempt is skipped and the election
+    /// `FAILED_PRECONDITION` surfaces.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_ride_out_skips_squeezed_attempt_and_surfaces_election() {
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(|_req| async {
+                // Hard 300ms reply floor: a squeezed (<300ms) attempt can never
+                // complete, and the first (500ms-budget) attempt clears it.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: Some("b:1".into()),
+                    leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
+                }))
+            })
+            .spawn()
+            .await;
+
+        let endpoint = format!("http://{addr}");
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            per_attempt_deadline: Duration::from_millis(500),
+            overall_deadline: Duration::from_millis(500),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec![endpoint.clone()], None, false, policy);
+
+        // Cache the endpoint as the epoch-10 leader so the epoch-5 hint is
+        // strictly stale → dropped (ride-out) rather than followed.
+        pool.record_success(&endpoint, 10);
+
+        match issue_seq_rpc(&pool, "orders", 1).await {
+            Err(ClientError::Rpc(status)) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "a budget-squeezed ride-out must surface the election \
+                 FAILED_PRECONDITION, not a manufactured SeqUncertain",
+            ),
+            other => panic!(
+                "a squeezed ride-out attempt must not be issued and time out; \
+                 expected the election FAILED_PRECONDITION, got {other:?}"
+            ),
         }
     }
 }
