@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v1.0.1...tsoracle-driver-paxos-v2.0.0) - 2026-05-30
+
+### Added
+
+- keyed dense sequences on openraft + format-activation rollout gate ([#585](https://github.com/prisma-risk/tsoracle/pull/585))
+
+### Other
+
+- *(consensus)* [**breaking**] typed AdvanceOutOfRange variant end-to-end ([#569](https://github.com/prisma-risk/tsoracle/pull/569))
+- *(driver-paxos)* make tsoracle_consensus the canonical AdvancePayload path ([#570](https://github.com/prisma-risk/tsoracle/pull/570))
+
 ## [1.0.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v1.0.0...tsoracle-driver-paxos-v1.0.1) - 2026-05-27
 
 ### Other
