@@ -21,6 +21,7 @@
 //  limitations under the License.
 //
 
+mod seq_tracker;
 mod tracker;
 
 use std::path::PathBuf;
@@ -31,6 +32,7 @@ use clap::{Parser, ValueEnum};
 use tonic::transport::{Certificate, ClientTlsConfig, Identity};
 use tsoracle_client::{ClientBuilder, RetryPolicy};
 
+use crate::seq_tracker::SeqTracker;
 use crate::tracker::Tracker;
 
 #[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -68,6 +70,19 @@ enum Mode {
     /// The driver remains a pure observer; the orchestrator drives every
     /// membership transition over the loopback admin port via `kubectl exec`.
     MembershipSoak,
+    /// One-shot GetSeq probe used by the mixed-version orchestrator to assert
+    /// the activation transition: before activation it must observe
+    /// `--seq-expect=failed-precondition`; after activation, `--seq-expect=served`.
+    /// Uses the client's leader-hint routing so it reaches the leader.
+    GetSeqProbe,
+}
+
+#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum SeqExpect {
+    /// GetSeq must be refused with gRPC FAILED_PRECONDITION (not activated).
+    FailedPrecondition,
+    /// GetSeq must return a served block.
+    Served,
 }
 
 #[derive(Parser, Debug)]
@@ -107,6 +122,14 @@ struct Cli {
     /// Client identity private key (PEM); paired with `--tls-cert`.
     #[arg(long, requires = "tls_cert")]
     tls_key: Option<PathBuf>,
+
+    /// get-seq-probe: the dense key to probe.
+    #[arg(long, default_value = "orders")]
+    seq_key: String,
+
+    /// get-seq-probe: the expected outcome.
+    #[arg(long, value_enum, default_value_t = SeqExpect::Served)]
+    seq_expect: SeqExpect,
 }
 
 /// Soak error budget: monotonicity is the hard invariant (zero tolerance), but
@@ -158,6 +181,9 @@ async fn main() -> Result<()> {
         }
         Mode::MembershipSoak => {
             run_membership_soak(&cli.endpoints, Duration::from_secs(cli.duration_secs), tls).await?
+        }
+        Mode::GetSeqProbe => {
+            run_get_seq_probe(&cli.endpoints, &cli.seq_key, &cli.seq_expect, tls).await?
         }
     };
     if !passed {
@@ -264,14 +290,7 @@ async fn run_mixed_version_soak(
     duration: Duration,
     tls: Option<ClientTlsConfig>,
 ) -> Result<bool> {
-    sustain_load(
-        endpoints,
-        duration,
-        "mixed-version-soak",
-        MAX_SOAK_ERROR_RATE,
-        tls,
-    )
-    .await
+    sustain_load_with_seq(endpoints, duration, tls).await
 }
 
 /// Sustain GetTs load while the orchestrator force-deletes the current leader
@@ -357,6 +376,107 @@ async fn sustain_load(
         }
     }
     Ok(tracker.report_within_error_tolerance(label, max_error_rate))
+}
+
+/// Mixed-version soak body: sustain GetTs load while also probing GetSeq
+/// gaplessness. GetSeq is isolated to this function (not in [`sustain_load`])
+/// so the other soak modes (Soak, SigkillSoak, MembershipSoak) are unaffected.
+/// The `SeqTracker` observes the FAILED_PRECONDITION→served transition: pre-
+/// activation calls record as `not_serving` (not errors); post-activation calls
+/// must be gapless.  Both the GetTs monotonicity verdict and the SeqTracker
+/// verdict must pass for the soak to pass.
+async fn sustain_load_with_seq(
+    endpoints: &[String],
+    duration: Duration,
+    tls: Option<ClientTlsConfig>,
+) -> Result<bool> {
+    use tsoracle_client::ClientError;
+
+    let builder = ClientBuilder::endpoints(endpoints.to_vec()).retry_policy(generous_policy());
+    let client = apply_tls(builder, tls)
+        .build()
+        .await
+        .context("build mixed-version-soak client")?;
+    let mut tracker: Tracker<_> = Tracker::new();
+    let mut seq = SeqTracker::new();
+    let mut announced = false;
+    // The deadline is checked before each call, so the loop can overrun by up
+    // to one client `overall_deadline` (the in-flight get_ts) against a fully
+    // unreachable cluster; size any Job activeDeadlineSeconds with that slack.
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        match client.get_ts().await {
+            Ok(ts) => {
+                if !announced {
+                    println!("mixed-version-soak: first GetTs ok");
+                    announced = true;
+                }
+                tracker.record_ok(ts);
+            }
+            Err(error) => {
+                eprintln!("mixed-version-soak: get_ts error: {error}");
+                tracker.record_err();
+            }
+        }
+        match client.get_seq("orders", 1).await {
+            Ok(block) => seq.record_block("orders", block.start, block.count),
+            // Pre-activation: not-activated (or routed to a v4-only leader that
+            // lacks the RPC) is an expected state, not an error.
+            Err(ClientError::Rpc(status))
+                if matches!(
+                    status.code(),
+                    tonic::Code::FailedPrecondition | tonic::Code::Unimplemented
+                ) =>
+            {
+                seq.record_not_serving()
+            }
+            // Non-idempotent ambiguity: contiguity barrier, counts to error budget.
+            Err(ClientError::SeqUncertain) => seq.record_uncertain("orders"),
+            Err(error) => {
+                eprintln!("mixed-version-soak: get_seq error: {error}");
+                seq.record_err();
+            }
+        }
+    }
+    let ts_ok = tracker.report_within_error_tolerance("mixed-version-soak", MAX_SOAK_ERROR_RATE);
+    let seq_ok = seq.report_within_error_tolerance("mixed-version-soak-seq", MAX_SOAK_ERROR_RATE);
+    Ok(ts_ok && seq_ok)
+}
+
+async fn run_get_seq_probe(
+    endpoints: &[String],
+    key: &str,
+    expect: &SeqExpect,
+    tls: Option<ClientTlsConfig>,
+) -> Result<bool> {
+    use tsoracle_client::ClientError;
+
+    let builder = ClientBuilder::endpoints(endpoints.to_vec()).retry_policy(generous_policy());
+    let client = apply_tls(builder, tls)
+        .build()
+        .await
+        .context("build get-seq-probe client")?;
+
+    let result = client.get_seq(key, 1).await;
+    match (expect, &result) {
+        (SeqExpect::Served, Ok(block)) => {
+            println!(
+                "get-seq-probe: SERVED key={key} start={} count={} -> PASS",
+                block.start, block.count
+            );
+            Ok(true)
+        }
+        (SeqExpect::FailedPrecondition, Err(ClientError::Rpc(status)))
+            if status.code() == tonic::Code::FailedPrecondition =>
+        {
+            println!("get-seq-probe: FAILED_PRECONDITION (not activated) -> PASS");
+            Ok(true)
+        }
+        (expect, other) => {
+            eprintln!("get-seq-probe: expected {expect:?} but got {other:?} -> FAIL");
+            Ok(false)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -493,5 +613,19 @@ mod cli_tests {
             err.to_string().contains("--tls-ca"),
             "expected --tls-ca message, got: {err}"
         );
+    }
+
+    #[test]
+    fn get_seq_probe_mode_parses() {
+        let cli = Cli::parse_from([
+            "kube-e2e-driver",
+            "--mode=get-seq-probe",
+            "--endpoints=a:5051,b:5051,c:5051",
+            "--seq-key=orders",
+            "--seq-expect=failed-precondition",
+        ]);
+        assert_eq!(cli.mode, Mode::GetSeqProbe);
+        assert_eq!(cli.seq_key, "orders");
+        assert_eq!(cli.seq_expect, SeqExpect::FailedPrecondition);
     }
 }

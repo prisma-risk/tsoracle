@@ -28,6 +28,7 @@ prost                    = "0.14"
 # `tsoracle_openraft_toolkit::codec` (the only toolkit surface the harnesses touch)
 # is unconditional and lives outside the feature-gated `log_store` module.
 tsoracle-openraft-toolkit         = { path = "../crates/tsoracle-openraft-toolkit", default-features = false }
+tsoracle-codec           = { path = "../crates/tsoracle-codec" }
 tsoracle-driver-file     = { path = "../crates/tsoracle-driver-file" }
 tsoracle-driver-openraft = { path = "../crates/tsoracle-driver-openraft", default-features = false }
 # `default-features = false` drops the `rocksdb-storage` feature on both paxos

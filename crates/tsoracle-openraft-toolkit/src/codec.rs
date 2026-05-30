@@ -51,22 +51,11 @@ pub const MIN_READABLE_VERSION: u8 = 4;
 /// Newest on-disk/wire format version this binary has a parser for. Only ever
 /// grows. Decode accepts `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`.
 ///
-/// Production builds set this to the current baseline. The test-only
-/// `e2e-max-readable-next` feature raises it to `BASELINE_WRITE_VERSION + 2`
-/// so a mixed-version e2e harness can drive a real activation flip from the
-/// baseline to the next version. The aliased body is byte-identical to the
-/// baseline (added by `BASELINE + 2` alias arms on the per-version codec in
-/// `tsoracle-driver-openraft` under the matching feature), so this is a
-/// faithful harness for the activation machinery rather than a real format
-/// change. Off by default; never compiled into production. The expression
-/// derives from `BASELINE_WRITE_VERSION` so a future baseline bump moves
-/// MAX automatically with no edit here. (Version 5 = `DENSE_WRITE_VERSION`
-/// is reserved for the real dense-sequence format; the synthetic harness
-/// rides on `BASELINE + 2` = 6 to avoid colliding with it — see #583.)
-#[cfg(not(feature = "e2e-max-readable-next"))]
+/// Today this is 5 (`DENSE_WRITE_VERSION`): a v5-capable binary can read both
+/// the v4 baseline layout and the v5 dense layout. A node writes
+/// `BASELINE_WRITE_VERSION` (4) until a committed `SetFormatVersion` activation
+/// advances the active write version through the all-members gate.
 pub const MAX_READABLE_VERSION: u8 = 5;
-#[cfg(feature = "e2e-max-readable-next")]
-pub const MAX_READABLE_VERSION: u8 = BASELINE_WRITE_VERSION + 2;
 
 // Compile-time guard: the readable range must be non-empty (`MIN <= MAX`) or
 // every decode rejects every record. Catches a future inverted-constants edit
@@ -195,36 +184,13 @@ pub fn recover_active_write_version(
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "e2e-max-readable-next"))]
     #[test]
     fn version_constants_are_at_expected_values() {
         assert_eq!(MIN_READABLE_VERSION, 4);
-        // MAX raised to 5 to cover the dense write version (DENSE_WRITE_VERSION).
+        // MAX is 5 to cover the dense write version (DENSE_WRITE_VERSION).
         assert_eq!(MAX_READABLE_VERSION, 5);
         assert_eq!(BASELINE_WRITE_VERSION, 4);
         assert_eq!(DENSE_WRITE_VERSION, 5);
-    }
-
-    #[cfg(feature = "e2e-max-readable-next")]
-    #[test]
-    fn version_constants_under_e2e_max_readable_next_feature() {
-        // Test-only harness: MAX rises to `BASELINE + 2` so a mixed-version
-        // e2e can drive a real activation flip from the baseline to the
-        // next version. MIN and BASELINE are unchanged — the harness
-        // raises only the read ceiling (Stage 1 of a real rollout); the
-        // active write version still starts at BASELINE and only moves
-        // through the normal activation barrier. Assert against the
-        // baseline expression so this test survives a future baseline
-        // bump unchanged. (`BASELINE + 1` = 5 is `DENSE_WRITE_VERSION`
-        // which owns real codec arms; synthetic harness uses `BASELINE + 2`
-        // = 6 to avoid colliding — interim until #583.)
-        assert_eq!(MAX_READABLE_VERSION, BASELINE_WRITE_VERSION + 2);
-        // `MAX > MIN` would tautologically follow from the above plus
-        // `BASELINE >= MIN` (which is true by definition: BASELINE is in
-        // the readable range). The compile-time `const _: () =
-        // assert!(MIN <= MAX)` at the top of this module guarantees the
-        // range invariant whether the feature is on or off; the
-        // runtime assertion would be flagged by `clippy::assertions_on_constants`.
     }
 
     #[test]
@@ -258,10 +224,8 @@ mod tests {
 
     #[test]
     fn recover_takes_the_max_of_present_lower_bounds() {
-        // The "max" only differs from BASELINE when MAX_READABLE_VERSION >
-        // BASELINE_WRITE_VERSION — the e2e-max-readable-next harness. Under the
-        // production cfg the range is a single point so every assertion here
-        // collapses to BASELINE, but the test still exercises every input shape.
+        // MAX_READABLE_VERSION (5) > BASELINE_WRITE_VERSION (4), so these
+        // assertions exercise the genuine multi-version max (4 vs 5).
         assert_eq!(
             recover_active_write_version(Some(MAX_READABLE_VERSION), None).unwrap(),
             MAX_READABLE_VERSION

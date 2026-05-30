@@ -2099,6 +2099,7 @@ dependencies = [
  "libfuzzer-sys",
  "postcard",
  "prost",
+ "tsoracle-codec",
  "tsoracle-driver-file",
  "tsoracle-driver-openraft",
  "tsoracle-driver-paxos",
