@@ -83,12 +83,15 @@ jobs:
           - variant: file
             image: tsoracle-file
             features: file
+            description: 'tsoracle with the file driver — single-node timestamp & sequence oracle'
           - variant: openraft
             image: tsoracle-openraft
             features: openraft
+            description: 'tsoracle with the openraft driver — distributed, fault-tolerant timestamp & sequence oracle'
           - variant: umbrella
             image: tsoracle
             features: ''
+            description: 'tsoracle with all drivers bundled (file, openraft & OmniPaxos) — distributed timestamp & sequence oracle'
           - arch: amd64
             runner: ubuntu-latest
           - arch: arm64
@@ -105,12 +108,16 @@ jobs:
       - name: Build and push per-arch image
         env:
           V: ${{ needs.version.outputs.v }}
+          IMAGE: ${{ matrix.image }}
+          DESC: ${{ matrix.description }}
         run: |
           docker buildx build \
             --platform linux/${{ matrix.arch }} \
             -f deploy/Dockerfile \
             --build-arg FEATURES=${{ matrix.features }} \
-            -t "ghcr.io/prisma-risk/${{ matrix.image }}:${V}-${{ matrix.arch }}" \
+            --build-arg IMAGE_TITLE="$IMAGE" \
+            --build-arg IMAGE_DESCRIPTION="$DESC" \
+            -t "ghcr.io/prisma-risk/$IMAGE:${V}-${{ matrix.arch }}" \
             --push .
 
   manifest:
@@ -125,10 +132,13 @@ jobs:
         include:
           - variant: file
             image: tsoracle-file
+            description: 'tsoracle with the file driver — single-node timestamp & sequence oracle'
           - variant: openraft
             image: tsoracle-openraft
+            description: 'tsoracle with the openraft driver — distributed, fault-tolerant timestamp & sequence oracle'
           - variant: umbrella
             image: tsoracle
+            description: 'tsoracle with all drivers bundled (file, openraft & OmniPaxos) — distributed timestamp & sequence oracle'
     runs-on: ubuntu-latest
     steps:
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
@@ -140,14 +150,26 @@ jobs:
       - name: Create multi-arch manifest list
         env:
           V: ${{ needs.version.outputs.v }}
+          IMAGE: ${{ matrix.image }}
+          DESC: ${{ matrix.description }}
         run: |
-          IMG=ghcr.io/prisma-risk/${{ matrix.image }}
+          IMG=ghcr.io/prisma-risk/$IMAGE
+          # `index:`-scoped annotations land on the manifest list itself. GHCR reads
+          # the package-page description from the index annotation, NOT from the
+          # per-arch config LABEL baked by the Dockerfile (imagetools create does not
+          # copy child labels up), so this is the half that actually fixes the page.
+          ANNOTATIONS=(
+            --annotation "index:org.opencontainers.image.title=$IMAGE"
+            --annotation "index:org.opencontainers.image.description=$DESC"
+            --annotation "index:org.opencontainers.image.source=https://github.com/prisma-risk/tsoracle"
+            --annotation "index:org.opencontainers.image.licenses=Apache-2.0"
+          )
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            docker buildx imagetools create \
+            docker buildx imagetools create "${ANNOTATIONS[@]}" \
               -t "$IMG:$V" -t "$IMG:latest" \
               "$IMG:$V-amd64" "$IMG:$V-arm64"
           else
-            docker buildx imagetools create \
+            docker buildx imagetools create "${ANNOTATIONS[@]}" \
               -t "$IMG:$V" \
               "$IMG:$V-amd64" "$IMG:$V-arm64"
           fi

@@ -17,6 +17,18 @@ COPY . .
 RUN cargo build --release -p tsoracle --bin tsoracle ${FEATURES:+--no-default-features --features $FEATURES}
 
 FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS runtime
+# OCI image metadata. IMAGE_TITLE/IMAGE_DESCRIPTION are passed per-variant by the
+# release-images workflow so each driver image (tsoracle-file, tsoracle-openraft,
+# tsoracle) carries its own description; defaults cover a bare `docker build`. This
+# description LABEL is the per-arch-config copy that `docker inspect` reads; the
+# release workflow ALSO re-emits the same value as an index-level annotation on the
+# multi-arch manifest, which is the layer GHCR's package page actually surfaces.
+ARG IMAGE_TITLE="tsoracle"
+ARG IMAGE_DESCRIPTION="A distributed timestamp and sequence oracle"
+LABEL org.opencontainers.image.title="${IMAGE_TITLE}" \
+      org.opencontainers.image.description="${IMAGE_DESCRIPTION}" \
+      org.opencontainers.image.source="https://github.com/prisma-risk/tsoracle" \
+      org.opencontainers.image.licenses="Apache-2.0"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
