@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.1.0...tsoracle-standalone-v1.1.1) - 2026-05-30
+
+### Other
+
+- updated the following local packages: tsoracle-core, tsoracle-consensus, tsoracle-server, tsoracle-driver-file, tsoracle-openraft-toolkit, tsoracle-driver-openraft, tsoracle-driver-paxos, tsoracle-paxos-toolkit
+
 ## [1.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.0.0...tsoracle-standalone-v1.1.0) - 2026-05-27
 
 ### Added

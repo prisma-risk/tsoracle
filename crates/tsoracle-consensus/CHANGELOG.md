@@ -4,6 +4,17 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v1.0.1...tsoracle-consensus-v2.0.0) - 2026-05-30
+
+### Added
+
+- keyed dense sequences on openraft + format-activation rollout gate ([#585](https://github.com/prisma-risk/tsoracle/pull/585))
+- keyed dense sequence service (GetSeq) with file driver consensus support ([#579](https://github.com/prisma-risk/tsoracle/pull/579))
+
+### Other
+
+- *(consensus)* [**breaking**] typed AdvanceOutOfRange variant end-to-end ([#569](https://github.com/prisma-risk/tsoracle/pull/569))
+
 ## [1.0.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v1.0.0...tsoracle-consensus-v1.0.1) - 2026-05-27
 
 ### Other
