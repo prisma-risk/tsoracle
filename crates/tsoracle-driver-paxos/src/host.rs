@@ -27,9 +27,9 @@
 //! is persisted, and how `current_high_water` / `submit_advance` interact
 //! with the underlying paxos log. The bundled [`crate::StandaloneHost`]
 //! owns its own OmniPaxos cluster + apply pipeline keyed on
-//! [`HighWaterCommand`]. A larger service that already runs OmniPaxos for
+//! [`HighWaterCommand`](crate::log_entry::HighWaterCommand). A larger service that already runs OmniPaxos for
 //! other state can implement this trait against its existing handle and
-//! pick its own [`Entry`](omnipaxos::storage::Entry) — typically an
+//! pick its own [`Entry`] — typically an
 //! envelope enum that carries `HighWaterCommand` as one variant alongside
 //! the service's own commands.
 

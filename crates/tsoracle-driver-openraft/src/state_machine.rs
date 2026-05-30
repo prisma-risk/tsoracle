@@ -61,8 +61,8 @@ use tsoracle_codec::{
     VersionedCodec, decode_framed, decode_postcard_exact, encode_framed, encode_postcard,
 };
 use tsoracle_openraft_toolkit::{
-    ActiveWriteVersion, BASELINE_WRITE_VERSION, MAX_READABLE_VERSION, MIN_READABLE_VERSION,
-    codec_io_error,
+    ActiveWriteVersion, BASELINE_WRITE_VERSION, DENSE_WRITE_VERSION, MAX_READABLE_VERSION,
+    MIN_READABLE_VERSION, codec_io_error,
 };
 
 use crate::log_entry::{HighWaterCommand, SetFormatVersionPayload};
@@ -89,6 +89,24 @@ pub struct HighWaterStateMachineSnapshot {
     pub current_value: u64,
     pub last_applied: Option<LogId>,
     pub last_membership: StoredMem,
+    /// Per-key dense counters (v5+). Empty in a v4 snapshot (pre-dense); the
+    /// restore path keeps the genesis cap seeded from the constructor.
+    pub dense: std::collections::BTreeMap<String, u64>,
+    /// Genesis cardinality cap (v5+). Zero in a v4 snapshot ("absent
+    /// sentinel"); the restore path keeps the cap seeded from the constructor.
+    pub dense_cap: u64,
+}
+
+/// The v4 on-disk snapshot layout, frozen. Used only to decode
+/// `BASELINE_WRITE_VERSION` bytes written before the dense fields existed;
+/// converted into the current payload (empty dense map, sentinel cap 0 =
+/// "absent") on decode. Do not edit its field set — it must remain
+/// byte-identical to the pre-dense layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HighWaterStateMachineSnapshotV4 {
+    current_value: u64,
+    last_applied: Option<LogId>,
+    last_membership: StoredMem,
 }
 
 /// On-disk envelope written to the [`SnapshotStore`]: pairs the openraft
@@ -106,20 +124,31 @@ struct PersistedSnapshot {
 impl VersionedCodec for HighWaterStateMachineSnapshot {
     fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
         match version {
-            // v4 (BASELINE_WRITE_VERSION): whole-value postcard, byte-identical
-            // to the pre-seam frame. Later phases add older/newer arms here as
-            // the layout evolves and MIN_READABLE_VERSION/MAX_READABLE_VERSION
-            // widen.
-            v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
-            // `BASELINE + 1` alias: a test-only harness affordance. The body
-            // is byte-identical to BASELINE — only the version byte changes
-            // — so the activation machinery (gate -> propose -> commit ->
-            // apply -> cell flip) can run end-to-end in a mixed-version e2e
-            // without shipping a real new format. Gated off in production.
-            // The guard derives from BASELINE so a future baseline bump
-            // moves the alias version with no edit here.
+            // v4 (BASELINE_WRITE_VERSION): decode the frozen old layout, lift
+            // into the current payload. Pre-dense snapshots carry no dense
+            // bytes; dense is empty and cap is the sentinel 0 ("absent") — the
+            // restore path keeps the genesis cap seeded from the constructor.
+            v if v == BASELINE_WRITE_VERSION => {
+                let old: HighWaterStateMachineSnapshotV4 = decode_postcard_exact(body)?;
+                Ok(HighWaterStateMachineSnapshot {
+                    current_value: old.current_value,
+                    last_applied: old.last_applied,
+                    last_membership: old.last_membership,
+                    dense: std::collections::BTreeMap::new(),
+                    dense_cap: 0,
+                })
+            }
+            // v5 (DENSE_WRITE_VERSION): the current layout decodes directly.
+            // Ungated — production reads dense snapshots from v5-activated
+            // clusters without any feature flag.
+            v if v == DENSE_WRITE_VERSION => decode_postcard_exact(body),
+            // v6 (BASELINE + 2): synthetic activation-test alias. Body is
+            // byte-identical to the current layout — only the version byte
+            // changes — so the activation machinery (gate -> propose -> commit
+            // -> apply -> cell flip) can run end-to-end in a mixed-version e2e
+            // without shipping a real new format. Gated off in production. (#583)
             #[cfg(feature = "e2e-max-readable-next")]
-            v if v == BASELINE_WRITE_VERSION + 1 => decode_postcard_exact(body),
+            v if v == BASELINE_WRITE_VERSION + 2 => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -130,9 +159,31 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
 
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
-            v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
+            // v4: project to the frozen old layout (dense is always empty before
+            // activation, so dropping it is lossless). This is what
+            // build_snapshot emits while the active write version is still 4.
+            v if v == BASELINE_WRITE_VERSION => {
+                // Fail loud in ALL build profiles (not just debug): a non-empty
+                // dense map at this point means write-version 5 data is being
+                // encoded into a v4 snapshot, which would silently drop it.
+                // The invariant (dense only populated after activation flips the
+                // write version to 5) is maintained by the rollout gate, so
+                // reaching here with a non-empty map indicates a protocol
+                // violation that must be surfaced rather than silently lost.
+                if !self.dense.is_empty() {
+                    return Err(tsoracle_codec::CodecError::NotRepresentable { version });
+                }
+                encode_postcard(&HighWaterStateMachineSnapshotV4 {
+                    current_value: self.current_value,
+                    last_applied: self.last_applied,
+                    last_membership: self.last_membership.clone(),
+                })
+            }
+            // v5: the current (dense) layout encodes directly. Ungated.
+            v if v == DENSE_WRITE_VERSION => encode_postcard(self),
+            // v6 synthetic alias — see decode_version comment above.
             #[cfg(feature = "e2e-max-readable-next")]
-            v if v == BASELINE_WRITE_VERSION + 1 => encode_postcard(self),
+            v if v == BASELINE_WRITE_VERSION + 2 => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -145,9 +196,16 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
 impl VersionedCodec for PersistedSnapshot {
     fn decode_version(version: u8, body: &[u8]) -> Result<Self, tsoracle_codec::CodecError> {
         match version {
+            // v4: envelope layout unchanged — opaque `data` bytes hold the
+            // version-framed payload.
             v if v == BASELINE_WRITE_VERSION => decode_postcard_exact(body),
+            // v5: envelope layout still unchanged (only the payload data blob
+            // inside gains dense bytes). Ungated — production reads v5
+            // envelopes once activated.
+            v if v == DENSE_WRITE_VERSION => decode_postcard_exact(body),
+            // v6 synthetic alias — see HighWaterStateMachineSnapshot decode_version.
             #[cfg(feature = "e2e-max-readable-next")]
-            v if v == BASELINE_WRITE_VERSION + 1 => decode_postcard_exact(body),
+            v if v == BASELINE_WRITE_VERSION + 2 => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -159,8 +217,11 @@ impl VersionedCodec for PersistedSnapshot {
     fn encode_version(&self, version: u8) -> Result<Vec<u8>, tsoracle_codec::CodecError> {
         match version {
             v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
+            // v5: envelope layout unchanged; real ungated arm for production.
+            v if v == DENSE_WRITE_VERSION => encode_postcard(self),
+            // v6 synthetic alias — see HighWaterStateMachineSnapshot decode_version.
             #[cfg(feature = "e2e-max-readable-next")]
-            v if v == BASELINE_WRITE_VERSION + 1 => encode_postcard(self),
+            v if v == BASELINE_WRITE_VERSION + 2 => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -175,6 +236,14 @@ impl VersionedCodec for PersistedSnapshot {
 /// (poison semantics would just mask the originating panic).
 struct Core {
     current_value: u64,
+    /// Per-key dense counters. Deterministic iteration (BTreeMap) so snapshots
+    /// are byte-identical across replicas.
+    dense: std::collections::BTreeMap<String, u64>,
+    /// Immutable, cluster-wide genesis cardinality cap. Seeded from the SM
+    /// constructor (identical config on every node) or restored from a
+    /// snapshot; never mutated at runtime. Stored in the replicated snapshot so
+    /// replay/restore reproduces the same accept/reject decisions (spec §6.2).
+    dense_cap: u64,
     last_applied: Option<LogId>,
     last_membership: StoredMem,
     /// Snapshot index counter, used to make snapshot ids unique even when two
@@ -266,16 +335,46 @@ impl HighWaterStateMachine {
         Self::with_store(store).expect("InMemorySnapshotStore::load is infallible")
     }
 
+    /// Build a state machine with a custom genesis cardinality cap, backed by
+    /// an in-memory snapshot store. The cap is immutable after construction and
+    /// must be identical on every cluster member. Intended for tests that need
+    /// a small cap to exercise `DenseCardinalityExceeded`; production callers
+    /// use [`new`](Self::new) which defaults to
+    /// [`DEFAULT_DENSE_CARDINALITY_CAP`](crate::DEFAULT_DENSE_CARDINALITY_CAP).
+    #[cfg(test)]
+    #[expect(
+        clippy::expect_used,
+        reason = "`new_with_dense_cap` only fails when `store.load()` returns Err; \
+                  `InMemorySnapshotStore::load` is `Ok(None)` for a fresh \
+                  store, so this branch is unreachable."
+    )]
+    fn new_with_dense_cap(dense_cap: u64) -> Self {
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let sm = Self::with_store(store).expect("InMemorySnapshotStore::load is infallible");
+        sm.core.lock().dense_cap = dense_cap;
+        sm
+    }
+
     /// Build a state machine backed by `store` and rehydrated from whatever
     /// snapshot the store currently holds.
     ///
     /// If `store.load()` returns a snapshot, the state machine's
-    /// `current_value`, `last_applied`, `last_membership`, and
+    /// `current_value`, `last_applied`, `last_membership`, dense state, and
     /// `get_current_snapshot()` all reflect that snapshot on return. This is
     /// the contract that lets openraft re-enable the default snapshot policy:
     /// after a restart the log store's `last_purged_log_id` may sit above
     /// index 0, and the state machine must already cover those purged entries
     /// or openraft will panic during recovery.
+    ///
+    /// The active write version is recovered to at least the persisted
+    /// snapshot's leading version byte, so a store holding a v5/dense snapshot
+    /// does not come back at the baseline (which would trip the fail-loud
+    /// `NotRepresentable` guard on the next `build_snapshot`). For full
+    /// max-of-evidence recovery — folding in the highest version byte among
+    /// durable *log* records as well — seed the cell via
+    /// [`recover_active_write_version`](tsoracle_openraft_toolkit::recover_active_write_version)
+    /// and pass it to [`with_store_and_active_version`](Self::with_store_and_active_version);
+    /// `with_store` only sees the snapshot store.
     pub fn with_store(store: Arc<dyn SnapshotStore>) -> io::Result<Self> {
         Self::with_store_and_active_version(store, ActiveWriteVersion::default())
     }
@@ -291,6 +390,8 @@ impl HighWaterStateMachine {
     ) -> io::Result<Self> {
         let mut core = Core {
             current_value: 0,
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: crate::DEFAULT_DENSE_CARDINALITY_CAP,
             last_applied: None,
             last_membership: StoredMembership::default(),
             snapshot_idx: 0,
@@ -306,10 +407,35 @@ impl HighWaterStateMachine {
             core.current_value = payload.current_value;
             core.last_applied = payload.last_applied;
             core.last_membership = payload.last_membership;
+            core.dense = payload.dense;
+            // A v4 snapshot carries dense_cap == 0 (absent sentinel); keep the
+            // constructor-seeded genesis cap. A v5 snapshot carries the real cap.
+            if payload.dense_cap != 0 {
+                core.dense_cap = payload.dense_cap;
+            }
             core.current_snapshot = Some(StoredSnapshot {
                 meta: persisted.meta,
                 data: persisted.data,
             });
+            // Recover the active write version from the persisted envelope's
+            // leading version byte, mirroring `install_snapshot`'s
+            // max-of-evidence rule (and `recover_active_write_version`'s).
+            // Without this, the bare `with_store` path — which hands in a fresh
+            // BASELINE cell — would rehydrate a populated dense map (from a v5
+            // snapshot) while leaving the cell at v4, then trip the fail-loud
+            // `NotRepresentable` guard on its next `build_snapshot`. The byte is
+            // a safe floor: a v5 snapshot proves a `SetFormatVersion` to at
+            // least that version already committed cluster-wide. Only ever
+            // advances, so a caller (e.g. standalone bootstrap) that already
+            // seeded the cell from richer log+snapshot evidence is unaffected.
+            // `decode_framed` accepted the byte above, so it is within
+            // `[MIN, MAX_READABLE_VERSION]` and never exceeds what this binary
+            // can write.
+            if let Some(&snapshot_version) = bytes.first() {
+                if snapshot_version > active_write_version.get() {
+                    active_write_version.set(snapshot_version);
+                }
+            }
         }
         let state_machine = Self {
             core: Arc::new(Mutex::new(core)),
@@ -338,6 +464,12 @@ impl HighWaterStateMachine {
     /// before calling.
     pub async fn current_value(&self) -> u64 {
         self.core.lock().current_value
+    }
+
+    /// Read a dense counter by key, returning 0 if absent. State-machine-local
+    /// read; callers needing linearizability must issue a read barrier first.
+    pub fn dense_value(&self, key: &str) -> u64 {
+        self.core.lock().dense.get(key).copied().unwrap_or(0)
     }
 
     fn snapshot_id_for(last_applied: Option<&LogId>, idx: u64) -> String {
@@ -415,6 +547,8 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
                 current_value: core.current_value,
                 last_applied: core.last_applied,
                 last_membership: core.last_membership.clone(),
+                dense: core.dense.clone(),
+                dense_cap: core.dense_cap,
             };
             let snapshot_id = Self::snapshot_id_for(core.last_applied.as_ref(), core.snapshot_idx);
             let meta = SnapMeta {
@@ -598,6 +732,30 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                         }
                     }
                 }
+                EntryPayload::Normal(HighWaterCommand::AdvanceDense { key, count }) => {
+                    let mut core = self.core.lock();
+                    let key_str = key.as_str();
+                    let present = core.dense.contains_key(key_str);
+                    let outcome = if !present && core.dense.len() as u64 >= core.dense_cap {
+                        ApplyOutcome::DenseCardinalityExceeded {
+                            cap: core.dense_cap,
+                        }
+                    } else {
+                        let start = core.dense.get(key_str).copied().unwrap_or(0);
+                        match start.checked_add(u64::from(*count)) {
+                            Some(next) => {
+                                core.dense.insert(key_str.to_string(), next);
+                                ApplyOutcome::DenseAdvanced { start }
+                            }
+                            None => ApplyOutcome::DenseOverflow,
+                        }
+                    };
+                    core.last_applied = Some(log_id);
+                    HighWaterApplied {
+                        value: core.current_value,
+                        outcome,
+                    }
+                }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
                     core.last_membership = StoredMembership::new(Some(log_id), membership.clone());
@@ -652,6 +810,25 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
             ));
         }
 
+        // The snapshot's leading version byte is evidence that the sending
+        // leader's active write version was at least this high — which means a
+        // `SetFormatVersion` activation to that version already committed
+        // cluster-wide (the all-members gate required every member, including
+        // this one, to be able to read it). Advance our cell to match, mirroring
+        // `recover_active_write_version`'s max-of-evidence rule. Without this, a
+        // follower that receives a v5 snapshot whose `SetFormatVersion` entry was
+        // purged into the snapshot would keep `active_write_version` at the
+        // baseline while holding a populated dense map, then trip the fail-loud
+        // v4-encode `NotRepresentable` guard on its next `build_snapshot`. The
+        // byte is already within `[MIN, MAX_READABLE_VERSION]` (decode_framed
+        // accepted it above), so this never exceeds what this binary can write.
+        if let Some(&snapshot_version) = bytes.first() {
+            if snapshot_version > self.active_write_version.get() {
+                self.active_write_version.set(snapshot_version);
+                crate::observability::record_active_write_version(snapshot_version);
+            }
+        }
+
         let persisted = PersistedSnapshot {
             meta: meta.clone(),
             data: bytes.clone(),
@@ -671,6 +848,12 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
             core.current_value = payload.current_value;
             core.last_applied = payload.last_applied;
             core.last_membership = payload.last_membership;
+            core.dense = payload.dense;
+            // A v4 snapshot carries dense_cap == 0 (absent sentinel); keep the
+            // constructor-seeded genesis cap. A v5 snapshot carries the real cap.
+            if payload.dense_cap != 0 {
+                core.dense_cap = payload.dense_cap;
+            }
         })?;
         Ok(())
     }
@@ -845,13 +1028,13 @@ mod tests {
         // The flip is only observable when the local binary's readable
         // range contains a target distinct from BASELINE. The
         // `e2e-max-readable-next` test harness raises MAX to
-        // BASELINE + 1; in default builds MIN == MAX == BASELINE, so any
+        // BASELINE + 2; in default builds MIN == MAX == BASELINE, so any
         // distinct target is out of range and the apply-arm
         // defense-in-depth (correctly) no-ops it. The behavior pinned by
         // this test — "subset OK + in-range target ⇒ cell flips" — is
         // unchanged; only the in-range target is feature-dependent.
         let mut sm = HighWaterStateMachine::new();
-        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 1;
+        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 2;
         // Establish membership {1, 2} at index 1.
         apply_one(
             &mut sm,
@@ -1130,7 +1313,7 @@ mod tests {
     #[cfg(feature = "e2e-max-readable-next")]
     #[tokio::test]
     async fn successful_activation_survives_replay() {
-        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 1;
+        let target = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 2;
         let log = vec![
             (1u64, ReplayEntry::Membership(vec![1, 2])),
             (
@@ -1236,7 +1419,7 @@ mod tests {
     #[cfg(feature = "e2e-max-readable-next")]
     #[tokio::test]
     async fn replay_is_deterministic() {
-        let in_range = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 1;
+        let in_range = tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION + 2;
         let log = vec![
             (1u64, ReplayEntry::Membership(vec![1, 2])),
             (
@@ -1365,12 +1548,13 @@ mod tests {
         // readable across the multi-version codec and the next
         // build_snapshot re-emits at the cluster's ACTIVE write version.
         //
-        // HONESTY: MIN==MAX==BASELINE today, so there is no genuine lower
-        // production version. This exercises the seam end-to-end at the
-        // only version that exists; the genuine cross-version rewrite
-        // (install vN, flip to vN+1, assert rebuild is vN+1) is the
-        // structural extension a real vN+1 work would make by
-        // parameterizing the installed version.
+        // SCOPE: this drives the same-version axis — persist at the active
+        // write version (BASELINE = 4, since no activation flip is injected
+        // here) and assert the reopen reads it back and re-emits at the active
+        // version. The genuine cross-version rewrite (install v4, activate v5,
+        // assert the rebuild is v5) is the orthogonal axis; the readable range
+        // is now [4, 5], so the v4 lower version genuinely exists on disk
+        // pre-activation.
         let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
 
         // Persist a snapshot via a first SM instance, then drop it.
@@ -1428,11 +1612,18 @@ mod tests {
         // MAX_READABLE_VERSION] and reject anything outside it. This is
         // what makes an OLD-version on-disk snapshot readable after the
         // active version moves forward. Asserted against the codec range
-        // directly so it documents the contract even while MIN==MAX today.
+        // directly so it covers the full readable range [MIN = 4, MAX = 5] —
+        // iterating v4 (decode-and-lift) and v5 (direct decode).
+        // Empty dense map + cap 0 so the v4 encode arm (which projects to the
+        // frozen V4 struct) is lossless; assert_eq!(decoded, payload) holds
+        // for every version in the readable range because the decode-and-lift
+        // path restores dense=empty, dense_cap=0 from a v4 blob.
         let payload = HighWaterStateMachineSnapshot {
             current_value: 5,
             last_applied: Some(log_id(2)),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
         for version in tsoracle_openraft_toolkit::MIN_READABLE_VERSION
             ..=tsoracle_openraft_toolkit::MAX_READABLE_VERSION
@@ -1464,73 +1655,98 @@ mod tests {
 
     #[cfg(feature = "e2e-max-readable-next")]
     #[test]
-    fn e2e_max_readable_next_aliases_to_baseline_bytewise() {
+    fn e2e_max_readable_next_aliases_to_dense_version_bytewise() {
         // The test-only `e2e-max-readable-next` feature raises
-        // `MAX_READABLE_VERSION` to `BASELINE_WRITE_VERSION + 1` in the
+        // `MAX_READABLE_VERSION` to `BASELINE_WRITE_VERSION + 2` in the
         // toolkit and adds matching alias arms in this file's
-        // `VersionedCodec` impls that delegate to the baseline body. This
-        // pins the alias contract: a `BASELINE + 1`-stamped envelope is
-        // byte-identical to a BASELINE-stamped one beyond the leading
-        // version byte, and round-trips cross-version. That is what lets
-        // a mixed-version e2e drive a real activation flip from BASELINE
-        // to the next version end-to-end (gate -> propose -> commit ->
-        // apply -> cell flip) without shipping a real new format — the
-        // activation control plane runs because every encoder/decoder
-        // accepts the next version as an alias of BASELINE. Version-
-        // neutral assertions so this test survives a future baseline
+        // `VersionedCodec` impls that encode and decode as the current
+        // (v5/dense) layout. This pins the alias contract for the
+        // activation machinery harness:
+        //
+        //  - v6 = `BASELINE + 2` is the synthetic "next" activation target,
+        //    chosen above `DENSE_WRITE_VERSION` = 5 so the e2e harness does
+        //    not collide with the real dense format (#583).
+        //  - v6 encodes the current (full, dense-capable) layout — its body
+        //    is byte-identical to a v5-encoded blob, not to a v4 blob (v4
+        //    projects to the frozen `HighWaterStateMachineSnapshotV4` struct
+        //    which omits `dense` + `dense_cap`).
+        //  - The activation control plane (gate -> propose -> commit ->
+        //    apply -> cell flip) exercises end-to-end without a real new
+        //    format because the framing machinery accepts v6 just like v5.
+        //
+        // Version-neutral assertions so this test survives a future baseline
         // bump unchanged.
         use tsoracle_codec::{decode_framed, encode_framed};
-        use tsoracle_openraft_toolkit::{BASELINE_WRITE_VERSION, MAX_READABLE_VERSION};
+        use tsoracle_openraft_toolkit::{
+            BASELINE_WRITE_VERSION, DENSE_WRITE_VERSION, MAX_READABLE_VERSION,
+        };
 
         let baseline = BASELINE_WRITE_VERSION;
-        let next = baseline + 1;
+        let dense = DENSE_WRITE_VERSION;
+        let next = baseline + 2;
         assert_eq!(
             MAX_READABLE_VERSION, next,
-            "feature must raise MAX to BASELINE+1"
+            "feature must raise MAX to BASELINE+2"
         );
 
+        // Use empty dense map + cap 0 so the v4 encode arm (V4 projection) is
+        // lossless when we round-trip through v4, and the v6 body equals the
+        // v5 body (both encode the full current layout).
         let payload = HighWaterStateMachineSnapshot {
             current_value: 7,
             last_applied: None,
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
 
-        let framed_baseline = encode_framed(baseline, &payload).expect("encode baseline");
-        let framed_next = encode_framed(next, &payload).expect("encode next (alias)");
+        let framed_dense = encode_framed(dense, &payload).expect("encode dense (v5)");
+        let framed_next = encode_framed(next, &payload).expect("encode next (v6 alias)");
 
-        // Byte-identical except the leading version byte: the alias is
-        // structural, not a real layout change.
-        assert_eq!(framed_baseline[0], baseline);
+        // v6 body is byte-identical to v5 body (both encode the full layout).
+        assert_eq!(framed_dense[0], dense);
         assert_eq!(framed_next[0], next);
         assert_eq!(
-            &framed_baseline[1..],
+            &framed_dense[1..],
             &framed_next[1..],
-            "alias body must be byte-identical to baseline — only the version byte differs"
+            "v6 alias body must be byte-identical to v5 — only the version byte differs"
         );
 
-        // Cross-version round-trip: a next-stamped envelope decodes through
-        // the readable range, and a baseline reader can still consume it
-        // because the body is the same shape.
+        // v4 body is SHORTER (no dense/cap bytes) — confirm it is NOT
+        // byte-identical to v6. This documents the intentional divergence from
+        // the pre-T4 state where all three were aliased.
+        let framed_baseline = encode_framed(baseline, &payload).expect("encode baseline (v4)");
+        assert_ne!(
+            &framed_baseline[1..],
+            &framed_next[1..],
+            "v4 body must differ from v6 body: v4 omits dense/dense_cap"
+        );
+
+        // Cross-version round-trip: every version in the readable range
+        // decodes into the same logical value (empty dense, cap 0).
         let back_baseline: HighWaterStateMachineSnapshot =
             decode_framed(baseline, next, &framed_baseline).expect("decode baseline");
+        let back_dense: HighWaterStateMachineSnapshot =
+            decode_framed(baseline, next, &framed_dense).expect("decode v5");
         let back_next: HighWaterStateMachineSnapshot =
-            decode_framed(baseline, next, &framed_next).expect("decode next (alias)");
+            decode_framed(baseline, next, &framed_next).expect("decode next (v6 alias)");
         assert_eq!(back_baseline, payload);
+        assert_eq!(back_dense, payload);
         assert_eq!(back_next, payload);
 
-        // The envelope-shape carrier (`PersistedSnapshot`) must alias too
-        // — it is what `build_snapshot` actually emits at the active
-        // write version when the cell flips.
+        // The envelope-shape carrier (`PersistedSnapshot`) must also alias
+        // v5 at v6 — it is what `build_snapshot` actually emits at the
+        // active write version when the cell flips to v6.
         let envelope = PersistedSnapshot {
             meta: SnapMeta::default(),
             data: framed_next.clone(),
         };
-        let framed_env_baseline = encode_framed(baseline, &envelope).expect("envelope baseline");
-        let framed_env_next = encode_framed(next, &envelope).expect("envelope next");
+        let framed_env_dense = encode_framed(dense, &envelope).expect("envelope v5");
+        let framed_env_next = encode_framed(next, &envelope).expect("envelope v6");
         assert_eq!(
-            &framed_env_baseline[1..],
+            &framed_env_dense[1..],
             &framed_env_next[1..],
-            "PersistedSnapshot next-version envelope must alias baseline"
+            "PersistedSnapshot v6 envelope must be byte-identical to v5 envelope"
         );
     }
 
@@ -1591,8 +1807,11 @@ mod tests {
 
         let snap = sm.build_snapshot().await.expect("build_snapshot");
         let bytes = snap.snapshot.into_inner();
-        let payload: HighWaterStateMachineSnapshot = tsoracle_openraft_toolkit::decode(
-            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+        // Use decode_framed (VersionedCodec) so the v4 bytes are decoded via
+        // the frozen-V4-struct + lift path, not a raw postcard deserialize.
+        let payload: HighWaterStateMachineSnapshot = tsoracle_codec::decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
             &bytes,
         )
         .expect("decode snapshot");
@@ -1625,8 +1844,10 @@ mod tests {
             current_value: 999,
             last_applied: Some(log_id(5)),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
-        let bytes = tsoracle_openraft_toolkit::encode(
+        let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &payload,
         )
@@ -1811,8 +2032,10 @@ mod tests {
             current_value: 700,
             last_applied: Some(log_id(10)),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
-        let bytes = tsoracle_openraft_toolkit::encode(
+        let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &payload,
         )
@@ -1841,8 +2064,10 @@ mod tests {
             current_value: value,
             last_applied: Some(last_applied),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
-        let bytes = tsoracle_openraft_toolkit::encode(
+        let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &payload,
         )
@@ -2027,8 +2252,10 @@ mod tests {
             current_value: 123,
             last_applied: Some(log_id(5)),
             last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
-        let bytes = tsoracle_openraft_toolkit::encode(
+        let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             &payload,
         )
@@ -2148,24 +2375,43 @@ mod tests {
     #[test]
     fn snapshot_payload_versioned_codec_matches_legacy_frame() {
         use tsoracle_codec::{decode_framed, encode_framed};
-        // The framed bytes through the new VersionedCodec seam must equal the
-        // legacy `tsoracle_openraft_toolkit::encode(BASELINE_WRITE_VERSION, ..)` frame —
-        // proving the on-disk format did not move.
+        // The v4 encode arm projects to the frozen `HighWaterStateMachineSnapshotV4`
+        // struct (3 fields, no dense/cap). This test proves:
+        //
+        //  1. The v4 framed bytes are `[4, 7, 0, 0, 0, 0]` — the on-disk v4
+        //     layout did not change from the pre-dense era.
+        //  2. Those bytes equal what the frozen V4 struct produces when encoded
+        //     directly — a real pre-dense reader can still decode the output.
+        //  3. A v4-decode-and-lift roundtrip restores the original value with
+        //     empty dense map + cap 0 ("absent" sentinel).
         let payload = HighWaterStateMachineSnapshot {
             current_value: 7,
             last_applied: None,
             last_membership: StoredMembership::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
         let via_seam = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
             .expect("encode_framed");
-        let legacy = tsoracle_openraft_toolkit::encode(
+
+        // Prove the v4 body equals encoding the frozen V4 struct directly.
+        let v4_direct = tsoracle_openraft_toolkit::encode(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
-            &payload,
+            &HighWaterStateMachineSnapshotV4 {
+                current_value: 7,
+                last_applied: None,
+                last_membership: StoredMembership::default(),
+            },
         )
-        .expect("legacy encode");
-        assert_eq!(via_seam, legacy);
+        .expect("v4 direct encode");
+        assert_eq!(
+            via_seam, v4_direct,
+            "v4 encode must project to the frozen V4 struct"
+        );
         assert_eq!(via_seam, vec![4, 7, 0, 0, 0, 0]);
 
+        // decode-and-lift: v4 bytes decode into the current layout with empty
+        // dense map and cap 0 (the "absent" sentinel), which matches `payload`.
         let back: HighWaterStateMachineSnapshot = decode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
@@ -2194,24 +2440,29 @@ mod tests {
     #[test]
     fn snapshot_payload_pins_v4_layout() {
         use tsoracle_codec::encode_framed;
-        // Hand-built v4 frame: [BASELINE_WRITE_VERSION | postcard(payload)],
-        // now produced through the VersionedCodec seam that build_snapshot
-        // uses. Leading byte advanced 3 -> 4 when OpenraftPeer gained the
-        // admin_endpoint field (a breaking on-disk change for membership);
+        // Hand-built v4 frame: [BASELINE_WRITE_VERSION | postcard(V4_payload)],
+        // produced through the VersionedCodec seam that build_snapshot uses
+        // when active_write_version == BASELINE_WRITE_VERSION. The v4 encode
+        // arm projects to the frozen `HighWaterStateMachineSnapshotV4` struct
+        // (3 fields, no dense/cap), so the body bytes are unchanged from the
+        // pre-dense era. Leading byte advanced 3 -> 4 when OpenraftPeer gained
+        // the admin_endpoint field (a breaking on-disk change for membership);
         // the postcard body is unchanged. Body [7, 0, 0, 0, 0] =
         // current_value 7, last_applied None, then default StoredMembership
-        // (None log id + empty configs + empty nodes). Reordering or
-        // inserting a field changes these bytes and trips this test, forcing
-        // a deliberate version bump (a future evolution would advance
-        // MAX_READABLE_VERSION + BASELINE_WRITE_VERSION through an
-        // activation barrier rather than the historical stop-the-world bump).
+        // (None log id + empty configs + empty nodes). Reordering or inserting
+        // a field in the V4 struct changes these bytes and trips this test,
+        // forcing a deliberate review.
         let payload = HighWaterStateMachineSnapshot {
             current_value: 7,
             last_applied: None,
             last_membership: StoredMembership::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
         };
         let framed = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
             .expect("encode");
+        // v4 encode projects to the frozen V4 struct: body is still
+        // [7, 0, 0, 0, 0] — the dense/cap bytes are NOT in the output.
         assert_eq!(framed, vec![4, 7, 0, 0, 0, 0]);
     }
 
@@ -2291,5 +2542,511 @@ mod tests {
             store.load().expect("load").is_none(),
             "rejected install must not persist an envelope"
         );
+    }
+
+    // ---- Snapshot codec cross-version tests (Task 4) ----
+    //
+    // These tests pin the postcard correctness guarantees added by Task 4:
+    //  - v5 round-trip: encode a dense snapshot, decode back equal.
+    //  - v4 forward-compat: encode an empty-dense snapshot at v4; the bytes
+    //    equal what the frozen V4 struct produces; decode lifts to empty dense.
+    //  - v4 old-bytes: hand-encode a V4 struct, decode as current → empty dense.
+
+    #[test]
+    fn snapshot_codec_v5_roundtrip_with_nonempty_dense_map() {
+        use tsoracle_codec::{decode_framed, encode_framed};
+        use tsoracle_openraft_toolkit::DENSE_WRITE_VERSION;
+
+        let mut dense = std::collections::BTreeMap::new();
+        dense.insert("orders".to_string(), 42u64);
+        dense.insert("invoices".to_string(), 1000u64);
+
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 777,
+            last_applied: Some(log_id(9)),
+            last_membership: StoredMem::default(),
+            dense: dense.clone(),
+            dense_cap: 500,
+        };
+
+        let framed = encode_framed(DENSE_WRITE_VERSION, &payload).expect("v5 encode");
+        assert_eq!(framed[0], DENSE_WRITE_VERSION, "leading byte must be v5");
+
+        let decoded: HighWaterStateMachineSnapshot = decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            &framed,
+        )
+        .expect("v5 decode");
+        assert_eq!(
+            decoded, payload,
+            "v5 roundtrip must produce the original payload"
+        );
+        assert_eq!(decoded.dense, dense, "dense map must survive roundtrip");
+        assert_eq!(decoded.dense_cap, 500, "dense_cap must survive roundtrip");
+    }
+
+    #[test]
+    fn snapshot_codec_v4_forward_compat_empty_dense() {
+        use tsoracle_codec::{decode_framed, encode_framed};
+
+        // A pre-dense snapshot: dense is empty, cap is 0.
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 42,
+            last_applied: Some(log_id(3)),
+            last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
+        };
+
+        let framed = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
+            .expect("v4 encode");
+
+        // The v4 bytes must equal encoding the frozen V4 struct directly,
+        // so a pre-dense reader can still decode them.
+        let v4_struct_bytes = tsoracle_openraft_toolkit::encode(
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
+            &HighWaterStateMachineSnapshotV4 {
+                current_value: 42,
+                last_applied: Some(log_id(3)),
+                last_membership: StoredMem::default(),
+            },
+        )
+        .expect("v4 struct direct encode");
+        assert_eq!(
+            framed, v4_struct_bytes,
+            "v4 encode of empty-dense payload must be byte-identical to frozen V4 struct"
+        );
+
+        // Decode: the v4 bytes lift into the current layout with empty dense, cap 0.
+        let decoded: HighWaterStateMachineSnapshot = decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            &framed,
+        )
+        .expect("v4 decode");
+        assert_eq!(
+            decoded, payload,
+            "v4 forward-compat decode must produce empty-dense payload"
+        );
+        assert!(decoded.dense.is_empty(), "decoded v4 dense must be empty");
+        assert_eq!(
+            decoded.dense_cap, 0,
+            "decoded v4 cap must be 0 (absent sentinel)"
+        );
+    }
+
+    #[test]
+    fn snapshot_codec_v4_old_bytes_decode_lifts_to_empty_dense() {
+        use tsoracle_codec::{decode_framed, encode_postcard};
+
+        // Hand-encode a V4 struct (the 3-field pre-dense layout) as postcard,
+        // then frame it as a v4 record. This simulates bytes written by an old
+        // (pre-dense) node.
+        let v4 = HighWaterStateMachineSnapshotV4 {
+            current_value: 99,
+            last_applied: Some(log_id(7)),
+            last_membership: StoredMem::default(),
+        };
+        let v4_body = encode_postcard(&v4).expect("postcard encode V4");
+        let mut framed = vec![tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION];
+        framed.extend_from_slice(&v4_body);
+
+        // Decode through the VersionedCodec path.
+        let decoded: HighWaterStateMachineSnapshot = decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            &framed,
+        )
+        .expect("decode old v4 bytes");
+
+        assert_eq!(decoded.current_value, 99, "current_value lifts correctly");
+        assert_eq!(
+            decoded.last_applied.map(|l| l.index),
+            Some(7),
+            "last_applied lifts correctly"
+        );
+        assert!(
+            decoded.dense.is_empty(),
+            "old v4 bytes must lift to empty dense map"
+        );
+        assert_eq!(
+            decoded.dense_cap, 0,
+            "old v4 bytes must lift to cap 0 (absent)"
+        );
+    }
+
+    // ---- AdvanceDense apply tests ----
+    //
+    // Drive the `AdvanceDense` apply arm directly via `apply_one` and verify
+    // the observable side effects through `dense_value()` (the pre/post
+    // counter), the `last_applied` log position, and the fact that the
+    // high-water is NOT touched by a dense advance.
+    //
+    // The four cases the plan mandates:
+    //  1. First advance of "orders" by 5 → start=0, dense["orders"]=5.
+    //  2. Second advance of "orders" by 3 → start=5, dense["orders"]=8.
+    //  3. A new key when the cap is full → DenseCardinalityExceeded: counter
+    //     stays 0 and the map size does not grow.
+    //  4. A counter at u64::MAX with count=1 → DenseOverflow: counter
+    //     stays at u64::MAX.
+    //
+    // We verify start and outcome by observing `dense_value` BEFORE the apply
+    // (which gives `start`) and AFTER (which gives `start + count` on success,
+    // unchanged on rejection). The high-water is pinned at 0 throughout (no
+    // `Advance` entries), which confirms the apply arm does NOT touch it.
+
+    fn dense_key(s: &str) -> tsoracle_core::SeqKey {
+        tsoracle_core::SeqKey::try_new(s).expect("valid key")
+    }
+
+    #[tokio::test]
+    async fn dense_advance_first_key_starts_at_zero() {
+        let mut sm = HighWaterStateMachine::new();
+        let key = dense_key("orders");
+
+        // Pre-condition: key is absent → start would be 0.
+        assert_eq!(sm.dense_value("orders"), 0);
+
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: key.clone(),
+                count: 5,
+            }),
+        )
+        .await;
+
+        // Post-condition: counter advanced by 5; start was 0.
+        assert_eq!(
+            sm.dense_value("orders"),
+            5,
+            "first advance by 5: dense[orders] = 5 (start=0)"
+        );
+        // High-water must be untouched.
+        assert_eq!(
+            sm.current_value().await,
+            0,
+            "AdvanceDense must not touch the high-water"
+        );
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(last.map(|l| l.index), Some(1));
+    }
+
+    #[tokio::test]
+    async fn dense_advance_second_apply_starts_at_previous_value() {
+        let mut sm = HighWaterStateMachine::new();
+        let key = dense_key("orders");
+
+        // First advance: start=0, next=5.
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: key.clone(),
+                count: 5,
+            }),
+        )
+        .await;
+        assert_eq!(sm.dense_value("orders"), 5);
+
+        // Capture start before second apply.
+        let start_before = sm.dense_value("orders"); // == 5
+
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: key.clone(),
+                count: 3,
+            }),
+        )
+        .await;
+
+        // The second block starts at 5 (the pre-advance value).
+        assert_eq!(
+            start_before, 5,
+            "second advance: start must be the prior counter value (5)"
+        );
+        assert_eq!(
+            sm.dense_value("orders"),
+            8,
+            "second advance by 3: dense[orders] = 8"
+        );
+    }
+
+    #[tokio::test]
+    async fn dense_advance_cardinality_cap_rejects_new_key() {
+        // Cap set to 1: one key is allowed; a second new key must be rejected.
+        let mut sm = HighWaterStateMachine::new_with_dense_cap(1);
+        let k1 = dense_key("orders");
+        let k2 = dense_key("users");
+
+        // First key is accepted (map was empty, cap=1 → len 0 < 1 → OK).
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: k1.clone(),
+                count: 1,
+            }),
+        )
+        .await;
+        assert_eq!(sm.dense_value("orders"), 1, "first key accepted");
+
+        // Second NEW key: map len==1 >= cap=1 → DenseCardinalityExceeded.
+        // The counter for the new key must stay at 0 (rejection is a no-op on
+        // the dense map).
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: k2.clone(),
+                count: 1,
+            }),
+        )
+        .await;
+        assert_eq!(
+            sm.dense_value("users"),
+            0,
+            "new key rejected by cardinality cap: dense[users] must be 0"
+        );
+        // Existing key still advances (already present → cap check skipped).
+        apply_one(
+            &mut sm,
+            3,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: k1.clone(),
+                count: 4,
+            }),
+        )
+        .await;
+        assert_eq!(
+            sm.dense_value("orders"),
+            5,
+            "existing key still advances despite cap being full"
+        );
+    }
+
+    #[tokio::test]
+    async fn dense_advance_overflow_leaves_counter_unchanged() {
+        // Seed the counter at u64::MAX by using a large initial count and then
+        // bridging up. Since count is u32 (max 2^32-1) we need multiple applies
+        // to reach u64::MAX. It is simpler to directly manipulate the core in
+        // the test module (same file, so private access is allowed).
+        let sm = HighWaterStateMachine::new();
+        {
+            let mut core = sm.core.lock();
+            core.dense.insert("x".to_string(), u64::MAX);
+        }
+        // Apply AdvanceDense with count=1: checked_add(u64::MAX, 1) overflows.
+        let mut sm_mut = sm;
+        apply_one(
+            &mut sm_mut,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: dense_key("x"),
+                count: 1,
+            }),
+        )
+        .await;
+        // Overflow: counter must remain at u64::MAX (rejection is a no-op).
+        assert_eq!(
+            sm_mut.dense_value("x"),
+            u64::MAX,
+            "overflow must not modify the counter"
+        );
+    }
+
+    // ---- Regression test: install_snapshot advances active_write_version ----
+    //
+    // Bug: a follower that received a v5 snapshot whose `SetFormatVersion` entry
+    // had already been purged into the snapshot would keep `active_write_version`
+    // at `BASELINE_WRITE_VERSION` (4) while now holding a populated dense map.
+    // The next `build_snapshot` call would then hit the fail-loud
+    // `NotRepresentable` guard in `encode_version`'s v4 arm and return an error.
+    //
+    // Fix: after decoding the incoming snapshot, `install_snapshot` now advances
+    // the `active_write_version` cell to the snapshot's leading version byte if
+    // it exceeds the current cell value.
+
+    #[tokio::test]
+    async fn install_snapshot_advances_active_write_version_to_snapshot_byte() {
+        // ---- Step 1: build a v5-framed snapshot on a source SM ----
+        //
+        // Create a source SM whose active_write_version is DENSE_WRITE_VERSION
+        // (5) and whose dense map is non-empty — the combination that would have
+        // triggered the NotRepresentable guard on the follower.
+        let v5_cell = ActiveWriteVersion::default();
+        v5_cell.set(DENSE_WRITE_VERSION);
+
+        let store_src: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let mut src =
+            HighWaterStateMachine::with_store_and_active_version(store_src, v5_cell.clone())
+                .expect("source SM");
+
+        // Populate the dense map and advance the high-water so the snapshot is
+        // non-trivial.  `with_store_and_active_version` starts at the genesis
+        // cardinality cap; apply an AdvanceDense to ensure dense is non-empty.
+        apply_one(
+            &mut src,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                key: dense_key("orders"),
+                count: 42,
+            }),
+        )
+        .await;
+
+        assert_eq!(src.active_write_version(), DENSE_WRITE_VERSION);
+        assert_eq!(src.dense_value("orders"), 42, "source dense populated");
+
+        // Build the v5 snapshot: the bytes handed back by openraft are what
+        // gets streamed to the follower via `begin_receiving_snapshot` +
+        // `install_snapshot`.
+        let snap = src
+            .build_snapshot()
+            .await
+            .expect("build_snapshot on source");
+        let snap_meta = snap.meta.clone();
+        // `snap.snapshot` is a `Cursor<Vec<u8>>`; the inner Vec is the framed
+        // payload bytes that `install_snapshot` receives.
+        let snap_bytes = snap.snapshot.into_inner();
+
+        // Confirm the snapshot is v5-framed (the first byte is the version).
+        assert_eq!(
+            snap_bytes[0], DENSE_WRITE_VERSION,
+            "source snapshot must be v5-framed"
+        );
+
+        // ---- Step 2: build a fresh target SM at BASELINE_WRITE_VERSION ----
+        //
+        // This models a newly-joining follower that never applied the
+        // SetFormatVersion entry (it was already purged into the snapshot it is
+        // about to receive).
+        let mut target = HighWaterStateMachine::new();
+        assert_eq!(
+            target.active_write_version(),
+            BASELINE_WRITE_VERSION,
+            "target must start at baseline (the pre-bug state)"
+        );
+        assert_eq!(target.dense_value("orders"), 0, "target dense starts empty");
+
+        // ---- Step 3: install the v5 snapshot onto the target ----
+        target
+            .install_snapshot(&snap_meta, std::io::Cursor::new(snap_bytes))
+            .await
+            .expect("install_snapshot must succeed");
+
+        // ---- Step 4: regression assertions ----
+
+        // PRIMARY: the cell must advance to DENSE_WRITE_VERSION after install.
+        // Before the fix this stayed at BASELINE_WRITE_VERSION (4) — the exact
+        // bug being pinned by this test.
+        assert_eq!(
+            target.active_write_version(),
+            DENSE_WRITE_VERSION,
+            "install_snapshot must advance active_write_version to the snapshot's \
+             leading version byte (regression: was left at BASELINE before fix)"
+        );
+
+        // Dense state must be restored from the snapshot.
+        assert_eq!(
+            target.dense_value("orders"),
+            42,
+            "dense map must be restored from the installed snapshot"
+        );
+
+        // CRITICAL: build_snapshot on the target must now SUCCEED.  Before the
+        // fix, this would error with NotRepresentable because the v4 encode arm
+        // would be selected (cell=4) while dense is non-empty.
+        target
+            .build_snapshot()
+            .await
+            .expect("build_snapshot on target after install must NOT return NotRepresentable");
+    }
+
+    // ---- Regression test: with_store recovers active_write_version ----
+    //
+    // Sibling of `install_snapshot_advances_active_write_version_to_snapshot_byte`.
+    // Bug: the public `with_store` / `with_store_and_active_version` load path
+    // rehydrated `core.dense` (and `dense_cap`) from a persisted v5 snapshot but
+    // left the freshly-defaulted `active_write_version` cell at
+    // `BASELINE_WRITE_VERSION` (4). The next `build_snapshot` would then select
+    // the v4 encode arm with a non-empty dense map and hit the fail-loud
+    // `NotRepresentable` guard; `advance_dense` would also stay gated.
+    //
+    // Production dodges this because standalone bootstrap recovers the cell from
+    // log + snapshot evidence *before* constructing the SM, but the public
+    // `with_store` API documents durable-snapshot rehydration, so the bare path
+    // must recover the version byte too (a safe floor: the snapshot byte proves
+    // an activation to at least that version committed cluster-wide).
+    //
+    // Fix: after `store.load()`, advance the cell to the persisted envelope's
+    // leading version byte when it exceeds the cell's current value.
+
+    #[tokio::test]
+    async fn with_store_recovers_active_write_version_from_v5_snapshot() {
+        // ---- Step 1: persist a v5/dense snapshot through a source SM ----
+        let v5_cell = ActiveWriteVersion::default();
+        v5_cell.set(DENSE_WRITE_VERSION);
+
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        {
+            let mut src = HighWaterStateMachine::with_store_and_active_version(
+                store.clone(),
+                v5_cell.clone(),
+            )
+            .expect("source SM");
+            apply_one(
+                &mut src,
+                1,
+                EntryPayload::Normal(HighWaterCommand::AdvanceDense {
+                    key: dense_key("orders"),
+                    count: 42,
+                }),
+            )
+            .await;
+            src.build_snapshot().await.expect("build v5 snapshot");
+        }
+
+        // Confirm the persisted envelope is v5-framed.
+        let persisted_bytes = store.load().expect("load").expect("snapshot present");
+        assert_eq!(
+            persisted_bytes[0], DENSE_WRITE_VERSION,
+            "persisted envelope must be v5-framed"
+        );
+
+        // ---- Step 2: reopen via the bare public API (fresh BASELINE cell) ----
+        // This models an embedder that uses `with_store` with a durable backend
+        // holding v5 data — the pre-bug state left the cell at baseline.
+        let mut reopened =
+            HighWaterStateMachine::with_store(store.clone()).expect("reopen via with_store");
+
+        // ---- Step 3: regression assertions ----
+
+        // PRIMARY: the cell must recover to DENSE_WRITE_VERSION from the
+        // snapshot's leading byte. Before the fix this stayed at BASELINE (4).
+        assert_eq!(
+            reopened.active_write_version(),
+            DENSE_WRITE_VERSION,
+            "with_store must recover active_write_version from the persisted \
+             snapshot's leading version byte (regression: was left at BASELINE)"
+        );
+
+        // Dense state must be rehydrated from the snapshot.
+        assert_eq!(
+            reopened.dense_value("orders"),
+            42,
+            "dense map must be rehydrated from the persisted snapshot"
+        );
+
+        // CRITICAL: build_snapshot must now SUCCEED. Before the fix, the v4
+        // encode arm (cell=4) with a non-empty dense map hit NotRepresentable.
+        reopened
+            .build_snapshot()
+            .await
+            .expect("build_snapshot after reopen must NOT return NotRepresentable");
     }
 }

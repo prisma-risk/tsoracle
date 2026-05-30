@@ -40,8 +40,9 @@ pub mod lifecycle;
 pub mod test_fakes;
 
 pub use codec::{
-    ActiveWriteVersion, BASELINE_WRITE_VERSION, CodecError, MAX_READABLE_VERSION,
-    MIN_READABLE_VERSION, codec_io_error, decode, encode, recover_active_write_version,
+    ActiveWriteVersion, BASELINE_WRITE_VERSION, CodecError, DENSE_WRITE_VERSION,
+    MAX_READABLE_VERSION, MIN_READABLE_VERSION, codec_io_error, decode, encode,
+    recover_active_write_version,
 };
 pub use codec_provider::{DefaultLogStoreCodec, LogStoreCodec};
 pub use lifecycle::{

@@ -26,7 +26,7 @@
 //! Use this when you want a dedicated TSO raft, separate from any other
 //! consensus state your service runs. For services that already run an
 //! openraft cluster (e.g. a placement driver), implement
-//! [`OpenraftHighWaterHost`](crate::OpenraftHighWaterHost) directly against
+//! [`OpenraftHighWaterHost`] directly against
 //! that existing cluster instead.
 
 use std::collections::BTreeSet;
@@ -318,6 +318,16 @@ fn classify_activation_outcome(
         | ApplyOutcome::Advanced => {
             Err(FormatActivationError::MembershipChangedSinceGate { target })
         }
+        // A SetFormatVersion entry's apply can only yield a Format*/Advanced
+        // outcome; a dense outcome here would be a state-machine bug, not an
+        // activation result. Fail loud rather than misreport it as a benign
+        // membership change (which would send the operator down the wrong
+        // remediation path).
+        other @ (ApplyOutcome::DenseAdvanced { .. }
+        | ApplyOutcome::DenseCardinalityExceeded { .. }
+        | ApplyOutcome::DenseOverflow) => {
+            unreachable!("dense ApplyOutcome {other:?} returned from a SetFormatVersion entry")
+        }
     }
 }
 
@@ -351,6 +361,49 @@ impl OpenraftHighWaterHost for StandaloneHost {
             Ok(resp) => Ok(resp.data.value),
             Err(e) => Err(classify_client_write_error(e)),
         }
+    }
+
+    fn active_write_version(&self) -> u8 {
+        // Delegate to the inherent method on `StandaloneHost` which reads the
+        // shared `ActiveWriteVersion` cell via the state machine.
+        StandaloneHost::active_write_version(self)
+    }
+
+    async fn submit_advance_dense(
+        &self,
+        key: &tsoracle_core::SeqKey,
+        count: u32,
+    ) -> Result<u64, ConsensusError> {
+        match self
+            .raft
+            .client_write(HighWaterCommand::AdvanceDense {
+                key: key.clone(),
+                count,
+            })
+            .await
+        {
+            Ok(resp) => match resp.data.outcome {
+                crate::type_config::ApplyOutcome::DenseAdvanced { start } => Ok(start),
+                crate::type_config::ApplyOutcome::DenseCardinalityExceeded { cap } => {
+                    Err(ConsensusError::SeqKeyCardinalityExceeded { cap })
+                }
+                crate::type_config::ApplyOutcome::DenseOverflow => Err(ConsensusError::SeqOverflow),
+                other => Err(ConsensusError::PermanentDriver(
+                    format!("unexpected ApplyOutcome for AdvanceDense: {other:?}").into(),
+                )),
+            },
+            Err(e) => Err(classify_client_write_error(e)),
+        }
+    }
+
+    async fn current_dense_seq(&self, key: &tsoracle_core::SeqKey) -> Result<u64, ConsensusError> {
+        // Issue the same linearizable read barrier as `current_high_water` so
+        // the local SM read below reflects every committed write from any prior
+        // leader at any prior epoch.
+        if let Err(e) = self.raft.ensure_linearizable(ReadPolicy::ReadIndex).await {
+            return Err(classify_read_error(e));
+        }
+        Ok(self.state_machine.dense_value(key.as_str()))
     }
 }
 

@@ -69,6 +69,15 @@ pub enum HighWaterCommand {
     /// Applies as a no-op if the membership at this entry's log position is
     /// not a subset of `gated_members`.
     SetFormatVersion(SetFormatVersionPayload),
+    /// Advance the dense counter for `key` by `count`, lazily creating the key
+    /// at 0. The pre-advance value is the issued block's start; it is returned
+    /// to the proposer via [`ApplyOutcome`](crate::ApplyOutcome) (the apply path computes it in
+    /// committed log order). Only ever appended under write version
+    /// >= DENSE_WRITE_VERSION (gated by activation).
+    AdvanceDense {
+        key: tsoracle_core::SeqKey,
+        count: u32,
+    },
 }
 
 impl fmt::Display for HighWaterCommand {
@@ -86,6 +95,13 @@ impl fmt::Display for HighWaterCommand {
                     f,
                     "SetFormatVersion {{ target: {target}, gated_members: [{}] }}",
                     rendered.join(", ")
+                )
+            }
+            HighWaterCommand::AdvanceDense { key, count } => {
+                write!(
+                    f,
+                    "AdvanceDense {{ key: {}, count: {count} }}",
+                    key.as_str()
                 )
             }
         }

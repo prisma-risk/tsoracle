@@ -388,7 +388,7 @@ where
     ///
     /// Reads only each record's leading byte (no postcard body parse), so a
     /// record from any version in the readable range contributes its byte
-    /// without needing its parser. Bounded by `lo` like [`last_log_id_in_cf`]:
+    /// without needing its parser. Bounded by `lo` like `last_log_id_in_cf`:
     /// for `GroupPrefixed` the reverse iterator can walk into a neighbouring
     /// group's bytes, so any key below `lo` ends the scan.
     pub fn highest_log_record_version(&self) -> io::Result<Option<u8>> {
@@ -767,16 +767,17 @@ mod record_codec_tests {
     }
 
     // Pinned to BASELINE in the default build; the test-only
-    // `e2e-max-readable-next` feature lifts MAX to `BASELINE + 1`, so
+    // `e2e-max-readable-next` feature lifts MAX to `BASELINE + 2`, so
     // skip the MAX assertion under that feature (covered by
     // `version_constants_under_e2e_max_readable_next_feature` in
     // `codec.rs`).
     #[cfg(not(feature = "e2e-max-readable-next"))]
     #[test]
-    fn version_constants_are_at_four() {
+    fn version_constants_are_at_expected_values() {
         assert_eq!(BASELINE_WRITE_VERSION, 4);
         assert_eq!(MIN_READABLE_VERSION, 4);
-        assert_eq!(MAX_READABLE_VERSION, 4);
+        // MAX raised to 5 to cover the dense write version (DENSE_WRITE_VERSION).
+        assert_eq!(MAX_READABLE_VERSION, 5);
     }
 }
 

@@ -107,7 +107,10 @@ pub(crate) fn classify(error: ConsensusError) -> PersistDisposition {
         // string-wrapped `io::Error`.
         dense_error @ (ConsensusError::DenseUnsupported
         | ConsensusError::SeqKeyCardinalityExceeded { .. }
-        | ConsensusError::SeqOverflow) => PersistDisposition::Permanent(Box::new(dense_error)),
+        | ConsensusError::SeqOverflow
+        | ConsensusError::DenseNotActivated { .. }) => {
+            PersistDisposition::Permanent(Box::new(dense_error))
+        }
     }
 }
 

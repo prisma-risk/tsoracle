@@ -37,6 +37,13 @@ pub mod standalone;
 pub mod state_machine;
 pub mod type_config;
 
+/// The default immutable genesis cardinality cap for dense sequence keys.
+/// Every cluster member must be constructed with the same value; the cap is
+/// stored in replicated snapshots so replay/restore reproduces the same
+/// accept/reject decisions (spec §6.2). Operators that need a larger or
+/// smaller key namespace configure this at SM construction time.
+pub const DEFAULT_DENSE_CARDINALITY_CAP: u64 = 10_000;
+
 pub use capabilities::{
     CapabilitySource, FormatActivationError, NodeCapabilities, all_members_can_read, gather_with,
 };

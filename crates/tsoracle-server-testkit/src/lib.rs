@@ -107,7 +107,7 @@ pub fn client(host: &str, port: u16) -> Result<TsoServiceClient<Channel>, BoxErr
 /// network. Bare `host:port` is rewritten to `http://host:port`.
 ///
 /// This is the per-endpoint building block for driving the *high-level*
-/// [`tsoracle_client::Client`] over turmoil: pass a closure delegating to
+/// `tsoracle_client::Client` over turmoil: pass a closure delegating to
 /// it into `ClientBuilder::channel_connector`, and the client's pool —
 /// including leader-hint redirects — dials every endpoint through the
 /// simulated network.

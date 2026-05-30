@@ -65,6 +65,26 @@ pub trait OpenraftHighWaterHost: Send + Sync + 'static {
     /// return the new high-water value after apply. The state machine must
     /// enforce monotonicity (`max(prev, at_least)`); the driver does not.
     async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError>;
+
+    /// The active write version (read from the shared `ActiveWriteVersion`
+    /// cell). The driver gates `advance_dense` on this being >=
+    /// `DENSE_WRITE_VERSION`.
+    fn active_write_version(&self) -> u8;
+
+    /// Submit an `AdvanceDense { key, count }` proposal and return the applied
+    /// block start. The proposer reads `ApplyOutcome` from the `client_write`
+    /// response: `DenseAdvanced { start }` → `Ok(start)`; the two rejection
+    /// outcomes map to the corresponding `ConsensusError`.
+    async fn submit_advance_dense(
+        &self,
+        key: &tsoracle_core::SeqKey,
+        count: u32,
+    ) -> Result<u64, ConsensusError>;
+
+    /// Read a key's durably-committed dense counter (0 if absent),
+    /// linearized. Implementations issue the same read barrier as
+    /// `current_high_water` before reading the local state machine.
+    async fn current_dense_seq(&self, key: &tsoracle_core::SeqKey) -> Result<u64, ConsensusError>;
 }
 
 #[cfg(test)]
@@ -99,6 +119,25 @@ mod tests {
         async fn submit_advance(&self, _at_least: u64) -> Result<u64, ConsensusError> {
             Ok(0)
         }
+
+        fn active_write_version(&self) -> u8 {
+            tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION
+        }
+
+        async fn submit_advance_dense(
+            &self,
+            _key: &tsoracle_core::SeqKey,
+            _count: u32,
+        ) -> Result<u64, ConsensusError> {
+            Err(ConsensusError::DenseUnsupported)
+        }
+
+        async fn current_dense_seq(
+            &self,
+            _key: &tsoracle_core::SeqKey,
+        ) -> Result<u64, ConsensusError> {
+            Err(ConsensusError::DenseUnsupported)
+        }
     }
 
     /// Compile-time proof the trait is satisfiable without a `StateMachine`
@@ -122,5 +161,9 @@ mod tests {
         let _rx = host.metrics();
         assert!(host.current_high_water().await.is_ok());
         assert!(host.submit_advance(7).await.is_ok());
+        let _ = host.active_write_version();
+        let key = tsoracle_core::SeqKey::try_new("k").unwrap();
+        assert!(host.submit_advance_dense(&key, 1).await.is_err());
+        assert!(host.current_dense_seq(&key).await.is_err());
     }
 }

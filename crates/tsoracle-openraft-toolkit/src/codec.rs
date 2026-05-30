@@ -52,19 +52,21 @@ pub const MIN_READABLE_VERSION: u8 = 4;
 /// grows. Decode accepts `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`.
 ///
 /// Production builds set this to the current baseline. The test-only
-/// `e2e-max-readable-next` feature raises it to `BASELINE_WRITE_VERSION + 1`
+/// `e2e-max-readable-next` feature raises it to `BASELINE_WRITE_VERSION + 2`
 /// so a mixed-version e2e harness can drive a real activation flip from the
 /// baseline to the next version. The aliased body is byte-identical to the
-/// baseline (added by `BASELINE + 1` alias arms on the per-version codec in
+/// baseline (added by `BASELINE + 2` alias arms on the per-version codec in
 /// `tsoracle-driver-openraft` under the matching feature), so this is a
 /// faithful harness for the activation machinery rather than a real format
 /// change. Off by default; never compiled into production. The expression
 /// derives from `BASELINE_WRITE_VERSION` so a future baseline bump moves
-/// MAX automatically with no edit here.
+/// MAX automatically with no edit here. (Version 5 = `DENSE_WRITE_VERSION`
+/// is reserved for the real dense-sequence format; the synthetic harness
+/// rides on `BASELINE + 2` = 6 to avoid colliding with it — see #583.)
 #[cfg(not(feature = "e2e-max-readable-next"))]
-pub const MAX_READABLE_VERSION: u8 = 4;
+pub const MAX_READABLE_VERSION: u8 = 5;
 #[cfg(feature = "e2e-max-readable-next")]
-pub const MAX_READABLE_VERSION: u8 = BASELINE_WRITE_VERSION + 1;
+pub const MAX_READABLE_VERSION: u8 = BASELINE_WRITE_VERSION + 2;
 
 // Compile-time guard: the readable range must be non-empty (`MIN <= MAX`) or
 // every decode rejects every record. Catches a future inverted-constants edit
@@ -78,6 +80,13 @@ const _: () = assert!(MIN_READABLE_VERSION <= MAX_READABLE_VERSION);
 /// cell only ever advances via a successful, committed activation apply (P5),
 /// so in this release every framed record still leads with this byte.
 pub const BASELINE_WRITE_VERSION: u8 = 4;
+
+/// The write version that introduces the `AdvanceDense` log command and the
+/// dense fields in the state-machine snapshot. A leader must not append an
+/// `AdvanceDense` entry (and `GetSeq` is refused) until the active write
+/// version has been activated to at least this value through the all-members
+/// gate — otherwise an older member could receive an entry it cannot decode.
+pub const DENSE_WRITE_VERSION: u8 = 5;
 
 /// Process-shared, runtime-mutable active write version.
 ///
@@ -188,24 +197,28 @@ mod tests {
 
     #[cfg(not(feature = "e2e-max-readable-next"))]
     #[test]
-    fn version_constants_are_at_the_v4_baseline() {
+    fn version_constants_are_at_expected_values() {
         assert_eq!(MIN_READABLE_VERSION, 4);
-        assert_eq!(MAX_READABLE_VERSION, 4);
+        // MAX raised to 5 to cover the dense write version (DENSE_WRITE_VERSION).
+        assert_eq!(MAX_READABLE_VERSION, 5);
         assert_eq!(BASELINE_WRITE_VERSION, 4);
+        assert_eq!(DENSE_WRITE_VERSION, 5);
     }
 
     #[cfg(feature = "e2e-max-readable-next")]
     #[test]
     fn version_constants_under_e2e_max_readable_next_feature() {
-        // Test-only harness: MAX rises to `BASELINE + 1` so a mixed-version
+        // Test-only harness: MAX rises to `BASELINE + 2` so a mixed-version
         // e2e can drive a real activation flip from the baseline to the
         // next version. MIN and BASELINE are unchanged — the harness
         // raises only the read ceiling (Stage 1 of a real rollout); the
         // active write version still starts at BASELINE and only moves
         // through the normal activation barrier. Assert against the
         // baseline expression so this test survives a future baseline
-        // bump unchanged.
-        assert_eq!(MAX_READABLE_VERSION, BASELINE_WRITE_VERSION + 1);
+        // bump unchanged. (`BASELINE + 1` = 5 is `DENSE_WRITE_VERSION`
+        // which owns real codec arms; synthetic harness uses `BASELINE + 2`
+        // = 6 to avoid colliding — interim until #583.)
+        assert_eq!(MAX_READABLE_VERSION, BASELINE_WRITE_VERSION + 2);
         // `MAX > MIN` would tautologically follow from the above plus
         // `BASELINE >= MIN` (which is true by definition: BASELINE is in
         // the readable range). The compile-time `const _: () =

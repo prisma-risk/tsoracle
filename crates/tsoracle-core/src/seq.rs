@@ -50,6 +50,7 @@ pub const DEFAULT_MAX_SEQ_COUNT: u32 = 65_536;
 /// and at most [`MAX_SEQ_KEY_LEN`] bytes. `try_new` is the single validation
 /// site — a value of this type is proof the key is in range.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeqKey(String);
 
 impl SeqKey {

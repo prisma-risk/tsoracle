@@ -275,6 +275,22 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
                         tso: Some(core.high_water),
                     }
                 }
+                EntryPayload::Normal(HostCommand::Tso(HighWaterCommand::AdvanceDense {
+                    ..
+                })) => {
+                    // The piggyback example does not implement dense sequence
+                    // state. This arm handles the exhaustiveness requirement
+                    // introduced when `AdvanceDense` was added in Task 2 of the
+                    // dense-openraft plan. A real piggyback host that supports
+                    // dense sequences would forward this entry to a
+                    // `HighWaterStateMachine` (Task 6 of that plan).
+                    let mut core = self.core.lock();
+                    core.last_applied = Some(log_id);
+                    HostApplied {
+                        kv: None,
+                        tso: Some(core.high_water),
+                    }
+                }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
                     core.last_membership = StoredMembership::new(Some(log_id), membership.clone());
@@ -389,6 +405,30 @@ impl OpenraftHighWaterHost for PiggybackHost {
             }
             Err(e) => Err(ConsensusError::TransientDriver(Box::new(e))),
         }
+    }
+
+    fn active_write_version(&self) -> u8 {
+        // The piggyback host does not own an `ActiveWriteVersion` cell — dense
+        // sequences are not implemented here. Return BASELINE so the driver
+        // gate always returns `DenseNotActivated` for this host (dense is
+        // deferred for piggyback; a real dense piggyback would share a cell).
+        tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION
+    }
+
+    async fn submit_advance_dense(
+        &self,
+        _key: &tsoracle_core::SeqKey,
+        _count: u32,
+    ) -> Result<u64, ConsensusError> {
+        // Dense sequences are not implemented in the piggyback example.
+        // The driver gate (`active_write_version < DENSE_WRITE_VERSION`)
+        // prevents this from ever being called in normal operation.
+        Err(ConsensusError::DenseUnsupported)
+    }
+
+    async fn current_dense_seq(&self, _key: &tsoracle_core::SeqKey) -> Result<u64, ConsensusError> {
+        // Dense sequences are not implemented in the piggyback example.
+        Err(ConsensusError::DenseUnsupported)
     }
 }
 
