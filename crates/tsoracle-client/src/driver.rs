@@ -410,6 +410,10 @@ fn clone_client_error(error: &ClientError) -> ClientError {
         ClientError::InvalidCount(count) => ClientError::InvalidCount(*count),
         ClientError::Connector(source) => ClientError::Connector(source.to_string().into()),
         ClientError::DriverGone => ClientError::DriverGone,
+        // Dense-sequence errors are not produced by the timestamp driver,
+        // but must be exhaustively matched.
+        ClientError::SeqUncertain => ClientError::SeqUncertain,
+        ClientError::InvalidSeqKey => ClientError::InvalidSeqKey,
     }
 }
 
@@ -693,6 +697,14 @@ mod tests {
 
         let driver_gone = clone_client_error(&ClientError::DriverGone);
         assert!(matches!(driver_gone, ClientError::DriverGone));
+
+        // Dense-path variants: never produced by the timestamp driver, but the
+        // exhaustive clone must still preserve them.
+        let seq_uncertain = clone_client_error(&ClientError::SeqUncertain);
+        assert!(matches!(seq_uncertain, ClientError::SeqUncertain));
+
+        let invalid_seq_key = clone_client_error(&ClientError::InvalidSeqKey);
+        assert!(matches!(invalid_seq_key, ClientError::InvalidSeqKey));
     }
 
     #[test]

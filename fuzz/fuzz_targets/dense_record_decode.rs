@@ -21,21 +21,16 @@
 //  limitations under the License.
 //
 
-#![doc = include_str!("../README.md")]
-// Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
-// for the lib's own unit tests; integration tests are separate compilation units.
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+#![no_main]
 
-mod allocator;
-mod epoch;
-mod peer;
-pub mod seq;
-mod timestamp;
+use libfuzzer_sys::fuzz_target;
+use tsoracle_driver_file::dense_record;
 
-pub mod docs;
-
-pub use allocator::{Allocator, CommitOutcome, CoreError, IgnoreReason, PhysicalMs, WindowGrant};
-pub use epoch::Epoch;
-pub use peer::{PeerEndpoint, PeerEndpointError, TsoPeer};
-pub use seq::{MAX_SEQ_COUNT, MAX_SEQ_KEY_LEN, SeqAllocator, SeqGrant, SeqKey};
-pub use timestamp::{LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp, TimestampError};
+// The dense-sequence on-disk record is a first-class, attacker-reachable format
+// (it is read verbatim from disk at `open_or_init`). `decode` must never panic
+// on arbitrary bytes — every malformed input must surface as a `DenseRecordError`,
+// never an unwrap/slice-index panic. Mirrors `record_decode` for the high-water
+// `state` record.
+fuzz_target!(|data: &[u8]| {
+    let _ = dense_record::decode(data);
+});

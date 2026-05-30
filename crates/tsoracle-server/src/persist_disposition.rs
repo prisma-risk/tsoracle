@@ -98,6 +98,16 @@ pub(crate) fn classify(error: ConsensusError) -> PersistDisposition {
         ConsensusError::TransientDriver(source) => PersistDisposition::Transient(source),
         ConsensusError::PermanentDriver(source) => PersistDisposition::Permanent(source),
         ConsensusError::AdvanceOutOfRange(at_least) => PersistDisposition::OutOfRange(at_least),
+        // Dense-path variants: never produced by persist_high_water /
+        // load_high_water, but the exhaustiveness check requires them. Treat as
+        // permanent (the caller must not silently retry an unexpected dense error
+        // on the timestamp persist path). These variants carry no inner source,
+        // so propagate the `ConsensusError` itself — preserving its `Display` and
+        // concrete type for downcasting — rather than laundering it through a
+        // string-wrapped `io::Error`.
+        dense_error @ (ConsensusError::DenseUnsupported
+        | ConsensusError::SeqKeyCardinalityExceeded { .. }
+        | ConsensusError::SeqOverflow) => PersistDisposition::Permanent(Box::new(dense_error)),
     }
 }
 
@@ -172,6 +182,26 @@ mod tests {
                 assert_eq!(at_least, tsoracle_core::PHYSICAL_MS_MAX + 1);
             }
             other => panic!("expected OutOfRange, got a different disposition: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dense_variants_propagate_the_actual_error_as_permanent() {
+        // The dense-path variants carry no inner boxed source, so classify must
+        // propagate the ConsensusError itself — its Display must survive intact,
+        // not be replaced by a generic io::Error string wrapper.
+        let disposition = classify(ConsensusError::SeqKeyCardinalityExceeded { cap: 10_000 });
+        match disposition {
+            PersistDisposition::Permanent(source) => {
+                assert_eq!(
+                    source.to_string(),
+                    "dense key-cardinality cap 10000 reached"
+                );
+                // The concrete type is preserved (downcast succeeds), proving we
+                // boxed the real error rather than a stringified copy.
+                assert!(source.downcast_ref::<ConsensusError>().is_some());
+            }
+            other => panic!("expected Permanent, got a different disposition: {other:?}"),
         }
     }
 }

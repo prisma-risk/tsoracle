@@ -30,6 +30,20 @@ service TsoService {
   // - A response of zero also means the leader has not yet admitted a window
   //   (cold start before the first persist).
   rpc GetCurrentMaxSafe(GetCurrentMaxSafeRequest) returns (GetCurrentMaxSafeResponse);
+
+  // Allocate a contiguous block of `count` dense ordinals for `key`.
+  //
+  // Returns [start, start + count) — a gapless consecutive range guaranteed
+  // not to overlap with any other grant for the same key. `start` is the
+  // durably-committed pre-advance counter value; ordinals are never reused
+  // even across leader transitions or restarts.
+  //
+  // Only the current leader serves this RPC; a non-leader returns
+  // `FAILED_PRECONDITION` with the same `tsoracle-leader-hint-bin` trailer
+  // as `GetTs`. This RPC is non-idempotent: a committed advance that is not
+  // delivered to the client is a spent (but non-duplicate) ordinal block —
+  // clients must treat an ambiguous failure as `SeqUncertain` and not retry.
+  rpc GetSeq(GetSeqRequest) returns (GetSeqResponse);
 }
 
 message GetTsRequest {
@@ -66,6 +80,23 @@ message GetTsResponse {
   // (a smaller epoch after a larger one indicates a stale server).
   uint64 epoch_hi = 4;
   uint64 epoch_lo = 5;
+}
+
+message GetSeqRequest {
+  string key = 1; // bounded UTF-8 sequence key
+  uint32 count = 2; // must be >= 1
+}
+
+message GetSeqResponse {
+  string key = 1;
+  uint64 start = 2; // first ordinal of the contiguous block [start, start+count)
+  uint32 count = 3;
+  // Leader epoch that issued this block, as a single nested message so its
+  // presence implies both halves — bundling makes a half-populated (corrupt)
+  // epoch unrepresentable on the wire, matching `LeaderHint.leader_epoch`.
+  // Always populated on a successful response; the client seats its confirmed
+  // leader cache from it (a missing epoch on success is a protocol violation).
+  EpochWire epoch = 4;
 }
 
 // Carried in the `tsoracle-leader-hint-bin` binary metadata trailer when the

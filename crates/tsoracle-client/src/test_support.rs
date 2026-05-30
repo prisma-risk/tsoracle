@@ -24,7 +24,17 @@
 //! Shared test-only helpers for the client crate's retry/attempt/leader-hint
 //! unit tests. Compiled only under `cfg(test)`.
 
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
+
+use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
+use tsoracle_proto::v1::{
+    GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetSeqRequest, GetSeqResponse,
+    GetTsRequest, GetTsResponse,
+};
 
 use crate::RetryPolicy;
 
@@ -66,4 +76,104 @@ pub(crate) fn make_status_with_hint(hint: tsoracle_proto::v1::LeaderHint) -> ton
         .metadata_mut()
         .insert_bin(key, BinaryMetadataValue::from_bytes(&buf));
     status
+}
+
+type BoxFut<T> = Pin<Box<dyn Future<Output = Result<T, tonic::Status>> + Send>>;
+type TsHandler = Arc<dyn Fn(GetTsRequest) -> BoxFut<GetTsResponse> + Send + Sync>;
+type SeqHandler = Arc<dyn Fn(GetSeqRequest) -> BoxFut<GetSeqResponse> + Send + Sync>;
+
+/// A configurable fake [`TsoService`] for client tests. Per-call behavior is
+/// injected as closures, so this single trait impl — one `get_ts`, one
+/// `get_seq` — replaces the many bespoke per-test server structs. The shared
+/// `get_seq` earns real coverage from the dense tests that configure it, instead
+/// of leaving an unreachable `unimplemented!()` stub in every timestamp-path
+/// test that never calls it.
+///
+/// Both handlers default to returning `UNIMPLEMENTED`; a test overrides only the
+/// RPC it exercises via [`on_get_ts`](Self::on_get_ts) /
+/// [`on_get_seq`](Self::on_get_seq). `get_current_max_safe` returns the default
+/// response (every test that touches it wants exactly that).
+pub(crate) struct FakeTso {
+    get_ts: TsHandler,
+    get_seq: SeqHandler,
+}
+
+impl FakeTso {
+    pub(crate) fn new() -> Self {
+        FakeTso {
+            get_ts: Arc::new(|_| {
+                Box::pin(async { Err(tonic::Status::unimplemented("get_ts not configured")) })
+            }),
+            get_seq: Arc::new(|_| {
+                Box::pin(async { Err(tonic::Status::unimplemented("get_seq not configured")) })
+            }),
+        }
+    }
+
+    /// Override the `get_ts` behavior with an async closure of the request.
+    pub(crate) fn on_get_ts<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(GetTsRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<GetTsResponse, tonic::Status>> + Send + 'static,
+    {
+        self.get_ts = Arc::new(move |req| Box::pin(f(req)));
+        self
+    }
+
+    /// Override the `get_seq` behavior with an async closure of the request.
+    pub(crate) fn on_get_seq<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(GetSeqRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<GetSeqResponse, tonic::Status>> + Send + 'static,
+    {
+        self.get_seq = Arc::new(move |req| Box::pin(f(req)));
+        self
+    }
+
+    /// Bind a fresh loopback listener, serve this fake on a background task, and
+    /// return the bound address. The spawned task is detached; it ends when the
+    /// test's runtime is torn down.
+    pub(crate) async fn spawn(self) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let incoming = tonic::transport::server::TcpIncoming::from(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TsoServiceServer::new(self))
+                .serve_with_incoming(incoming)
+                .await
+                .ok();
+        });
+        addr
+    }
+}
+
+#[tonic::async_trait]
+impl TsoService for FakeTso {
+    async fn get_ts(
+        &self,
+        request: tonic::Request<GetTsRequest>,
+    ) -> Result<tonic::Response<GetTsResponse>, tonic::Status> {
+        (self.get_ts)(request.into_inner())
+            .await
+            .map(tonic::Response::new)
+    }
+
+    async fn get_current_max_safe(
+        &self,
+        _request: tonic::Request<GetCurrentMaxSafeRequest>,
+    ) -> Result<tonic::Response<GetCurrentMaxSafeResponse>, tonic::Status> {
+        Ok(tonic::Response::new(GetCurrentMaxSafeResponse::default()))
+    }
+
+    async fn get_seq(
+        &self,
+        request: tonic::Request<GetSeqRequest>,
+    ) -> Result<tonic::Response<GetSeqResponse>, tonic::Status> {
+        (self.get_seq)(request.into_inner())
+            .await
+            .map(tonic::Response::new)
+    }
 }

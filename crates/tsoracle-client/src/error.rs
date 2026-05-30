@@ -51,6 +51,10 @@ pub enum ClientError {
     /// logs, not a network issue.
     #[error("client driver task is gone; subsequent requests cannot be served by this Client")]
     DriverGone,
+    #[error("dense sequence outcome uncertain: the request may or may not have committed")]
+    SeqUncertain,
+    #[error("invalid sequence key")]
+    InvalidSeqKey,
 }
 
 #[cfg(test)]

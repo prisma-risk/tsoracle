@@ -42,6 +42,8 @@ jobs:
         target:
           - record_decode
           - record_roundtrip
+          - dense_record_decode
+          - dense_record_roundtrip
           - proto_get_ts_request_decode
           - proto_get_ts_response_decode
           - proto_leader_hint_decode

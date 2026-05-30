@@ -42,3 +42,8 @@ tokio    = { workspace = true, features = ["test-util"] }
 name              = "failpoints"
 path              = "tests/failpoints.rs"
 required-features = ["failpoints"]
+
+[[test]]
+name              = "dense_failpoints"
+path              = "tests/dense_failpoints.rs"
+required-features = ["failpoints"]

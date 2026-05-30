@@ -267,48 +267,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connect_and_rpc_share_one_per_attempt_deadline() {
         enable_tracing();
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
 
-        struct HangingServer;
-
-        #[tonic::async_trait]
-        impl TsoService for HangingServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                // Hang well past any per-attempt budget so the client's RPC
-                // timeout — not a server reply — decides when the phase ends.
+        // A server whose get_ts hangs well past any per-attempt budget, so the
+        // client's RPC timeout — not a server reply — decides when the phase ends.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(|_req| async {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 Err(tonic::Status::internal(
                     "unreachable: server should be timed out",
                 ))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(HangingServer))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+            })
+            .spawn()
+            .await;
 
         let budget = Duration::from_millis(300);
         // Burn most of the budget in the connect phase; the RPC must get only
@@ -414,43 +384,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn application_error_preserves_cached_channel() {
         enable_tracing();
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
 
-        struct InternalServer;
-
-        #[tonic::async_trait]
-        impl TsoService for InternalServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                Err(tonic::Status::internal("boom"))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(InternalServer))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // A healthy server that always answers Internal — the connection is fine,
+        // only the application result is an error.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(|_req| async { Err(tonic::Status::internal("boom")) })
+            .spawn()
+            .await;
 
         let connect_count = Arc::new(AtomicUsize::new(0));
         let connector = counting_connector(connect_count.clone(), move || {
@@ -488,44 +428,15 @@ mod tests {
     /// real-world case this covers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rpc_timeout_evicts_cached_channel() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct HangingServer;
-
-        #[tonic::async_trait]
-        impl TsoService for HangingServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
+        // A server whose get_ts hangs past the per-attempt budget, so the RPC
+        // surfaces DeadlineExceeded (transport-class) and the channel is evicted.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(|_req| async {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 Err(tonic::Status::internal("unreachable: should be timed out"))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(HangingServer))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+            })
+            .spawn()
+            .await;
 
         let connect_count = Arc::new(AtomicUsize::new(0));
         let connector = counting_connector(connect_count.clone(), move || {
@@ -564,51 +475,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn malformed_response_payload_surfaces_error_without_evicting() {
         enable_tracing();
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
 
-        struct WrongCountServer;
-
-        #[tonic::async_trait]
-        impl TsoService for WrongCountServer {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                // The test requests count = 1, but the server claims 9: the
-                // client's decoder rejects the mismatch over a healthy channel.
-                Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
+        // A healthy server that answers a structurally valid message whose count
+        // (9) disagrees with the requested count (1): the client's decoder rejects
+        // the mismatch but the channel stays cached.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(|_req| async {
+                Ok(tsoracle_proto::v1::GetTsResponse {
                     physical_ms: 1,
                     logical_start: 0,
                     count: 9,
                     epoch_hi: 0,
                     epoch_lo: 0,
-                }))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(WrongCountServer))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+                })
+            })
+            .spawn()
+            .await;
 
         let connect_count = Arc::new(AtomicUsize::new(0));
         let connector = counting_connector(connect_count.clone(), move || {

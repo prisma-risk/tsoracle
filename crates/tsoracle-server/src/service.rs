@@ -28,8 +28,8 @@ use tonic::{Request, Response, Status};
 use tsoracle_consensus::ConsensusError;
 use tsoracle_core::{CommitOutcome, CoreError, Epoch, PeerEndpoint};
 use tsoracle_proto::v1::{
-    EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetTsRequest, GetTsResponse,
-    LeaderHint, tso_service_server::TsoService,
+    EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetSeqRequest, GetSeqResponse,
+    GetTsRequest, GetTsResponse, LeaderHint, tso_service_server::TsoService,
 };
 
 use crate::leader_hint::not_leader_status;
@@ -97,6 +97,14 @@ fn core_status(error: CoreError) -> Status {
         } => Status::internal(format!(
             "window extension overflow: max(floor {floor}, now_ms {now_ms}) + ahead_ms {ahead_ms} exceeds u64::MAX"
         )),
+        CoreError::SeqKeyEmpty
+        | CoreError::SeqKeyTooLong { .. }
+        | CoreError::SeqCountZero
+        | CoreError::SeqCountTooLarge { .. } => Status::invalid_argument(error.to_string()),
+        // A block-range overflow is a server-side invariant breach, not a
+        // malformed client request — surface it as Internal. Unreachable on the
+        // get_ts path (which never builds a SeqGrant); present for exhaustiveness.
+        CoreError::SeqBlockOverflow { .. } => Status::internal(error.to_string()),
     }
 }
 
@@ -207,6 +215,115 @@ impl TsoService for TsoServiceImpl {
             epoch_hi,
             epoch_lo,
         }))
+    }
+
+    async fn get_seq(
+        &self,
+        req: Request<GetSeqRequest>,
+    ) -> Result<Response<GetSeqResponse>, Status> {
+        let GetSeqRequest { key, count } = req.into_inner();
+
+        self.server.reporter.get_seq_requests.increment(1);
+
+        if !self.server.core.is_serving() {
+            return Err(not_leader_status(
+                &self.server.reporter,
+                leader_hint_from(&self.server),
+            ));
+        }
+
+        // Core gate: leadership + key/count validation. NotLeader → redirect.
+        let seq_key = match self.server.core.seq_validate(&key, count) {
+            Ok(k) => k,
+            Err(tsoracle_core::CoreError::NotLeader) => {
+                return Err(not_leader_status(
+                    &self.server.reporter,
+                    leader_hint_from(&self.server),
+                ));
+            }
+            Err(tsoracle_core::CoreError::SeqKeyEmpty)
+            | Err(tsoracle_core::CoreError::SeqKeyTooLong { .. }) => {
+                return Err(Status::invalid_argument("invalid sequence key"));
+            }
+            Err(tsoracle_core::CoreError::SeqCountZero)
+            | Err(tsoracle_core::CoreError::SeqCountTooLarge { .. }) => {
+                return Err(Status::invalid_argument(
+                    "count must be between 1 and the maximum",
+                ));
+            }
+            Err(other) => return Err(Status::internal(other.to_string())),
+        };
+
+        let epoch = match self.server.core.current_epoch() {
+            Some(e) => e,
+            None => {
+                return Err(not_leader_status(
+                    &self.server.reporter,
+                    leader_hint_from(&self.server),
+                ));
+            }
+        };
+
+        match self
+            .server
+            .consensus
+            .advance_dense(&seq_key, count, epoch)
+            .await
+        {
+            Ok(start) => {
+                self.server.reporter.get_seq_success.increment(1);
+                self.server
+                    .reporter
+                    .seq_values_issued
+                    .increment(u64::from(count));
+                // Route through the core SeqGrant (spec §7.2) so the response is
+                // derived from the validated grant, not assembled ad hoc.
+                // try_new only fails on count==0 or a block-range overflow,
+                // neither of which can occur here (count is validated 1..=MAX
+                // and advance_dense already rejected an overflowing advance), so
+                // an Err is a server invariant breach → Internal.
+                let grant = tsoracle_core::SeqGrant::try_new(seq_key, start, count, epoch)
+                    .map_err(core_status)?;
+                let (hi, lo) = grant.epoch().to_wire();
+                Ok(Response::new(GetSeqResponse {
+                    key: grant.key().as_str().to_string(),
+                    start: grant.start(),
+                    count: grant.count(),
+                    // EpochWire is already imported (used by the leader-hint
+                    // path's `wire_epoch` helper).
+                    epoch: Some(EpochWire { hi, lo }),
+                }))
+            }
+            Err(ConsensusError::SeqKeyCardinalityExceeded { cap }) => {
+                self.server.reporter.seq_cardinality_rejected.increment(1);
+                Err(Status::resource_exhausted(format!(
+                    "dense key cardinality cap {cap} reached"
+                )))
+            }
+            Err(ConsensusError::SeqOverflow) => {
+                Err(Status::failed_precondition("dense counter overflow"))
+            }
+            Err(ConsensusError::NotLeader { .. }) | Err(ConsensusError::Fenced { .. }) => Err(
+                not_leader_status(&self.server.reporter, leader_hint_from(&self.server)),
+            ),
+            // The driver has no dense support (openraft/paxos until their
+            // follow-up PRs). This is a healthy leader, so masking it as
+            // NOT_LEADER would send the client into a pointless election
+            // ride-out and inflate not-leader metrics. Surface it plainly so
+            // clients/operators can diagnose it at a glance.
+            Err(ConsensusError::DenseUnsupported) => Err(Status::unimplemented(
+                "dense sequences are not supported by this consensus driver",
+            )),
+            // A transient driver fault (storage hiccup, momentary quorum loss)
+            // is safe to retry → UNAVAILABLE. Everything else reaching here is a
+            // permanent fault (PermanentDriver, AdvanceOutOfRange) the client
+            // MUST NOT silently retry → INTERNAL, matching the ConsensusError
+            // contract and the get_ts extension path's PersistDisposition split.
+            Err(ConsensusError::TransientDriver(source)) => {
+                Err(Status::unavailable(source.to_string()))
+            }
+            Err(other) => Err(Status::internal(other.to_string())),
+        }
     }
 }
 
@@ -403,6 +520,24 @@ mod tests {
                 .message()
                 .contains(&format!("ahead_ms {}", u64::MAX))
         );
+
+        assert_eq!(
+            core_status(CoreError::SeqKeyEmpty).code(),
+            tonic::Code::InvalidArgument
+        );
+        let too_long = core_status(CoreError::SeqKeyTooLong { len: 200, max: 128 });
+        assert_eq!(too_long.code(), tonic::Code::InvalidArgument);
+        assert!(too_long.message().contains("200"));
+        assert_eq!(
+            core_status(CoreError::SeqCountZero).code(),
+            tonic::Code::InvalidArgument
+        );
+        let too_large = core_status(CoreError::SeqCountTooLarge {
+            count: 70_000,
+            max: 65_536,
+        });
+        assert_eq!(too_large.code(), tonic::Code::InvalidArgument);
+        assert!(too_large.message().contains("70000"));
     }
 
     #[test]

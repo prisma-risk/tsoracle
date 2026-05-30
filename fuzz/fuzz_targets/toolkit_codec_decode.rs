@@ -24,8 +24,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tsoracle_openraft_toolkit::decode;
 use tsoracle_driver_openraft::HighWaterApplied;
+use tsoracle_openraft_toolkit::decode;
 
 // Adversarial-bytes safety for the `[version_byte | postcard(body)]` envelope
 // used for openraft RPC payloads and storage records (see

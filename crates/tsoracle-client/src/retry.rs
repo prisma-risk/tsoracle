@@ -85,11 +85,13 @@
 use std::time::Duration;
 
 use crate::attempt::{AttemptOutcome, HintUnusableReason, attempt};
-use crate::budget::Budget;
+use crate::budget::{Budget, PairBudget};
 use crate::channel_pool::ChannelPool;
 use crate::error::ClientError;
+use crate::leader_hint::classify_not_leader_hint;
 use crate::response::TimestampRange;
 use crate::retry_policy::{is_transport_failure, jittered_backoff, should_backoff};
+use crate::seq_attempt::{SeqAttemptOutcome, SeqBlock, classify_seq_status};
 use crate::worklist::Worklist;
 
 /// Ceiling on actionable leader-hint pivots within a single re-poll *pass* of
@@ -392,6 +394,309 @@ fn surface_error(
     }
 }
 
+/// Issue one `GetSeq(key, count)` with the dense retry policy.
+///
+/// Mirrors `issue_rpc`'s loop structure — per-attempt budget, overall deadline,
+/// redirect bounds, election ride-out — but applies the **non-idempotent dense
+/// retry policy**. Every outcome below is pre-commit-certain (the server
+/// rejected before any durable advance) except the explicitly-ambiguous one:
+///
+/// - `FAILED_PRECONDITION` with **no** leader-hint trailer → a definitive server
+///   rejection (e.g. `SeqOverflow`), surfaced as-is. Unlike the timestamp path,
+///   GetSeq overloads bare `FAILED_PRECONDITION`, so an absent trailer is *not*
+///   read as "no leader yet".
+/// - `FAILED_PRECONDITION` with a usable leader-endpoint hint → follow the hint
+///   within the redirect and attempt bounds.
+/// - `FAILED_PRECONDITION` whose hint cannot outrank the cached leader (an
+///   older-epoch / epoch-less hint) → an election signal: ride it out without
+///   charging the attempt budget.
+/// - `FAILED_PRECONDITION` whose hint is malformed or unfollowable → a definitive
+///   rejection, surfaced fast (no ride-out).
+/// - `Unavailable` / `DeadlineExceeded` **after** the RPC was put on the wire →
+///   return `SeqUncertain` immediately. A commit may have occurred; retrying
+///   transparently would risk silently spending a second block.
+/// - A connect-phase failure **before** the RPC reached the wire → pre-commit-
+///   certain (no bytes sent); retried within the per-attempt budget and, if every
+///   attempt fails, surfaced as the last transport error.
+///
+/// "Sent" is determined by whether `pool.client_with_cell` succeeded (i.e., a
+/// channel was acquired and the RPC future was created). Once we hold a live
+/// channel and issue the RPC, any subsequent failure is ambiguous.
+pub(crate) async fn issue_seq_rpc(
+    pool: &ChannelPool,
+    key: &str,
+    count: u32,
+) -> Result<SeqBlock, ClientError> {
+    let policy = pool.retry_policy().clone();
+    let budget = Budget::start(&policy);
+    let mut last_err: Option<ClientError> = None;
+    let mut election_signal: Option<tonic::Status> = None;
+    let mut failed_attempts: u32 = 0;
+    let mut total_redirects: u32 = 0;
+    let mut attempt_cap: usize = 0;
+    let mut pass: u32 = 0;
+
+    'passes: loop {
+        let initial_endpoints = pool.iter_round_robin();
+        if pass == 0 {
+            attempt_cap = policy.max_attempts.max(initial_endpoints.len());
+        }
+        let mut worklist = Worklist::new(initial_endpoints);
+        let mut redirects: u32 = 0;
+        let mut saw_election_signal = false;
+
+        while let Some(endpoint) = worklist.next() {
+            if failed_attempts as usize >= attempt_cap {
+                break;
+            }
+            let Some(attempt_budget) = budget.next_attempt() else {
+                break;
+            };
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                endpoint = %endpoint,
+                key,
+                count,
+                failed_attempts,
+                pass,
+                budget_ms = attempt_budget.as_millis() as u64,
+                "tsoracle-client: dispatching GetSeq to endpoint",
+            );
+
+            // Perform the (connect, get_seq) pair under the per-attempt budget.
+            // `sent` tracks whether the RPC was put on the wire: only set to
+            // `true` after a successful channel acquisition so that a
+            // connect-phase failure (which never touches the server) is treated
+            // as pre-commit-certain.
+            let pair = PairBudget::start(attempt_budget);
+
+            let (mut client, cell) = match tokio::time::timeout(
+                attempt_budget,
+                pool.client_with_cell(&endpoint),
+            )
+            .await
+            {
+                Ok(Ok(leased)) => leased,
+                Ok(Err(err)) => {
+                    // Connect failed before any bytes were sent — pre-commit-certain.
+                    let do_backoff = should_backoff(&err);
+                    last_err = Some(err);
+                    failed_attempts = failed_attempts.saturating_add(1);
+                    // Backoff on transport failures (Unavailable from connect).
+                    if do_backoff {
+                        let backoff = jittered_backoff(policy.base_backoff, failed_attempts - 1);
+                        let sleep_for = budget.clamp_backoff(backoff);
+                        if sleep_for > Duration::ZERO {
+                            tokio::time::sleep(sleep_for).await;
+                        }
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    // Connect timed out — pre-commit-certain (no bytes sent).
+                    let err = ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
+                        "connect exceeded per_attempt_deadline of {attempt_budget:?}"
+                    )));
+                    last_err = Some(err);
+                    failed_attempts = failed_attempts.saturating_add(1);
+                    continue;
+                }
+            };
+
+            // Channel acquired: from this point a commit may occur on the
+            // server. Any transport-class failure from here on is ambiguous.
+            let rpc_budget = pair.remaining();
+            let rpc = client.get_seq(tsoracle_proto::v1::GetSeqRequest {
+                key: key.to_string(),
+                count,
+            });
+
+            let outcome = match tokio::time::timeout(rpc_budget, rpc).await {
+                Ok(Ok(response)) => {
+                    let inner = response.into_inner();
+                    // Validate the payload before trusting it. A success means the
+                    // server committed an advance, so a response that does not
+                    // describe the block we asked for is a protocol violation we
+                    // cannot resolve into a safe block: surface SeqUncertain (a
+                    // commit occurred; the caller must reconcile) rather than hand
+                    // back a malformed block or silently retry into a double-spend.
+                    // Mirrors the None-epoch protocol-violation handling below.
+                    if inner.key != key || inner.count != count {
+                        return Err(ClientError::SeqUncertain);
+                    }
+                    // Decode the epoch from the nested EpochWire. A None epoch on
+                    // a success response is a protocol violation → SeqUncertain.
+                    let epoch = match inner.epoch {
+                        Some(ew) => tsoracle_core::Epoch::from_wire(ew.hi, ew.lo).0,
+                        None => {
+                            // Protocol violation: server returned success with no epoch.
+                            return Err(ClientError::SeqUncertain);
+                        }
+                    };
+                    // Seat the confirmed leader.
+                    pool.record_success(&endpoint, epoch);
+                    return Ok(SeqBlock {
+                        start: inner.start,
+                        count: inner.count,
+                        epoch,
+                    });
+                }
+                Ok(Err(status)) if status.code() == tonic::Code::FailedPrecondition => {
+                    use crate::attempt::{AttemptOutcome as AO, HintUnusableReason};
+                    use crate::channel_pool::{LeaderHintLookup, decode_leader_hint};
+                    // A bare FailedPrecondition carrying NO leader-hint trailer is
+                    // a definitive server rejection — e.g. SeqOverflow — NOT a
+                    // NOT_LEADER redirect. Surface it via classify_seq_status
+                    // (definitive Err, preserving the server's message) instead of
+                    // misreading it as "no leader yet" and riding out the deadline.
+                    // (Unlike the timestamp path, get_seq has a bare-FailedPrecondition
+                    // case, so the trailer presence must be checked explicitly.)
+                    if matches!(decode_leader_hint(&status), LeaderHintLookup::Absent) {
+                        classify_seq_status(status, false)
+                    } else {
+                        // NOT_LEADER (hint trailer present, possibly malformed):
+                        // classify via the shared helper. Pre-commit-certain — the
+                        // server rejected before any durable advance. Keep the channel.
+                        match classify_not_leader_hint(pool, &endpoint, status) {
+                            AO::LeaderHint {
+                                endpoint: hinted,
+                                epoch,
+                            } => SeqAttemptOutcome::LeaderHint {
+                                endpoint: hinted,
+                                epoch,
+                            },
+                            // An election-in-progress signal: either a peer with no
+                            // leader to name yet (`NoLeaderYet`) or a lagging peer
+                            // pointing at an older-epoch leader (`StaleEpoch`). Both
+                            // are pre-commit-certain — the server rejected before any
+                            // durable advance — so ride out (no budget charge) rather
+                            // than surfacing a hard error. The bare-FailedPrecondition
+                            // pre-check above routes an absent trailer to the
+                            // definitive branch, so in practice only `StaleEpoch`
+                            // reaches here; folding `NoLeaderYet` into the same arm
+                            // keeps both election signals on one ride-out path and
+                            // stays correct if that pre-check ever changes.
+                            AO::NoLeaderYet(status)
+                            | AO::HintUnusable {
+                                status,
+                                reason: HintUnusableReason::StaleEpoch,
+                            } => {
+                                #[cfg(feature = "metrics")]
+                                metrics::counter!("tsoracle.client.leader_hint.stale.total")
+                                    .increment(1);
+                                saw_election_signal = true;
+                                election_signal = Some(status.clone());
+                                last_err = Some(ClientError::Rpc(status));
+                                continue;
+                            }
+                            AO::HintUnusable {
+                                status,
+                                reason: HintUnusableReason::Rejected,
+                            } => SeqAttemptOutcome::Err(ClientError::Rpc(status)),
+                            AO::Ok { .. } | AO::Err(_) => {
+                                unreachable!(
+                                    "classify_not_leader_hint on FailedPrecondition \
+                                     cannot produce Ok/Err"
+                                )
+                            }
+                        }
+                    }
+                }
+                Ok(Err(status)) => {
+                    // Post-connect RPC failure: the request reached the wire (the
+                    // server returned a status), so this is always post-send.
+                    // Transport-class failures additionally evict the now-suspect
+                    // channel, but that does not change the fact that the outcome
+                    // is post-send. classify_seq_status is fail-uncertain by default
+                    // and keeps only provably-pre-commit codes definitive, so a
+                    // post-send INTERNAL (the advance may already be committed)
+                    // surfaces as Uncertain rather than a retry-safe error — no
+                    // silent double-spend.
+                    if is_transport_failure(&ClientError::Rpc(status.clone())) {
+                        pool.evict_if_current(&endpoint, &cell);
+                    }
+                    classify_seq_status(status, true)
+                }
+                Err(_) => {
+                    // RPC timed out post-connect — ambiguous.
+                    pool.evict_if_current(&endpoint, &cell);
+                    SeqAttemptOutcome::Uncertain
+                }
+            };
+
+            match outcome {
+                SeqAttemptOutcome::Uncertain => {
+                    // Ambiguous post-send failure: surface immediately, never retry.
+                    return Err(ClientError::SeqUncertain);
+                }
+                SeqAttemptOutcome::LeaderHint {
+                    endpoint: hinted,
+                    epoch: _hint_epoch,
+                } => {
+                    // Absolute total-redirect cap.
+                    if total_redirects >= MAX_TOTAL_LEADER_REDIRECTS {
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("tsoracle.client.leader_redirect_total_cap.total")
+                            .increment(1);
+                        last_err = Some(ClientError::Rpc(tonic::Status::failed_precondition(
+                            format!(
+                                "absolute leader-hint redirect cap ({MAX_TOTAL_LEADER_REDIRECTS}) \
+                                 reached across passes before finding the live leader"
+                            ),
+                        )));
+                        break 'passes;
+                    }
+                    if redirects >= MAX_LEADER_REDIRECTS {
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("tsoracle.client.leader_redirect_cap.total").increment(1);
+                        let status = tonic::Status::failed_precondition(format!(
+                            "leader-hint redirect cap ({MAX_LEADER_REDIRECTS}) reached \
+                             before finding the live leader"
+                        ));
+                        election_signal = Some(status.clone());
+                        last_err = Some(ClientError::Rpc(status));
+                        saw_election_signal = true;
+                        break;
+                    }
+                    redirects += 1;
+                    total_redirects = total_redirects.saturating_add(1);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
+                    worklist.redirect_to(hinted);
+                    continue;
+                }
+                SeqAttemptOutcome::Err(err) => {
+                    let should_sleep = should_backoff(&err);
+                    last_err = Some(err);
+                    failed_attempts = failed_attempts.saturating_add(1);
+                    if should_sleep {
+                        let backoff = jittered_backoff(policy.base_backoff, failed_attempts - 1);
+                        let sleep_for = budget.clamp_backoff(backoff);
+                        if sleep_for > Duration::ZERO {
+                            tokio::time::sleep(sleep_for).await;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // End of pass.
+        if saw_election_signal && budget.next_attempt().is_some() {
+            let backoff = jittered_backoff(policy.base_backoff, pass);
+            let sleep_for = budget.clamp_backoff(backoff);
+            if sleep_for > Duration::ZERO {
+                tokio::time::sleep(sleep_for).await;
+            }
+            pass = pass.saturating_add(1);
+            continue;
+        }
+        break;
+    }
+    Err(surface_error(election_signal, last_err))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,45 +913,12 @@ mod tests {
     /// loop's reaction to it — is exercised end to end, not stubbed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hint_rejected_preserves_cached_leader() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct HintlessFollower;
-
-        #[tonic::async_trait]
-        impl TsoService for HintlessFollower {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                // No `tsoracle-leader-hint-bin` trailer → LeaderHintLookup::Absent
-                // → AttemptOutcome::NoLeaderYet in the retry loop.
-                Err(tonic::Status::failed_precondition("not leader"))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(HintlessFollower))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // A follower that answers NOT_LEADER with no hint trailer →
+        // LeaderHintLookup::Absent → AttemptOutcome::NoLeaderYet in the loop.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(|_req| async { Err(tonic::Status::failed_precondition("not leader")) })
+            .spawn()
+            .await;
 
         let endpoint = format!("http://{addr}");
         let pool = ChannelPool::new(vec![endpoint.clone()], None, false, short_policy());
@@ -702,49 +974,18 @@ mod tests {
     /// loop's `last_err` bookkeeping — is exercised end to end.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stale_leader_hint_surfaces_failed_precondition_not_no_reachable_endpoints() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct StaleHintingFollower;
-
-        #[tonic::async_trait]
-        impl TsoService for StaleHintingFollower {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                // NOT_LEADER with a well-formed hint at epoch 5 — strictly
-                // behind the epoch-10 leader the client has cached, so the
-                // epoch-monotone gate drops it: AttemptOutcome::HintUnusable { reason: StaleEpoch }.
+        // NOT_LEADER with a well-formed hint at epoch 5 — strictly behind the
+        // epoch-10 leader the client has cached, so the epoch-monotone gate drops
+        // it: AttemptOutcome::HintUnusable { reason: StaleEpoch }.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(|_req| async {
                 Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
                     leader_endpoint: Some("b:1".into()),
                     leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
                 }))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(StaleHintingFollower))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+            })
+            .spawn()
+            .await;
 
         let endpoint = format!("http://{addr}");
         let pool = ChannelPool::new(vec![endpoint.clone()], None, false, short_policy());
@@ -807,74 +1048,41 @@ mod tests {
     async fn redirect_chain_longer_than_max_attempts_reaches_leader() {
         use std::future::Future;
         use std::pin::Pin;
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
         // Number of NOT_LEADER redirects before the server answers. Strictly
         // greater than `max_attempts` below, so the old "every outcome bumps
         // the attempt budget" behaviour would exhaust the budget mid-chain.
         const REDIRECTS: usize = 3;
 
-        struct RedirectingLeaderChain {
-            calls: Arc<AtomicUsize>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for RedirectingLeaderChain {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                let n = self.calls.fetch_add(1, Ordering::SeqCst);
-                if n < REDIRECTS {
-                    // Hint at a fresh endpoint string (unvisited, so the
-                    // worklist advances) with no epoch (followed
-                    // unconditionally, so this is always an actionable hint).
-                    Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
-                        leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
-                        leader_epoch: None,
-                    }))
-                } else {
-                    Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
-                        physical_ms: 1,
-                        logical_start: 0,
-                        count: 1,
-                        epoch_hi: 0,
-                        epoch_lo: 0,
-                    }))
-                }
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(RedirectingLeaderChain {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // Each call hints a fresh (unvisited) endpoint with no epoch (followed
+        // unconditionally) until the chain settles and serves; the chain lives in
+        // the call counter, not in distinct listeners.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    if n < REDIRECTS {
+                        Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                            leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                            leader_epoch: None,
+                        }))
+                    } else {
+                        Ok(tsoracle_proto::v1::GetTsResponse {
+                            physical_ms: 1,
+                            logical_start: 0,
+                            count: 1,
+                            epoch_hi: 0,
+                            epoch_lo: 0,
+                        })
+                    }
+                }
+            })
+            .spawn()
+            .await;
 
-        // Every hinted endpoint resolves to the one backend; the chain lives
-        // in the server's call counter, not in distinct listeners.
+        // Every hinted endpoint resolves to the one backend.
         let connector: Arc<crate::transport::ChannelConnector> =
             Arc::new(move |_endpoint: &str| {
                 let target = format!("http://{addr}");
@@ -918,65 +1126,34 @@ mod tests {
     /// the cap.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn redirect_cap_then_settles_reaches_leader() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
         const CHURN: usize = MAX_LEADER_REDIRECTS as usize + 3;
 
-        struct ChurnsThenServes {
-            calls: Arc<AtomicUsize>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for ChurnsThenServes {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                let n = self.calls.fetch_add(1, Ordering::SeqCst);
-                if n < CHURN {
-                    Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
-                        leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
-                        leader_epoch: None,
-                    }))
-                } else {
-                    Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
-                        physical_ms: 1,
-                        logical_start: 0,
-                        count: 1,
-                        epoch_hi: 0,
-                        epoch_lo: 0,
-                    }))
-                }
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(ChurnsThenServes {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // Churn longer than the per-pass cap, then settle and serve.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    if n < CHURN {
+                        Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                            leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                            leader_epoch: None,
+                        }))
+                    } else {
+                        Ok(tsoracle_proto::v1::GetTsResponse {
+                            physical_ms: 1,
+                            logical_start: 0,
+                            count: 1,
+                            epoch_hi: 0,
+                            epoch_lo: 0,
+                        })
+                    }
+                }
+            })
+            .spawn()
+            .await;
 
         let connector: Arc<crate::transport::ChannelConnector> =
             Arc::new(move |_endpoint: &str| {
@@ -1024,53 +1201,23 @@ mod tests {
     /// absolute cap is the whole-call ceiling on churn (issues #340, #440).)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn endless_redirect_chain_is_bounded_by_absolute_cap() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct AlwaysRedirecting {
-            calls: Arc<AtomicUsize>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for AlwaysRedirecting {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                let n = self.calls.fetch_add(1, Ordering::SeqCst);
-                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
-                    leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
-                    leader_epoch: None,
-                }))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(AlwaysRedirecting {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // Every dial hints a fresh, never-visited endpoint → the chain never
+        // settles; only the absolute redirect cap can bound it.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                        leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                        leader_epoch: None,
+                    }))
+                }
+            })
+            .spawn()
+            .await;
 
         let connector: Arc<crate::transport::ChannelConnector> =
             Arc::new(move |_endpoint: &str| {
@@ -1156,66 +1303,33 @@ mod tests {
     /// never cut short one hop early.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn redirect_chain_at_cap_still_reaches_leader() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        // Redirect for the first MAX_LEADER_REDIRECTS calls, then answer with a
-        // timestamp — a chain that consumes the whole redirect budget and no
-        // more.
-        struct RedirectsExactlyToCap {
-            calls: Arc<AtomicUsize>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for RedirectsExactlyToCap {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                let n = self.calls.fetch_add(1, Ordering::SeqCst);
-                if n < MAX_LEADER_REDIRECTS as usize {
-                    Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
-                        leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
-                        leader_epoch: None,
-                    }))
-                } else {
-                    Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
-                        physical_ms: 1,
-                        logical_start: 0,
-                        count: 1,
-                        epoch_hi: 0,
-                        epoch_lo: 0,
-                    }))
-                }
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(RedirectsExactlyToCap {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // Redirect for the first MAX_LEADER_REDIRECTS calls, then answer with a
+        // timestamp — a chain that consumes the whole redirect budget and no more.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    if n < MAX_LEADER_REDIRECTS as usize {
+                        Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                            leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                            leader_epoch: None,
+                        }))
+                    } else {
+                        Ok(tsoracle_proto::v1::GetTsResponse {
+                            physical_ms: 1,
+                            logical_start: 0,
+                            count: 1,
+                            epoch_hi: 0,
+                            epoch_lo: 0,
+                        })
+                    }
+                }
+            })
+            .spawn()
+            .await;
 
         let connector: Arc<crate::transport::ChannelConnector> =
             Arc::new(move |_endpoint: &str| {
@@ -1259,62 +1373,31 @@ mod tests {
     /// single pass. Regression for the leader-election ride-out.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rides_out_election_until_leader_appears() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
         const NO_LEADER_REPLIES: usize = 4;
 
-        struct ElectingThenServing {
-            calls: Arc<AtomicUsize>,
-        }
-
-        #[tonic::async_trait]
-        impl TsoService for ElectingThenServing {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                let n = self.calls.fetch_add(1, Ordering::SeqCst);
-                if n < NO_LEADER_REPLIES {
-                    Err(tonic::Status::failed_precondition("no leader yet"))
-                } else {
-                    Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
-                        physical_ms: 1,
-                        logical_start: 0,
-                        count: 1,
-                        epoch_hi: 0,
-                        epoch_lo: 0,
-                    }))
-                }
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = calls.clone();
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(ElectingThenServing {
-                    calls: server_calls,
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // Answer "no leader yet" for the first NO_LEADER_REPLIES calls, then serve.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    if n < NO_LEADER_REPLIES {
+                        Err(tonic::Status::failed_precondition("no leader yet"))
+                    } else {
+                        Ok(tsoracle_proto::v1::GetTsResponse {
+                            physical_ms: 1,
+                            logical_start: 0,
+                            count: 1,
+                            epoch_hi: 0,
+                            epoch_lo: 0,
+                        })
+                    }
+                }
+            })
+            .spawn()
+            .await;
 
         let connector: Arc<crate::transport::ChannelConnector> =
             Arc::new(move |_endpoint: &str| {
@@ -1385,16 +1468,10 @@ mod tests {
     /// single-endpoint loop fails fast rather than riding out to the deadline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn malformed_hint_does_not_ride_out() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct AlwaysMalformed;
-        #[tonic::async_trait]
-        impl TsoService for AlwaysMalformed {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
+        // Answer NOT_LEADER with a trailer whose bytes are not a valid LeaderHint
+        // → LeaderHintLookup::Malformed → HintUnusable { Rejected } (no ride-out).
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(|_req| async {
                 let mut status = tonic::Status::failed_precondition("not leader");
                 let key = tonic::metadata::MetadataKey::from_bytes(
                     tsoracle_proto::v1::LEADER_HINT_TRAILER_KEY.as_bytes(),
@@ -1406,31 +1483,9 @@ mod tests {
                     tonic::metadata::BinaryMetadataValue::from_bytes(garbage),
                 );
                 Err(status)
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(AlwaysMalformed))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+            })
+            .spawn()
+            .await;
 
         let connector: Arc<crate::transport::ChannelConnector> =
             Arc::new(move |_endpoint: &str| {
@@ -1475,42 +1530,11 @@ mod tests {
     /// overall deadline against a cold dial on a slow runner.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exhausted_ride_out_surfaces_not_leader() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct AlwaysElecting;
-        #[tonic::async_trait]
-        impl TsoService for AlwaysElecting {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                Err(tonic::Status::failed_precondition("no leader yet"))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(AlwaysElecting))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+        // Every dial answers "no leader yet" (bare FAILED_PRECONDITION), forever.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(|_req| async { Err(tonic::Status::failed_precondition("no leader yet")) })
+            .spawn()
+            .await;
 
         let connector: Arc<crate::transport::ChannelConnector> =
             Arc::new(move |_endpoint: &str| {
@@ -1585,49 +1609,19 @@ mod tests {
     /// succeed even though `max_attempts` is smaller than the endpoint count.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rotation_offset_cannot_strand_the_only_live_endpoint() {
-        use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
-
-        struct LiveLeader;
-
-        #[tonic::async_trait]
-        impl TsoService for LiveLeader {
-            async fn get_ts(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetTsRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetTsResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(tsoracle_proto::v1::GetTsResponse {
+        // A live leader that always serves a timestamp.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_ts(|_req| async {
+                Ok(tsoracle_proto::v1::GetTsResponse {
                     physical_ms: 1,
                     logical_start: 0,
                     count: 1,
                     epoch_hi: 0,
                     epoch_lo: 0,
-                }))
-            }
-
-            async fn get_current_max_safe(
-                &self,
-                _request: tonic::Request<tsoracle_proto::v1::GetCurrentMaxSafeRequest>,
-            ) -> Result<tonic::Response<tsoracle_proto::v1::GetCurrentMaxSafeResponse>, tonic::Status>
-            {
-                Ok(tonic::Response::new(
-                    tsoracle_proto::v1::GetCurrentMaxSafeResponse::default(),
-                ))
-            }
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let incoming = tonic::transport::server::TcpIncoming::from(listener);
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(TsoServiceServer::new(LiveLeader))
-                .serve_with_incoming(incoming)
-                .await
-                .ok();
-        });
+                })
+            })
+            .spawn()
+            .await;
 
         // A connector that only the single live endpoint can dial; every other
         // configured endpoint fails fast with a transport-class error, exactly
@@ -1768,6 +1762,321 @@ mod tests {
                  deadline cuts it short",
             ),
             other => panic!("expected the last transport error, got {other:?}"),
+        }
+    }
+
+    /// Dense-path analogue of `redirect_chain_longer_than_max_attempts_reaches_leader`:
+    /// a GetSeq redirected by NOT_LEADER+hint several times must follow the chain
+    /// to the live leader and return its block. A redirect is pre-commit-certain
+    /// (the server refused before any durable advance), so following it is safe
+    /// for the non-idempotent dense path. Exercises issue_seq_rpc's LeaderHint
+    /// redirect arm and the redirect-count bookkeeping.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_follows_leader_hint_chain_to_leader() {
+        use std::future::Future;
+        use std::pin::Pin;
+        const REDIRECTS: usize = 3;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        // Redirect the GetSeq with a fresh (unvisited), epoch-less hint until the
+        // chain settles, then serve a block. The chain lives in the call counter.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |req| {
+                let calls = server_calls.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    if n < REDIRECTS {
+                        Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                            leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                            leader_epoch: None,
+                        }))
+                    } else {
+                        let (hi, lo) = tsoracle_core::Epoch(9).to_wire();
+                        Ok(tsoracle_proto::v1::GetSeqResponse {
+                            key: req.key,
+                            start: 100,
+                            count: req.count,
+                            epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                        })
+                    }
+                }
+            })
+            .spawn()
+            .await;
+
+        // Every hinted endpoint resolves to the one backend.
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                }) as Pin<Box<dyn Future<Output = Result<_, _>> + Send>>
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
+
+        let block = issue_seq_rpc(&pool, "orders", 5)
+            .await
+            .expect("a redirect chain ending at a live leader must yield a block");
+        assert_eq!(block.start, 100);
+        assert_eq!(block.count, 5);
+        assert_eq!(block.epoch, 9);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            REDIRECTS + 1,
+            "the loop must dial through all {REDIRECTS} redirects to the leader",
+        );
+    }
+
+    /// A NOT_LEADER whose hint trailer is present but carries no endpoint (the
+    /// hint cannot be followed) classifies as `HintUnusable { Rejected }` on the
+    /// dense path — a definitive rejection, not an election ride-out — so
+    /// issue_seq_rpc fails fast within its attempt bound rather than looping to
+    /// the overall deadline. Exercises the `Err` outcome arm and its backoff.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_endpointless_hint_fails_fast() {
+        // NOT_LEADER whose hint trailer is present but carries no endpoint → an
+        // unfollowable hint (HintUnusable::Rejected).
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(|_req| async {
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: None,
+                    leader_epoch: None,
+                }))
+            })
+            .spawn()
+            .await;
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec![format!("http://{addr}")], None, false, policy);
+
+        let start = Instant::now();
+        let result = issue_seq_rpc(&pool, "orders", 1).await;
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(result, Err(ClientError::Rpc(_))),
+            "an unfollowable hint must surface a definitive Rpc error, got {result:?}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "an unfollowable hint must fail fast, not ride out the deadline; took {elapsed:?}",
+        );
+    }
+
+    /// A pool whose endpoints all refuse to connect exercises issue_seq_rpc's
+    /// connect-failure arm: every attempt fails before any bytes reach the wire
+    /// (pre-commit-certain), so the loop surfaces a transport error fast rather
+    /// than riding out the overall deadline — and never risks a double-spend.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_dead_pool_surfaces_error_fast() {
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_millis(100),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(
+            vec!["http://127.0.0.1:1".into(), "http://127.0.0.1:2".into()],
+            None,
+            false,
+            policy,
+        );
+        let start = Instant::now();
+        let result = issue_seq_rpc(&pool, "orders", 1).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "all-dead pool must surface an error");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a dead pool must fail fast, not ride out the full deadline; took {elapsed:?}",
+        );
+    }
+
+    /// A `GetSeq` that succeeds at the wire but omits the leader epoch is a
+    /// protocol violation: the block cannot be trusted (the client seats its
+    /// confirmed leader from that epoch). issue_seq_rpc must surface
+    /// `SeqUncertain` rather than hand back an unverifiable block.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_success_without_epoch_is_uncertain() {
+        // A success whose key/count match the request but which omits the epoch
+        // — a protocol violation the client must surface as SeqUncertain.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(|req| async move {
+                Ok(tsoracle_proto::v1::GetSeqResponse {
+                    key: req.key,
+                    start: 0,
+                    count: req.count,
+                    epoch: None,
+                })
+            })
+            .spawn()
+            .await;
+
+        let pool = ChannelPool::new(vec![format!("http://{addr}")], None, false, short_policy());
+        match issue_seq_rpc(&pool, "orders", 1).await {
+            Err(ClientError::SeqUncertain) => {}
+            other => panic!("epoch-less success must be SeqUncertain, got {other:?}"),
+        }
+    }
+
+    /// A cluster that hints an endless redirect chain (never settling) must be
+    /// bounded by the absolute cross-pass redirect cap rather than looping
+    /// forever: issue_seq_rpc breaks out and surfaces an error. Exercises the
+    /// per-pass and absolute redirect-cap arms and the end-of-pass ride-out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_endless_redirect_is_bounded_by_cap() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        // Every GetSeq dial hints a fresh, unvisited endpoint → the chain never
+        // settles; only the absolute redirect cap can bound it.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                        leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                        leader_epoch: None,
+                    }))
+                }
+            })
+            .spawn()
+            .await;
+
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                }) as Pin<Box<dyn Future<Output = Result<_, _>> + Send>>
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
+
+        let start = Instant::now();
+        let err = issue_seq_rpc(&pool, "orders", 1)
+            .await
+            .expect_err("an endless redirect chain must surface an error, not a block");
+        let elapsed = start.elapsed();
+        let dials = calls.load(Ordering::SeqCst);
+
+        // The absolute cap (not the 10s deadline) must terminate the churn, and
+        // it surfaces a FAILED_PRECONDITION naming that cap.
+        match err {
+            ClientError::Rpc(status) => {
+                assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+                assert!(
+                    status
+                        .message()
+                        .contains("absolute leader-hint redirect cap"),
+                    "must surface the absolute-cap rejection, got {:?}",
+                    status.message(),
+                );
+            }
+            other => panic!("expected a bounded ClientError::Rpc, got {other:?}"),
+        }
+        // Each pass follows up to MAX_LEADER_REDIRECTS pivots then a per-pass-cap
+        // dial, so the total lands a little above MAX_TOTAL_LEADER_REDIRECTS.
+        assert!(
+            dials >= MAX_TOTAL_LEADER_REDIRECTS as usize
+                && dials <= (MAX_TOTAL_LEADER_REDIRECTS + 2 * MAX_LEADER_REDIRECTS) as usize,
+            "dials must be bounded by the absolute cap, not the deadline; got {dials}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the cap (not the 10s deadline) must terminate the churn; took {elapsed:?}",
+        );
+    }
+
+    /// A follower that hints at an *older-epoch* leader than the one the client
+    /// has cached: the epoch-monotone gate drops the hint as `StaleEpoch`, which
+    /// the dense loop treats as an election-in-progress signal and rides out
+    /// (no budget charge) rather than surfacing a hard error — until the overall
+    /// deadline elapses and the recorded election signal is surfaced. Covers the
+    /// folded NoLeaderYet/StaleEpoch ride-out arm.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_stale_epoch_hint_rides_out_then_surfaces_election() {
+        // A follower whose GetSeq hint names an epoch-5 leader, strictly behind
+        // the epoch-10 leader the client has cached → dropped as StaleEpoch.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(|_req| async {
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: Some("b:1".into()),
+                    leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
+                }))
+            })
+            .spawn()
+            .await;
+
+        let endpoint = format!("http://{addr}");
+        let pool = ChannelPool::new(vec![endpoint.clone()], None, false, short_policy());
+
+        // Wait until the fake peer is accepting and replying FAILED_PRECONDITION.
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(mut client) = pool.client(&endpoint).await {
+                let replied = client
+                    .get_seq(tsoracle_proto::v1::GetSeqRequest {
+                        key: "orders".into(),
+                        count: 1,
+                    })
+                    .await
+                    .err()
+                    .is_some_and(|s| s.code() == tonic::Code::FailedPrecondition);
+                if replied {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "fake follower never came up"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Cache the only endpoint as leader at epoch 10 so the epoch-5 hint is
+        // strictly stale and is dropped (ride-out) rather than followed.
+        pool.record_success(&endpoint, 10);
+
+        match issue_seq_rpc(&pool, "orders", 1).await {
+            Err(ClientError::Rpc(status)) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "a stale-hint ride-out must surface the election FAILED_PRECONDITION",
+            ),
+            other => panic!("expected a ridden-out FAILED_PRECONDITION, got {other:?}"),
         }
     }
 }

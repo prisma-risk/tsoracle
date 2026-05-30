@@ -165,7 +165,11 @@ pub(crate) fn is_transport_failure(error: &crate::error::ClientError) -> bool {
         | ClientError::InvalidEndpoint(_)
         | ClientError::InvalidCount(_)
         | ClientError::Connector(_)
-        | ClientError::DriverGone => false,
+        | ClientError::DriverGone
+        // Dense-sequence errors are pre-commit-certain deterministic rejections,
+        // not transport failures; they do not trigger backoff or channel eviction.
+        | ClientError::SeqUncertain
+        | ClientError::InvalidSeqKey => false,
     }
 }
 

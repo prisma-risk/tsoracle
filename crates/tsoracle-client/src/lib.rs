@@ -36,6 +36,7 @@ mod leader_hint;
 mod response;
 mod retry;
 mod retry_policy;
+mod seq_attempt;
 mod transport;
 mod worklist;
 
@@ -44,6 +45,7 @@ mod test_support;
 
 pub use error::ClientError;
 pub use retry_policy::RetryPolicy;
+pub use seq_attempt::SeqBlock;
 pub use transport::BoxError;
 
 use std::sync::Arc;
@@ -203,6 +205,27 @@ impl Client {
             return Err(ClientError::InvalidCount(count));
         }
         self.driver.request(count).await
+    }
+
+    /// Request a contiguous block of `count` dense ordinals for the given
+    /// sequence `key`.
+    ///
+    /// **Non-idempotent:** if this call returns `ClientError::SeqUncertain` it
+    /// means a commit may or may not have occurred on the server — do NOT
+    /// silently retry, as that would risk spending a second block. The caller
+    /// must resolve the ambiguity (e.g. by reading back the current counter
+    /// with a coordinator-level read) before re-issuing.
+    ///
+    /// All other errors are pre-commit-certain (the server rejected the request
+    /// before any durable advance) and are safe to retry.
+    pub async fn get_seq(&self, key: &str, count: u32) -> Result<SeqBlock, ClientError> {
+        if key.is_empty() || key.len() > tsoracle_core::MAX_SEQ_KEY_LEN {
+            return Err(ClientError::InvalidSeqKey);
+        }
+        if count == 0 || count > tsoracle_core::MAX_SEQ_COUNT {
+            return Err(ClientError::InvalidCount(count));
+        }
+        retry::issue_seq_rpc(&self.pool, key, count).await
     }
 
     /// Read the leader's current safe-point in physical-millisecond units.
@@ -506,6 +529,341 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "deadline must short-circuit; took {elapsed:?}"
+        );
+    }
+
+    /// Integration test: `get_seq` against a real loopback gRPC server that
+    /// simulates a file-driver leader. The server uses a fake `TsoService`
+    /// with a real `get_seq` implementation (incrementing an atomic counter).
+    /// Asserts: consecutive blocks are gapless, the epoch is propagated, and
+    /// invalid inputs are rejected up-front.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_returns_gapless_blocks_and_rejects_invalid_inputs() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        const EPOCH: u128 = 42;
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let server_counter = counter.clone();
+        // A leader serving gapless blocks from a single atomic counter, rejecting
+        // empty keys / zero counts as InvalidArgument.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |req| {
+                let counter = server_counter.clone();
+                async move {
+                    if req.key.is_empty() {
+                        return Err(tonic::Status::invalid_argument("invalid sequence key"));
+                    }
+                    if req.count == 0 {
+                        return Err(tonic::Status::invalid_argument(
+                            "count must be between 1 and the maximum",
+                        ));
+                    }
+                    let start = counter.fetch_add(u64::from(req.count), Ordering::SeqCst);
+                    let (hi, lo) = tsoracle_core::Epoch(EPOCH).to_wire();
+                    Ok(tsoracle_proto::v1::GetSeqResponse {
+                        key: req.key,
+                        start,
+                        count: req.count,
+                        epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                    })
+                }
+            })
+            .spawn()
+            .await;
+
+        let endpoint = format!("http://{addr}");
+        let client = ClientBuilder::endpoints(vec![endpoint])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .expect("client must build");
+
+        // First call: block [0, 5).
+        let block1 = client
+            .get_seq("orders", 5)
+            .await
+            .expect("first get_seq must succeed");
+        assert_eq!(block1.start, 0, "first block must start at 0");
+        assert_eq!(block1.count, 5, "first block must have count 5");
+        assert_eq!(block1.epoch, EPOCH, "epoch must match the server's epoch");
+
+        // Second call: block [5, 8) — gapless continuation.
+        let block2 = client
+            .get_seq("orders", 3)
+            .await
+            .expect("second get_seq must succeed");
+        assert_eq!(block2.start, 5, "second block must start at 5 (gapless)");
+        assert_eq!(block2.count, 3);
+        assert_eq!(block2.epoch, EPOCH);
+
+        // Empty key is rejected up-front by the client, not the server.
+        match client.get_seq("", 1).await {
+            Err(ClientError::InvalidSeqKey) => {}
+            other => panic!("empty key must return InvalidSeqKey, got {other:?}"),
+        }
+
+        // Zero count is rejected up-front by the client.
+        match client.get_seq("orders", 0).await {
+            Err(ClientError::InvalidCount(0)) => {}
+            other => panic!("count=0 must return InvalidCount, got {other:?}"),
+        }
+    }
+
+    /// Regression guard for the dense classification bug: a bare
+    /// `FailedPrecondition` from the server (NO leader-hint trailer) — e.g.
+    /// `SeqOverflow` — must surface immediately as that definitive error,
+    /// preserving the server's message, NOT be misread as a NOT_LEADER
+    /// "no leader yet" and ridden out across passes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_bare_failed_precondition_surfaces_definitive_error() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        // Bare FailedPrecondition with NO leader-hint trailer — mirrors the
+        // server's SeqOverflow mapping. Counts calls to prove bounded attempts.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::failed_precondition("dense counter overflow"))
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        match client.get_seq("orders", 1).await {
+            Err(ClientError::Rpc(status)) => {
+                assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+                assert!(
+                    status.message().contains("overflow"),
+                    "must surface the server's overflow message, not a synthetic \
+                     'no leader yet'; got {:?}",
+                    status.message()
+                );
+            }
+            other => panic!("expected the overflow FailedPrecondition, got {other:?}"),
+        }
+        // Definitive-error path: bounded attempts, never an unbounded ride-out.
+        let n = calls.load(Ordering::SeqCst);
+        assert!((1..=3).contains(&n), "expected bounded attempts, got {n}");
+    }
+
+    /// The non-idempotency contract: a post-send transport failure
+    /// (`Unavailable` after the request reached the server) is ambiguous — the
+    /// advance may have committed — so `get_seq` returns `SeqUncertain` and must
+    /// NOT transparently retry (a retry could silently spend a second block).
+    /// Asserts the server is invoked exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_ambiguous_post_send_failure_is_uncertain_without_retry() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        // A post-send transport failure (Unavailable after the request reached
+        // the server) — ambiguous; counts calls to prove no retry.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::unavailable("connection reset mid-call"))
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        match client.get_seq("orders", 1).await {
+            Err(ClientError::SeqUncertain) => {}
+            other => panic!("post-send Unavailable must be SeqUncertain, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "non-idempotent get_seq must NOT retry an ambiguous post-send failure"
+        );
+    }
+
+    /// The non-idempotency contract extended to application faults: a post-send
+    /// `INTERNAL` (the server's mapping for a permanent dense driver fault — the
+    /// file driver emits this for a directory-fsync failure that happens *after*
+    /// the durable rename) is ambiguous, not pre-commit-certain. `get_seq` must
+    /// return `SeqUncertain` and invoke the server exactly once, never surfacing
+    /// it as a definitive (caller-retry-safe) error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_post_send_internal_is_uncertain_without_retry() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        // A post-send INTERNAL (permanent dense driver fault) — ambiguous; counts
+        // calls to prove no retry.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::internal("permanent dense driver fault"))
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        match client.get_seq("orders", 1).await {
+            Err(ClientError::SeqUncertain) => {}
+            other => panic!("post-send INTERNAL must be SeqUncertain, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "post-send INTERNAL must NOT be retried (possible committed advance)"
+        );
+    }
+
+    /// A successful `GetSeqResponse` whose `count` does not match the request is
+    /// a protocol violation: the server committed an advance, but the block it
+    /// describes is not the one the caller asked for. The client must not hand
+    /// back a malformed block — it surfaces `SeqUncertain` (a commit occurred,
+    /// reconcile) and invokes the server exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_response_count_mismatch_is_uncertain() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        // Honour the key but return a count the caller did NOT request — a
+        // protocol violation; counts calls to prove no (double-spending) retry.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let (hi, lo) = tsoracle_core::Epoch(7).to_wire();
+                    Ok(tsoracle_proto::v1::GetSeqResponse {
+                        key: req.key,
+                        start: 0,
+                        count: req.count + 1,
+                        epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                    })
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        match client.get_seq("orders", 5).await {
+            Err(ClientError::SeqUncertain) => {}
+            other => panic!("count-mismatch success must be SeqUncertain, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a malformed success must not trigger a (double-spending) retry"
+        );
+    }
+
+    /// A successful `GetSeqResponse` echoing a different `key` than requested is
+    /// likewise a protocol violation → `SeqUncertain`, server invoked once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_response_key_mismatch_is_uncertain() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        // Echo a DIFFERENT key than requested — a protocol violation; counts
+        // calls to prove the malformed success is not retried.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq(move |req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let (hi, lo) = tsoracle_core::Epoch(7).to_wire();
+                    Ok(tsoracle_proto::v1::GetSeqResponse {
+                        key: format!("{}-tampered", req.key),
+                        start: 0,
+                        count: req.count,
+                        epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                    })
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        match client.get_seq("orders", 5).await {
+            Err(ClientError::SeqUncertain) => {}
+            other => panic!("key-mismatch success must be SeqUncertain, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "malformed success: one call"
         );
     }
 }

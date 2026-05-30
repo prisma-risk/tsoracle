@@ -233,6 +233,16 @@ pub enum CoreError {
         now_ms: u64,
         ahead_ms: u64,
     },
+    #[error("sequence key must not be empty")]
+    SeqKeyEmpty,
+    #[error("sequence key length {len} exceeds maximum {max} bytes")]
+    SeqKeyTooLong { len: usize, max: usize },
+    #[error("sequence count must be >= 1")]
+    SeqCountZero,
+    #[error("sequence count {count} exceeds maximum {max}")]
+    SeqCountTooLarge { count: u32, max: u32 },
+    #[error("sequence block [{start}, {start}+{count}) overflows u64")]
+    SeqBlockOverflow { start: u64, count: u32 },
 }
 
 /// The result of a `try_commit_window_extension` that passed range validation.

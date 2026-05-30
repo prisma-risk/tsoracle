@@ -127,6 +127,27 @@ pub trait ConsensusDriver: Send + Sync + 'static {
     /// [`ConsensusError`]). Single-node drivers have no term to fence against
     /// and may ignore `epoch`.
     async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError>;
+
+    /// Read a key's durably-committed dense counter (0 if absent). Linearized,
+    /// like `load_high_water`. Default: unsupported.
+    async fn load_dense_seq(&self, key: &tsoracle_core::SeqKey) -> Result<u64, ConsensusError> {
+        let _ = key;
+        Err(ConsensusError::DenseUnsupported)
+    }
+
+    /// Durable, linearized fetch-add for one key. Lazily creates the key at 0 on
+    /// first use. Commits `seq[key] += count` and returns the pre-advance value
+    /// as the block start. `expected_epoch` fences a stale proposer. Default:
+    /// unsupported.
+    async fn advance_dense(
+        &self,
+        key: &tsoracle_core::SeqKey,
+        count: u32,
+        expected_epoch: Epoch,
+    ) -> Result<u64, ConsensusError> {
+        let (_, _, _) = (key, count, expected_epoch);
+        Err(ConsensusError::DenseUnsupported)
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +205,23 @@ mod tests {
                 driver.persist_high_water(42, Epoch(7)).await.unwrap(),
                 42,
                 "persist returns the at_least argument unchanged",
+            );
+            // The dense methods are not overridden by `Dummy`, so these exercise
+            // the trait's default bodies, which report the capability as absent.
+            let key = tsoracle_core::SeqKey::try_new("k").unwrap();
+            assert!(
+                matches!(
+                    driver.load_dense_seq(&key).await,
+                    Err(ConsensusError::DenseUnsupported)
+                ),
+                "default load_dense_seq is DenseUnsupported",
+            );
+            assert!(
+                matches!(
+                    driver.advance_dense(&key, 1, Epoch(1)).await,
+                    Err(ConsensusError::DenseUnsupported)
+                ),
+                "default advance_dense is DenseUnsupported",
             );
         });
     }
