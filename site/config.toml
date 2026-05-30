@@ -1,6 +1,6 @@
 base_url = "https://tsoracle.rs"
 title = "tsoracle"
-description = "Strictly monotonic timestamps in Rust. Distributed, raft-replicated, embeddable."
+description = "Strictly monotonic timestamps and gapless sequences in Rust. Distributed, raft-replicated, embeddable."
 default_language = "en"
 compile_sass = true
 build_search_index = false

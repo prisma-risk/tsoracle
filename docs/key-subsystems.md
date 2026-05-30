@@ -58,7 +58,7 @@ sequenceDiagram
 
 ## The leader-hint trailer
 
-When a follower receives a `GetTs` RPC, it responds with `FAILED_PRECONDITION` (`Status::failed_precondition("not leader")`) carrying a binary metadata trailer keyed `tsoracle-leader-hint-bin`. The trailer's value is a protobuf-encoded `LeaderHint`:
+When a follower receives a `GetTs` or `GetSeq` RPC, it responds with `FAILED_PRECONDITION` (`Status::failed_precondition("not leader")`) carrying a binary metadata trailer keyed `tsoracle-leader-hint-bin`. The trailer's value is a protobuf-encoded `LeaderHint`:
 
 ```protobuf
 message LeaderHint {
@@ -98,3 +98,9 @@ During steady-state serving, a `get_ts` call that finds the allocator's `physica
 The cost shape is **one fsync per extension, amortized over `window_ahead_ms × throughput` timestamps** — with `window_ahead = 3s` (the default) at 100 000 requests/sec, that's roughly one fsync per 300 000 timestamps. During a boundary stampede, waiters queue behind the single-flight lock and retry against the same newly committed window. Sizing `window_ahead` to bound the fraction of requests that pay this latency is covered in [Sizing window_ahead](operations.md#sizing-window_ahead).
 
 The `prepare → commit` shape (rather than holding the allocator mutex across `await`) is what lets concurrent `get_ts` calls continue serving from the existing window while one of them is mid-extension. See [Prepare-commit split](the-allocator.md#prepare-commit-split) for the rationale.
+
+## Serving GetSeq
+
+`GetSeq` shares the serving gate and the leader-hint trailer with `GetTs`: a follower rejects it with the same `FAILED_PRECONDITION` + `tsoracle-leader-hint-bin` redirect, and the failover fence's `NotServing` window blocks it exactly as it blocks `GetTs`. What it does *not* share is the window-extension machinery. There is no per-request window to exhaust and no `extension_gate` read-lock to take: the handler validates the key and `count` against `tsoracle-core`, reads the current leader epoch, and `await`s `ConsensusDriver::advance_dense(key, count, epoch)` directly, returning the block's `start`.
+
+The contract difference drives the error handling. A window extension is a monotonic `max`, so a stale or retried `persist_high_water` is harmless; a dense advance is a `fetch_add`, so it must commit exactly once. The server therefore maps a post-admission fault on the dense path to `INTERNAL` (the advance may already have committed) and the client treats that — and any ambiguous post-send failure — as `SeqUncertain` rather than retrying. A driver without dense support returns `UNIMPLEMENTED` here, never a disguised `NOT_LEADER`. See [Interface Reference → GetSeq](interface-reference.md#rpc-getseq).

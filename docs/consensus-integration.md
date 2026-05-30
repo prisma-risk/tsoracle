@@ -1,6 +1,6 @@
 # Consensus Integration
 
-`ConsensusDriver` is tsoracle's single pluggable trait — implement it and you can run tsoracle on top of openraft, raft-rs, etcd, or any other replicated log. This chapter is both the trait reference and a how-to: each of the three methods has its own subsection covering the contract and per-driver implementation recipes, plus a worked end-to-end sketch and an explanation of why single-writer is irreducible.
+`ConsensusDriver` is tsoracle's single pluggable trait — implement it and you can run tsoracle on top of openraft, raft-rs, etcd, or any other replicated log. This chapter is both the trait reference and a how-to: each of the core methods has its own subsection covering the contract and per-driver implementation recipes (plus the two optional dense-sequence methods that back `GetSeq`), a worked end-to-end sketch, and an explanation of why single-writer is irreducible.
 
 ```mermaid
 sequenceDiagram
@@ -36,11 +36,12 @@ sequenceDiagram
 
 ## The ConsensusDriver trait
 
-The `ConsensusDriver` trait in `tsoracle-consensus` is the single injection point for HA and durable persistence. Three methods, about fifty lines of trait surface:
+The `ConsensusDriver` trait in `tsoracle-consensus` is the single injection point for HA and durable persistence. Three required methods, plus two optional dense-sequence methods:
 
 - [`leadership_events`](#leadership_events) — emit leader-state transitions
 - [`load_high_water`](#load_high_water) — read the durable high-water, linearized
 - [`persist_high_water`](#persist_high_water) — advance the durable high-water, monotonically, fenced by epoch
+- [`load_dense_seq` / `advance_dense`](#dense-sequences-optional) — *optional*: back the `GetSeq` RPC. Both default to `DenseUnsupported`; override them to serve gapless sequences.
 
 Code lives in `crates/tsoracle-consensus/src/lib.rs`.
 
@@ -71,6 +72,23 @@ Per-driver recipes:
 - **raft-rs:** propose a `TsoExtend` log entry. On commit, apply does `max(stored, at_least)`. Stale leaders fail at the propose layer.
 - **etcd:** transactional update: read current value, compare-and-swap with `max(current, at_least)`. The lease + revision number gives you epoch fencing.
 - **Single-node:** read current value under a mutex, take max, write the record atomically (write-then-rename + dir fsync), return.
+
+## Dense sequences (optional)
+
+Two further methods back the `GetSeq` RPC. They are **optional**: both default to `Err(ConsensusError::DenseUnsupported)`, which `tsoracle-server` maps to gRPC `UNIMPLEMENTED`. A driver that only serves timestamps can ignore them; a driver that wants gapless sequences overrides both.
+
+- `async fn load_dense_seq(&self, key: &SeqKey) -> Result<u64, ConsensusError>` — return the durable current value of the per-key counter, linearized (same read contract as `load_high_water`). `0` for a key that has never been advanced.
+- `async fn advance_dense(&self, key: &SeqKey, count: u32, expected_epoch: Epoch) -> Result<u64, ConsensusError>` — atomically advance the counter named `key` by `count`, durably commit the advance, and return the **pre-advance** value (the block's `start`). Fenced by `expected_epoch` exactly like `persist_high_water`.
+
+The contract mirrors `persist_high_water` with one critical difference: it is **non-idempotent by construction**. `persist_high_water` is a monotonic `max`, so replaying it is harmless; `advance_dense` is a `fetch_add`, so replaying it spends a *second* block. A driver must therefore commit each advance exactly once and must **not** auto-retry a submission whose outcome is unknown — the ambiguity is propagated up to the client as `SeqUncertain` rather than resolved by re-submitting. Keep each key's counter independent, never let it regress, and never reuse an ordinal across leader transitions or restarts.
+
+Per-driver recipes:
+
+- **openraft:** submit an `AdvanceDense { key, count, epoch }` entry through `Raft::client_write()`; the state-machine apply reads `start = counter[key]`, sets `counter[key] += count`, and returns `start`, keyed per `key`. Shipped in [#585](https://github.com/prisma-risk/tsoracle/pull/585).
+- **Single-node (file):** under the key's lock, read the counter, durably write `value + count` (write-then-rename + dir fsync), return the old value.
+- **paxos / others:** leave defaulted (`DenseUnsupported`) until the per-key advance can be threaded through the log; the server answers `GetSeq` with `UNIMPLEMENTED` in the meantime.
+
+See [Driver Comparison → Dense gapless sequences](driver-comparison.md#dense-gapless-sequences-getseq) for the support matrix and [Interface Reference → GetSeq](interface-reference.md#rpc-getseq) for the wire contract.
 
 ## Choosing a driver
 

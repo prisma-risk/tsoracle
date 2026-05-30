@@ -1,7 +1,7 @@
 +++
 title = "Paxos, in pictures: ballots, promises, and the safety rule that makes it all work"
 description = "How classic Paxos decides a single value, why dueling proposers livelock, how Multi-Paxos rescues throughput, and why tsoracle ships an omnipaxos driver next to the openraft one. With animated diagrams you can play through."
-weight = 7
+weight = 8
 [taxonomies]
 tags = ["distributed-systems", "paxos", "consensus", "tsoracle", "internals"]
 +++

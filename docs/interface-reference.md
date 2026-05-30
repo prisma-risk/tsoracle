@@ -17,7 +17,7 @@ The wire source of truth lives in the [`tsoracle-proto`](../crates/tsoracle-prot
 
 ### Service: `tsoracle.v1.TsoService`
 
-Two RPCs. Default port is **`50551`** (loopback by default; configurable via `--listen`). The server speaks gRPC over HTTP/2 in either plaintext (`h2c`) or TLS, controlled by `--tls-cert`/`--tls-key`/`--tls-client-ca`.
+Three RPCs — `GetTs` (timestamps), `GetSeq` (gapless sequences), and `GetCurrentMaxSafe` (safe-point reads). Default port is **`50551`** (loopback by default; configurable via `--listen`). The server speaks gRPC over HTTP/2 in either plaintext (`h2c`) or TLS, controlled by `--tls-cert`/`--tls-key`/`--tls-client-ca`.
 
 #### RPC: `GetTs`
 
@@ -79,6 +79,45 @@ Read the current safe-point — the highest `physical_ms` at which any timestamp
 - Long-lived pollers should fence stale-leader values by tracking `(epoch_hi, epoch_lo)` and discarding values from a smaller epoch after a larger one.
 
 This RPC does not return `FAILED_PRECONDITION`, and the response carries no trailer.
+
+#### RPC: `GetSeq`
+
+Allocate a contiguous block of `count` dense ordinals for a named `key` — a gapless, never-reused run. Only the current leader serves this RPC. Dense support is **driver-specific** (see [Driver Comparison](driver-comparison.md)); a driver without it returns `UNIMPLEMENTED`. This RPC is **non-idempotent** — see the error table.
+
+**Request — `GetSeqRequest`:**
+
+| Field | Type | Constraint | Meaning |
+|---|---|---|---|
+| `key` | `string` (1) | non-empty UTF-8, `<= MAX_SEQ_KEY_LEN` (128 bytes) | Names the independent counter the block is drawn from. |
+| `count` | `uint32` (2) | `>= 1`; upper bound is the server's configured `max_seq_count` (default `65_536`) | Size of the contiguous block to reserve. |
+
+**Response — `GetSeqResponse` (on success):**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `key` | `string` (1) | Echoes the request key. |
+| `start` | `uint64` (2) | First ordinal of the block — the durably-committed pre-advance counter value. The block is `[start, start + count)`. |
+| `count` | `uint32` (3) | Equals the request's `count`. The server never returns a partial grant. |
+| `epoch` | `EpochWire` (4) | The leader epoch that issued the block, bundled as a nested message (always present on success). Same `EpochWire` shape as the leader-hint trailer. |
+
+**Success contract:**
+
+- The block is `[start, start + count)` — every ordinal present, none skipped.
+- Across all successful `GetSeq` responses for a given `key`, the issued ordinals are dense and never reused: each grant begins exactly where the previous one ended, even across leader transitions and restarts. A fresh key starts at `0`.
+- Each `key` is an independent counter; different keys advance separately.
+
+**Error statuses returned from `GetSeq`:**
+
+| `tonic::Code` | When | Trailer | Pre-commit-certain? |
+|---|---|---|---|
+| `FAILED_PRECONDITION` | This node is not the leader (carries the hint), **or** the dense counter would overflow `u64` (no hint). | [`tsoracle-leader-hint-bin`](#trailer-tsoracle-leader-hint-bin) on the not-leader case only | Yes |
+| `INVALID_ARGUMENT` | Empty/oversized `key`, `count == 0`, or `count` over the server's `max_seq_count`. | — | Yes |
+| `RESOURCE_EXHAUSTED` | The number of distinct keys reached the driver's cardinality cap. | — | Yes |
+| `UNIMPLEMENTED` | This consensus driver has no dense-sequence support. | — | Yes (nothing advanced) |
+| `UNAVAILABLE` | A transient driver fault (storage hiccup, momentary quorum loss); the advance did not commit. | — | Yes |
+| `INTERNAL` | A permanent driver fault or violated invariant reached after the request was admitted; the durable advance may have committed. | — | **No** — ambiguous |
+
+Because the dense path is non-idempotent, `tsoracle-client` treats any post-send failure that is *not* provably pre-commit-certain (a transport timeout after the request was sent, or `INTERNAL`) as `ClientError::SeqUncertain` and does **not** retry it — the advance may already have committed. Every pre-commit-certain status above is handled or retried normally. See [GetSeq — dense, gapless sequences](client-api-and-usage.md#getseq--dense-gapless-sequences) for the caller's reconciliation contract.
 
 ### Service: `tsoracle.admin.v1.MembershipAdmin`
 

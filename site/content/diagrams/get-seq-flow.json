@@ -1,0 +1,10 @@
+{
+    "actors": ["client", "leader", "followers"],
+    "messages": [
+        {"from": "client", "to": "leader", "label": "get_seq(key, N)"},
+        {"from": "leader", "to": "leader", "label": "fsync(seq[key] + N)", "kind": "self"},
+        {"from": "leader", "to": "followers", "label": "replicate"},
+        {"from": "followers", "to": "leader", "label": "quorum ack", "kind": "reply"},
+        {"from": "leader", "to": "client", "label": "[start, start+N)", "kind": "reply"}
+    ]
+}

@@ -39,3 +39,9 @@ tsoracle guarantees this through a mandatory failover fence run on every transit
 3. The allocator is seeded with both the first legal `physical_ms` (`serving_floor`) and the durable high-water `H` returned by the persist. It will not issue below `serving_floor` or above `H`, so the first timestamp from the new leader is strictly above anything any prior leader could have served.
 
 The orchestration of the fence — drain, load, persist, seed, begin serving — is in [The failover fence](key-subsystems.md#the-failover-fence).
+
+## Dense sequences: a separate counter
+
+The window allocator above issues *timestamps*; the `GetSeq` RPC issues *dense sequences*, and the two share no allocation machinery. A timestamp's gaps come from the `physical_ms`/`logical` packing — the logical counter resets every millisecond, so the issued integer space is sparse. A dense sequence has no packing and no reset: it is a plain per-key durable counter that advances by exactly `count` per grant and returns the pre-advance value, so `[start, start + count)` is gapless by construction.
+
+In `tsoracle-core` this is only the keying-and-validation surface — `SeqKey`, `SeqGrant`, `MAX_SEQ_KEY_LEN`, and the key/`count` bounds checks — and, deliberately, *nothing else*: unlike `Allocator`, it holds no per-key counter state. Every counter lives in the durable layer behind `ConsensusDriver::advance_dense`, so its monotonic-advance and epoch-fencing guarantees come from the same place the high-water's do, and there is no in-memory window to seed at failover. The one contract difference is idempotency: the high-water persist is a monotonic `max` (safe to replay), while a dense advance is a `fetch_add` (replay double-spends) — which is why the client surfaces an ambiguous `GetSeq` failure as `SeqUncertain`. See [Consensus Integration → Dense sequences](consensus-integration.md#dense-sequences-optional).

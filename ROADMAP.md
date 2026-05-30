@@ -44,7 +44,7 @@ This roadmap captures direction at three horizons. Specific issues track in <htt
 
 - File-driver hardening: more failpoint coverage, durability invariants, snapshot-publish correctness audit.
 - Continued zero-downtime format evolution under the framework shipped in PRs #454–#479.
-- Keyed dense sequence (`GetSeq`) support for the paxos driver. Dense sequences ship first on `file` and `openraft`; paxos returns `UNIMPLEMENTED` today. Adding it safely requires porting the per-version codec discipline and an all-members activation gate to paxos (the zero-downtime format-evolution machinery is currently openraft-only), so it is a prerequisite project rather than a direct feature add.
+- Dense-sequence (`GetSeq`) support for the OmniPaxos driver — bring `paxos` to parity with `file` and `openraft`, which already serve gapless sequences. Paxos returns `UNIMPLEMENTED` today via the inherited `DenseUnsupported` default; adding it safely requires porting the per-version codec discipline and an all-members activation gate to paxos.
 
 ## Long term (12+ months)
 

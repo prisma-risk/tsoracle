@@ -1,6 +1,6 @@
 # Client API and Usage
 
-The `tsoracle-client` crate end-to-end: constructing a `Client`, calling `get_ts` and `get_ts_batch`, how the client handles leader changes and `NOT_LEADER` rejections without surfacing them to your code, and the knobs you can turn.
+The `tsoracle-client` crate end-to-end: constructing a `Client`, calling `get_ts`, `get_ts_batch`, and `get_seq`, how the client handles leader changes and `NOT_LEADER` rejections without surfacing them to your code, and the knobs you can turn.
 
 For a minimum-overhead getting-started example, see [Calling tsoracle from Rust](getting-started.md#calling-tsoracle-from-rust). This chapter is the reference.
 
@@ -27,6 +27,30 @@ pub async fn get_ts_batch(&self, count: u32) -> Result<Vec<Timestamp>, ClientErr
 
 Use `get_ts` for one-off cases and `get_ts_batch` whenever you can amortize. The coalescing layer makes single-call sites efficient even without explicit batching, but explicit batching still beats coalescing because it skips one client-side wait per batch.
 
+## GetSeq — dense, gapless sequences
+
+Alongside timestamps, the client issues **gapless dense sequences** through a second wire RPC, `GetSeq { key, count }`, wrapped by one method:
+
+```rust
+pub async fn get_seq(&self, key: &str, count: u32) -> Result<SeqBlock, ClientError>;
+```
+
+`get_seq(key, count)` reserves a contiguous block of `count` ordinals from the per-key counter named `key` and returns a `SeqBlock { start: u64, count: u32, epoch: u128 }`. The block is `[start, start + count)` — every ordinal present, none skipped — where `start` is the durably-committed pre-advance value of the counter. Each `key` is an independent counter (so `orders` and `users` advance separately); a key is non-empty UTF-8 up to `tsoracle_core::MAX_SEQ_KEY_LEN` (128) bytes, and the first call to a fresh key starts at `0`. As with `get_ts_batch`, one call of `count = 1000` is one RPC and one persist, after which the caller hands the thousand IDs out locally.
+
+The client pre-rejects only universally-invalid inputs — an empty or oversized `key` (`ClientError::InvalidSeqKey`) and a zero `count` (`ClientError::InvalidCount(0)`, since a block always covers at least one ordinal). The upper bound on `count` is the server's configured `ServerBuilder::max_seq_count` (default `65_536`), which is deployment-specific; an over-cap `count` is forwarded and the server rejects it with `INVALID_ARGUMENT` (surfaced as `ClientError::Rpc`), so a client built against one cap stays correct against a server configured with another.
+
+### Non-idempotency and `SeqUncertain`
+
+This is the one place the sequence path's contract is deliberately weaker than `get_ts`. A gapless advance cannot be wasted — once the counter moves, the block is spent whether or not the client received it — so `get_seq` is **non-idempotent**. If a call fails *after* the request may have committed (a post-send timeout, an ambiguous transport error, an `INTERNAL` returned after the server's durable fsync), the client cannot tell whether the advance landed, and it returns `ClientError::SeqUncertain` rather than silently retrying. Retrying an uncertain call risks a double-spend: a second, *different* block handed to the same caller while the first sits spent-but-undelivered.
+
+On `SeqUncertain` the caller resolves the ambiguity instead of guessing — typically by reading the counter back through a coordinator-level read, or by tolerating a one-block gap where the workload allows it (a surrogate key only has to be unique, not literally hole-free). Pre-commit-certain rejections are **not** uncertain: `INVALID_ARGUMENT` (bad key/count), `RESOURCE_EXHAUSTED` (the distinct-key cardinality cap), `UNIMPLEMENTED` (a driver without dense support — see below), and a `FAILED_PRECONDITION` leader-hint redirect all provably advanced nothing, so they are handled or retried like any other error.
+
+The ride-out loop is the same one `get_ts` uses (`crates/tsoracle-client/src/retry.rs::issue_seq_rpc`), with one extra guard for the non-idempotent path: once an attempt has been issued, the loop refuses to send a further attempt whose budget the overall deadline has squeezed below a full per-attempt window. A never-issued RPC is unambiguous, so the loop surfaces the recorded election signal (a `FAILED_PRECONDITION`) instead of manufacturing a spurious `SeqUncertain` that would force a needless reconciliation.
+
+### Driver support
+
+Dense sequences are a property of the consensus driver. The **file** and **openraft** drivers implement them today; the **OmniPaxos** driver is on the roadmap. A driver without dense support answers `GetSeq` with `UNIMPLEMENTED` (`"dense sequences are not supported by this consensus driver"`) — never a disguised `NOT_LEADER` that would send the client into a pointless election ride-out — so the limitation is diagnosable at the first call. `get_ts` is unaffected on every driver. See [Driver Comparison](driver-comparison.md) for the support matrix.
+
 ## Leader discovery and retries
 
 The client never asks "who's the leader" before issuing an RPC. It picks an endpoint from its pool, sends `GetTs`, and reacts to the response:
@@ -46,7 +70,9 @@ The trailer's wire format is described in [The leader-hint trailer](key-subsyste
 - `Transport(_)` — tonic transport error wrapping the last attempt's failure.
 - `Rpc(Status)` — the last attempt returned a tonic `Status` we couldn't recover from.
 - `InvalidEndpoint(String)` — an endpoint string failed to parse as a URI.
-- `InvalidCount(u32)` — `count == 0` or `count > LOGICAL_MAX + 1` was passed to `get_ts_batch`.
+- `InvalidCount(u32)` — `count == 0` or `count > LOGICAL_MAX + 1` was passed to `get_ts_batch`, or `count == 0` was passed to `get_seq`.
+- `InvalidSeqKey` — an empty or oversized `key` (over `MAX_SEQ_KEY_LEN`) was passed to `get_seq`, rejected before any RPC.
+- `SeqUncertain` — a `get_seq` call failed after the request may have committed; the dense advance may or may not have landed, so the caller must reconcile rather than retry (see [GetSeq — dense, gapless sequences](#getseq--dense-gapless-sequences)).
 - `Connector(_)` — a user-supplied `channel_connector` closure returned an error. Built-in TLS failures continue to surface as `Transport(_)`.
 
 ## Configuration

@@ -1,7 +1,7 @@
 +++
 title = "Wiring tsoracle into openraft"
 description = "A timestamp oracle needs a replicated log under it. Inside tsoracle's ConsensusDriver trait, the openraft driver, and the envelope pattern for piggybacking on your service's existing raft."
-weight = 5
+weight = 6
 [taxonomies]
 tags = ["distributed-systems", "tso", "tsoracle", "raft", "internals"]
 +++
