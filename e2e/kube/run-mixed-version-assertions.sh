@@ -12,12 +12,12 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=./_assertions_lib.sh
 source "$here/_assertions_lib.sh"
 
-# Activation target. BASELINE_WRITE_VERSION is 4 today; e2e-max-readable-next
-# raises MAX_READABLE_VERSION to BASELINE+2 = 6 (BASELINE+1 = 5 is reserved
-# for DENSE_WRITE_VERSION — see #583). If BASELINE bumps, this constant trips
-# a visible mismatch on the next run rather than silently activating to an
-# unintended version.
-ACTIVATION_TARGET=6
+# Activation target. DENSE_WRITE_VERSION is 5 (the real dense layout); this
+# is the genuine target the all-members gate must accept once all pods are
+# v5-capable. If DENSE_WRITE_VERSION bumps, this constant trips a visible
+# mismatch on the next run rather than silently activating to an unintended
+# version.
+ACTIVATION_TARGET=5
 # Loopback admin port; matches deploy/entrypoint.sh:12 ADMIN_PORT default
 # and the chart values.yaml ports.admin entry added in Task 7.
 ADMIN_PORT=51002
@@ -106,29 +106,95 @@ try_activate_format() {
     return 1
 }
 
+# Assert activation to $1 is rejected by the ALL-MEMBERS GATE specifically
+# (rc=2 MEMBERS_BELOW_TARGET on a v5-capable leader), NOT by a v4 leader's
+# local-range check (rc=4). With partition=1 two of three pods are v5-capable
+# and exactly one (ordinal 0) is v4. If the current leader is the v4 pod it
+# answers rc=4; we gracefully restart it (default-grace SIGTERM fires the
+# leadership handoff onto a caught-up v5 voter) and retry. Bounded attempts.
+assert_gate_rejection() {
+    local target="$1"
+    local v4_leader
+    for _attempt in 1 2 3; do
+        v4_leader=""
+        local pods
+        pods=$(kubectl get pods -l app.kubernetes.io/name=tsoracle \
+            -o jsonpath='{.items[*].metadata.name}')
+        for pod in $pods; do
+            local rc=0
+            "$TIMEOUT_CMD" 30s kubectl exec "$pod" -c tsoracle -- \
+                tsoracle admin activate-format \
+                --endpoint "http://127.0.0.1:${ADMIN_PORT}" \
+                --target "$target" >&2 || rc=$?
+            case "$rc" in
+                2)
+                    echo "gate held: activate-format(target=$target) -> MEMBERS_BELOW_TARGET on v5 leader $pod"
+                    return 0
+                    ;;
+                3) continue ;;                 # follower; skip
+                4) v4_leader="$pod" ;;          # v4 leader; record, will hand off
+                0)
+                    echo "FAIL: activation unexpectedly SUCCEEDED in mixed state on $pod"
+                    return 1
+                    ;;
+                *)
+                    echo "FAIL: activate-format on $pod: rc=$rc"
+                    return 1
+                    ;;
+            esac
+        done
+        if [ -n "$v4_leader" ]; then
+            echo "leader is v4 ($v4_leader); gracefully restarting to hand off to a v5 voter"
+            kubectl delete pod "$v4_leader"     # default grace -> SIGTERM -> #423 handoff
+            kubectl rollout status sts/tsoracle --timeout=120s
+        fi
+    done
+    echo "FAIL: could not establish a v5 leader for the gate assertion"
+    return 1
+}
+
+# One-shot GetSeq probe via the already-loaded driver image. EXPECT in
+# {failed-precondition, served}. Runs to completion; non-zero exit = FAIL.
+get_seq_probe() {
+    local expect="$1"
+    "$TIMEOUT_CMD" 60s kubectl run "seq-probe-${expect}-$$" \
+        --image=tsoracle-e2e-driver:latest --image-pull-policy=IfNotPresent \
+        --restart=Never --rm -i --command -- \
+        kube-e2e-driver --mode=get-seq-probe \
+        --endpoints=tsoracle-0.tsoracle-peer:5051,tsoracle-1.tsoracle-peer:5051,tsoracle-2.tsoracle-peer:5051 \
+        --seq-key=orders --seq-expect="$expect"
+}
+
 echo "== step 1: start mixed-version soak (load is live before any perturbation) =="
 kubectl apply -f "$here/driver/job-mixed-version-soak.yaml"
 wait_soak_live tsoracle-e2e-mixed-version-soak \
     "mixed-version-soak: first GetTs ok" 60
 
-echo "== step 2: partition=2; roll only ordinal 2 to :e2e-next =="
+echo "== step 2: partition=1; roll ordinals 1 and 2 to :e2e-next (ordinal 0 stays v4) =="
 kubectl patch sts/tsoracle --type=strategic \
-    -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":2}}}}'
+    -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":1}}}}'
 kubectl set image sts/tsoracle "tsoracle=${NEXT_IMAGE}"
 wait_pod_image_and_ready tsoracle-2 "${NEXT_IMAGE}" 120
+wait_pod_image_and_ready tsoracle-1 "${NEXT_IMAGE}" 120
 
-echo "== step 3: activation MUST be safely rejected (mixed-version state) =="
-try_activate_format "$ACTIVATION_TARGET" REJECTED
+echo "== step 3: all-members gate MUST reject (v5 leader, v4 member present) =="
+assert_gate_rejection "$ACTIVATION_TARGET"
 
-echo "== step 4: partition=0; complete the rollout =="
+echo "== step 4: partition=0; complete the rollout (all v5-capable) =="
 kubectl patch sts/tsoracle --type=strategic \
     -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":0}}}}'
 kubectl rollout status sts/tsoracle --timeout=180s
 
-echo "== step 5: activation MUST succeed (all members on :e2e-next) =="
+echo "== step 5: pre-activation GetSeq MUST be FAILED_PRECONDITION =="
+get_seq_probe failed-precondition
+
+echo "== step 6: activation MUST succeed (all members on :e2e-next) =="
 try_activate_format "$ACTIVATION_TARGET" OK
 
-echo "== step 6: drain the soak (zero monotonicity violations + <0.5% errors) =="
+echo "== step 7: post-activation GetSeq MUST serve a block =="
+get_seq_probe served
+
+echo "== step 8: drain the soak (GetTs monotone + GetSeq gapless + <error budget) =="
 wait_job tsoracle-e2e-mixed-version-soak 180
 
 echo "== all mixed-version assertions passed =="

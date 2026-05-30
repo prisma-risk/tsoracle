@@ -24,10 +24,8 @@ spec:
             # tsoracle client is configured (leader-hint failover assumes the
             # client knows every replica).
             - --endpoints=tsoracle-0.tsoracle-peer:5051,tsoracle-1.tsoracle-peer:5051,tsoracle-2.tsoracle-peer:5051
-            # Longer than the plain soak: must cover the rolling restart of
-            # every replica (one at a time, with readiness wait between) AND
-            # the operator-initiated activation that follows. 180s leaves
-            # ample headroom on top of a typical ~90s rolling restart of a
-            # 3-replica StatefulSet plus the activation round-trip; tune
-            # alongside the workflow if its sequencing grows.
-            - --duration-secs=180
+            # Longer than the plain soak: must cover the partition=1 rollout of
+            # two ordinals (with readiness waits), a possible leadership-handoff
+            # restart to seat a v5 leader, two GetSeq probes, and the activation
+            # round-trip. 300s leaves ample headroom on top of that sequencing.
+            - --duration-secs=300

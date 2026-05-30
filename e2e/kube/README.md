@@ -61,6 +61,19 @@ helm install tsoracle-tls deploy/charts/tsoracle -n e2e-tls --set image.reposito
 RELEASE=tsoracle-tls JOB_DIR=$(pwd)/e2e/kube/driver/tls ./e2e/kube/run-assertions.sh
 ```
 
+## Mixed-version lane (`kube-e2e-mixed-version.yml`)
+
+The `workflow_dispatch`-only mixed-version lane runs a separate kind cluster with two image tags: `tsoracle:e2e-baseline` built from the pinned `tsoracle-v2.0.0` commit (v4-only, `MAX_READABLE_VERSION=4`, no GetSeq) and `tsoracle:e2e-next` built from the PR head (`FEATURES=openraft`, v5-capable). It soaks `GetTs` monotonicity and `GetSeq` gaplessness across a partition=1 rolling restart, asserts the all-members gate rejects activation while the v4 member is present, then activates `DENSE_WRITE_VERSION=5` once all members are v5-capable.
+
+### Old-reader-rejects-too-new (version gate)
+
+The "an old-only reader rejects a too-new record at the version gate rather than misdecoding" property is covered deterministically, not in this e2e lane:
+
+- Unit: `snapshot_codec_accepts_full_readable_range` in `crates/tsoracle-driver-openraft/src/state_machine.rs` and `decode_entry_record_rejects_out_of_range_version` in the openraft toolkit log store assert a version above `MAX_READABLE_VERSION` is rejected, not misdecoded.
+- Fuzz: `openraft_dense_command_decode` drives decode at a fuzzed version byte and asserts out-of-range versions are rejected.
+
+This lane covers the complementary system-level guarantee: the all-members gate ensures a v4-only member is never *exposed* to a v5 record (the `MEMBERS_BELOW_TARGET` rejection in step 3).
+
 ## Deploying to EKS (staging)
 
 The kind flow above is fully local. To deploy the same `openraft-standalone` cluster onto the real **staging** EKS cluster (arm64, real EBS) for a manual smoke test, the Kubernetes manifests live in the **infra** repo at `k8s/tsoracle-e2e/`; this repo only builds and pushes the images.

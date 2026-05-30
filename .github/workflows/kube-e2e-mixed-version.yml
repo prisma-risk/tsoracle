@@ -10,6 +10,8 @@ jobs:
   kube-e2e-mixed-version:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      BASELINE_REF: 2760a8d5e47f4610eda7559a0420e97f537414a2  # tsoracle-v2.0.0
     steps:
       - name: free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
@@ -26,15 +28,21 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-      - name: build baseline image (openraft only, no e2e feature)
+      - name: checkout baseline release (v4-only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ env.BASELINE_REF }}
+          path: baseline-src
+          fetch-depth: 0
+      - name: build baseline image (v4-only, tsoracle-v2.0.0)
+        run: |
+          docker build -f baseline-src/deploy/Dockerfile \
+            --build-arg FEATURES=openraft \
+            -t tsoracle:e2e-baseline baseline-src
+      - name: build next image (openraft, v5-capable PR head)
         run: |
           docker build -f deploy/Dockerfile \
             --build-arg FEATURES=openraft \
-            -t tsoracle:e2e-baseline .
-      - name: build next image (openraft + e2e-max-readable-next)
-        run: |
-          docker build -f deploy/Dockerfile \
-            --build-arg FEATURES=openraft,e2e-max-readable-next \
             -t tsoracle:e2e-next .
       - name: build driver image
         run: docker build -f e2e/kube/driver/Dockerfile -t tsoracle-e2e-driver:latest .
