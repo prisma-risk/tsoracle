@@ -18,11 +18,12 @@
 
 </div>
 
-A distributed timestamp oracle for Rust — highly available and fault-tolerant, issuing strictly monotonic integer timestamps over gRPC, replicated via openraft or OmniPaxos (or your own log) with pluggable consensus.
+A distributed timestamp **and sequence** oracle for Rust — highly available and fault-tolerant, issuing strictly monotonic integer timestamps and gapless, dense ID sequences over gRPC, replicated via openraft or OmniPaxos (or your own log) with pluggable consensus.
 
 ## Features
 
-- 🔢 **Strictly monotonic** — every issued timestamp is strictly greater than every previously issued one; no duplicates and no regression, ever. The packed integer space is not dense (logical resets when `physical_ms` advances, so some integer values are unused), but the issued sequence is total-ordered and unique.
+- 🔢 **Strictly monotonic timestamps** — every issued timestamp is strictly greater than every previously issued one; no duplicates and no regression, ever. The packed integer space is not dense (logical resets when `physical_ms` advances, so some integer values are unused), but the issued sequence is total-ordered and unique. Call `get_ts` when you need *order*.
+- 🆔 **Gapless sequences** — `get_seq(key, count)` hands out dense, contiguous ID blocks `[start, start + count)` per named key — nothing skipped, never reused across crashes or failover — for surrogate keys, invoice numbers, ledger lines, or partition offsets. The tradeoff is non-idempotency: an ambiguous failure surfaces as `SeqUncertain` for the caller to reconcile rather than being silently retried. Call `get_seq` when you need *no holes*. Implemented on the file and openraft drivers today (OmniPaxos on the roadmap).
 - 🛡️ **Crash-safe** — window state is fsync'd before any timestamp in that window is handed out, so a restart never rewinds.
 - 🔌 **Pluggable consensus, openraft + OmniPaxos included** — `tsoracle-driver-openraft` and `tsoracle-driver-paxos` ship production-ready replicated drivers; implement one trait (`ConsensusDriver`) to back tsoracle with raft-rs, etcd, or your own replicated log instead. See [`docs/consensus-integration.md`](docs/consensus-integration.md#choosing-a-driver) for picking between drivers.
 - 📦 **gRPC client included** — `tsoracle-client` handles leader discovery, request coalescing, and reconnection for you.
@@ -52,6 +53,8 @@ let client = Client::connect(vec!["http://127.0.0.1:50551".into()]).await?;
 
 let ts = client.get_ts().await?;             // a strictly increasing Timestamp
 let batch = client.get_ts_batch(64).await?;  // amortize RPC cost across many IDs
+
+let block = client.get_seq("orders", 64).await?;  // 64 gapless IDs: [start, start + 64)
 ```
 
 ## Use as a library
@@ -86,6 +89,8 @@ A *timestamp oracle* is a service that hands out strictly increasing integer IDs
 - Per-host clocks aren't monotonic or accurate enough, and database sequences don't scale to your workload.
 
 tsoracle is a small, embeddable Rust implementation. The consensus layer is left as a trait, so you can run it single-node behind one fsync (the default), or wire it into a replicated log of your choice.
+
+Beyond ordering, tsoracle also issues **gapless sequences**. Where a timestamp only has to be *ordered* (and may skip values), a sequence has to be *contiguous* — `…, 41, 42, 43, …` with nothing missing. Call `get_seq(key, count)` for surrogate keys, invoice or order numbers, ledger line numbers, or partition offsets, with one durable, gapless counter per named key. The cost is non-idempotency, since a gapless advance can't be un-spent — see [Gapless sequences with GetSeq](https://tsoracle.rs/posts/gapless-sequences-with-getseq/) for the full story and [`docs/client-api-and-usage.md`](docs/client-api-and-usage.md) for the API.
 
 ## Documentation
 

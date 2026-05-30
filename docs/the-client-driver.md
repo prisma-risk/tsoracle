@@ -124,3 +124,11 @@ Auto-batching is per-client — each `Client` instance runs its own `driver_task
 - **Across many clients.** Each client issues its own stream of RPCs to the server. Per-client throughput is bounded by `B / τ` for whatever B that client's concurrency produces; total system throughput is the sum across clients, capped by what the server can serve. The leader serves them in arrival order, and the failover fence ensures monotonicity across leader transitions ([Monotonicity proof](the-allocator.md#monotonicity-proof)).
 
 When per-client throughput matters and the caller's logic is genuinely serial, the deployment pattern is "one shared `Client` per host, used by every in-process task," not "every callsite constructs its own `Client`."
+
+## GetSeq does not coalesce
+
+Everything above is about `get_ts`. The `get_seq` path deliberately does *not* use the coalescing driver, and the reasons are instructive.
+
+First, dense blocks are keyed and non-interchangeable. Two concurrent `get_seq("orders", …)` and `get_seq("users", …)` calls draw from different counters, and the coalescing trick — merge N waiters into one RPC, hand each an arbitrary slice of the response — only works when the returned values are fungible. Timestamps are fungible; keyed ordinals are not. Second, `get_seq` is non-idempotent (see [Client API → GetSeq](client-api-and-usage.md#getseq--dense-gapless-sequences)). The coalescing driver's freedom to re-issue a merged batch after a transport failure is exactly what a non-idempotent advance cannot tolerate — a re-issue would double-spend. So `get_seq` issues a direct, per-call RPC through the same leader-discovery worklist (`retry::issue_seq_rpc`), without the `driver_task` queue.
+
+The freshness invariant also inverts. For `get_ts`, holding an unused timestamp breaks external monotonicity, so the client structurally never hoards. For `get_seq`, holding the block *is the point*: a caller asks for a thousand ordinals in one RPC and hands them out locally, and the block is a local pool by design — a gapless sequence carries no external-real-time-ordering contract to violate. The two RPCs make opposite trades, and the client implements each accordingly.

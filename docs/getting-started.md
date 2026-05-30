@@ -10,7 +10,8 @@ The vocabulary used throughout the rest of these docs:
 - **High-water `H`.** The durably-persisted upper bound on `physical_ms`. The allocator will never issue a timestamp with `physical_ms > H`. Every advance of `H` is durably committed (via the `ConsensusDriver`) before any timestamp under the new bound is handed out.
 - **Window.** The range from which the allocator may currently issue, bounded above by `H`. The allocator *extends* its window by advancing `H` when serving approaches the current upper bound.
 - **Epoch.** An opaque monotonic identifier identifying a leader's term, supplied by the `ConsensusDriver`. Used to fence stale-leader writes.
-- **Leader / follower.** At any moment, exactly one node in a tsoracle deployment is the leader; only the leader serves `GetTs`. Followers respond with `NOT_LEADER` and a hint to the current leader's address. The single-node configuration is trivially "always leader."
+- **Sequence (dense).** A gapless, per-key counter served by `get_seq`: a call reserves a contiguous block `[start, start + count)` of ordinals that are never skipped or reused, even across failover. Unlike a timestamp — which only has to be *ordered* and may skip values — a sequence has to be *contiguous*. Dense-sequence support is driver-specific (see [Driver Comparison](driver-comparison.md)).
+- **Leader / follower.** At any moment, exactly one node in a tsoracle deployment is the leader; only the leader serves `GetTs` and `GetSeq`. Followers respond with `NOT_LEADER` and a hint to the current leader's address. The single-node configuration is trivially "always leader."
 - **Failover fence.** The mandatory sequence the new leader runs before serving on every transition into leadership — load `H`, advance `H` past anything the prior leader could have served, persist, then begin serving. The correctness argument is in [Monotonicity proof](the-allocator.md#monotonicity-proof); the orchestration is in [The failover fence](key-subsystems.md#the-failover-fence).
 
 No code on this page — just the words. The pages that follow assume these terms.
@@ -53,7 +54,7 @@ To seed the state directory at a non-zero high-water (for migrating off a prior 
 
 The `tsoracle-client` crate is a thin async wrapper over the gRPC service. Use it when your application speaks Rust; for other languages, drive the protobuf service in `tsoracle-proto` directly.
 
-Connect to one or more server endpoints, then call `get_ts` or `get_ts_batch`:
+Connect to one or more server endpoints, then call `get_ts`/`get_ts_batch` for timestamps, or `get_seq` for gapless sequences:
 
 ```rust
 use tsoracle_client::Client;
@@ -62,7 +63,12 @@ let client = Client::connect(vec!["http://127.0.0.1:50551".into()]).await?;
 
 let ts = client.get_ts().await?;             // a single strictly increasing Timestamp
 let batch = client.get_ts_batch(64).await?;  // 64 contiguous strictly increasing timestamps
+
+// Gapless dense sequence: a contiguous block of IDs from the named counter "orders".
+let block = client.get_seq("orders", 64).await?;  // ordinals [block.start, block.start + 64)
 ```
+
+`get_seq` is **non-idempotent**: an ambiguous failure returns `ClientError::SeqUncertain` (the advance may or may not have committed) for you to reconcile, rather than being silently retried like `get_ts`. See [GetSeq — dense, gapless sequences](client-api-and-usage.md#getseq--dense-gapless-sequences) for the contract.
 
 `Client::connect` is the minimum-overhead constructor. To tune the batch-flush interval (how long the client waits to coalesce concurrent waiters before issuing an outgoing `GetTs`), use the builder:
 

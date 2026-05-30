@@ -19,12 +19,13 @@ Legend used in the matrices below: ✅ supported · ❌ not supported · ➖ not
 |---|---|---|---|
 | Multi-node HA | ❌ (single-node only) | ✅ | ✅ |
 | Tolerates `f` failures with `2f+1` nodes | ➖ | ✅ | ✅ |
+| Strictly monotonic timestamps (`GetTs`) | ✅ | ✅ | ✅ |
+| Dense gapless sequences (`GetSeq`) | ✅ | ✅ ([#585](https://github.com/prisma-risk/tsoracle/pull/585)) | ❌ — roadmap (returns `UNIMPLEMENTED`) |
 | Persistence backend | local filesystem (atomic rename + fsync) | RocksDB (log + pluggable snapshot store) | RocksDB (via `tsoracle-paxos-toolkit`) |
 | Peer transport | ➖ | tonic gRPC, unary + client-streaming snapshots | tonic gRPC, unary |
 | Peer mTLS | ➖ | ✅ (`PeerTlsConfig`) | ✅ (`PeerTlsConfig`) |
 | Secure-by-default Helm render (peer TLS required for HA) | ➖ | ✅ ([#452](https://github.com/prisma-risk/tsoracle/pull/452)) | ✅ ([#452](https://github.com/prisma-risk/tsoracle/pull/452)) |
 | Runtime dynamic membership (add/remove nodes online) | ❌ | ✅ ([#453](https://github.com/prisma-risk/tsoracle/pull/453)) | ❌ — peers fixed at startup, restart required |
-| Keyed dense sequences (`GetSeq`) | ✅ | ✅ (gated on format activation to write version 5) | ❌ — returns `UNIMPLEMENTED`; tracked on the [roadmap](../ROADMAP.md) |
 | Admin gRPC service + `tsoracle admin` CLI | ❌ | ✅ (own `--admin-listen` port, optional admin mTLS) | ❌ (returns `AdminError::Unsupported`) |
 | Admin mTLS | ➖ | ✅ (`AdminTlsConfig`) | ➖ (no admin service) |
 | Graceful leader handoff on SIGTERM | ➖ | ✅ — transfers leadership to most-caught-up voter, then drains ([#423](https://github.com/prisma-risk/tsoracle/pull/423)) | ❌ — process exits without handoff; followers re-elect |
@@ -62,7 +63,7 @@ If you can't say yes to one of those, openraft is the better default — the mis
 **Things worth knowing before you pick:**
 
 - **Clients ride out elections without an external load balancer.** The leader-hint trailer mechanism means clients re-target after a redirect on their own. You do not need a smart proxy in front of the cluster — point clients at all replicas and let the client handle leader discovery.
-- **`tsoracle` is single-shard.** All three drivers issue one monotonic sequence per cluster. If you need partitioned timestamp domains, deploy multiple clusters; don't try to shard at the driver layer.
+- **`tsoracle` is single-shard.** All three drivers issue one monotonic timestamp stream per cluster (plus, where dense sequences are supported, any number of independent named `GetSeq` counters from the same leader). If you need partitioned timestamp domains, deploy multiple clusters; don't try to shard at the driver layer.
 - **Brief `NotServing` windows during leader transitions are normal.** All three drivers publish `NotServing` while the failover fence runs (load high-water, reseat the allocator). Clients tolerate this; alerts that page on every `NotServing` will be noisy.
 - **Peer mTLS is on by default in the Helm chart for HA drivers.** Disabling it requires the explicit `tls.allowInsecurePeer=true` opt-out. Don't treat this as ceremony — a plaintext peer port with the default headless Service is unauthenticated consensus on the pod network.
 
@@ -72,20 +73,26 @@ If you can't say yes to one of those, openraft is the better default — the mis
 
 ### The `ConsensusDriver` trait surface
 
-All three drivers implement [`ConsensusDriver`](consensus-integration.md), defined at `crates/tsoracle-consensus/src/driver.rs`. The core trait is three methods:
+All three drivers implement [`ConsensusDriver`](consensus-integration.md), defined at `crates/tsoracle-consensus/src/driver.rs`. The trait has three required methods plus two optional dense-sequence methods:
 
 - `leadership_events() -> Stream<LeaderState>` — emits `Leader { epoch }` / `Follower { leader_endpoint, leader_epoch }` / `NotServing` transitions.
 - `load_high_water() -> Result<u64>` — read the durable high-water mark.
 - `persist_high_water(at_least, epoch) -> Result<u64>` — write the high-water mark; result is the actual persisted value (monotonic).
-
-Two further methods back the keyed dense-sequence path (`GetSeq`); both have a default impl returning `ConsensusError::DenseUnsupported`, so a driver opts in by overriding them (`file` and `openraft` do; `paxos` does not):
-
-- `advance_dense(key, count, epoch) -> Result<u64>` — durable, linearized fetch-add for one key; returns the pre-advance counter as the issued block's start.
-- `load_dense_seq(key) -> Result<u64>` — read a key's durable dense counter (0 if absent).
+- `load_dense_seq(key) -> Result<u64>` and `advance_dense(key, count, expected_epoch) -> Result<u64>` — back `GetSeq`. Both default to `Err(ConsensusError::DenseUnsupported)` (mapped to gRPC `UNIMPLEMENTED`); a driver opts into dense sequences by overriding them.
 
 The trait is location-agnostic: it does not specify who names peers or who opens peer sockets. Each driver makes those decisions independently.
 
 ### Per-feature deep dive
+
+#### Dense gapless sequences (`GetSeq`)
+
+The `GetSeq` RPC is backed by the two optional `ConsensusDriver` methods above. `load_dense_seq(key)` reads a key's durable counter; `advance_dense(key, count, expected_epoch)` atomically reserves `count` ordinals and returns the pre-advance value (the block's `start`). Both default to `DenseUnsupported`; the server (`crates/tsoracle-server/src/service.rs`) maps that to `UNIMPLEMENTED` rather than a disguised `NOT_LEADER`, so an unsupported driver is diagnosable at the first call.
+
+- **`file`** — implemented (`crates/tsoracle-driver-file/src/driver.rs`). A durable per-key fetch-add layered on the same write-temp + fsync + atomic-rename path as the timestamp high-water; non-canonical dense records are rejected on decode.
+- **`openraft`** — implemented in [#585](https://github.com/prisma-risk/tsoracle/pull/585) (the dense-openraft PR): the advance is proposed through the raft log like the high-water mark, so ordinals are committed by quorum and survive failover. **This docs change should land with that PR** — until it merges, the openraft driver still answers `GetSeq` with `UNIMPLEMENTED`.
+- **`paxos`** — inherits the trait default (`DenseUnsupported`); on the roadmap.
+
+The dense path is non-idempotent on purpose: a committed advance the client never receives is a spent-but-non-duplicate block, surfaced to the caller as `SeqUncertain` rather than retried. See [Interface Reference → GetSeq](interface-reference.md#rpc-getseq) and [Client API → GetSeq](client-api-and-usage.md#getseq--dense-gapless-sequences).
 
 #### Dynamic membership and the admin surface
 
@@ -123,14 +130,6 @@ Openraft only. The version contract is four constants in `crates/tsoracle-openra
 Activation is gated by `all_members_can_read(target, capabilities)` (`drivers/openraft/capabilities.rs:73-95`), which uses the additive `Capabilities` peer RPC to gather every member's `[min_readable, max_readable, active_write]` triple. The flip itself happens at apply via `ApplyOutcome::FormatActivated`. Wire payloads carry an additive proto `format_version uint32` field that defaults to 0 → `BASELINE_WRITE_VERSION`.
 
 Paxos has none of this. The on-disk schema is fixed per `tsoracle-paxos-toolkit` release; a version bump requires a coordinated rolling restart with operator-managed compatibility. See [Format Migration](format-migration-upgrade.md) for the full story.
-
-#### Keyed dense sequences (`GetSeq`)
-
-`GetSeq(key, count)` hands out a contiguous block `[start, start+count)` of gapless consecutive integers per named key — independent counters for, say, `orders` and `invoices`. Unlike `GetTs` timestamps (which are intentionally non-dense — the logical counter resets each millisecond), a dense sequence has no gaps: the server-side committed ledger is contiguous. It is backed by two `ConsensusDriver` methods (`advance_dense`, `load_dense_seq`) and is non-idempotent (an ambiguous failure may have spent a block; clients see `SeqUncertain` and must not blindly retry).
-
-- **`file`** — supported. The dense map (`BTreeMap<String,u64>` + an immutable genesis cardinality cap) lives in a versioned, crc32c-checksummed `dense` record beside the high-water `state` file, written with the same atomic tmp→fsync→rename→dir-fsync protocol. Each `advance_dense` durably persists before publishing, so a crash before fsync never advances the counter.
-- **`openraft`** — supported, as a replicated `AdvanceDense` state-machine command folded deterministically in committed log order (start computed at apply; cardinality cap and overflow checked at apply). Because adding the command is an on-disk/on-wire format change, it is **gated behind the format-activation machinery**: a leader will not append a dense entry (and `GetSeq` returns `FAILED_PRECONDITION` "format not yet activated") until the active write version has been activated to 5 through the all-members `all_members_can_read` gate — so a mixed-version cluster never receives an entry an un-upgraded member cannot decode.
-- **`paxos`** — **not supported**; `advance_dense`/`load_dense_seq` return `ConsensusError::DenseUnsupported`, surfaced to clients as `UNIMPLEMENTED`. Paxos lacks the per-version codec discipline and the online activation gate that make a non-breaking dense rollout safe (the whole zero-downtime format-evolution framework is openraft-only). Adding dense to paxos therefore requires porting that machinery first; it is tracked on the [roadmap](../ROADMAP.md).
 
 #### Single-active leadership-stream lease
 
@@ -178,9 +177,9 @@ Both HA drivers also expose a piggyback trait (`OpenraftHighWaterHost`, `PaxosHi
 
 These are known gaps rather than bugs — they shape what's safe to deploy where:
 
+- **Paxos dense sequences** — `advance_dense`/`load_dense_seq` are unimplemented; the paxos driver inherits the `DenseUnsupported` default and returns `UNIMPLEMENTED` for `GetSeq`. On the roadmap after the openraft dense path ([#585](https://github.com/prisma-risk/tsoracle/pull/585)) lands.
 - **Paxos dynamic membership** — five real blockers documented in [project-dynamic-membership](https://github.com/prisma-risk/tsoracle/pull/453); not a "just wire it" item.
 - **Paxos format evolution** — no `MIN/MAX/ActiveWrite` triple, no `SetFormatVersion`, no `Capabilities` RPC. Version bumps are operator-coordinated rolling restarts.
-- **Paxos keyed dense sequences (`GetSeq`)** — returns `UNIMPLEMENTED`. Blocked on the format-evolution gap above: a non-breaking dense rollout needs the per-version codec + activation gate that paxos lacks. Tracked on the [roadmap](../ROADMAP.md).
 - **Paxos graceful handoff** — no `handoff.rs` analogue. `SIGTERM` exits cooperatively but without transferring leadership.
 - **Paxos admin TLS** — `AdminTlsConfig` exists only on `OpenraftConfig`. Paxos has no admin service to TLS-protect.
 - **Openraft single-active leadership-stream lease** — openraft mints streams freely. Documented intentional asymmetry; revisit if the same hazard becomes reachable.
