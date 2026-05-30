@@ -794,6 +794,24 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
             ));
         }
 
+        // Re-validate every dense key before adopting the snapshot. The dense
+        // map is persisted as raw `String` keys, so — unlike the replicated
+        // `AdvanceDense` log command, whose `SeqKey` re-validates on decode — a
+        // crafted or corrupted snapshot can carry an empty or oversized key that
+        // `decode_framed` above accepts. Enforce `SeqKey`'s invariant here, fail
+        // loud, and do it before the `active_write_version` bump and the persist
+        // below so a rejected install leaves the store and in-memory state
+        // untouched for openraft to retry — exactly like the meta/payload check
+        // above.
+        for key in payload.dense.keys() {
+            if let Err(e) = tsoracle_core::SeqKey::try_new(key.as_str()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("snapshot dense key fails the SeqKey invariant: {e}"),
+                ));
+            }
+        }
+
         // The snapshot's leading version byte is evidence that the sending
         // leader's active write version was at least this high — which means a
         // `SetFormatVersion` activation to that version already committed
@@ -1752,6 +1770,81 @@ mod tests {
             .expect("get_current_snapshot")
             .expect("snapshot present");
         assert_eq!(current.meta.snapshot_id, "test-install-1");
+    }
+
+    /// Build a v5 (dense) snapshot whose `dense` map carries one raw-`String`
+    /// key, paired with a meta whose `last_log_id` agrees with the payload so
+    /// the install reaches the dense-key validation guard (not the earlier
+    /// meta/payload-disagreement check). Returns `(meta, framed bytes)`.
+    fn dense_snapshot_with_key(key: &str) -> (SnapMeta, Vec<u8>) {
+        let last_applied = Some(log_id(9));
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 999,
+            last_applied,
+            last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::from([(key.to_string(), 7u64)]),
+            dense_cap: 64,
+        };
+        let bytes =
+            tsoracle_codec::encode_framed(tsoracle_openraft_toolkit::DENSE_WRITE_VERSION, &payload)
+                .expect("serialize v5 dense payload");
+        let meta = SnapMeta {
+            last_log_id: last_applied,
+            last_membership: StoredMem::default(),
+            snapshot_id: "test-invalid-dense-key".to_string(),
+        };
+        (meta, bytes)
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_rejects_empty_dense_key() {
+        let mut sm = HighWaterStateMachine::new();
+        let before = sm.current_value().await;
+        let (meta, bytes) = dense_snapshot_with_key("");
+
+        let err = sm
+            .install_snapshot(&meta, std::io::Cursor::new(bytes))
+            .await
+            .expect_err("install of a snapshot with an empty dense key must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        // Rejected before any mutation: the wholesale state replacement (which
+        // would have set current_value to 999) did not happen, and the invalid
+        // key is absent from the dense map.
+        assert_eq!(sm.current_value().await, before);
+        assert_eq!(sm.dense_value(""), 0);
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_rejects_oversized_dense_key() {
+        let mut sm = HighWaterStateMachine::new();
+        let before = sm.current_value().await;
+        let oversized = "a".repeat(tsoracle_core::MAX_SEQ_KEY_LEN + 1);
+        let (meta, bytes) = dense_snapshot_with_key(&oversized);
+
+        let err = sm
+            .install_snapshot(&meta, std::io::Cursor::new(bytes))
+            .await
+            .expect_err("install of a snapshot with an oversized dense key must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        assert_eq!(sm.current_value().await, before);
+        assert_eq!(sm.dense_value(&oversized), 0);
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_accepts_valid_dense_key() {
+        // The guard must not reject an honest v5 snapshot: a valid dense key
+        // installs and is observable afterwards.
+        let mut sm = HighWaterStateMachine::new();
+        let (meta, bytes) = dense_snapshot_with_key("orders");
+
+        sm.install_snapshot(&meta, std::io::Cursor::new(bytes))
+            .await
+            .expect("install of a snapshot with a valid dense key must succeed");
+
+        assert_eq!(sm.current_value().await, 999);
+        assert_eq!(sm.dense_value("orders"), 7);
     }
 
     #[tokio::test]

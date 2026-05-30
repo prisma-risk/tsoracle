@@ -27,5 +27,6 @@ serde     = { workspace = true, optional = true }
 
 [dev-dependencies]
 husky-rs   = { workspace = true }
+postcard   = { workspace = true }
 proptest   = { workspace = true }
 serde_json = { workspace = true }
