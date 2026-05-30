@@ -701,7 +701,6 @@ mod range_boundary_tests {
 mod record_codec_tests {
     use super::{decode_entry_record, encode_entry_record};
     use crate::codec::BASELINE_WRITE_VERSION;
-    #[cfg(not(feature = "e2e-max-readable-next"))]
     use crate::codec::{MAX_READABLE_VERSION, MIN_READABLE_VERSION};
     use crate::declare_raft_types_ext;
     use crate::log_store::DefaultLogStoreCodec;
@@ -766,17 +765,11 @@ mod record_codec_tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
-    // Pinned to BASELINE in the default build; the test-only
-    // `e2e-max-readable-next` feature lifts MAX to `BASELINE + 2`, so
-    // skip the MAX assertion under that feature (covered by
-    // `version_constants_under_e2e_max_readable_next_feature` in
-    // `codec.rs`).
-    #[cfg(not(feature = "e2e-max-readable-next"))]
     #[test]
     fn version_constants_are_at_expected_values() {
         assert_eq!(BASELINE_WRITE_VERSION, 4);
         assert_eq!(MIN_READABLE_VERSION, 4);
-        // MAX raised to 5 to cover the dense write version (DENSE_WRITE_VERSION).
+        // MAX is 5 to cover the dense write version (DENSE_WRITE_VERSION).
         assert_eq!(MAX_READABLE_VERSION, 5);
     }
 }

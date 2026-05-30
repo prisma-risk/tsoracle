@@ -123,7 +123,7 @@ Paxos has no equivalent. There is no `drivers/paxos/handoff.rs`, no `transfer_le
 Openraft only. The version contract is four constants in `crates/tsoracle-openraft-toolkit/src/codec.rs:41-80`:
 
 - `MIN_READABLE_VERSION` — read-floor (today: 4).
-- `MAX_READABLE_VERSION` — read-ceiling (today: 4; bumps to 5 under the `e2e-max-readable-next` feature for soak testing).
+- `MAX_READABLE_VERSION` — read-ceiling (today: 5; covers the v5 dense layout, `DENSE_WRITE_VERSION`).
 - `BASELINE_WRITE_VERSION` — fallback write version (today: 4).
 - `ActiveWriteVersion(Arc<AtomicU8>)` — the runtime-mutable active write version, seeded from the log at recovery and *only* mutated by a committed `SetFormatVersion` raft entry.
 
