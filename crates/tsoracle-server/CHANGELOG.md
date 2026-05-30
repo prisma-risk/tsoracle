@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [3.0.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.0.0...tsoracle-server-v3.0.1) - 2026-05-30
+
+### Other
+
+- updated the following local packages: tsoracle-core, tsoracle-core, tsoracle-consensus
+
 ## [3.0.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v2.0.0...tsoracle-server-v3.0.0) - 2026-05-30
 
 ### Added

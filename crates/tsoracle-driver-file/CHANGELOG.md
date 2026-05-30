@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.0.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v2.0.0...tsoracle-driver-file-v2.0.1) - 2026-05-30
+
+### Other
+
+- updated the following local packages: tsoracle-core, tsoracle-consensus
+
 ## [2.0.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v1.0.1...tsoracle-driver-file-v2.0.0) - 2026-05-30
 
 ### Added

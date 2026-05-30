@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.0.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v2.0.0...tsoracle-driver-openraft-v2.0.1) - 2026-05-30
+
+### Fixed
+
+- *(seq)* re-validate SeqKey on serde deserialize and dense snapshot restore ([#596](https://github.com/prisma-risk/tsoracle/pull/596))
+
 ## [2.0.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-openraft-v1.0.1...tsoracle-driver-openraft-v2.0.0) - 2026-05-30
 
 ### Added

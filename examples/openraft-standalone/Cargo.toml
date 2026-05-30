@@ -17,8 +17,8 @@ default    = []
 reflection = ["tsoracle-server/reflection"]
 
 [dependencies]
-tsoracle-server     = { path = "../../crates/tsoracle-server", version = "3.0.0" }
-tsoracle-standalone = { path = "../../crates/tsoracle-standalone", version = "1.1.1", default-features = false, features = ["openraft"] }
+tsoracle-server     = { path = "../../crates/tsoracle-server", version = "3.0.1" }
+tsoracle-standalone = { path = "../../crates/tsoracle-standalone", version = "1.1.2", default-features = false, features = ["openraft"] }
 tokio               = { workspace = true, features = ["signal", "macros", "rt-multi-thread"] }
 clap                = { workspace = true }
 tracing             = { workspace = true }
