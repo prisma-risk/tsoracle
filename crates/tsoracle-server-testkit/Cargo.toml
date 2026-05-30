@@ -18,5 +18,5 @@ tokio          = { workspace = true }
 tonic          = { workspace = true }
 tower          = { version = "0.5" }
 turmoil        = { version = "0.7" }
-tsoracle-proto = { path = "../tsoracle-proto", version = "1.0.0" }
-tsoracle-server = { path = "../tsoracle-server", version = "2.0.0" }
+tsoracle-proto = { path = "../tsoracle-proto", version = "1.1.0" }
+tsoracle-server = { path = "../tsoracle-server", version = "3.0.0" }

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-yieldpoint-v1.0.0...tsoracle-yieldpoint-v1.1.0) - 2026-05-30
+
+### Added
+
+- keyed dense sequences on openraft + format-activation rollout gate ([#585](https://github.com/prisma-risk/tsoracle/pull/585))
+
 ## [0.1.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-yieldpoint-v0.1.5...tsoracle-yieldpoint-v0.1.6) - 2026-05-26
 
 ### Fixed

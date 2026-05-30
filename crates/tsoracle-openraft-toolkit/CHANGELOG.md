@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v1.0.0...tsoracle-openraft-toolkit-v1.1.0) - 2026-05-30
+
+### Added
+
+- keyed dense sequences on openraft + format-activation rollout gate ([#585](https://github.com/prisma-risk/tsoracle/pull/585))
+
 ## [0.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v0.2.1...tsoracle-openraft-toolkit-v0.2.2) - 2026-05-26
 
 ### Added

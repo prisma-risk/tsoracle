@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-proto-v1.0.0...tsoracle-proto-v1.1.0) - 2026-05-30
+
+### Added
+
+- keyed dense sequence service (GetSeq) with file driver consensus support ([#579](https://github.com/prisma-risk/tsoracle/pull/579))
+
 ## [0.2.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-proto-v0.2.3...tsoracle-proto-v0.2.4) - 2026-05-26
 
 ### Added
