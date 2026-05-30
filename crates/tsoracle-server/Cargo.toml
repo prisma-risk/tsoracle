@@ -55,7 +55,7 @@ tsoracle-failpoint = { workspace = true }
 tokio        = { workspace = true, features = ["test-util"] }
 metrics-util = { workspace = true }
 tsoracle-core = { path = "../tsoracle-core", version = "2.1.1" }
-tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "2.0.1" }
+tsoracle-driver-file = { path = "../tsoracle-driver-file" }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 
