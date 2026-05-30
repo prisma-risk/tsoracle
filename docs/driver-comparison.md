@@ -24,6 +24,7 @@ Legend used in the matrices below: ✅ supported · ❌ not supported · ➖ not
 | Peer mTLS | ➖ | ✅ (`PeerTlsConfig`) | ✅ (`PeerTlsConfig`) |
 | Secure-by-default Helm render (peer TLS required for HA) | ➖ | ✅ ([#452](https://github.com/prisma-risk/tsoracle/pull/452)) | ✅ ([#452](https://github.com/prisma-risk/tsoracle/pull/452)) |
 | Runtime dynamic membership (add/remove nodes online) | ❌ | ✅ ([#453](https://github.com/prisma-risk/tsoracle/pull/453)) | ❌ — peers fixed at startup, restart required |
+| Keyed dense sequences (`GetSeq`) | ✅ | ✅ (gated on format activation to write version 5) | ❌ — returns `UNIMPLEMENTED`; tracked on the [roadmap](../ROADMAP.md) |
 | Admin gRPC service + `tsoracle admin` CLI | ❌ | ✅ (own `--admin-listen` port, optional admin mTLS) | ❌ (returns `AdminError::Unsupported`) |
 | Admin mTLS | ➖ | ✅ (`AdminTlsConfig`) | ➖ (no admin service) |
 | Graceful leader handoff on SIGTERM | ➖ | ✅ — transfers leadership to most-caught-up voter, then drains ([#423](https://github.com/prisma-risk/tsoracle/pull/423)) | ❌ — process exits without handoff; followers re-elect |
@@ -40,9 +41,9 @@ Legend used in the matrices below: ✅ supported · ❌ not supported · ➖ not
 
 **`file`** — a single fsynced state file on local disk, guarded by an OS `flock`. No peers, no log, no replication. The simplest possible deployment: one pod, one PVC, replicas pinned to 1 (the Helm chart enforces this). If the node loses its disk you lose the oracle's high-water mark and must rebuild from a backup. Suitable for development, single-tenant deployments, and anywhere the underlying disk durability story is acceptable.
 
-**`openraft`** — production HA on top of [openraft](https://github.com/databendlabs/openraft). The richest feature set: dynamic membership over a dedicated admin port, graceful leader handoff on SIGTERM, online format evolution, snapshot streaming, peer + admin mTLS. The default choice for HA deployments; the Helm chart treats `driver=openraft` as the recommended default.
+**`openraft`** — production HA on top of [openraft](https://github.com/databendlabs/openraft). The richest feature set: dynamic membership over a dedicated admin port, graceful leader handoff on SIGTERM, online format evolution, snapshot streaming, peer + admin mTLS, and keyed dense sequences (`GetSeq`). The default choice for HA deployments; the Helm chart treats `driver=openraft` as the recommended default.
 
-**`paxos`** — production HA on top of [OmniPaxos](https://omnipaxos.com/). Feature-light relative to openraft: no dynamic membership, no graceful handoff, no online format evolution, no admin gRPC. What it brings is a different consensus algorithm (paxos lineage rather than raft) and a per-leader *single-active-stream lease* that openraft does not currently implement (see contributor notes). Use it when you specifically want paxos semantics or want the second consensus implementation as a hedge.
+**`paxos`** — production HA on top of [OmniPaxos](https://omnipaxos.com/). Feature-light relative to openraft: no dynamic membership, no graceful handoff, no online format evolution, no admin gRPC, and no keyed dense sequences (`GetSeq` returns `UNIMPLEMENTED`). What it brings is a different consensus algorithm (paxos lineage rather than raft) and a per-leader *single-active-stream lease* that openraft does not currently implement (see contributor notes). Use it when you specifically want paxos semantics or want the second consensus implementation as a hedge — and you do not need dense sequences.
 
 ### Choosing a driver
 
@@ -71,11 +72,16 @@ If you can't say yes to one of those, openraft is the better default — the mis
 
 ### The `ConsensusDriver` trait surface
 
-All three drivers implement [`ConsensusDriver`](consensus-integration.md), defined at `crates/tsoracle-consensus/src/driver.rs`. The trait is three methods:
+All three drivers implement [`ConsensusDriver`](consensus-integration.md), defined at `crates/tsoracle-consensus/src/driver.rs`. The core trait is three methods:
 
 - `leadership_events() -> Stream<LeaderState>` — emits `Leader { epoch }` / `Follower { leader_endpoint, leader_epoch }` / `NotServing` transitions.
 - `load_high_water() -> Result<u64>` — read the durable high-water mark.
 - `persist_high_water(at_least, epoch) -> Result<u64>` — write the high-water mark; result is the actual persisted value (monotonic).
+
+Two further methods back the keyed dense-sequence path (`GetSeq`); both have a default impl returning `ConsensusError::DenseUnsupported`, so a driver opts in by overriding them (`file` and `openraft` do; `paxos` does not):
+
+- `advance_dense(key, count, epoch) -> Result<u64>` — durable, linearized fetch-add for one key; returns the pre-advance counter as the issued block's start.
+- `load_dense_seq(key) -> Result<u64>` — read a key's durable dense counter (0 if absent).
 
 The trait is location-agnostic: it does not specify who names peers or who opens peer sockets. Each driver makes those decisions independently.
 
@@ -117,6 +123,14 @@ Openraft only. The version contract is four constants in `crates/tsoracle-openra
 Activation is gated by `all_members_can_read(target, capabilities)` (`drivers/openraft/capabilities.rs:73-95`), which uses the additive `Capabilities` peer RPC to gather every member's `[min_readable, max_readable, active_write]` triple. The flip itself happens at apply via `ApplyOutcome::FormatActivated`. Wire payloads carry an additive proto `format_version uint32` field that defaults to 0 → `BASELINE_WRITE_VERSION`.
 
 Paxos has none of this. The on-disk schema is fixed per `tsoracle-paxos-toolkit` release; a version bump requires a coordinated rolling restart with operator-managed compatibility. See [Format Migration](format-migration-upgrade.md) for the full story.
+
+#### Keyed dense sequences (`GetSeq`)
+
+`GetSeq(key, count)` hands out a contiguous block `[start, start+count)` of gapless consecutive integers per named key — independent counters for, say, `orders` and `invoices`. Unlike `GetTs` timestamps (which are intentionally non-dense — the logical counter resets each millisecond), a dense sequence has no gaps: the server-side committed ledger is contiguous. It is backed by two `ConsensusDriver` methods (`advance_dense`, `load_dense_seq`) and is non-idempotent (an ambiguous failure may have spent a block; clients see `SeqUncertain` and must not blindly retry).
+
+- **`file`** — supported. The dense map (`BTreeMap<String,u64>` + an immutable genesis cardinality cap) lives in a versioned, crc32c-checksummed `dense` record beside the high-water `state` file, written with the same atomic tmp→fsync→rename→dir-fsync protocol. Each `advance_dense` durably persists before publishing, so a crash before fsync never advances the counter.
+- **`openraft`** — supported, as a replicated `AdvanceDense` state-machine command folded deterministically in committed log order (start computed at apply; cardinality cap and overflow checked at apply). Because adding the command is an on-disk/on-wire format change, it is **gated behind the format-activation machinery**: a leader will not append a dense entry (and `GetSeq` returns `FAILED_PRECONDITION` "format not yet activated") until the active write version has been activated to 5 through the all-members `all_members_can_read` gate — so a mixed-version cluster never receives an entry an un-upgraded member cannot decode.
+- **`paxos`** — **not supported**; `advance_dense`/`load_dense_seq` return `ConsensusError::DenseUnsupported`, surfaced to clients as `UNIMPLEMENTED`. Paxos lacks the per-version codec discipline and the online activation gate that make a non-breaking dense rollout safe (the whole zero-downtime format-evolution framework is openraft-only). Adding dense to paxos therefore requires porting that machinery first; it is tracked on the [roadmap](../ROADMAP.md).
 
 #### Single-active leadership-stream lease
 
@@ -166,6 +180,7 @@ These are known gaps rather than bugs — they shape what's safe to deploy where
 
 - **Paxos dynamic membership** — five real blockers documented in [project-dynamic-membership](https://github.com/prisma-risk/tsoracle/pull/453); not a "just wire it" item.
 - **Paxos format evolution** — no `MIN/MAX/ActiveWrite` triple, no `SetFormatVersion`, no `Capabilities` RPC. Version bumps are operator-coordinated rolling restarts.
+- **Paxos keyed dense sequences (`GetSeq`)** — returns `UNIMPLEMENTED`. Blocked on the format-evolution gap above: a non-breaking dense rollout needs the per-version codec + activation gate that paxos lacks. Tracked on the [roadmap](../ROADMAP.md).
 - **Paxos graceful handoff** — no `handoff.rs` analogue. `SIGTERM` exits cooperatively but without transferring leadership.
 - **Paxos admin TLS** — `AdminTlsConfig` exists only on `OpenraftConfig`. Paxos has no admin service to TLS-protect.
 - **Openraft single-active leadership-stream lease** — openraft mints streams freely. Documented intentional asymmetry; revisit if the same hazard becomes reachable.
