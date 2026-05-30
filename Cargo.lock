@@ -3297,6 +3297,7 @@ name = "tsoracle-core"
 version = "2.1.0"
 dependencies = [
  "husky-rs",
+ "postcard",
  "proptest",
  "serde",
  "serde_json",

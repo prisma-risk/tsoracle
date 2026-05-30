@@ -49,8 +49,14 @@ pub const DEFAULT_MAX_SEQ_COUNT: u32 = 65_536;
 /// A validated sequence key: non-empty, valid UTF-8 (guaranteed by `String`),
 /// and at most [`MAX_SEQ_KEY_LEN`] bytes. `try_new` is the single validation
 /// site — a value of this type is proof the key is in range.
+///
+/// The `serde` impls are hand-written (not derived) so deserialization routes
+/// through `try_new`: a derived `Deserialize` for a newtype builds the inner
+/// `String` directly and would be a second construction site that bypasses the
+/// invariant. Mirrors [`crate::peer::PeerEndpoint`]'s validate-on-deserialize
+/// discipline. `Serialize` emits the bare string (newtype-transparent), so the
+/// on-disk and wire byte layout is unchanged.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeqKey(String);
 
 impl SeqKey {
@@ -70,6 +76,25 @@ impl SeqKey {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for SeqKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for SeqKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Re-validate on the way in: `try_new` is the single validation site, so
+        // a crafted or corrupted key (empty, or longer than `MAX_SEQ_KEY_LEN`
+        // bytes) arriving in a replicated log entry or a persisted snapshot is
+        // rejected here rather than silently observed as an in-range `SeqKey`.
+        let s = String::deserialize(deserializer)?;
+        SeqKey::try_new(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -429,5 +454,60 @@ mod seqkey_tests {
             SeqKey::try_new(&too_long),
             Err(CoreError::SeqKeyTooLong { .. })
         ));
+    }
+
+    // ---- SeqKey: serde re-validates on deserialize (try_new is the single
+    // validation site, including the postcard decode path the openraft log and
+    // dense snapshot travel through). A derived `Deserialize` would build the
+    // inner `String` directly and bypass `try_new`, so these pin that decode
+    // routes through the invariant.
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_deserialize_rejects_empty_key() {
+        // `postcard::to_stdvec(&String::new())` is a structurally valid postcard
+        // String (a single zero length-prefix byte). Decoding it as a `SeqKey`
+        // must re-run `try_new` and reject the empty key, not return `SeqKey("")`.
+        let bytes = postcard::to_stdvec(&String::new()).expect("encode empty string");
+        let decoded = postcard::from_bytes::<SeqKey>(&bytes);
+        assert!(
+            decoded.is_err(),
+            "empty-key postcard payload must fail to decode, got {decoded:?}",
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_deserialize_rejects_oversized_key() {
+        let oversized = "a".repeat(MAX_SEQ_KEY_LEN + 1);
+        let bytes = postcard::to_stdvec(&oversized).expect("encode oversized string");
+        let decoded = postcard::from_bytes::<SeqKey>(&bytes);
+        assert!(
+            decoded.is_err(),
+            "oversized-key postcard payload must fail to decode, got {decoded:?}",
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_round_trip_preserves_valid_key() {
+        let key = SeqKey::try_new("orders").unwrap();
+        let bytes = postcard::to_stdvec(&key).expect("encode key");
+        // Serialize is newtype-transparent: the bytes are exactly a postcard
+        // `String`, so the on-disk/wire format is unchanged by routing decode
+        // through `try_new`.
+        assert_eq!(bytes, postcard::to_stdvec(&"orders".to_string()).unwrap());
+        let back: SeqKey = postcard::from_bytes(&bytes).expect("decode key");
+        assert_eq!(back, key);
+        assert_eq!(back.as_str(), "orders");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_deserialize_accepts_max_length_key() {
+        let max = "a".repeat(MAX_SEQ_KEY_LEN);
+        let bytes = postcard::to_stdvec(&max).expect("encode max-length string");
+        let back: SeqKey = postcard::from_bytes(&bytes).expect("max-length key must decode");
+        assert_eq!(back.as_str(), max);
     }
 }

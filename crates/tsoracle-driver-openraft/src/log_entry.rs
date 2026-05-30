@@ -186,4 +186,60 @@ mod tests {
         let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(back, cmd);
     }
+
+    #[test]
+    fn postcard_round_trip_advance_dense() {
+        // A valid `AdvanceDense` round-trips unchanged: routing the embedded
+        // `SeqKey` decode through `try_new` must not perturb the honest path.
+        let cmd = HighWaterCommand::AdvanceDense {
+            key: tsoracle_core::SeqKey::try_new("orders").unwrap(),
+            count: 7,
+        };
+        let bytes = postcard::to_stdvec(&cmd).expect("serialize");
+        let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn advance_dense_postcard_layout_is_pinned() {
+        // Pin the byte layout the hand-crafted invalid-key payloads below rely
+        // on: `AdvanceDense` is the 3rd `HighWaterCommand` variant (index 2),
+        // followed by the newtype-transparent `SeqKey` (a postcard `String`:
+        // varint length prefix + UTF-8 bytes) then the `count` varint. A
+        // 1-byte key "a" with count 1 is therefore [2, 1, b'a', 1].
+        let cmd = HighWaterCommand::AdvanceDense {
+            key: tsoracle_core::SeqKey::try_new("a").unwrap(),
+            count: 1,
+        };
+        let bytes = postcard::to_stdvec(&cmd).expect("serialize");
+        assert_eq!(bytes, vec![2u8, 1, b'a', 1]);
+    }
+
+    #[test]
+    fn decode_rejects_advance_dense_empty_key() {
+        // Variant 2 (AdvanceDense), empty-string key (length prefix 0), count 1.
+        // The bytes are structurally valid postcard, but the embedded `SeqKey`
+        // violates the non-empty invariant, so the decode must fail loud rather
+        // than land `SeqKey("")` in a replicated command.
+        let bytes = vec![2u8, 0, 1];
+        let decoded = postcard::from_bytes::<HighWaterCommand>(&bytes);
+        assert!(
+            decoded.is_err(),
+            "AdvanceDense with empty key must fail to decode, got {decoded:?}",
+        );
+    }
+
+    #[test]
+    fn decode_rejects_advance_dense_oversized_key() {
+        // Variant 2, a 129-byte key (one past MAX_SEQ_KEY_LEN), count 1. 129 as
+        // a postcard varint is [0x81, 0x01].
+        let mut bytes = vec![2u8, 0x81, 0x01];
+        bytes.extend(std::iter::repeat_n(b'a', 129));
+        bytes.push(1);
+        let decoded = postcard::from_bytes::<HighWaterCommand>(&bytes);
+        assert!(
+            decoded.is_err(),
+            "AdvanceDense with oversized key must fail to decode, got {decoded:?}",
+        );
+    }
 }
