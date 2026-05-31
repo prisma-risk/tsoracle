@@ -231,8 +231,8 @@ mod tests {
 
     #[test]
     fn recover_takes_the_max_of_present_lower_bounds() {
-        // MAX_READABLE_VERSION (5) > BASELINE_WRITE_VERSION (4), so these
-        // assertions exercise the genuine multi-version max (4 vs 5).
+        // MAX_READABLE_VERSION (6) > BASELINE_WRITE_VERSION (4), so these
+        // assertions exercise the genuine multi-version max (4 vs 6).
         assert_eq!(
             recover_active_write_version(Some(MAX_READABLE_VERSION), None).unwrap(),
             MAX_READABLE_VERSION
