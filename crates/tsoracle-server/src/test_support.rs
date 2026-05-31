@@ -56,7 +56,8 @@ use crate::{Server, ServerError, ServingState};
 use crate::leader_hint::not_leader_status;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use tsoracle_proto::v1::{
-    GetSeqRequest, GetSeqResponse, GetTsRequest, GetTsResponse, LeaderHint,
+    GetSeqBatchRequest, GetSeqBatchResponse, GetSeqRequest, GetSeqResponse, GetTsRequest,
+    GetTsResponse, LeaderHint,
     tso_service_server::{TsoService, TsoServiceServer},
 };
 
@@ -320,6 +321,19 @@ impl TsoService for FixedHintService {
         &self,
         _request: tonic::Request<GetSeqRequest>,
     ) -> Result<tonic::Response<GetSeqResponse>, tonic::Status> {
+        Err(not_leader_status(
+            &crate::reporter::Reporter::for_tests(),
+            LeaderHint {
+                leader_endpoint: Some(self.hint_endpoint.clone()),
+                leader_epoch: None,
+            },
+        ))
+    }
+
+    async fn get_seq_batch(
+        &self,
+        _request: tonic::Request<GetSeqBatchRequest>,
+    ) -> Result<tonic::Response<GetSeqBatchResponse>, tonic::Status> {
         Err(not_leader_status(
             &crate::reporter::Reporter::for_tests(),
             LeaderHint {

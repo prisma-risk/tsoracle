@@ -156,6 +156,7 @@ mod tests {
         let core = std::sync::Arc::new(ServingCore::new(
             Duration::from_secs(3),
             tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
         ));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -232,6 +233,7 @@ mod tests {
         let core = std::sync::Arc::new(ServingCore::new(
             Duration::from_secs(3),
             tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
         ));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -274,6 +276,7 @@ mod tests {
         let core = std::sync::Arc::new(ServingCore::new(
             Duration::from_secs(3),
             tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
         ));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -320,6 +323,7 @@ mod tests {
         let core = std::sync::Arc::new(ServingCore::new(
             Duration::from_secs(3),
             tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
         ));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 

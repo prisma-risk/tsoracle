@@ -46,9 +46,22 @@ pub struct OpenraftLogCodec;
 
 impl LogStoreCodec<TypeConfig> for OpenraftLogCodec {
     fn encode_entry(
-        _version: u8,
+        version: u8,
         entry: &<TypeConfig as openraft::RaftTypeConfig>::Entry,
     ) -> Result<Vec<u8>, CodecError> {
+        // Defense-in-depth: never serialize an AdvanceDenseBatch under a write
+        // version that predates it. The driver's proposer gate already refuses
+        // to propose one before activation; this is the second line so a gate
+        // regression fails the write here at the leader rather than committing a
+        // poison entry a pre-v6 follower cannot decode.
+        if version < tsoracle_openraft_toolkit::BATCH_WRITE_VERSION {
+            if let openraft::EntryPayload::Normal(
+                crate::log_entry::HighWaterCommand::AdvanceDenseBatch { .. },
+            ) = &entry.payload
+            {
+                return Err(CodecError::NotRepresentable { version });
+            }
+        }
         encode_postcard(entry)
     }
 
@@ -116,5 +129,43 @@ mod tests {
         let via_provider =
             <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_log_id(4, &log_id).unwrap();
         assert_eq!(via_provider, postcard::to_stdvec(&log_id).unwrap());
+    }
+
+    #[test]
+    fn encode_entry_rejects_batch_below_batch_version() {
+        use crate::log_entry::{DenseAdvance, HighWaterCommand};
+        use tsoracle_openraft_toolkit::{BATCH_WRITE_VERSION, DENSE_WRITE_VERSION};
+        let lid = openraft::testing::log_id::<TypeConfig>(1, 1, 1);
+        let entry: <TypeConfig as openraft::RaftTypeConfig>::Entry =
+            openraft::entry::RaftEntry::new_normal(
+                lid,
+                HighWaterCommand::AdvanceDenseBatch {
+                    entries: vec![DenseAdvance {
+                        key: tsoracle_core::SeqKey::try_new("k").unwrap(),
+                        count: 1,
+                    }],
+                },
+            );
+        // Below BATCH_WRITE_VERSION: refused, no bytes produced. Tested at both
+        // the baseline and the just-below-threshold version to pin the whole
+        // pre-v6 range, not a single point.
+        use tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION;
+        for below in [BASELINE_WRITE_VERSION, DENSE_WRITE_VERSION] {
+            assert!(
+                matches!(
+                    <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_entry(below, &entry),
+                    Err(CodecError::NotRepresentable { .. })
+                ),
+                "AdvanceDenseBatch must be refused at write version {below}",
+            );
+        }
+        // At BATCH_WRITE_VERSION: allowed.
+        assert!(
+            <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_entry(
+                BATCH_WRITE_VERSION,
+                &entry
+            )
+            .is_ok()
+        );
     }
 }

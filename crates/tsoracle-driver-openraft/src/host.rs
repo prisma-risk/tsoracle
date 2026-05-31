@@ -81,6 +81,16 @@ pub trait OpenraftHighWaterHost: Send + Sync + 'static {
         count: u32,
     ) -> Result<u64, ConsensusError>;
 
+    /// Submit an `AdvanceDenseBatch { entries }` proposal and return the applied
+    /// per-key block starts in request order. The proposer reads `ApplyOutcome`
+    /// from the `client_write` response: `DenseBatchAdvanced { starts }` →
+    /// `Ok(starts)`; the two rejection outcomes map to the corresponding
+    /// `ConsensusError`.
+    async fn submit_advance_dense_batch(
+        &self,
+        entries: &[(tsoracle_core::SeqKey, u32)],
+    ) -> Result<Vec<u64>, ConsensusError>;
+
     /// Read a key's durably-committed dense counter (0 if absent),
     /// linearized. Implementations issue the same read barrier as
     /// `current_high_water` before reading the local state machine.
@@ -132,6 +142,13 @@ mod tests {
             Err(ConsensusError::DenseUnsupported)
         }
 
+        async fn submit_advance_dense_batch(
+            &self,
+            _entries: &[(tsoracle_core::SeqKey, u32)],
+        ) -> Result<Vec<u64>, ConsensusError> {
+            Err(ConsensusError::DenseUnsupported)
+        }
+
         async fn current_dense_seq(
             &self,
             _key: &tsoracle_core::SeqKey,
@@ -164,6 +181,11 @@ mod tests {
         let _ = host.active_write_version();
         let key = tsoracle_core::SeqKey::try_new("k").unwrap();
         assert!(host.submit_advance_dense(&key, 1).await.is_err());
+        assert!(
+            host.submit_advance_dense_batch(&[(key.clone(), 1)])
+                .await
+                .is_err()
+        );
         assert!(host.current_dense_seq(&key).await.is_err());
     }
 }

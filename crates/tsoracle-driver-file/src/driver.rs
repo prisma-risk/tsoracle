@@ -437,6 +437,68 @@ impl ConsensusDriver for FileDriver {
         dense.map = new_map;
         Ok(start)
     }
+
+    async fn advance_dense_batch(
+        &self,
+        entries: &[(tsoracle_core::SeqKey, u32)],
+        _expected_epoch: Epoch,
+    ) -> Result<Vec<u64>, ConsensusError> {
+        // An empty batch is a no-op: return before locking or touching disk so a
+        // degenerate call never triggers a gratuitous durable rewrite.
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut dense = self.dense.lock().await;
+
+        // Phase 1: cardinality. Count distinct keys not already present;
+        // duplicates within the batch count only once.
+        let new_keys: std::collections::BTreeSet<&str> = entries
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .filter(|k| !dense.map.contains_key(*k))
+            .collect();
+        if dense.map.len() as u64 + new_keys.len() as u64 > dense.cap {
+            return Err(ConsensusError::SeqKeyCardinalityExceeded { cap: dense.cap });
+        }
+
+        // Phase 2: sequential fold into a scratch map seeded from current
+        // counters; each entry's start is the running value before the advance.
+        // Overflow against the accumulated value rejects the whole batch.
+        let mut scratch: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
+        let mut starts: Vec<u64> = Vec::with_capacity(entries.len());
+        for (key, count) in entries {
+            let key_str = key.as_str();
+            let running = scratch
+                .get(key_str)
+                .copied()
+                .or_else(|| dense.map.get(key_str).copied())
+                .unwrap_or(0);
+            starts.push(running);
+            let next = running
+                .checked_add(u64::from(*count))
+                .ok_or(ConsensusError::SeqOverflow)?;
+            scratch.insert(key_str.to_string(), next);
+        }
+
+        // Phase 3: build the would-be-new map, persist it durably ONCE, THEN
+        // publish. A crash before the publish leaves the prior map intact.
+        let mut new_map = dense.map.clone();
+        for (key_str, next) in &scratch {
+            new_map.insert(key_str.clone(), *next);
+        }
+        let cap = dense.cap;
+        let dir = self.dir.clone();
+        let to_write = new_map.clone();
+        tokio::task::spawn_blocking(move || write_dense_record(&dir, &to_write, cap))
+            .await
+            .map_err(|e| ConsensusError::PermanentDriver(Box::new(std::io::Error::other(e))))?
+            .map_err(|e| ConsensusError::PermanentDriver(Box::new(e)))?;
+
+        dense.map = new_map;
+        Ok(starts)
+    }
 }
 
 #[cfg(test)]
@@ -538,6 +600,90 @@ mod dense_tests {
             err,
             Err(tsoracle_consensus::ConsensusError::SeqKeyCardinalityExceeded { cap: 2 })
         ));
+    }
+
+    #[tokio::test]
+    async fn batch_advance_is_gapless_atomic_and_one_durable_write() {
+        let dir = tempfile::tempdir().unwrap();
+        // FileDriver holds an EXCLUSIVE directory lock for its lifetime, so the
+        // first driver must be dropped (scope) before reopening — mirroring the
+        // existing `counters_survive_reopen` test.
+        {
+            let d = FileDriver::open_or_init(dir.path()).unwrap();
+            let starts = d
+                .advance_dense_batch(&[(key("orders"), 5), (key("users"), 2)], Epoch(1))
+                .await
+                .unwrap();
+            assert_eq!(starts, vec![0, 0]);
+        }
+        // Reopen: the whole batch was one durable write.
+        let d2 = FileDriver::open_or_init(dir.path()).unwrap();
+        assert_eq!(d2.load_dense_seq(&key("orders")).await.unwrap(), 5);
+        assert_eq!(d2.load_dense_seq(&key("users")).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn batch_advance_duplicate_key_yields_adjacent_starts() {
+        // A duplicate key within one batch (rejected by the server pre-commit,
+        // but handled deterministically here so the driver is never the weak
+        // link) must produce ADJACENT, non-overlapping blocks: the second
+        // entry's start is the first entry's post-advance value. This pins the
+        // accumulation contract directly, since the file driver returns starts.
+        let dir = tempfile::tempdir().unwrap();
+        let d = FileDriver::open_or_init(dir.path()).unwrap();
+        let starts = d
+            .advance_dense_batch(&[(key("k"), 3), (key("k"), 5)], Epoch(1))
+            .await
+            .unwrap();
+        assert_eq!(starts, vec![0, 3]); // [0,3) then [3,8)
+        assert_eq!(d.load_dense_seq(&key("k")).await.unwrap(), 8);
+    }
+
+    #[tokio::test]
+    async fn batch_advance_empty_is_noop() {
+        // An empty batch returns an empty start list without touching disk.
+        let dir = tempfile::tempdir().unwrap();
+        let d = FileDriver::open_or_init(dir.path()).unwrap();
+        assert_eq!(d.advance_dense_batch(&[], Epoch(1)).await.unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn batch_cardinality_is_atomic() {
+        use std::collections::BTreeMap;
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = BTreeMap::new();
+        m.insert("a".to_string(), 1u64);
+        let bytes = crate::dense_record::encode(&m, 1); // cap 1, full
+        std::fs::write(dir.path().join("dense"), bytes).unwrap();
+        let d = FileDriver::open_or_init(dir.path()).unwrap();
+        let err = d
+            .advance_dense_batch(&[(key("a"), 1), (key("b"), 1)], Epoch(1))
+            .await;
+        assert!(matches!(
+            err,
+            Err(tsoracle_consensus::ConsensusError::SeqKeyCardinalityExceeded { cap: 1 })
+        ));
+        // "a" unchanged — nothing committed.
+        assert_eq!(d.load_dense_seq(&key("a")).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn batch_overflow_is_atomic_and_accumulates_duplicates() {
+        use std::collections::BTreeMap;
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = BTreeMap::new();
+        m.insert("k".to_string(), u64::MAX - 5);
+        let bytes = crate::dense_record::encode(&m, DEFAULT_DENSE_CARDINALITY_CAP);
+        std::fs::write(dir.path().join("dense"), bytes).unwrap();
+        let d = FileDriver::open_or_init(dir.path()).unwrap();
+        let err = d
+            .advance_dense_batch(&[(key("k"), 4), (key("k"), 4)], Epoch(1))
+            .await;
+        assert!(matches!(
+            err,
+            Err(tsoracle_consensus::ConsensusError::SeqOverflow)
+        ));
+        assert_eq!(d.load_dense_seq(&key("k")).await.unwrap(), u64::MAX - 5);
     }
 }
 

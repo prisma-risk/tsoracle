@@ -49,6 +49,12 @@ pub enum BuildError {
     /// misconfiguration surfaces immediately rather than at first request.
     #[error("max_seq_count must be >= 1 (0 would reject every GetSeq request)")]
     ZeroMaxSeqCount,
+    /// `max_seq_batch_keys` was set to 0. Every `GetSeqBatch` request would
+    /// then be rejected as exceeding the batch-key cap (the minimum is 1
+    /// entry), silently disabling `GetSeqBatch`. Rejected at build time so the
+    /// misconfiguration surfaces immediately rather than at first request.
+    #[error("max_seq_batch_keys must be >= 1 (0 would reject every GetSeqBatch request)")]
+    ZeroMaxSeqBatchKeys,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -109,6 +115,7 @@ pub struct ServerBuilder {
     shutdown_grace: Duration,
     heartbeat_interval: Duration,
     max_seq_count: u32,
+    max_seq_batch_keys: u32,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -123,6 +130,7 @@ impl Default for ServerBuilder {
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
             heartbeat_interval: Duration::from_secs(10),
             max_seq_count: tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            max_seq_batch_keys: tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: None,
         }
@@ -213,10 +221,28 @@ impl ServerBuilder {
         self
     }
 
+    /// Cap on the number of `(key, count)` entries accepted in one
+    /// `GetSeqBatch` request. Defaults to
+    /// [`tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS`] (`128`).
+    ///
+    /// This is a soft anti-abuse guardrail bounding fan-out and the size of
+    /// one atomic consensus entry. A value of `0` is rejected by
+    /// [`Self::build`] with [`BuildError::ZeroMaxSeqBatchKeys`]: it would
+    /// make every `GetSeqBatch` call fail, silently disabling the RPC, so the
+    /// misconfiguration is surfaced at build time. Deployment-specific tuning;
+    /// clients need no rebuild after changing this.
+    pub fn max_seq_batch_keys(mut self, max_seq_batch_keys: u32) -> Self {
+        self.max_seq_batch_keys = max_seq_batch_keys;
+        self
+    }
+
     pub fn build(self) -> Result<Server, BuildError> {
         let consensus = self.consensus.ok_or(BuildError::MissingConsensusDriver)?;
         if self.max_seq_count == 0 {
             return Err(BuildError::ZeroMaxSeqCount);
+        }
+        if self.max_seq_batch_keys == 0 {
+            return Err(BuildError::ZeroMaxSeqBatchKeys);
         }
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
         Ok(Server {
@@ -226,7 +252,11 @@ impl ServerBuilder {
             failover_advance: self.failover_advance,
             shutdown_grace: self.shutdown_grace,
             heartbeat_interval: self.heartbeat_interval,
-            core: Arc::new(ServingCore::new(self.window_ahead, self.max_seq_count)),
+            core: Arc::new(ServingCore::new(
+                self.window_ahead,
+                self.max_seq_count,
+                self.max_seq_batch_keys,
+            )),
             reporter: Arc::new(crate::reporter::Reporter::new()),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: self.tls_config,
@@ -1147,6 +1177,34 @@ mod tests {
             .expect("max_seq_count(1) must build");
     }
 
+    #[test]
+    fn build_accepts_max_seq_batch_keys_of_one() {
+        // 1 is the smallest usable batch cap: a single-entry batch is valid, so
+        // the cap must build (the guard rejects only 0).
+        Server::builder()
+            .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .max_seq_batch_keys(1)
+            .build()
+            .expect("max_seq_batch_keys(1) must build");
+    }
+
+    #[test]
+    fn zero_max_seq_batch_keys_is_rejected() {
+        // max_seq_batch_keys(0) makes every GetSeqBatch call fail as
+        // "batch has N entries; the maximum is 0" — the RPC is silently dead.
+        // build() must fail-fast rather than ship a server where GetSeqBatch
+        // can never succeed.
+        match Server::builder()
+            .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .max_seq_batch_keys(0)
+            .build()
+        {
+            Err(BuildError::ZeroMaxSeqBatchKeys) => {}
+            Err(other) => panic!("expected ZeroMaxSeqBatchKeys, got {other:?}"),
+            Ok(_) => panic!("max_seq_batch_keys(0) must be rejected at build, but build succeeded"),
+        }
+    }
+
     #[tokio::test]
     async fn join_to_server_result_passes_through_clean_outcome() {
         // Ok(Ok(())) — task finished cleanly; forward verbatim.
@@ -1268,6 +1326,7 @@ mod tests {
         let core = Arc::new(ServingCore::new(
             Duration::from_secs(3),
             tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
         ));
         core.publish_serving();
 
@@ -1305,6 +1364,7 @@ mod tests {
         let core = Arc::new(ServingCore::new(
             Duration::from_secs(3),
             tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
         ));
         core.publish_serving();
 

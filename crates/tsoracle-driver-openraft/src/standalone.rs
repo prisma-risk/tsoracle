@@ -325,7 +325,10 @@ fn classify_activation_outcome(
         // remediation path).
         other @ (ApplyOutcome::DenseAdvanced { .. }
         | ApplyOutcome::DenseCardinalityExceeded { .. }
-        | ApplyOutcome::DenseOverflow) => {
+        | ApplyOutcome::DenseOverflow
+        | ApplyOutcome::DenseBatchAdvanced { .. }
+        | ApplyOutcome::DenseBatchCardinalityExceeded { .. }
+        | ApplyOutcome::DenseBatchOverflow) => {
             unreachable!("dense ApplyOutcome {other:?} returned from a SetFormatVersion entry")
         }
     }
@@ -390,6 +393,38 @@ impl OpenraftHighWaterHost for StandaloneHost {
                 crate::type_config::ApplyOutcome::DenseOverflow => Err(ConsensusError::SeqOverflow),
                 other => Err(ConsensusError::PermanentDriver(
                     format!("unexpected ApplyOutcome for AdvanceDense: {other:?}").into(),
+                )),
+            },
+            Err(e) => Err(classify_client_write_error(e)),
+        }
+    }
+
+    async fn submit_advance_dense_batch(
+        &self,
+        entries: &[(tsoracle_core::SeqKey, u32)],
+    ) -> Result<Vec<u64>, ConsensusError> {
+        let payload: Vec<crate::log_entry::DenseAdvance> = entries
+            .iter()
+            .map(|(key, count)| crate::log_entry::DenseAdvance {
+                key: key.clone(),
+                count: *count,
+            })
+            .collect();
+        match self
+            .raft
+            .client_write(HighWaterCommand::AdvanceDenseBatch { entries: payload })
+            .await
+        {
+            Ok(resp) => match resp.data.outcome {
+                crate::type_config::ApplyOutcome::DenseBatchAdvanced { starts } => Ok(starts),
+                crate::type_config::ApplyOutcome::DenseBatchCardinalityExceeded { cap } => {
+                    Err(ConsensusError::SeqKeyCardinalityExceeded { cap })
+                }
+                crate::type_config::ApplyOutcome::DenseBatchOverflow => {
+                    Err(ConsensusError::SeqOverflow)
+                }
+                other => Err(ConsensusError::PermanentDriver(
+                    format!("unexpected ApplyOutcome for AdvanceDenseBatch: {other:?}").into(),
                 )),
             },
             Err(e) => Err(classify_client_write_error(e)),
@@ -563,6 +598,16 @@ mod tests {
             result,
             Err(FormatActivationError::MembershipChangedSinceGate { target: 7 })
         ));
+    }
+
+    /// The `unreachable!` arm in `classify_activation_outcome` covers every
+    /// dense `ApplyOutcome` variant, including the batch variants added in this
+    /// release. Driving any one of them proves the arm compiles and runs; the
+    /// test deliberately panics via `should_panic`.
+    #[test]
+    #[should_panic(expected = "dense ApplyOutcome")]
+    fn classify_activation_outcome_dense_batch_advanced_is_unreachable() {
+        classify_activation_outcome(ApplyOutcome::DenseBatchAdvanced { starts: vec![0] }, 7).ok();
     }
 
     #[test]

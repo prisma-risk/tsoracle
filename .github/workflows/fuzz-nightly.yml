@@ -52,6 +52,7 @@ jobs:
           - toolkit_codec_decode
           - openraft_entry_decode
           - openraft_meta_decode
+          - openraft_advance_dense_batch_decode
           - codec_roundtrip
           - paxos_log_entry_decode
           - paxos_snapshot_decode

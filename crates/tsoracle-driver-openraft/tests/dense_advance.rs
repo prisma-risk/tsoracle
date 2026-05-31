@@ -51,7 +51,9 @@ use futures::StreamExt;
 use tokio::time::timeout;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::{Epoch, SeqKey};
-use tsoracle_driver_openraft::{CapabilitySource, NodeCapabilities, OpenraftPeer, StandaloneHost};
+use tsoracle_driver_openraft::{
+    CapabilitySource, NodeCapabilities, OpenraftHighWaterHost, OpenraftPeer, StandaloneHost,
+};
 use tsoracle_openraft_toolkit::DENSE_WRITE_VERSION;
 
 use common::{TestCluster, build_single_node, build_three_node, eventually_eq};
@@ -318,4 +320,82 @@ async fn three_node_follower_converges_on_dense_seq() {
         .await
         .expect("load_dense_seq on leader");
     assert_eq!(seq, 7, "leader load_dense_seq = 7 after advance by 7");
+}
+
+// ---------------------------------------------------------------------------
+// Tests: advance_dense_batch — post-activation via StandaloneHost
+// ---------------------------------------------------------------------------
+
+/// After activating write version 6 (BATCH_WRITE_VERSION), `advance_dense_batch`
+/// on a single-node cluster must return gapless block starts for each key in
+/// the batch. `load_dense_seq` must reflect the committed counters.
+///
+/// The test activates version 5 first (required before version 6), then
+/// activates version 6, and issues a two-key batch. Each key's start must be
+/// gapless from its own counter (starting at 0 for new keys), and a second
+/// batch call must produce contiguous block starts.
+#[tokio::test(start_paused = true)]
+async fn advance_dense_batch_after_activation_is_gapless() {
+    use tsoracle_openraft_toolkit::BATCH_WRITE_VERSION;
+
+    let (host, cluster) = single_node_leader_host().await;
+    let driver = &cluster.drivers[0];
+
+    // Activate DENSE_WRITE_VERSION (5) first — required stepping-stone.
+    host.initiate_format_activation(DENSE_WRITE_VERSION, &UnusedSource)
+        .await
+        .expect("dense (v5) activation must succeed on a single-node cluster");
+
+    // Now activate BATCH_WRITE_VERSION (6).
+    host.initiate_format_activation(BATCH_WRITE_VERSION, &UnusedSource)
+        .await
+        .expect("batch (v6) activation must succeed on a single-node cluster");
+
+    assert_eq!(
+        host.active_write_version(),
+        BATCH_WRITE_VERSION,
+        "cell must read BATCH_WRITE_VERSION after activation"
+    );
+
+    let key_orders = SeqKey::try_new("orders").unwrap();
+    let key_invoices = SeqKey::try_new("invoices").unwrap();
+
+    // First batch: advance "orders" by 5 and "invoices" by 3, both new keys.
+    let starts = host
+        .submit_advance_dense_batch(&[(key_orders.clone(), 5), (key_invoices.clone(), 3)])
+        .await
+        .expect("batch advance after batch activation");
+    assert_eq!(starts.len(), 2, "one start per batch entry");
+    assert_eq!(starts[0], 0, "orders: first advance starts at 0");
+    assert_eq!(
+        starts[1], 0,
+        "invoices: first advance starts at 0 (independent)"
+    );
+
+    // `load_dense_seq` must reflect the committed counters.
+    let seq_orders = driver
+        .load_dense_seq(&key_orders)
+        .await
+        .expect("load_dense_seq for orders");
+    assert_eq!(seq_orders, 5, "orders counter = 5 after batch advance");
+    let seq_invoices = driver
+        .load_dense_seq(&key_invoices)
+        .await
+        .expect("load_dense_seq for invoices");
+    assert_eq!(seq_invoices, 3, "invoices counter = 3 after batch advance");
+
+    // Second batch on the same keys: starts must be contiguous with the first.
+    let starts2 = host
+        .submit_advance_dense_batch(&[(key_orders.clone(), 2), (key_invoices.clone(), 4)])
+        .await
+        .expect("second batch advance");
+    assert_eq!(starts2.len(), 2);
+    assert_eq!(
+        starts2[0], 5,
+        "orders: second advance starts where first ended"
+    );
+    assert_eq!(
+        starts2[1], 3,
+        "invoices: second advance starts where first ended"
+    );
 }

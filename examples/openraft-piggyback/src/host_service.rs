@@ -291,6 +291,20 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
                         tso: Some(core.high_water),
                     }
                 }
+                EntryPayload::Normal(HostCommand::Tso(HighWaterCommand::AdvanceDenseBatch {
+                    ..
+                })) => {
+                    // The piggyback example does not implement batch dense sequence
+                    // state. This arm satisfies exhaustiveness; a real piggyback
+                    // host that supports batch advances would forward this entry to
+                    // its embedded `HighWaterStateMachine`.
+                    let mut core = self.core.lock();
+                    core.last_applied = Some(log_id);
+                    HostApplied {
+                        kv: None,
+                        tso: Some(core.high_water),
+                    }
+                }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
                     core.last_membership = StoredMembership::new(Some(log_id), membership.clone());
@@ -422,6 +436,16 @@ impl OpenraftHighWaterHost for PiggybackHost {
     ) -> Result<u64, ConsensusError> {
         // Dense sequences are not implemented in the piggyback example.
         // The driver gate (`active_write_version < DENSE_WRITE_VERSION`)
+        // prevents this from ever being called in normal operation.
+        Err(ConsensusError::DenseUnsupported)
+    }
+
+    async fn submit_advance_dense_batch(
+        &self,
+        _entries: &[(tsoracle_core::SeqKey, u32)],
+    ) -> Result<Vec<u64>, ConsensusError> {
+        // Dense sequences are not implemented in the piggyback example.
+        // The driver gate (`active_write_version < BATCH_WRITE_VERSION`)
         // prevents this from ever being called in normal operation.
         Err(ConsensusError::DenseUnsupported)
     }

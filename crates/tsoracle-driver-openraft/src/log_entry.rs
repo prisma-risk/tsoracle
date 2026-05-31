@@ -57,6 +57,16 @@ pub struct SetFormatVersionPayload {
     pub gated_members: BTreeSet<u64>,
 }
 
+/// One `(key, count)` entry of an [`HighWaterCommand::AdvanceDenseBatch`]. A
+/// named struct (not a tuple) so the postcard layout is stable and pinnable and
+/// the embedded `SeqKey` revalidates on decode exactly like single-key
+/// `AdvanceDense`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DenseAdvance {
+    pub key: tsoracle_core::SeqKey,
+    pub count: u32,
+}
+
 /// Commands the state machine knows how to apply.
 ///
 /// `Display` is implemented because openraft's `AppData` blanket requires it
@@ -78,6 +88,13 @@ pub enum HighWaterCommand {
         key: tsoracle_core::SeqKey,
         count: u32,
     },
+    /// Atomically advance several distinct dense counters in one entry. Applied
+    /// all-or-nothing: a cardinality or overflow rejection moves no counter (see
+    /// the state-machine apply). Each entry's pre-advance value is the issued
+    /// block's start, returned in request order via
+    /// [`ApplyOutcome::DenseBatchAdvanced`](crate::ApplyOutcome). Only ever
+    /// appended under write version >= BATCH_WRITE_VERSION (gated by activation).
+    AdvanceDenseBatch { entries: Vec<DenseAdvance> },
 }
 
 impl fmt::Display for HighWaterCommand {
@@ -102,6 +119,17 @@ impl fmt::Display for HighWaterCommand {
                     f,
                     "AdvanceDense {{ key: {}, count: {count} }}",
                     key.as_str()
+                )
+            }
+            HighWaterCommand::AdvanceDenseBatch { entries } => {
+                let rendered: Vec<String> = entries
+                    .iter()
+                    .map(|e| format!("{} x{}", e.key.as_str(), e.count))
+                    .collect();
+                write!(
+                    f,
+                    "AdvanceDenseBatch {{ entries: [{}] }}",
+                    rendered.join(", ")
                 )
             }
         }
@@ -240,6 +268,69 @@ mod tests {
         assert!(
             decoded.is_err(),
             "AdvanceDense with oversized key must fail to decode, got {decoded:?}",
+        );
+    }
+
+    #[test]
+    fn display_renders_advance_dense_batch() {
+        let cmd = HighWaterCommand::AdvanceDenseBatch {
+            entries: vec![
+                DenseAdvance {
+                    key: tsoracle_core::SeqKey::try_new("orders").unwrap(),
+                    count: 3,
+                },
+                DenseAdvance {
+                    key: tsoracle_core::SeqKey::try_new("users").unwrap(),
+                    count: 5,
+                },
+            ],
+        };
+        assert_eq!(
+            format!("{cmd}"),
+            "AdvanceDenseBatch { entries: [orders x3, users x5] }"
+        );
+    }
+
+    #[test]
+    fn postcard_round_trip_advance_dense_batch() {
+        let cmd = HighWaterCommand::AdvanceDenseBatch {
+            entries: vec![DenseAdvance {
+                key: tsoracle_core::SeqKey::try_new("orders").unwrap(),
+                count: 7,
+            }],
+        };
+        let bytes = postcard::to_stdvec(&cmd).expect("serialize");
+        let back: HighWaterCommand = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn advance_dense_batch_postcard_layout_is_pinned() {
+        // AdvanceDenseBatch is the 4th HighWaterCommand variant (index 3),
+        // followed by a postcard seq (varint len prefix) of DenseAdvance, each
+        // = SeqKey (String: varint len + bytes) then count varint. One entry
+        // {"a", 1} is therefore [3, 1, 1, b'a', 1]:
+        //   3 = variant index, 1 = vec len, 1 = key len, b'a' = key, 1 = count.
+        let cmd = HighWaterCommand::AdvanceDenseBatch {
+            entries: vec![DenseAdvance {
+                key: tsoracle_core::SeqKey::try_new("a").unwrap(),
+                count: 1,
+            }],
+        };
+        let bytes = postcard::to_stdvec(&cmd).expect("serialize");
+        assert_eq!(bytes, vec![3u8, 1, 1, b'a', 1]);
+    }
+
+    #[test]
+    fn decode_rejects_advance_dense_batch_empty_key() {
+        // Variant 3, vec len 1, key len 0 (empty), count 1. Structurally valid
+        // postcard, but the embedded SeqKey violates the non-empty invariant,
+        // so decode must fail loud rather than land SeqKey("") in a command.
+        let bytes = vec![3u8, 1, 0, 1];
+        let decoded = postcard::from_bytes::<HighWaterCommand>(&bytes);
+        assert!(
+            decoded.is_err(),
+            "AdvanceDenseBatch with empty key must fail to decode, got {decoded:?}",
         );
     }
 }

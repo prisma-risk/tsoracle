@@ -74,6 +74,10 @@ pub enum ConsensusError {
         "dense sequences require write version {required} but the cluster is at {active}; activate the format first"
     )]
     DenseNotActivated { required: u8, active: u8 },
+    #[error(
+        "dense batch sequences require write version {required} but the cluster is at {active}; activate the format first"
+    )]
+    DenseBatchNotActivated { required: u8, active: u8 },
 }
 
 #[cfg(test)]

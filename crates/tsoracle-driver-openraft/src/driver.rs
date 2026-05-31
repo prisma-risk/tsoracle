@@ -48,6 +48,7 @@ use futures::{Stream, StreamExt};
 use openraft::RaftTypeConfig;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
+use tsoracle_openraft_toolkit::BATCH_WRITE_VERSION;
 use tsoracle_openraft_toolkit::DENSE_WRITE_VERSION;
 use tsoracle_openraft_toolkit::LeadershipState;
 use tsoracle_openraft_toolkit::leadership_events_from_metrics;
@@ -145,6 +146,27 @@ where
             });
         }
         self.host.submit_advance_dense(key, count).await
+    }
+
+    /// Atomic multi-key dense fetch-add, gated on batch-format activation.
+    /// `_expected_epoch` is ignored for the same reason as `advance_dense`
+    /// (openraft's leadership fence + committed-log linearization).
+    async fn advance_dense_batch(
+        &self,
+        entries: &[(tsoracle_core::SeqKey, u32)],
+        _expected_epoch: Epoch,
+    ) -> Result<Vec<u64>, ConsensusError> {
+        // Rollout gate: refuse until the batch format is active cluster-wide, so
+        // no un-upgraded follower is ever handed an AdvanceDenseBatch entry it
+        // cannot decode.
+        let active = self.host.active_write_version();
+        if active < BATCH_WRITE_VERSION {
+            return Err(ConsensusError::DenseBatchNotActivated {
+                required: BATCH_WRITE_VERSION,
+                active,
+            });
+        }
+        self.host.submit_advance_dense_batch(entries).await
     }
 
     /// Read a key's committed dense counter (0 if absent), linearized.
@@ -357,6 +379,13 @@ mod tests {
             Err(tsoracle_consensus::ConsensusError::DenseUnsupported)
         }
 
+        async fn submit_advance_dense_batch(
+            &self,
+            _entries: &[(tsoracle_core::SeqKey, u32)],
+        ) -> Result<Vec<u64>, tsoracle_consensus::ConsensusError> {
+            Err(tsoracle_consensus::ConsensusError::DenseUnsupported)
+        }
+
         async fn current_dense_seq(
             &self,
             _key: &tsoracle_core::SeqKey,
@@ -370,6 +399,217 @@ mod tests {
         let metrics = openraft::RaftMetrics::<TypeConfig>::new_initial(1u64);
         let (_tx, rx) = <TypeConfig as TypeConfigExt>::watch_channel(metrics);
         super::OpenraftDriver::new(EchoHost { rx })
+    }
+
+    /// A host whose `active_write_version` returns a caller-supplied value,
+    /// used to test the activation gate at an exact version boundary.
+    struct VersionedEchoHost {
+        version: u8,
+        rx: openraft::type_config::alias::WatchReceiverOf<
+            TypeConfig,
+            openraft::RaftMetrics<TypeConfig>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::host::OpenraftHighWaterHost for VersionedEchoHost {
+        type Config = TypeConfig;
+
+        fn metrics(
+            &self,
+        ) -> openraft::type_config::alias::WatchReceiverOf<
+            Self::Config,
+            openraft::RaftMetrics<Self::Config>,
+        > {
+            self.rx.clone()
+        }
+
+        async fn current_high_water(&self) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Ok(0)
+        }
+
+        async fn submit_advance(
+            &self,
+            at_least: u64,
+        ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Ok(at_least)
+        }
+
+        fn active_write_version(&self) -> u8 {
+            self.version
+        }
+
+        async fn submit_advance_dense(
+            &self,
+            _key: &tsoracle_core::SeqKey,
+            _count: u32,
+        ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Err(tsoracle_consensus::ConsensusError::DenseUnsupported)
+        }
+
+        async fn submit_advance_dense_batch(
+            &self,
+            _entries: &[(tsoracle_core::SeqKey, u32)],
+        ) -> Result<Vec<u64>, tsoracle_consensus::ConsensusError> {
+            Err(tsoracle_consensus::ConsensusError::DenseUnsupported)
+        }
+
+        async fn current_dense_seq(
+            &self,
+            _key: &tsoracle_core::SeqKey,
+        ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Err(tsoracle_consensus::ConsensusError::DenseUnsupported)
+        }
+    }
+
+    fn versioned_echo_driver(
+        version: u8,
+    ) -> std::sync::Arc<super::OpenraftDriver<VersionedEchoHost>> {
+        use openraft::type_config::TypeConfigExt;
+        let metrics = openraft::RaftMetrics::<TypeConfig>::new_initial(1u64);
+        let (_tx, rx) = <TypeConfig as TypeConfigExt>::watch_channel(metrics);
+        super::OpenraftDriver::new(VersionedEchoHost { version, rx })
+    }
+
+    #[tokio::test]
+    async fn advance_dense_returns_dense_not_activated_below_dense_write_version() {
+        use tsoracle_consensus::ConsensusDriver;
+        use tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION;
+        use tsoracle_openraft_toolkit::DENSE_WRITE_VERSION;
+
+        let driver = versioned_echo_driver(BASELINE_WRITE_VERSION);
+        let key = tsoracle_core::SeqKey::try_new("k").unwrap();
+        let err = driver
+            .advance_dense(&key, 1, Epoch::ZERO)
+            .await
+            .expect_err("advance_dense must be rejected when dense is not activated");
+        assert!(
+            matches!(
+                err,
+                tsoracle_consensus::ConsensusError::DenseNotActivated { required, active }
+                if required == DENSE_WRITE_VERSION && active == BASELINE_WRITE_VERSION
+            ),
+            "expected DenseNotActivated, got {err:?}"
+        );
+    }
+
+    /// A host whose `submit_advance_dense_batch` echoes back fixed starts so the
+    /// driver's success-delegation path is exercised at BATCH_WRITE_VERSION.
+    struct BatchEchoHost {
+        version: u8,
+        rx: openraft::type_config::alias::WatchReceiverOf<
+            TypeConfig,
+            openraft::RaftMetrics<TypeConfig>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::host::OpenraftHighWaterHost for BatchEchoHost {
+        type Config = TypeConfig;
+
+        fn metrics(
+            &self,
+        ) -> openraft::type_config::alias::WatchReceiverOf<
+            Self::Config,
+            openraft::RaftMetrics<Self::Config>,
+        > {
+            self.rx.clone()
+        }
+
+        async fn current_high_water(&self) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Ok(0)
+        }
+
+        async fn submit_advance(
+            &self,
+            at_least: u64,
+        ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Ok(at_least)
+        }
+
+        fn active_write_version(&self) -> u8 {
+            self.version
+        }
+
+        async fn submit_advance_dense(
+            &self,
+            _key: &tsoracle_core::SeqKey,
+            _count: u32,
+        ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Err(tsoracle_consensus::ConsensusError::DenseUnsupported)
+        }
+
+        /// Echo fixed starts: entry i gets start = i * 100.
+        async fn submit_advance_dense_batch(
+            &self,
+            entries: &[(tsoracle_core::SeqKey, u32)],
+        ) -> Result<Vec<u64>, tsoracle_consensus::ConsensusError> {
+            Ok(entries
+                .iter()
+                .enumerate()
+                .map(|(i, _)| i as u64 * 100)
+                .collect())
+        }
+
+        async fn current_dense_seq(
+            &self,
+            _key: &tsoracle_core::SeqKey,
+        ) -> Result<u64, tsoracle_consensus::ConsensusError> {
+            Err(tsoracle_consensus::ConsensusError::DenseUnsupported)
+        }
+    }
+
+    fn batch_echo_driver(version: u8) -> std::sync::Arc<super::OpenraftDriver<BatchEchoHost>> {
+        use openraft::type_config::TypeConfigExt;
+        let metrics = openraft::RaftMetrics::<TypeConfig>::new_initial(1u64);
+        let (_tx, rx) = <TypeConfig as TypeConfigExt>::watch_channel(metrics);
+        super::OpenraftDriver::new(BatchEchoHost { version, rx })
+    }
+
+    /// When the active write version is >= BATCH_WRITE_VERSION, `advance_dense_batch`
+    /// must delegate to the host's `submit_advance_dense_batch` and return its
+    /// starts. Exercises the success-delegation path in the driver.
+    #[tokio::test]
+    async fn advance_dense_batch_delegates_to_host_when_batch_activated() {
+        use tsoracle_consensus::ConsensusDriver;
+        use tsoracle_openraft_toolkit::BATCH_WRITE_VERSION;
+
+        let driver = batch_echo_driver(BATCH_WRITE_VERSION);
+        let key_a = tsoracle_core::SeqKey::try_new("orders").unwrap();
+        let key_b = tsoracle_core::SeqKey::try_new("invoices").unwrap();
+
+        let starts = driver
+            .advance_dense_batch(&[(key_a, 5), (key_b, 3)], tsoracle_core::Epoch::ZERO)
+            .await
+            .expect("advance_dense_batch must succeed when batch format is activated");
+
+        assert_eq!(starts.len(), 2, "one start per entry");
+        // BatchEchoHost returns i * 100 for entry i.
+        assert_eq!(starts[0], 0, "first entry start = 0");
+        assert_eq!(starts[1], 100, "second entry start = 100");
+    }
+
+    #[tokio::test]
+    async fn advance_dense_batch_returns_dense_batch_not_activated_below_batch_write_version() {
+        use tsoracle_consensus::ConsensusDriver;
+        use tsoracle_openraft_toolkit::BATCH_WRITE_VERSION;
+        use tsoracle_openraft_toolkit::DENSE_WRITE_VERSION;
+
+        // Dense is activated (version == DENSE_WRITE_VERSION) but batch is not yet.
+        let driver = versioned_echo_driver(DENSE_WRITE_VERSION);
+        let key = tsoracle_core::SeqKey::try_new("k").unwrap();
+        let err = driver
+            .advance_dense_batch(&[(key, 1)], Epoch::ZERO)
+            .await
+            .expect_err("advance_dense_batch must be rejected when batch format is not activated");
+        assert!(
+            matches!(
+                err,
+                tsoracle_consensus::ConsensusError::DenseBatchNotActivated { required, active }
+                if required == BATCH_WRITE_VERSION && active == DENSE_WRITE_VERSION
+            ),
+            "expected DenseBatchNotActivated, got {err:?}"
+        );
     }
 
     #[tokio::test]

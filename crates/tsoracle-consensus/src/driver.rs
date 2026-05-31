@@ -148,6 +148,20 @@ pub trait ConsensusDriver: Send + Sync + 'static {
         let (_, _, _) = (key, count, expected_epoch);
         Err(ConsensusError::DenseUnsupported)
     }
+
+    /// Atomic, linearized multi-key fetch-add: advances each `(key, count)` and
+    /// returns the per-key pre-advance block starts in request order. All-or-
+    /// nothing — a cardinality or overflow rejection advances no key. Lazily
+    /// creates absent keys at 0. `expected_epoch` fences a stale proposer.
+    /// Default: unsupported.
+    async fn advance_dense_batch(
+        &self,
+        entries: &[(tsoracle_core::SeqKey, u32)],
+        expected_epoch: Epoch,
+    ) -> Result<Vec<u64>, ConsensusError> {
+        let (_, _) = (entries, expected_epoch);
+        Err(ConsensusError::DenseUnsupported)
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +236,14 @@ mod tests {
                     Err(ConsensusError::DenseUnsupported)
                 ),
                 "default advance_dense is DenseUnsupported",
+            );
+            let entries = vec![(tsoracle_core::SeqKey::try_new("k").unwrap(), 1u32)];
+            assert!(
+                matches!(
+                    driver.advance_dense_batch(&entries, Epoch(1)).await,
+                    Err(ConsensusError::DenseUnsupported)
+                ),
+                "default advance_dense_batch is DenseUnsupported",
             );
         });
     }

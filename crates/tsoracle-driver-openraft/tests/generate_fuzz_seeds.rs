@@ -31,6 +31,13 @@
 //!
 //! Idempotent. Re-run after any change to `HighWaterCommand` or
 //! `HighWaterStateMachineSnapshot` to refresh the seeds.
+//!
+//! **Scope**: `generate_log_entry_decode_seeds` seeds only the baseline
+//! `Advance` variant for the `log_entry_decode` corpus. The `AdvanceDense` and
+//! `AdvanceDenseBatch` variants' decode paths are covered by the
+//! `openraft_dense_command_decode` and `openraft_advance_dense_batch_decode`
+//! fuzz targets respectively, which grow their own coverage-guided corpora
+//! rather than relying on hand-seeded entries.
 
 use std::fs;
 use std::path::PathBuf;

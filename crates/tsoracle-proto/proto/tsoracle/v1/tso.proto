@@ -44,6 +44,15 @@ service TsoService {
   // delivered to the client is a spent (but non-duplicate) ordinal block —
   // clients must treat an ambiguous failure as `SeqUncertain` and not retry.
   rpc GetSeq(GetSeqRequest) returns (GetSeqResponse);
+
+  // Atomically allocate contiguous dense blocks for several DISTINCT keys in
+  // one call. All-or-nothing: either every key advances or none does. The
+  // response lists one grant per request entry, in request order, plus the
+  // single leader epoch that issued the batch. Same leadership routing and
+  // `tsoracle-leader-hint-bin` trailer as `GetSeq`. Like `GetSeq` this is
+  // non-idempotent: an ambiguous failure means the whole batch may or may not
+  // have committed — clients treat it as `SeqUncertain` and must not retry.
+  rpc GetSeqBatch(GetSeqBatchRequest) returns (GetSeqBatchResponse);
 }
 
 message GetTsRequest {
@@ -97,6 +106,32 @@ message GetSeqResponse {
   // Always populated on a successful response; the client seats its confirmed
   // leader cache from it (a missing epoch on success is a protocol violation).
   EpochWire epoch = 4;
+}
+
+message SeqRequestEntry {
+  string key = 1; // bounded UTF-8 sequence key
+  uint32 count = 2; // must be >= 1
+}
+
+message GetSeqBatchRequest {
+  // 1..=max_seq_batch_keys entries; keys must be distinct (a duplicate is
+  // rejected with INVALID_ARGUMENT).
+  repeated SeqRequestEntry entries = 1;
+}
+
+message SeqGrantEntry {
+  string key = 1;
+  uint64 start = 2; // block is [start, start+count)
+  uint32 count = 3;
+}
+
+message GetSeqBatchResponse {
+  // One grant per request entry, in the SAME order as the request.
+  repeated SeqGrantEntry grants = 1;
+  // The single leader epoch that committed the whole batch (one atomic apply,
+  // one epoch). Always populated on success; bundled so a half-populated epoch
+  // is unrepresentable, matching GetSeqResponse.epoch.
+  EpochWire epoch = 2;
 }
 
 // Carried in the `tsoracle-leader-hint-bin` binary metadata trailer when the

@@ -146,6 +146,14 @@ bench             = false
 doctest           = false
 
 [[bin]]
+name              = "openraft_advance_dense_batch_decode"
+path              = "fuzz_targets/openraft_advance_dense_batch_decode.rs"
+test              = false
+doc               = false
+bench             = false
+doctest           = false
+
+[[bin]]
 name              = "codec_roundtrip"
 path              = "fuzz_targets/codec_roundtrip.rs"
 test              = false

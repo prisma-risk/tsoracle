@@ -769,8 +769,8 @@ mod record_codec_tests {
     fn version_constants_are_at_expected_values() {
         assert_eq!(BASELINE_WRITE_VERSION, 4);
         assert_eq!(MIN_READABLE_VERSION, 4);
-        // MAX is 5 to cover the dense write version (DENSE_WRITE_VERSION).
-        assert_eq!(MAX_READABLE_VERSION, 5);
+        // MAX is 6 to cover the batch write version (BATCH_WRITE_VERSION).
+        assert_eq!(MAX_READABLE_VERSION, 6);
     }
 }
 

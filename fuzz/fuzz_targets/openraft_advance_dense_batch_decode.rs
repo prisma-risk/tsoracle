@@ -21,24 +21,22 @@
 //  limitations under the License.
 //
 
-#![doc = include_str!("../README.md")]
-// Panic policy (see CONTRIBUTING.md). `cfg_attr(not(test), ...)` skips the lint
-// for the lib's own unit tests; integration tests are separate compilation units.
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+#![no_main]
+use libfuzzer_sys::fuzz_target;
+use tsoracle_driver_openraft::OpenraftEntry;
+use tsoracle_openraft_toolkit::decode;
 
-mod allocator;
-mod epoch;
-mod peer;
-pub mod seq;
-mod timestamp;
-
-pub mod docs;
-
-pub use allocator::{Allocator, CommitOutcome, CoreError, IgnoreReason, PhysicalMs, WindowGrant};
-pub use epoch::Epoch;
-pub use peer::{PeerEndpoint, PeerEndpointError, TsoPeer};
-pub use seq::{
-    DEFAULT_MAX_SEQ_BATCH_KEYS, DEFAULT_MAX_SEQ_COUNT, MAX_SEQ_KEY_LEN, SeqAllocator, SeqGrant,
-    SeqKey,
-};
-pub use timestamp::{LOGICAL_MAX, PHYSICAL_MS_MAX, Timestamp, TimestampError};
+// The AdvanceDenseBatch command is an attacker-reachable wire/disk format once
+// write version 6 is activated. Decoding arbitrary bytes must never panic —
+// every malformed input (bad variant index, truncated vec length, empty or
+// oversized embedded SeqKey, trailing bytes) must surface as a decode error,
+// never an unwrap/slice panic. This mirrors `openraft_dense_command_decode`'s
+// entry portion exactly: `decode` is an EXACT-version decoder, not the
+// log-store readable-range gate, so this asserts only the no-panic property —
+// it deliberately makes NO out-of-range-rejection assertion (the range gate
+// lives in the log store's `decode_entry_record`, covered by a unit test).
+fuzz_target!(|data: &[u8]| {
+    if let Some((&version, body)) = data.split_first() {
+        let _ = decode::<OpenraftEntry>(version, body);
+    }
+});

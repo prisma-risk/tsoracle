@@ -11,7 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      BASELINE_REF: 2760a8d5e47f4610eda7559a0420e97f537414a2  # tsoracle-v2.0.0
+      # Latest v5-capable release (MAX_READABLE_VERSION=5, dense but not batch):
+      # the realistic "previous release" a v6 (batch) cluster upgrades FROM. The
+      # lane therefore exercises the genuine v5->v6 transition and the v6
+      # all-members gate against a v5-only peer.
+      BASELINE_REF: 2d7ba937b98fdfdc4edc4d3c90e6a8e2f7ddd60a  # tsoracle-v2.0.2
     steps:
       - name: free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
@@ -28,18 +32,18 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-      - name: checkout baseline release (v4-only)
+      - name: checkout baseline release (v5-capable)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ env.BASELINE_REF }}
           path: baseline-src
           fetch-depth: 0
-      - name: build baseline image (v4-only, tsoracle-v2.0.0)
+      - name: build baseline image (v5-capable, tsoracle-v2.0.2)
         run: |
           docker build -f baseline-src/deploy/Dockerfile \
             --build-arg FEATURES=openraft \
             -t tsoracle:e2e-baseline baseline-src
-      - name: build next image (openraft, v5-capable PR head)
+      - name: build next image (openraft, v6-capable PR head)
         run: |
           docker build -f deploy/Dockerfile \
             --build-arg FEATURES=openraft \

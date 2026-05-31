@@ -12,12 +12,21 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=./_assertions_lib.sh
 source "$here/_assertions_lib.sh"
 
-# Activation target. DENSE_WRITE_VERSION is 5 (the real dense layout); this
-# is the genuine target the all-members gate must accept once all pods are
-# v5-capable. If DENSE_WRITE_VERSION bumps, this constant trips a visible
-# mismatch on the next run rather than silently activating to an unintended
-# version.
+# Dense activation target. DENSE_WRITE_VERSION is 5 (the real dense layout); the
+# v5-capable baseline can already read it, so it activates successfully once all
+# pods are up (it is NOT the gate-rejection target here — see below). Activated
+# post-rollout so GetSeq serves and the batch path's "still gated at v5"
+# independence can be asserted before v6 is activated. If DENSE_WRITE_VERSION
+# bumps, this constant trips a visible mismatch rather than silently activating
+# an unintended version.
 ACTIVATION_TARGET=5
+# Batch activation target AND the all-members gate-rejection target. The
+# v5-capable baseline can read 5 but NOT 6 (BATCH_WRITE_VERSION), so 6 is the
+# genuine version the gate must reject while a v5-only member is still present
+# (the realistic v5->v6 upgrade), and the version activated last once every pod
+# is v6-capable. Same bump-trips-a-visible-mismatch guard: if BATCH_WRITE_VERSION
+# moves, this constant no longer matches and the run fails loudly.
+BATCH_ACTIVATION_TARGET=6
 # Loopback admin port; matches deploy/entrypoint.sh:12 ADMIN_PORT default
 # and the chart values.yaml ports.admin entry added in Task 7.
 ADMIN_PORT=51002
@@ -107,16 +116,18 @@ try_activate_format() {
 }
 
 # Assert activation to $1 is rejected by the ALL-MEMBERS GATE specifically
-# (rc=2 MEMBERS_BELOW_TARGET on a v5-capable leader), NOT by a v4 leader's
-# local-range check (rc=4). With partition=1 two of three pods are v5-capable
-# and exactly one (ordinal 0) is v4. If the current leader is the v4 pod it
-# answers rc=4; we gracefully restart it (default-grace SIGTERM fires the
-# leadership handoff onto a caught-up v5 voter) and retry. Bounded attempts.
+# (rc=2 MEMBERS_BELOW_TARGET on a v6-capable leader), NOT by the v5 baseline
+# leader's local-range check (rc=4). Called with the v6 target, against which
+# the v5 baseline is genuinely below-target. With partition=1 two of three pods
+# are v6-capable and exactly one (ordinal 0) is the v5 baseline. If the current
+# leader is that v5 baseline pod it answers rc=4 (it cannot read the v6 target);
+# we gracefully restart it (default-grace SIGTERM fires the leadership handoff
+# onto a caught-up v6 voter) and retry. Bounded attempts.
 assert_gate_rejection() {
     local target="$1"
-    local v4_leader
+    local below_target_leader
     for _attempt in 1 2 3; do
-        v4_leader=""
+        below_target_leader=""
         local pods
         pods=$(kubectl get pods -l app.kubernetes.io/name=tsoracle \
             -o jsonpath='{.items[*].metadata.name}')
@@ -128,11 +139,11 @@ assert_gate_rejection() {
                 --target "$target" >&2 || rc=$?
             case "$rc" in
                 2)
-                    echo "gate held: activate-format(target=$target) -> MEMBERS_BELOW_TARGET on v5 leader $pod"
+                    echo "gate held: activate-format(target=$target) -> MEMBERS_BELOW_TARGET on v6 leader $pod"
                     return 0
                     ;;
-                3) continue ;;                 # follower; skip
-                4) v4_leader="$pod" ;;          # v4 leader; record, will hand off
+                3) continue ;;                          # follower; skip
+                4) below_target_leader="$pod" ;;        # v5 baseline leader; record, will hand off
                 0)
                     echo "FAIL: activation unexpectedly SUCCEEDED in mixed state on $pod"
                     return 1
@@ -143,13 +154,13 @@ assert_gate_rejection() {
                     ;;
             esac
         done
-        if [ -n "$v4_leader" ]; then
-            echo "leader is v4 ($v4_leader); gracefully restarting to hand off to a v5 voter"
-            kubectl delete pod "$v4_leader"     # default grace -> SIGTERM -> #423 handoff
+        if [ -n "$below_target_leader" ]; then
+            echo "leader is the v5 baseline ($below_target_leader); gracefully restarting to hand off to a v6 voter"
+            kubectl delete pod "$below_target_leader"   # default grace -> SIGTERM -> #423 handoff
             kubectl rollout status sts/tsoracle --timeout=120s
         fi
     done
-    echo "FAIL: could not establish a v5 leader for the gate assertion"
+    echo "FAIL: could not establish a v6 leader for the gate assertion"
     return 1
 }
 
@@ -165,22 +176,35 @@ get_seq_probe() {
         --seq-key=orders --seq-expect="$expect"
 }
 
+# One-shot GetSeqBatch probe (write version 6 path) over two distinct keys.
+# EXPECT in {failed-precondition, served}. Runs to completion; non-zero exit =
+# FAIL.
+get_seq_batch_probe() {
+    local expect="$1"
+    "$TIMEOUT_CMD" 60s kubectl run "seq-batch-probe-${expect}-$$" \
+        --image=tsoracle-e2e-driver:latest --image-pull-policy=IfNotPresent \
+        --restart=Never --rm -i --command -- \
+        kube-e2e-driver --mode=get-seq-batch-probe \
+        --endpoints=tsoracle-0.tsoracle-peer:5051,tsoracle-1.tsoracle-peer:5051,tsoracle-2.tsoracle-peer:5051 \
+        --seq-expect="$expect"
+}
+
 echo "== step 1: start mixed-version soak (load is live before any perturbation) =="
 kubectl apply -f "$here/driver/job-mixed-version-soak.yaml"
 wait_soak_live tsoracle-e2e-mixed-version-soak \
     "mixed-version-soak: first GetTs ok" 60
 
-echo "== step 2: partition=1; roll ordinals 1 and 2 to :e2e-next (ordinal 0 stays v4) =="
+echo "== step 2: partition=1; roll ordinals 1 and 2 to :e2e-next (ordinal 0 stays the v5 baseline) =="
 kubectl patch sts/tsoracle --type=strategic \
     -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":1}}}}'
 kubectl set image sts/tsoracle "tsoracle=${NEXT_IMAGE}"
 wait_pod_image_and_ready tsoracle-2 "${NEXT_IMAGE}" 120
 wait_pod_image_and_ready tsoracle-1 "${NEXT_IMAGE}" 120
 
-echo "== step 3: all-members gate MUST reject (v5 leader, v4 member present) =="
-assert_gate_rejection "$ACTIVATION_TARGET"
+echo "== step 3: all-members gate MUST reject v6 activation (v6 leader, v5 baseline member present) =="
+assert_gate_rejection "$BATCH_ACTIVATION_TARGET"
 
-echo "== step 4: partition=0; complete the rollout (all v5-capable) =="
+echo "== step 4: partition=0; complete the rollout (all v6-capable) =="
 kubectl patch sts/tsoracle --type=strategic \
     -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":0}}}}'
 kubectl rollout status sts/tsoracle --timeout=180s
@@ -193,6 +217,18 @@ try_activate_format "$ACTIVATION_TARGET" OK
 
 echo "== step 7: post-activation GetSeq MUST serve a block =="
 get_seq_probe served
+
+# The batch path (write version 6) gates ABOVE the dense path (write version 5).
+# With only v5 active, GetSeqBatch must still be FAILED_PRECONDITION — proving
+# the batch gate is independent of and higher than the dense gate.
+echo "== step 7b: pre-batch-activation GetSeqBatch MUST be FAILED_PRECONDITION (v5 active, v6 not) =="
+get_seq_batch_probe failed-precondition
+
+echo "== step 7c: batch activation (write version 6) MUST succeed (all members v6-capable) =="
+try_activate_format "$BATCH_ACTIVATION_TARGET" OK
+
+echo "== step 7d: post-activation GetSeqBatch MUST serve blocks =="
+get_seq_batch_probe served
 
 echo "== step 8: drain the soak (GetTs monotone + GetSeq gapless + <error budget) =="
 wait_job tsoracle-e2e-mixed-version-soak 180
