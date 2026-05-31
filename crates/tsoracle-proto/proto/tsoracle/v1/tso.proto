@@ -109,7 +109,7 @@ message GetSeqResponse {
 }
 
 message SeqRequestEntry {
-  string key = 1;   // bounded UTF-8 sequence key
+  string key = 1; // bounded UTF-8 sequence key
   uint32 count = 2; // must be >= 1
 }
 
