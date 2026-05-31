@@ -24,6 +24,11 @@ paxos    = [
     "dep:prost", "dep:postcard", "dep:parking_lot", "dep:tokio-stream",
     "tonic/tls-aws-lc",
 ]
+metrics  = [
+    "tsoracle-server/metrics",
+    "tsoracle-driver-openraft?/metrics",
+    "tsoracle-driver-paxos?/metrics",
+]
 # Gates `admin::test_support`, a tiny public seam exposing the otherwise
 # `pub(crate)` `AdminServiceImpl` constructor so an integration test can
 # drive the gRPC handler with a fake `MembershipAdmin`. Off in production.

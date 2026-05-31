@@ -53,11 +53,11 @@ jobs:
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
       - name: Build file + openraft + umbrella and smoke
         run: |
-          docker build -f deploy/Dockerfile --build-arg FEATURES=file -t tsoracle-file:pr .
+          docker build -f deploy/Dockerfile --build-arg FEATURES=file,metrics -t tsoracle-file:pr .
           docker run --rm --entrypoint tsoracle tsoracle-file:pr --help | head -1
-          docker build -f deploy/Dockerfile --build-arg FEATURES=openraft -t tsoracle-openraft:pr .
+          docker build -f deploy/Dockerfile --build-arg FEATURES=openraft,metrics -t tsoracle-openraft:pr .
           docker run --rm --entrypoint tsoracle tsoracle-openraft:pr --help | head -1
-          docker build -f deploy/Dockerfile -t tsoracle:pr .
+          docker build -f deploy/Dockerfile --build-arg FEATURES=file,openraft,paxos,metrics -t tsoracle:pr .
           docker run --rm --entrypoint tsoracle tsoracle:pr --help | head -1
           curl -fsSL https://get.helm.sh/helm-v3.15.0-linux-amd64.tar.gz | tar xz
           ./linux-amd64/helm lint deploy/charts/tsoracle
@@ -72,25 +72,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `variant` selects which driver subset is compiled into the binary; the
-        # paired `image` / `features` columns (via include:) decouple the matrix
-        # label from the image name and the cargo features so the `umbrella`
-        # row can build the fat image as plain `tsoracle` with default features
-        # (empty FEATURES => Dockerfile builds without --no-default-features).
+        # `variant` selects which driver subset is compiled into the binary.
+        # Every published image includes the `metrics` feature so tsoracle
+        # emits the documented Prometheus-ready signals.
         variant: [file, openraft, umbrella]
         arch: [amd64, arm64]
         include:
           - variant: file
             image: tsoracle-file
-            features: file
+            features: file,metrics
             description: 'tsoracle with the file driver — single-node timestamp & sequence oracle'
           - variant: openraft
             image: tsoracle-openraft
-            features: openraft
+            features: openraft,metrics
             description: 'tsoracle with the openraft driver — distributed, fault-tolerant timestamp & sequence oracle'
           - variant: umbrella
             image: tsoracle
-            features: ''
+            features: file,openraft,paxos,metrics
             description: 'tsoracle with all drivers bundled (file, openraft & OmniPaxos) — distributed timestamp & sequence oracle'
           - arch: amd64
             runner: ubuntu-latest
