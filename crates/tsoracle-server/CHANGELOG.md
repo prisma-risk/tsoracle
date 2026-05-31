@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [3.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.0.1...tsoracle-server-v3.1.0) - 2026-05-31
+
+### Added
+
+- atomic multi-key GetSeqBatch RPC ([#601](https://github.com/prisma-risk/tsoracle/pull/601))
+
 ## [3.0.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.0.0...tsoracle-server-v3.0.1) - 2026-05-30
 
 ### Other
