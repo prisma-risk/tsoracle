@@ -32,6 +32,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use anyhow::Context;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::sync::broadcast;
 use tsoracle_client::Client;
@@ -45,8 +46,8 @@ const METRICS_ADDR: &str = "127.0.0.1:9552";
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let metrics_addr: SocketAddr = METRICS_ADDR.parse()?;
-    let grpc_addr: SocketAddr = GRPC_ADDR.parse()?;
+    let metrics_addr = addr_from_env("TSORACLE_EXAMPLE_METRICS_ADDR", METRICS_ADDR)?;
+    let grpc_addr = addr_from_env("TSORACLE_EXAMPLE_GRPC_ADDR", GRPC_ADDR)?;
 
     // The `metrics` crate resolves the global recorder lazily per call site
     // and caches the result on first emission. An emission that lands before
@@ -81,6 +82,13 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     let _ = load_handle.await;
     Ok(())
+}
+
+fn addr_from_env(name: &str, default: &str) -> anyhow::Result<SocketAddr> {
+    std::env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse()
+        .with_context(|| format!("parse {name} as a socket address"))
 }
 
 /// Calls `get_ts_batch` on a loop so a fresh scrape shows non-zero counters

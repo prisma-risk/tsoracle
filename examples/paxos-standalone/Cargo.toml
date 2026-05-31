@@ -13,7 +13,7 @@ name = "paxos-standalone"
 path = "src/main.rs"
 
 [features]
-default    = []
+default    = ["reflection"]
 reflection = ["tsoracle-server/reflection"]
 
 [dependencies]

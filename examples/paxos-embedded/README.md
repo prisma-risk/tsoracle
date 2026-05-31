@@ -21,7 +21,7 @@ Ctrl-C drains in-flight RPCs and exits.
 Talk to it from another terminal with `grpcurl` against any node — followers respond with a `LeaderHint` trailer pointing at the leader's address:
 
 ```bash
-grpcurl -plaintext -d '{"count":1}' 127.0.0.1:50591 tsoracle.v1.TsoService/GetTs
+grpcurl -v -plaintext -d '{"count":1}' 127.0.0.1:50591 tsoracle.v1.TsoService/GetTs
 ```
 
 Or from Rust using the `tsoracle-client` crate; pass all three endpoints so the client honors `LeaderHint` redirects.
@@ -40,6 +40,6 @@ Or from Rust using the `tsoracle-client` crate; pass all three endpoints so the 
 
 ## Production caveats
 
-- **`MemNetwork`.** Replace with your real OmniPaxos peer transport (typically tonic; see `paxos-standalone/src/network.rs` for a worked version) before exposing this to anything beyond a single host.
+- **`MemNetwork`.** Replace with your real OmniPaxos peer transport (typically tonic; see the standalone transport under `crates/tsoracle-standalone`) before exposing this to anything beyond a single host.
 - **`MemStorage`.** The cluster's paxos log is in-memory only — every restart loses state. Swap to the toolkit's `RocksdbStorage` for durable storage.
 - **No graceful host shutdown.** Ctrl-C drains tsoracle servers but leaves the `StandaloneHost` runner + apply tasks to be torn down by the runtime. Production code should keep handles to call `host.stop().await` before returning from `main`.

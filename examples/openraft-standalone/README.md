@@ -1,6 +1,8 @@
 # Three-node tsoracle cluster on openraft (standalone)
 
-Multi-process tsoracle cluster backed by [openraft](https://github.com/databendlabs/openraft), wired together via [`tsoracle-driver-openraft`](../../crates/tsoracle-driver-openraft/). The driver crate provides the `ConsensusDriver` impl, the openraft `TypeConfig`, the `HighWaterStateMachine`, and the `StandaloneHost` that owns its own raft cluster. This example supplies the rest: a tonic raft peer transport (`src/network.rs`), the openraft `Config` + bootstrap glue (`src/main.rs`), and the `--tso-peers` map (`NodeId -> tsoracle-service-addr`), which seeds each member's `service_endpoint` in raft membership at bootstrap so the driver can resolve `LeaderHint` follower-redirects from the leader's membership node.
+Multi-process tsoracle cluster backed by [openraft](https://github.com/databendlabs/openraft), wired through [`tsoracle-standalone`](../../crates/tsoracle-standalone/) and [`tsoracle-driver-openraft`](../../crates/tsoracle-driver-openraft/). The standalone crate owns the openraft storage, peer transport, bootstrap, and driver construction; this example is the thin operator-facing wrapper that parses CLI flags, starts the tsoracle gRPC server, and wires graceful shutdown.
+
+At bootstrap, `--members` seeds each node's raft endpoint, tsoracle service endpoint, and admin endpoint into replicated membership. The driver reads the elected leader's service endpoint from that membership when returning `LeaderHint` follower redirects.
 
 If your service already runs openraft for other state and you want TSO to share it, see the [`openraft-piggyback`](../openraft-piggyback/) example instead.
 
@@ -24,20 +26,19 @@ Alternatively start each node by hand in its own terminal. Node 1 carries `--boo
     cargo run -p example-openraft-standalone -- \
       --id 1 \
       --raft-addr 127.0.0.1:51001 --tso-addr 127.0.0.1:50561 \
-      --peers     "1=127.0.0.1:51001,2=127.0.0.1:51002,3=127.0.0.1:51003" \
-      --tso-peers "1=127.0.0.1:50561,2=127.0.0.1:50562,3=127.0.0.1:50563" \
+      --members "1=127.0.0.1:51001/127.0.0.1:50561/127.0.0.1:52001,2=127.0.0.1:51002/127.0.0.1:50562/127.0.0.1:52002,3=127.0.0.1:51003/127.0.0.1:50563/127.0.0.1:52003" \
       --raft-dir ./.data/n1 --bootstrap
 
-    # node 2 (same args, --id 2, ports …002/…562, dir n2, no --bootstrap)
-    # node 3 (--id 3, ports …003/…563, dir n3, no --bootstrap)
+    # node 2 (same args, --id 2, ports ...002/...562, dir n2, no --bootstrap/--members)
+    # node 3 (--id 3, ports ...003/...563, dir n3, no --bootstrap/--members)
 
 ## Issue a timestamp
 
 Against any node:
 
-    grpcurl -plaintext -d '{"count":1}' 127.0.0.1:50561 tsoracle.v1.TsoService/GetTs
+    grpcurl -v -plaintext -d '{"count":1}' 127.0.0.1:50561 tsoracle.v1.TsoService/GetTs
 
-A follower will respond with a `LeaderHint` trailer pointing at the current leader's tsoracle address (see `--tso-peers`). That address is the leader's `service_endpoint` carried in raft membership (seeded from `--tso-peers` at bootstrap); the driver reads it from the leader's membership node.
+A follower will respond with a `LeaderHint` trailer pointing at the current leader's tsoracle address. That address is the leader's `service_endpoint` carried in raft membership (seeded from `--members` at bootstrap); the driver reads it from the leader's membership node.
 
 ## Observe failover
 
@@ -45,16 +46,15 @@ Find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that pr
 
 ## What's in this example
 
-- `src/main.rs` — CLI parse, openraft `Config`, one rocksdb instance with three CFs (`raft_log` / `raft_meta` for the log store, `raft_snapshot` for `RocksdbSnapshotStore`), `Raft::new`, optional `initialize`, and the driver wiring: `StandaloneHost::new` → `OpenraftDriver::new(host)`, with the `--tso-peers` addresses written into each member's `service_endpoint` in raft membership at bootstrap. About 150 lines including config and bootstrap.
-- `src/network.rs` — tonic raft peer transport (`AppendEntries`, `Vote`, chunked snapshot stream). The bulk of the example; ports across cleanly because the driver crate's `TypeConfig` is the only handle the network needs.
-- `proto/raft.proto`, `build.rs` — peer-RPC service definition + tonic codegen.
-- `scripts/run.sh` — 3-node bring-up.
+- `src/main.rs` — CLI parse, `DriverConfig::Openraft`, `tsoracle_standalone::build`, `Server::builder()`, and SIGINT/SIGTERM-aware shutdown via `tsoracle_server::shutdown_signal()`.
+- `scripts/run.sh` — 3-node bring-up with a fresh `.data/` directory and reflection enabled so the `grpcurl` quickstart works.
+- The openraft peer transport, RocksDB log/snapshot stores, admin-plane types, and driver construction live in [`tsoracle-standalone`](../../crates/tsoracle-standalone/) and [`tsoracle-driver-openraft`](../../crates/tsoracle-driver-openraft/).
 
 ## Production caveats
 
 This example shows the **minimum** wiring to take `ConsensusDriver` end-to-end with openraft. Several layers are simplified for readability and **must** be replaced before any real deployment:
 
-- **Snapshot transport.** `src/network.rs` streams snapshots in 1 MiB chunks over a client-streaming RPC, so frames stay well under gRPC's 4 MiB default. The receiver bounds reassembly at `MAX_SNAPSHOT_BYTES` (64 MiB) and refuses anything larger with `ResourceExhausted`, caps each peer message at `MAX_PEER_MESSAGE_BYTES` (one chunk plus framing headroom), and times out a single install stream after `SNAPSHOT_STREAM_TIMEOUT` (60 s) — these are example-scale defaults; size them against your largest realistic state-machine snapshot. It does *not* implement resume-on-disconnect: a peer that fails mid-install starts the next attempt at chunk 0. For state machines that grow into the hundreds of MiB you'll want a resumable protocol with an explicit offset.
+- **Snapshot transport.** The standalone openraft transport streams snapshots in 1 MiB chunks over a client-streaming RPC, so frames stay well under gRPC's 4 MiB default. The receiver bounds reassembly at `MAX_SNAPSHOT_BYTES` (64 MiB) and refuses anything larger with `ResourceExhausted`, caps each peer message at `MAX_PEER_MESSAGE_BYTES` (one chunk plus framing headroom), and times out a single install stream after `SNAPSHOT_STREAM_TIMEOUT` (60 s) — these are example-scale defaults; size them against your largest realistic state-machine snapshot. It does *not* implement resume-on-disconnect: a peer that fails mid-install starts the next attempt at chunk 0. For state machines that grow into the hundreds of MiB you'll want a resumable protocol with an explicit offset.
 
 - **Membership operations.** This example bootstraps a fixed 3-node cluster via `--bootstrap`. There is no add-learner / promote / remove flow shown. Use openraft's `change_membership` API and gate it behind whatever authentication you require.
 
@@ -64,7 +64,7 @@ This example shows the **minimum** wiring to take `ConsensusDriver` end-to-end w
 
 ## Addressing and pod restarts
 
-Peer addresses live in replicated raft membership, not in per-process config. Each member carries two addresses: `addr`, the raft transport endpoint as a scheme-less `host:port`, and `service_endpoint`, the tsoracle gRPC endpoint clients redirect to as a scheme-less `host:port` (the client applies `https://` under TLS, `http://` otherwise; an explicit `http://` is refused by a TLS client). Configure both with stable DNS names — run the cluster as a StatefulSet behind a headless Service so each pod has a durable name like `tso-0.tso.ns.svc.cluster.local`, never a raw pod IP. A pod that reschedules with a new IP keeps its name; the transport re-resolves it on the next dial (the pool evicts a failed channel), so no membership change is needed for an IP change. Production placement-driver/consensus stacks (Spanner, CockroachDB, FoundationDB) use this same stable-name model.
+Peer addresses live in replicated raft membership, not in per-process config. Each member carries three addresses: `addr`, the raft transport endpoint as a scheme-less `host:port`; `service_endpoint`, the tsoracle gRPC endpoint clients redirect to as a scheme-less `host:port` (the client applies `https://` under TLS, `http://` otherwise; an explicit `http://` is refused by a TLS client); and `admin_endpoint`, the membership-admin endpoint. Configure all of them with stable DNS names — run the cluster as a StatefulSet behind a headless Service so each pod has a durable name like `tso-0.tso.ns.svc.cluster.local`, never a raw pod IP. A pod that reschedules with a new IP keeps its name; the transport re-resolves it on the next dial (the pool evicts a failed channel), so no membership change is needed for an IP change. Production placement-driver/consensus stacks (Spanner, CockroachDB, FoundationDB) use this same stable-name model.
 
 This example's peer RPCs are unframed postcard, and widening the membership node bumped the toolkit `SCHEMA_VERSION`, so this build requires a **fresh cluster**: a rolling/mixed-version upgrade across the change is unsupported.
 

@@ -19,7 +19,7 @@ For the **reference documentation of the external interface** — the gRPC wire 
 - **[Driver Comparison](driver-comparison.md)** — capability matrix and per-feature deep dive across `file`, `openraft`, and `paxos`; operator decision guidance and contributor-facing internals.
 - **[Operations](operations.md)** — sizing `window_ahead`/`failover_advance`, monitoring hooks, deployment topologies, client retry behavior.
 - **[Deployment](deployment.md)** — container images (fat vs lean, multi-arch), Helm chart quick start, values reference, TLS/mTLS setup, and topology notes (file vs openraft vs paxos).
-- **[Testing and Examples](testing-and-examples.md)** — walkthroughs of `embedded-server`, `failover-demo`, `openraft-standalone`, `openraft-piggyback`, plus the workspace testing strategy.
+- **[Testing and Examples](testing-and-examples.md)** — walkthroughs of the runnable example crates plus the workspace testing strategy.
 - **[Failpoint Testing](failpoint-testing.md)** — fault-injection points for crash-recovery, fence, and service-path tests; the feature-gating model and contributor guidance.
 - **[Yield-point Testing](yieldpoint-testing.md)** — async counterpart of failpoints, for tests that need to park production code in an async path without blocking a tokio worker.
 - **[Interface Reference](interface-reference.md)** — reference documentation for the project's external interfaces: the `tsoracle.v1.TsoService` gRPC wire surface, the `tsoracle.admin.v1.MembershipAdmin` admin surface, the `tsoracle` CLI, and the published Rust crates.
