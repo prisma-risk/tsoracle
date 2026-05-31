@@ -18,6 +18,13 @@ source "$here/_assertions_lib.sh"
 # mismatch on the next run rather than silently activating to an unintended
 # version.
 ACTIVATION_TARGET=5
+# Batch activation target. BATCH_WRITE_VERSION is 6 (the atomic GetSeqBatch log
+# command). Activated AFTER ACTIVATION_TARGET so the soak exercises the genuine
+# v5->v6 progression; the all-members gate accepts it once every pod is
+# v6-capable (post-full-rollout). Same bump-trips-a-visible-mismatch guard as
+# ACTIVATION_TARGET: if BATCH_WRITE_VERSION moves, this constant no longer
+# matches and the run fails loudly rather than activating an unintended version.
+BATCH_ACTIVATION_TARGET=6
 # Loopback admin port; matches deploy/entrypoint.sh:12 ADMIN_PORT default
 # and the chart values.yaml ports.admin entry added in Task 7.
 ADMIN_PORT=51002
@@ -165,6 +172,19 @@ get_seq_probe() {
         --seq-key=orders --seq-expect="$expect"
 }
 
+# One-shot GetSeqBatch probe (write version 6 path) over two distinct keys.
+# EXPECT in {failed-precondition, served}. Runs to completion; non-zero exit =
+# FAIL.
+get_seq_batch_probe() {
+    local expect="$1"
+    "$TIMEOUT_CMD" 60s kubectl run "seq-batch-probe-${expect}-$$" \
+        --image=tsoracle-e2e-driver:latest --image-pull-policy=IfNotPresent \
+        --restart=Never --rm -i --command -- \
+        kube-e2e-driver --mode=get-seq-batch-probe \
+        --endpoints=tsoracle-0.tsoracle-peer:5051,tsoracle-1.tsoracle-peer:5051,tsoracle-2.tsoracle-peer:5051 \
+        --seq-expect="$expect"
+}
+
 echo "== step 1: start mixed-version soak (load is live before any perturbation) =="
 kubectl apply -f "$here/driver/job-mixed-version-soak.yaml"
 wait_soak_live tsoracle-e2e-mixed-version-soak \
@@ -193,6 +213,18 @@ try_activate_format "$ACTIVATION_TARGET" OK
 
 echo "== step 7: post-activation GetSeq MUST serve a block =="
 get_seq_probe served
+
+# The batch path (write version 6) gates ABOVE the dense path (write version 5).
+# With only v5 active, GetSeqBatch must still be FAILED_PRECONDITION — proving
+# the batch gate is independent of and higher than the dense gate.
+echo "== step 7b: pre-batch-activation GetSeqBatch MUST be FAILED_PRECONDITION (v5 active, v6 not) =="
+get_seq_batch_probe failed-precondition
+
+echo "== step 7c: batch activation (write version 6) MUST succeed (all members v6-capable) =="
+try_activate_format "$BATCH_ACTIVATION_TARGET" OK
+
+echo "== step 7d: post-activation GetSeqBatch MUST serve blocks =="
+get_seq_batch_probe served
 
 echo "== step 8: drain the soak (GetTs monotone + GetSeq gapless + <error budget) =="
 wait_job tsoracle-e2e-mixed-version-soak 180

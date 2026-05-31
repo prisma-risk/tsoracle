@@ -75,6 +75,13 @@ enum Mode {
     /// `--seq-expect=failed-precondition`; after activation, `--seq-expect=served`.
     /// Uses the client's leader-hint routing so it reaches the leader.
     GetSeqProbe,
+    /// One-shot GetSeqBatch probe used by the mixed-version orchestrator to
+    /// assert the batch-format (write version 6) activation transition: before
+    /// activation it must observe `--seq-expect=failed-precondition`; after, a
+    /// served batch of blocks for two distinct keys. The single-key dense path
+    /// (write version 5) may already be active when this runs — only the batch
+    /// path gates on write version 6.
+    GetSeqBatchProbe,
 }
 
 #[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -184,6 +191,9 @@ async fn main() -> Result<()> {
         }
         Mode::GetSeqProbe => {
             run_get_seq_probe(&cli.endpoints, &cli.seq_key, &cli.seq_expect, tls).await?
+        }
+        Mode::GetSeqBatchProbe => {
+            run_get_seq_batch_probe(&cli.endpoints, &cli.seq_expect, tls).await?
         }
     };
     if !passed {
@@ -506,6 +516,50 @@ async fn run_get_seq_probe(
         }
         (expect, other) => {
             eprintln!("get-seq-probe: expected {expect:?} but got {other:?} -> FAIL");
+            Ok(false)
+        }
+    }
+}
+
+/// One-shot `GetSeqBatch` probe for the mixed-version orchestrator's write
+/// version 6 (batch) activation assertion. Mirrors [`run_get_seq_probe`] but
+/// exercises the atomic multi-key path over two distinct keys. `Served` asserts
+/// a gapless block per key; `FailedPrecondition` asserts the pre-activation
+/// `DenseBatchNotActivated` rejection.
+async fn run_get_seq_batch_probe(
+    endpoints: &[String],
+    expect: &SeqExpect,
+    tls: Option<ClientTlsConfig>,
+) -> Result<bool> {
+    use tsoracle_client::ClientError;
+
+    let builder = ClientBuilder::endpoints(endpoints.to_vec()).retry_policy(generous_policy());
+    let client = apply_tls(builder, tls)
+        .build()
+        .await
+        .context("build get-seq-batch-probe client")?;
+
+    let result = client
+        .get_seq_batch(&[("orders-a", 1), ("orders-b", 1)])
+        .await;
+    match (expect, &result) {
+        (SeqExpect::Served, Ok(blocks)) => {
+            println!(
+                "get-seq-batch-probe: SERVED {} blocks (orders-a start={}, orders-b start={}) -> PASS",
+                blocks.len(),
+                blocks[0].start,
+                blocks[1].start
+            );
+            Ok(true)
+        }
+        (SeqExpect::FailedPrecondition, Err(ClientError::Rpc(status)))
+            if status.code() == tonic::Code::FailedPrecondition =>
+        {
+            println!("get-seq-batch-probe: FAILED_PRECONDITION (batch not activated) -> PASS");
+            Ok(true)
+        }
+        (expect, other) => {
+            eprintln!("get-seq-batch-probe: expected {expect:?} but got {other:?} -> FAIL");
             Ok(false)
         }
     }
