@@ -325,7 +325,10 @@ fn classify_activation_outcome(
         // remediation path).
         other @ (ApplyOutcome::DenseAdvanced { .. }
         | ApplyOutcome::DenseCardinalityExceeded { .. }
-        | ApplyOutcome::DenseOverflow) => {
+        | ApplyOutcome::DenseOverflow
+        | ApplyOutcome::DenseBatchAdvanced { .. }
+        | ApplyOutcome::DenseBatchCardinalityExceeded { .. }
+        | ApplyOutcome::DenseBatchOverflow) => {
             unreachable!("dense ApplyOutcome {other:?} returned from a SetFormatVersion entry")
         }
     }

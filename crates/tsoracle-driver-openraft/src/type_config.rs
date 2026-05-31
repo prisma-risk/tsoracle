@@ -131,6 +131,17 @@ pub enum ApplyOutcome {
     /// An `AdvanceDense` applied as a deterministic rejection: the counter would
     /// exceed u64::MAX.
     DenseOverflow,
+    /// An `AdvanceDenseBatch` applied successfully: `starts[i]` is the
+    /// pre-advance dense counter for request entry `i` (its block's first
+    /// ordinal), in request order. `value` on the enclosing `HighWaterApplied`
+    /// is the high-water, untouched.
+    DenseBatchAdvanced { starts: Vec<u64> },
+    /// An `AdvanceDenseBatch` applied as a deterministic rejection: applying it
+    /// would exceed the immutable genesis cardinality cap. No counter moved.
+    DenseBatchCardinalityExceeded { cap: u64 },
+    /// An `AdvanceDenseBatch` applied as a deterministic rejection: some key's
+    /// accumulated advance would exceed u64::MAX. No counter moved.
+    DenseBatchOverflow,
 }
 
 /// Per-entry apply result.
@@ -277,6 +288,14 @@ mod tests {
             ApplyOutcome::FormatActivated { target: 4 },
             ApplyOutcome::FormatActivationNoop { target: 4 },
             ApplyOutcome::FormatActivationTargetOutOfRange { target: 1 },
+            ApplyOutcome::DenseAdvanced { start: 99 },
+            ApplyOutcome::DenseCardinalityExceeded { cap: 1024 },
+            ApplyOutcome::DenseOverflow,
+            ApplyOutcome::DenseBatchAdvanced {
+                starts: vec![0, 1, u64::MAX],
+            },
+            ApplyOutcome::DenseBatchCardinalityExceeded { cap: 1024 },
+            ApplyOutcome::DenseBatchOverflow,
         ] {
             let applied = HighWaterApplied {
                 value: 42,
