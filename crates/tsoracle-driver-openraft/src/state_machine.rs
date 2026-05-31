@@ -756,15 +756,67 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                         outcome,
                     }
                 }
-                // The full all-or-nothing apply for this arm lands with the rest
-                // of the batch path. Until BATCH_WRITE_VERSION is activated
-                // cluster-wide, an AdvanceDenseBatch entry is never appended, so
-                // it cannot reach apply.
-                EntryPayload::Normal(HighWaterCommand::AdvanceDenseBatch { .. }) => {
-                    unreachable!(
-                        "AdvanceDenseBatch apply not yet implemented; entry must \
-                         not be appended before BATCH_WRITE_VERSION is activated"
-                    )
+                EntryPayload::Normal(HighWaterCommand::AdvanceDenseBatch { entries }) => {
+                    let mut core = self.core.lock();
+                    // Phase 1: cardinality. Count distinct keys not already
+                    // present; a duplicate entry on the same key counts once
+                    // (set semantics), so the new-key count uses a BTreeSet.
+                    let new_keys: std::collections::BTreeSet<&str> = entries
+                        .iter()
+                        .map(|e| e.key.as_str())
+                        .filter(|k| !core.dense.contains_key(*k))
+                        .collect();
+                    let outcome =
+                        if core.dense.len() as u64 + new_keys.len() as u64 > core.dense_cap {
+                            ApplyOutcome::DenseBatchCardinalityExceeded {
+                                cap: core.dense_cap,
+                            }
+                        } else {
+                            // Phase 2: sequential fold into a scratch map seeded
+                            // lazily from current counters. Each entry's start is the
+                            // running value in the scratch map (or the stored value if
+                            // not yet in the scratch map); the running value
+                            // accumulates across repeats, so a duplicate key yields
+                            // adjacent non-overlapping blocks and the overflow check
+                            // is against the ACCUMULATED value — not the shared
+                            // pre-batch counter. Any overflow rejects the whole batch.
+                            let mut scratch: std::collections::BTreeMap<&str, u64> =
+                                std::collections::BTreeMap::new();
+                            let mut starts: Vec<u64> = Vec::with_capacity(entries.len());
+                            let mut overflow = false;
+                            for entry in entries {
+                                let key_str = entry.key.as_str();
+                                let running = scratch
+                                    .get(key_str)
+                                    .copied()
+                                    .or_else(|| core.dense.get(key_str).copied())
+                                    .unwrap_or(0);
+                                starts.push(running);
+                                match running.checked_add(u64::from(entry.count)) {
+                                    Some(next) => {
+                                        scratch.insert(key_str, next);
+                                    }
+                                    None => {
+                                        overflow = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if overflow {
+                                ApplyOutcome::DenseBatchOverflow
+                            } else {
+                                // Phase 3: commit. Only now mutate the durable map.
+                                for (key_str, next) in scratch {
+                                    core.dense.insert(key_str.to_string(), next);
+                                }
+                                ApplyOutcome::DenseBatchAdvanced { starts }
+                            }
+                        };
+                    core.last_applied = Some(log_id);
+                    HighWaterApplied {
+                        value: core.current_value,
+                        outcome,
+                    }
                 }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
@@ -2889,6 +2941,196 @@ mod tests {
             sm_mut.dense_value("x"),
             u64::MAX,
             "overflow must not modify the counter"
+        );
+    }
+
+    // ---- AdvanceDenseBatch apply tests ----
+    //
+    // These tests pin the all-or-nothing semantics of the batch apply arm:
+    //  1. A successful batch advances ALL counters atomically; starts are
+    //     the pre-advance values in request order (including duplicate-key
+    //     blocks which are adjacent and non-overlapping within a single batch).
+    //  2. A cardinality violation rejects the ENTIRE batch — no counter moves,
+    //     not even keys already in the map.
+    //  3. An overflow caused by ACCUMULATED advances across duplicate entries
+    //     rejects the ENTIRE batch — a per-entry-against-prestate check would
+    //     pass both entries individually, so the sequential fold is the only
+    //     correct approach.
+    //
+    // Outcome is verified by observing `dense_value` before and after each
+    // apply (the same mechanism the single-key AdvanceDense tests use), since
+    // `ApplyOutcome` is only delivered via the openraft responder channel,
+    // which the test harness does not wire.
+
+    use crate::log_entry::DenseAdvance;
+
+    #[tokio::test]
+    async fn dense_batch_applies_atomically_and_gaplessly() {
+        // A two-key batch: both keys start absent (counter = 0) and the batch
+        // advances "orders" by 5 and "users" by 2. After the batch both counters
+        // must reflect exactly those advances — gaplessly starting from 0.
+        let mut sm = HighWaterStateMachine::new_with_dense_cap(8);
+
+        // Pre-condition: both keys absent.
+        assert_eq!(sm.dense_value("orders"), 0);
+        assert_eq!(sm.dense_value("users"), 0);
+
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDenseBatch {
+                entries: vec![
+                    DenseAdvance {
+                        key: dense_key("orders"),
+                        count: 5,
+                    },
+                    DenseAdvance {
+                        key: dense_key("users"),
+                        count: 2,
+                    },
+                ],
+            }),
+        )
+        .await;
+
+        // Post-condition: both counters advanced from 0.
+        assert_eq!(
+            sm.dense_value("orders"),
+            5,
+            "first batch: orders must advance from 0 to 5"
+        );
+        assert_eq!(
+            sm.dense_value("users"),
+            2,
+            "first batch: users must advance from 0 to 2"
+        );
+        // High-water must be untouched.
+        assert_eq!(
+            sm.current_value().await,
+            0,
+            "AdvanceDenseBatch must not touch the high-water"
+        );
+
+        // Second batch: advance "orders" by 3 — start must be 5 (current value).
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDenseBatch {
+                entries: vec![DenseAdvance {
+                    key: dense_key("orders"),
+                    count: 3,
+                }],
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            sm.dense_value("orders"),
+            8,
+            "second batch: orders must advance from 5 to 8"
+        );
+        assert_eq!(
+            sm.dense_value("users"),
+            2,
+            "users must be unchanged by a batch that does not mention it"
+        );
+    }
+
+    #[tokio::test]
+    async fn dense_batch_cardinality_is_atomic() {
+        // Cap = 1: only one distinct key is permitted. Seed "a" with a first
+        // batch (1 key, accepted), then submit a batch of ["a", "b"] — "b" is
+        // new and would push the count to 2 > cap. The ENTIRE batch must be
+        // rejected atomically: "a" must NOT advance and "b" must remain absent.
+        let mut sm = HighWaterStateMachine::new_with_dense_cap(1);
+
+        // Seed "a" at 1.
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDenseBatch {
+                entries: vec![DenseAdvance {
+                    key: dense_key("a"),
+                    count: 1,
+                }],
+            }),
+        )
+        .await;
+        assert_eq!(sm.dense_value("a"), 1, "seed apply must succeed");
+
+        // The cardinality-exceeded batch: "a" already exists (no new key there)
+        // but "b" is new and would push the distinct-key count to 2 > cap=1.
+        apply_one(
+            &mut sm,
+            2,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDenseBatch {
+                entries: vec![
+                    DenseAdvance {
+                        key: dense_key("a"),
+                        count: 1,
+                    },
+                    DenseAdvance {
+                        key: dense_key("b"),
+                        count: 1,
+                    },
+                ],
+            }),
+        )
+        .await;
+
+        // Atomic rejection: neither "a" nor "b" must move.
+        assert_eq!(
+            sm.dense_value("a"),
+            1,
+            "cardinality rejection must not advance existing key a"
+        );
+        assert_eq!(
+            sm.dense_value("b"),
+            0,
+            "cardinality rejection must leave new key b absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn dense_batch_overflow_is_atomic_and_accumulates_duplicates() {
+        // Seed "k" near the ceiling so that two entries on "k" within a single
+        // batch — each advancing by 4 — ACCUMULATE to an overflow: the running
+        // value after the first entry is (u64::MAX - 5 + 4) = u64::MAX - 1,
+        // and after the second entry checked_add(u64::MAX - 1, 4) overflows.
+        // A naive per-entry check against the pre-batch stored value (u64::MAX - 5)
+        // would pass both (each count=4 fits), so the sequential fold over a
+        // scratch map is the only correct implementation.
+        //
+        // The batch must be rejected entirely: "k" must remain at u64::MAX - 5.
+        let mut sm = HighWaterStateMachine::new_with_dense_cap(8);
+        {
+            let mut core = sm.core.lock();
+            core.dense.insert("k".to_string(), u64::MAX - 5);
+        }
+
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::AdvanceDenseBatch {
+                entries: vec![
+                    DenseAdvance {
+                        key: dense_key("k"),
+                        count: 4,
+                    },
+                    DenseAdvance {
+                        key: dense_key("k"),
+                        count: 4,
+                    },
+                ],
+            }),
+        )
+        .await;
+
+        // Entire batch must be rejected: k stays at u64::MAX - 5.
+        assert_eq!(
+            sm.dense_value("k"),
+            u64::MAX - 5,
+            "overflow from accumulated duplicate advances must not modify any counter"
         );
     }
 
