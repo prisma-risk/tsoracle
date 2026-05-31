@@ -440,6 +440,16 @@ impl OpenraftHighWaterHost for PiggybackHost {
         Err(ConsensusError::DenseUnsupported)
     }
 
+    async fn submit_advance_dense_batch(
+        &self,
+        _entries: &[(tsoracle_core::SeqKey, u32)],
+    ) -> Result<Vec<u64>, ConsensusError> {
+        // Dense sequences are not implemented in the piggyback example.
+        // The driver gate (`active_write_version < BATCH_WRITE_VERSION`)
+        // prevents this from ever being called in normal operation.
+        Err(ConsensusError::DenseUnsupported)
+    }
+
     async fn current_dense_seq(&self, _key: &tsoracle_core::SeqKey) -> Result<u64, ConsensusError> {
         // Dense sequences are not implemented in the piggyback example.
         Err(ConsensusError::DenseUnsupported)

@@ -399,6 +399,38 @@ impl OpenraftHighWaterHost for StandaloneHost {
         }
     }
 
+    async fn submit_advance_dense_batch(
+        &self,
+        entries: &[(tsoracle_core::SeqKey, u32)],
+    ) -> Result<Vec<u64>, ConsensusError> {
+        let payload: Vec<crate::log_entry::DenseAdvance> = entries
+            .iter()
+            .map(|(key, count)| crate::log_entry::DenseAdvance {
+                key: key.clone(),
+                count: *count,
+            })
+            .collect();
+        match self
+            .raft
+            .client_write(HighWaterCommand::AdvanceDenseBatch { entries: payload })
+            .await
+        {
+            Ok(resp) => match resp.data.outcome {
+                crate::type_config::ApplyOutcome::DenseBatchAdvanced { starts } => Ok(starts),
+                crate::type_config::ApplyOutcome::DenseBatchCardinalityExceeded { cap } => {
+                    Err(ConsensusError::SeqKeyCardinalityExceeded { cap })
+                }
+                crate::type_config::ApplyOutcome::DenseBatchOverflow => {
+                    Err(ConsensusError::SeqOverflow)
+                }
+                other => Err(ConsensusError::PermanentDriver(
+                    format!("unexpected ApplyOutcome for AdvanceDenseBatch: {other:?}").into(),
+                )),
+            },
+            Err(e) => Err(classify_client_write_error(e)),
+        }
+    }
+
     async fn current_dense_seq(&self, key: &tsoracle_core::SeqKey) -> Result<u64, ConsensusError> {
         // Issue the same linearizable read barrier as `current_high_water` so
         // the local SM read below reflects every committed write from any prior
