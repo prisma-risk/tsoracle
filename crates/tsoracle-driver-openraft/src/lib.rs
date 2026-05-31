@@ -46,6 +46,7 @@ pub const DEFAULT_DENSE_CARDINALITY_CAP: u64 = 10_000;
 
 pub use capabilities::{
     CapabilitySource, FormatActivationError, NodeCapabilities, all_members_can_read, gather_with,
+    report_with,
 };
 pub use driver::OpenraftDriver;
 pub use host::OpenraftHighWaterHost;
