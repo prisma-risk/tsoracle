@@ -7,8 +7,8 @@
 
 [![Crates.io](https://img.shields.io/crates/v/tsoracle.svg)](https://crates.io/crates/tsoracle)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-tsoracle-blue.svg)](https://deepwiki.com/prisma-risk/tsoracle)
-![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
-![Crates.io](https://img.shields.io/crates/d/tsoracle-core.svg)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![Crates.io](https://img.shields.io/crates/d/tsoracle-core.svg)](https://crates.io/crates/tsoracle)
 <br/>
 [![CI](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/prisma-risk/tsoracle/actions/workflows/ci.yml)
 [![stress](https://github.com/prisma-risk/tsoracle/actions/workflows/stress-nightly.yml/badge.svg?branch=main)](https://github.com/prisma-risk/tsoracle/actions/workflows/stress-nightly.yml)
