@@ -74,6 +74,8 @@ The "an old-only reader rejects a too-new record at the version gate rather than
 
 This lane covers the complementary system-level guarantee: the all-members gate ensures a v4-only member is never *exposed* to a v5 record (the `MEMBERS_BELOW_TARGET` rejection in step 3).
 
+The lane also activates write version 6 after version 5 and asserts `GetSeqBatch` gaplessness post-activation: the driver probes `get_seq_batch` over two independent keys (`orders-a`, `orders-b`) on every loop iteration, recording pre-activation `FailedPrecondition` / `Unimplemented` responses as not-serving (not errors) and verifying zero gaplessness violations once version 6 is active.
+
 ## Deploying to EKS (staging)
 
 The kind flow above is fully local. To deploy the same `openraft-standalone` cluster onto the real **staging** EKS cluster (arm64, real EBS) for a manual smoke test, the Kubernetes manifests live in the **infra** repo at `k8s/tsoracle-e2e/`; this repo only builds and pushes the images.

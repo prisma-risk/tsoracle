@@ -437,6 +437,38 @@ async fn sustain_load_with_seq(
                 seq.record_err();
             }
         }
+        // Batch probe: exercises GetSeqBatch across the v5→v6 activation boundary.
+        // Pre-activation (DenseBatchNotActivated / no RPC on old nodes) is
+        // expected — classified as not-serving, not an error.  Post-activation
+        // the two keys are tracked independently for gaplessness.
+        match client
+            .get_seq_batch(&[("orders-a", 1), ("orders-b", 1)])
+            .await
+        {
+            Ok(blocks) => {
+                for (key, block) in [("orders-a", &blocks[0]), ("orders-b", &blocks[1])] {
+                    seq.record_block(key, block.start, block.count);
+                }
+            }
+            // Pre-activation (batch format not yet active, or routed to a node
+            // without the RPC) is an expected state, not an error.
+            Err(ClientError::Rpc(status))
+                if matches!(
+                    status.code(),
+                    tonic::Code::FailedPrecondition | tonic::Code::Unimplemented
+                ) =>
+            {
+                seq.record_not_serving()
+            }
+            Err(ClientError::SeqUncertain) => {
+                seq.record_uncertain("orders-a");
+                seq.record_uncertain("orders-b");
+            }
+            Err(error) => {
+                eprintln!("mixed-version-soak: get_seq_batch error: {error}");
+                seq.record_err();
+            }
+        }
     }
     let ts_ok = tracker.report_within_error_tolerance("mixed-version-soak", MAX_SOAK_ERROR_RATE);
     let seq_ok = seq.report_within_error_tolerance("mixed-version-soak-seq", MAX_SOAK_ERROR_RATE);
