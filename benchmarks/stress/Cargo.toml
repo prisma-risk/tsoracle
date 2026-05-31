@@ -43,7 +43,7 @@ tracing-subscriber = { workspace = true }
 tsoracle-client          = { path = "../../crates/tsoracle-client", version = "1.2.0" }
 tsoracle-consensus       = { path = "../../crates/tsoracle-consensus", version = "2.1.0" }
 tsoracle-core            = { path = "../../crates/tsoracle-core", version = "2.2.0" }
-tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "2.1.0" }
+tsoracle-driver-openraft = { path = "../../crates/tsoracle-driver-openraft", version = "2.2.0" }
 tsoracle-driver-paxos    = { path = "../../crates/tsoracle-driver-paxos", version = "2.0.2" }
 tsoracle-openraft-toolkit = { path = "../../crates/tsoracle-openraft-toolkit", version = "1.2.0", features = ["test-fakes"] }
 tsoracle-paxos-toolkit   = { path = "../../crates/tsoracle-paxos-toolkit", version = "1.0.4", features = ["rocksdb-storage", "test-fakes"] }
