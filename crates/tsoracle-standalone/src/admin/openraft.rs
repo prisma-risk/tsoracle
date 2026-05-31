@@ -33,7 +33,8 @@ use tokio::sync::Mutex;
 use tsoracle_driver_openraft::{HighWaterStateMachine, OpenraftPeer, TypeConfig};
 
 use crate::admin::{
-    AdminError, MemberEntry, MemberRole, MembershipAdmin, MembershipView, NewMember,
+    AdminError, CapabilityReport, CapabilityState, MemberCapability, MemberEntry, MemberRole,
+    MembershipAdmin, MembershipView, NewMember,
 };
 
 /// Map a `change_membership` / `add_learner` error into an `AdminError`,
@@ -110,6 +111,60 @@ fn voter_ids(view: &MembershipView) -> BTreeSet<u64> {
         .filter(|entry| entry.role == MemberRole::Voter)
         .map(|entry| entry.id)
         .collect()
+}
+
+/// Build a [`CapabilityReport`] from a single membership snapshot and the
+/// per-member capability results gathered over that exact set. Pure: it never
+/// reads `raft.metrics()`, so the report rows correspond one-to-one with the
+/// `members` slice handed in.
+fn assemble_report(
+    leader: Option<u64>,
+    voters: &BTreeSet<u64>,
+    members: &[(u64, OpenraftPeer)],
+    caps: &[(
+        u64,
+        Result<tsoracle_driver_openraft::NodeCapabilities, String>,
+    )],
+) -> CapabilityReport {
+    let caps_by_id: std::collections::HashMap<
+        u64,
+        &Result<tsoracle_driver_openraft::NodeCapabilities, String>,
+    > = caps.iter().map(|(id, result)| (*id, result)).collect();
+
+    let members = members
+        .iter()
+        .map(|(id, node)| {
+            let caps = match caps_by_id.get(id) {
+                Some(Ok(capability)) => CapabilityState::Reported {
+                    min_readable: capability.min_readable_version,
+                    max_readable: capability.max_readable_version,
+                    active_write: capability.active_write_version,
+                },
+                Some(Err(detail)) => CapabilityState::Unreachable {
+                    detail: detail.clone(),
+                },
+                None => CapabilityState::Unreachable {
+                    detail: "no capability report".to_string(),
+                },
+            };
+            MemberCapability {
+                member: MemberEntry {
+                    id: *id,
+                    role: if voters.contains(id) {
+                        MemberRole::Voter
+                    } else {
+                        MemberRole::Learner
+                    },
+                    raft_addr: node.addr.clone(),
+                    service_endpoint: node.service_endpoint.clone(),
+                    admin_endpoint: node.admin_endpoint.clone(),
+                },
+                caps,
+            }
+        })
+        .collect();
+
+    CapabilityReport { members, leader }
 }
 
 /// openraft-backed membership admin. Holds a clone of the `Raft` handle
@@ -253,11 +308,50 @@ impl MembershipAdmin for OpenraftMembershipAdmin {
             .await
             .map_err(map_activation_error)
     }
+
+    async fn report_capabilities(&self) -> Result<CapabilityReport, AdminError> {
+        let (leader, voters, local_id, members) = {
+            let metrics = self.raft.metrics().borrow_watched().clone();
+            let voters: BTreeSet<u64> = metrics.membership_config.voter_ids().collect();
+            let members: Vec<(u64, OpenraftPeer)> = metrics
+                .membership_config
+                .nodes()
+                .map(|(id, node)| (*id, node.clone()))
+                .collect();
+            (metrics.current_leader, voters, metrics.id, members)
+        };
+        let local_capabilities =
+            tsoracle_driver_openraft::NodeCapabilities::local(self.host.active_write_version());
+        let caps = tsoracle_driver_openraft::report_with(
+            local_id,
+            local_capabilities,
+            &members,
+            &*self.source,
+        )
+        .await;
+        Ok(assemble_report(leader, &voters, &members, &caps))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn peer(addr: &str) -> OpenraftPeer {
+        OpenraftPeer {
+            addr: format!("{addr}:1"),
+            service_endpoint: format!("{addr}:2"),
+            admin_endpoint: format!("{addr}:3"),
+        }
+    }
+
+    fn ncaps(min: u8, max: u8, active: u8) -> tsoracle_driver_openraft::NodeCapabilities {
+        tsoracle_driver_openraft::NodeCapabilities {
+            min_readable_version: min,
+            max_readable_version: max,
+            active_write_version: active,
+        }
+    }
 
     #[test]
     fn voters_with_adds_the_id() {
@@ -269,6 +363,62 @@ mod tests {
     fn voters_without_removes_the_id() {
         let current = BTreeSet::from([1, 2, 3]);
         assert_eq!(voters_without(&current, 3), BTreeSet::from([1, 2]));
+    }
+
+    #[test]
+    fn assemble_report_builds_one_row_per_member_with_roles_and_caps() {
+        let members = vec![(1u64, peer("a")), (2u64, peer("b"))];
+        let voters = BTreeSet::from([1u64]);
+        let caps = vec![(1u64, Ok(ncaps(4, 6, 4))), (2u64, Ok(ncaps(4, 5, 4)))];
+        let report = assemble_report(Some(1), &voters, &members, &caps);
+
+        assert_eq!(report.leader, Some(1));
+        assert_eq!(report.members.len(), 2);
+        assert_eq!(report.members[0].member.id, 1);
+        assert_eq!(report.members[0].member.role, MemberRole::Voter);
+        assert_eq!(
+            report.members[0].caps,
+            crate::admin::CapabilityState::Reported {
+                min_readable: 4,
+                max_readable: 6,
+                active_write: 4,
+            }
+        );
+        assert_eq!(report.members[1].member.role, MemberRole::Learner);
+        assert_eq!(report.members[1].member.raft_addr, "b:1");
+    }
+
+    #[test]
+    fn assemble_report_marks_failed_query_unreachable_with_detail() {
+        let members = vec![(1u64, peer("a")), (2u64, peer("b"))];
+        let voters = BTreeSet::from([1u64, 2u64]);
+        let caps = vec![
+            (1u64, Ok(ncaps(4, 6, 4))),
+            (2u64, Err("connection refused".to_string())),
+        ];
+        let report = assemble_report(None, &voters, &members, &caps);
+        assert_eq!(report.leader, None);
+        assert_eq!(
+            report.members[1].caps,
+            crate::admin::CapabilityState::Unreachable {
+                detail: "connection refused".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn assemble_report_marks_member_absent_from_caps_unreachable() {
+        // A member in the snapshot but missing from the caps slice is
+        // Unreachable, never silently dropped.
+        let members = vec![(1u64, peer("a")), (2u64, peer("b"))];
+        let voters = BTreeSet::from([1u64, 2u64]);
+        let caps = vec![(1u64, Ok(ncaps(4, 6, 4)))];
+        let report = assemble_report(None, &voters, &members, &caps);
+        assert_eq!(report.members.len(), 2);
+        assert!(matches!(
+            report.members[1].caps,
+            crate::admin::CapabilityState::Unreachable { .. }
+        ));
     }
 
     #[test]
