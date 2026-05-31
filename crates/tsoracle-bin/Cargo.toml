@@ -18,6 +18,7 @@ default    = ["file", "openraft", "paxos"]
 file       = ["tsoracle-standalone/file"]
 openraft   = ["tsoracle-standalone/openraft"]
 paxos      = ["tsoracle-standalone/paxos"]
+metrics    = ["tsoracle-server/metrics", "tsoracle-standalone/metrics"]
 reflection = ["tsoracle-server/reflection"]
 bt         = ["tsoracle-server/bt"]
 
