@@ -756,6 +756,16 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                         outcome,
                     }
                 }
+                // The full all-or-nothing apply for this arm lands with the rest
+                // of the batch path. Until BATCH_WRITE_VERSION is activated
+                // cluster-wide, an AdvanceDenseBatch entry is never appended, so
+                // it cannot reach apply.
+                EntryPayload::Normal(HighWaterCommand::AdvanceDenseBatch { .. }) => {
+                    unreachable!(
+                        "AdvanceDenseBatch apply not yet implemented; entry must \
+                         not be appended before BATCH_WRITE_VERSION is activated"
+                    )
+                }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
                     core.last_membership = StoredMembership::new(Some(log_id), membership.clone());

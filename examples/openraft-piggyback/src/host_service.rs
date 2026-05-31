@@ -291,6 +291,20 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
                         tso: Some(core.high_water),
                     }
                 }
+                EntryPayload::Normal(HostCommand::Tso(HighWaterCommand::AdvanceDenseBatch {
+                    ..
+                })) => {
+                    // The piggyback example does not implement batch dense sequence
+                    // state. This arm satisfies exhaustiveness; a real piggyback
+                    // host that supports batch advances would forward this entry to
+                    // its embedded `HighWaterStateMachine`.
+                    let mut core = self.core.lock();
+                    core.last_applied = Some(log_id);
+                    HostApplied {
+                        kv: None,
+                        tso: Some(core.high_water),
+                    }
+                }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
                     core.last_membership = StoredMembership::new(Some(log_id), membership.clone());
