@@ -716,6 +716,273 @@ pub(crate) async fn issue_seq_rpc(
     Err(surface_error(election_signal, last_err))
 }
 
+/// Issue one `GetSeqBatch(entries)` with the dense retry policy.
+///
+/// Structurally identical to [`issue_seq_rpc`] — per-attempt budget, overall
+/// deadline, redirect bounds, squeezed-budget guard, election ride-out — but
+/// dispatches `GetSeqBatch` and validates the *whole batch* on success.
+///
+/// **Non-idempotent (whole batch):** on any ambiguous post-send failure the
+/// function returns [`ClientError::SeqUncertain`] immediately and does NOT retry.
+/// The server contract is all-or-nothing (one atomic apply for the entire batch),
+/// so `SeqUncertain` means the batch may or may not have committed; the caller
+/// must reconcile before re-issuing. There is never a partial mix to untangle.
+///
+/// A malformed success response (wrong grants length, mismatched key or count,
+/// missing epoch) is likewise treated as a protocol violation and surfaces
+/// `SeqUncertain` — a commit occurred, the block descriptions are untrustworthy.
+pub(crate) async fn issue_seq_batch_rpc(
+    pool: &ChannelPool,
+    entries: &[(&str, u32)],
+) -> Result<Vec<SeqBlock>, ClientError> {
+    let policy = pool.retry_policy().clone();
+    let budget = Budget::start(&policy);
+    let mut last_err: Option<ClientError> = None;
+    let mut election_signal: Option<tonic::Status> = None;
+    let mut failed_attempts: u32 = 0;
+    let mut total_redirects: u32 = 0;
+    let mut attempt_cap: usize = 0;
+    let mut pass: u32 = 0;
+    let mut issued_one = false;
+
+    'passes: loop {
+        let initial_endpoints = pool.iter_round_robin();
+        if pass == 0 {
+            attempt_cap = policy.max_attempts.max(initial_endpoints.len());
+        }
+        let mut worklist = Worklist::new(initial_endpoints);
+        let mut redirects: u32 = 0;
+        let mut saw_election_signal = false;
+
+        while let Some(endpoint) = worklist.next() {
+            if failed_attempts as usize >= attempt_cap {
+                break;
+            }
+            let Some(attempt_budget) = budget.next_attempt() else {
+                break;
+            };
+            // Non-idempotent ride-out guard: once at least one attempt has been
+            // issued, refuse to issue a sub-viable attempt whose budget the
+            // overall deadline has squeezed below a full per-attempt window.
+            if issued_one && attempt_budget < policy.per_attempt_deadline {
+                break 'passes;
+            }
+            issued_one = true;
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                endpoint = %endpoint,
+                keys = entries.len(),
+                failed_attempts,
+                pass,
+                budget_ms = attempt_budget.as_millis() as u64,
+                "tsoracle-client: dispatching GetSeqBatch to endpoint",
+            );
+
+            let pair = PairBudget::start(attempt_budget);
+
+            let (mut client, cell) = match tokio::time::timeout(
+                attempt_budget,
+                pool.client_with_cell(&endpoint),
+            )
+            .await
+            {
+                Ok(Ok(leased)) => leased,
+                Ok(Err(err)) => {
+                    // Connect failed before any bytes were sent — pre-commit-certain.
+                    let do_backoff = should_backoff(&err);
+                    last_err = Some(err);
+                    failed_attempts = failed_attempts.saturating_add(1);
+                    if do_backoff {
+                        let backoff = jittered_backoff(policy.base_backoff, failed_attempts - 1);
+                        let sleep_for = budget.clamp_backoff(backoff);
+                        if sleep_for > Duration::ZERO {
+                            tokio::time::sleep(sleep_for).await;
+                        }
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    // Connect timed out — pre-commit-certain (no bytes sent).
+                    let err = ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
+                        "connect exceeded per_attempt_deadline of {attempt_budget:?}"
+                    )));
+                    last_err = Some(err);
+                    failed_attempts = failed_attempts.saturating_add(1);
+                    continue;
+                }
+            };
+
+            // Channel acquired: from this point a commit may occur on the
+            // server. Any transport-class failure from here on is ambiguous.
+            let rpc_budget = pair.remaining();
+            let request_entries: Vec<tsoracle_proto::v1::SeqRequestEntry> = entries
+                .iter()
+                .map(|(key, count)| tsoracle_proto::v1::SeqRequestEntry {
+                    key: key.to_string(),
+                    count: *count,
+                })
+                .collect();
+            let rpc = client.get_seq_batch(tsoracle_proto::v1::GetSeqBatchRequest {
+                entries: request_entries,
+            });
+
+            let outcome = match tokio::time::timeout(rpc_budget, rpc).await {
+                Ok(Ok(response)) => {
+                    let inner = response.into_inner();
+                    // Validate the WHOLE batch before trusting it. Positional
+                    // mapping makes a malformed response silently wrong, so any
+                    // shape mismatch is a protocol violation we cannot resolve
+                    // into safe blocks: surface SeqUncertain (a commit may have
+                    // occurred; the caller reconciles) rather than return
+                    // mis-mapped blocks or silently retry into a double-spend.
+                    if inner.grants.len() != entries.len() {
+                        return Err(ClientError::SeqUncertain);
+                    }
+                    let epoch = match inner.epoch {
+                        Some(ew) => tsoracle_core::Epoch::from_wire(ew.hi, ew.lo).0,
+                        None => return Err(ClientError::SeqUncertain),
+                    };
+                    let mut blocks = Vec::with_capacity(inner.grants.len());
+                    for ((req_key, req_count), grant) in entries.iter().zip(inner.grants.iter()) {
+                        if grant.key != *req_key || grant.count != *req_count {
+                            return Err(ClientError::SeqUncertain);
+                        }
+                        blocks.push(SeqBlock {
+                            start: grant.start,
+                            count: grant.count,
+                            epoch,
+                        });
+                    }
+                    pool.record_success(&endpoint, epoch);
+                    return Ok(blocks);
+                }
+                Ok(Err(status)) if status.code() == tonic::Code::FailedPrecondition => {
+                    use crate::attempt::{AttemptOutcome as AO, HintUnusableReason};
+                    use crate::channel_pool::{LeaderHintLookup, decode_leader_hint};
+                    if matches!(decode_leader_hint(&status), LeaderHintLookup::Absent) {
+                        classify_seq_status(status, false)
+                    } else {
+                        match classify_not_leader_hint(pool, &endpoint, status) {
+                            AO::LeaderHint {
+                                endpoint: hinted,
+                                epoch,
+                            } => SeqAttemptOutcome::LeaderHint {
+                                endpoint: hinted,
+                                epoch,
+                            },
+                            AO::NoLeaderYet(status)
+                            | AO::HintUnusable {
+                                status,
+                                reason: HintUnusableReason::StaleEpoch,
+                            } => {
+                                #[cfg(feature = "metrics")]
+                                metrics::counter!("tsoracle.client.leader_hint.stale.total")
+                                    .increment(1);
+                                saw_election_signal = true;
+                                election_signal = Some(status.clone());
+                                last_err = Some(ClientError::Rpc(status));
+                                continue;
+                            }
+                            AO::HintUnusable {
+                                status,
+                                reason: HintUnusableReason::Rejected,
+                            } => SeqAttemptOutcome::Err(ClientError::Rpc(status)),
+                            AO::Ok { .. } | AO::Err(_) => {
+                                unreachable!(
+                                    "classify_not_leader_hint on FailedPrecondition \
+                                     cannot produce Ok/Err"
+                                )
+                            }
+                        }
+                    }
+                }
+                Ok(Err(status)) => {
+                    // Post-connect RPC failure — always post-send.
+                    if is_transport_failure(&ClientError::Rpc(status.clone())) {
+                        pool.evict_if_current(&endpoint, &cell);
+                    }
+                    classify_seq_status(status, true)
+                }
+                Err(_) => {
+                    // RPC timed out post-connect — ambiguous.
+                    pool.evict_if_current(&endpoint, &cell);
+                    SeqAttemptOutcome::Uncertain
+                }
+            };
+
+            match outcome {
+                SeqAttemptOutcome::Uncertain => {
+                    // Ambiguous post-send failure: surface immediately, never retry.
+                    return Err(ClientError::SeqUncertain);
+                }
+                SeqAttemptOutcome::LeaderHint {
+                    endpoint: hinted,
+                    epoch: _hint_epoch,
+                } => {
+                    // Absolute total-redirect cap.
+                    if total_redirects >= MAX_TOTAL_LEADER_REDIRECTS {
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("tsoracle.client.leader_redirect_total_cap.total")
+                            .increment(1);
+                        last_err = Some(ClientError::Rpc(tonic::Status::failed_precondition(
+                            format!(
+                                "absolute leader-hint redirect cap ({MAX_TOTAL_LEADER_REDIRECTS}) \
+                                 reached across passes before finding the live leader"
+                            ),
+                        )));
+                        break 'passes;
+                    }
+                    if redirects >= MAX_LEADER_REDIRECTS {
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("tsoracle.client.leader_redirect_cap.total").increment(1);
+                        let status = tonic::Status::failed_precondition(format!(
+                            "leader-hint redirect cap ({MAX_LEADER_REDIRECTS}) reached \
+                             before finding the live leader"
+                        ));
+                        election_signal = Some(status.clone());
+                        last_err = Some(ClientError::Rpc(status));
+                        saw_election_signal = true;
+                        break;
+                    }
+                    redirects += 1;
+                    total_redirects = total_redirects.saturating_add(1);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("tsoracle.client.leader_pivots.total").increment(1);
+                    worklist.redirect_to(hinted);
+                    continue;
+                }
+                SeqAttemptOutcome::Err(err) => {
+                    let should_sleep = should_backoff(&err);
+                    last_err = Some(err);
+                    failed_attempts = failed_attempts.saturating_add(1);
+                    if should_sleep {
+                        let backoff = jittered_backoff(policy.base_backoff, failed_attempts - 1);
+                        let sleep_for = budget.clamp_backoff(backoff);
+                        if sleep_for > Duration::ZERO {
+                            tokio::time::sleep(sleep_for).await;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // End of pass.
+        if saw_election_signal && budget.next_attempt().is_some() {
+            let backoff = jittered_backoff(policy.base_backoff, pass);
+            let sleep_for = budget.clamp_backoff(backoff);
+            if sleep_for > Duration::ZERO {
+                tokio::time::sleep(sleep_for).await;
+            }
+            pass = pass.saturating_add(1);
+            continue;
+        }
+        break;
+    }
+    Err(surface_error(election_signal, last_err))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -32,8 +32,8 @@ use std::time::Duration;
 
 use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
 use tsoracle_proto::v1::{
-    GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetSeqRequest, GetSeqResponse,
-    GetTsRequest, GetTsResponse,
+    GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetSeqBatchRequest, GetSeqBatchResponse,
+    GetSeqRequest, GetSeqResponse, GetTsRequest, GetTsResponse,
 };
 
 use crate::RetryPolicy;
@@ -81,21 +81,24 @@ pub(crate) fn make_status_with_hint(hint: tsoracle_proto::v1::LeaderHint) -> ton
 type BoxFut<T> = Pin<Box<dyn Future<Output = Result<T, tonic::Status>> + Send>>;
 type TsHandler = Arc<dyn Fn(GetTsRequest) -> BoxFut<GetTsResponse> + Send + Sync>;
 type SeqHandler = Arc<dyn Fn(GetSeqRequest) -> BoxFut<GetSeqResponse> + Send + Sync>;
+type SeqBatchHandler = Arc<dyn Fn(GetSeqBatchRequest) -> BoxFut<GetSeqBatchResponse> + Send + Sync>;
 
 /// A configurable fake [`TsoService`] for client tests. Per-call behavior is
 /// injected as closures, so this single trait impl — one `get_ts`, one
-/// `get_seq` — replaces the many bespoke per-test server structs. The shared
-/// `get_seq` earns real coverage from the dense tests that configure it, instead
-/// of leaving an unreachable `unimplemented!()` stub in every timestamp-path
-/// test that never calls it.
+/// `get_seq`, one `get_seq_batch` — replaces the many bespoke per-test server
+/// structs. The shared handlers earn real coverage from the tests that configure
+/// them, instead of leaving unreachable `unimplemented!()` stubs in every test
+/// that never calls a given RPC.
 ///
-/// Both handlers default to returning `UNIMPLEMENTED`; a test overrides only the
+/// All handlers default to returning `UNIMPLEMENTED`; a test overrides only the
 /// RPC it exercises via [`on_get_ts`](Self::on_get_ts) /
-/// [`on_get_seq`](Self::on_get_seq). `get_current_max_safe` returns the default
-/// response (every test that touches it wants exactly that).
+/// [`on_get_seq`](Self::on_get_seq) / [`on_get_seq_batch`](Self::on_get_seq_batch).
+/// `get_current_max_safe` returns the default response (every test that touches
+/// it wants exactly that).
 pub(crate) struct FakeTso {
     get_ts: TsHandler,
     get_seq: SeqHandler,
+    get_seq_batch: SeqBatchHandler,
 }
 
 impl FakeTso {
@@ -106,6 +109,11 @@ impl FakeTso {
             }),
             get_seq: Arc::new(|_| {
                 Box::pin(async { Err(tonic::Status::unimplemented("get_seq not configured")) })
+            }),
+            get_seq_batch: Arc::new(|_| {
+                Box::pin(async {
+                    Err(tonic::Status::unimplemented("get_seq_batch not configured"))
+                })
             }),
         }
     }
@@ -127,6 +135,16 @@ impl FakeTso {
         Fut: Future<Output = Result<GetSeqResponse, tonic::Status>> + Send + 'static,
     {
         self.get_seq = Arc::new(move |req| Box::pin(f(req)));
+        self
+    }
+
+    /// Override the `get_seq_batch` behavior with an async closure of the request.
+    pub(crate) fn on_get_seq_batch<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(GetSeqBatchRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<GetSeqBatchResponse, tonic::Status>> + Send + 'static,
+    {
+        self.get_seq_batch = Arc::new(move |req| Box::pin(f(req)));
         self
     }
 
@@ -173,6 +191,15 @@ impl TsoService for FakeTso {
         request: tonic::Request<GetSeqRequest>,
     ) -> Result<tonic::Response<GetSeqResponse>, tonic::Status> {
         (self.get_seq)(request.into_inner())
+            .await
+            .map(tonic::Response::new)
+    }
+
+    async fn get_seq_batch(
+        &self,
+        request: tonic::Request<GetSeqBatchRequest>,
+    ) -> Result<tonic::Response<GetSeqBatchResponse>, tonic::Status> {
+        (self.get_seq_batch)(request.into_inner())
             .await
             .map(tonic::Response::new)
     }

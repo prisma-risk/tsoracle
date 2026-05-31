@@ -182,6 +182,15 @@ impl TsoService for MalformedHintService {
             "get_seq not implemented in test stub",
         ))
     }
+
+    async fn get_seq_batch(
+        &self,
+        _request: tonic::Request<tsoracle_proto::v1::GetSeqBatchRequest>,
+    ) -> Result<tonic::Response<tsoracle_proto::v1::GetSeqBatchResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "get_seq_batch not implemented in test stub",
+        ))
+    }
 }
 
 /// Bind a malformed-hint fake server on a random port. Returns its socket

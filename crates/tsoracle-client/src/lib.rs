@@ -237,6 +237,42 @@ impl Client {
         retry::issue_seq_rpc(&self.pool, key, count).await
     }
 
+    /// Atomically request contiguous dense blocks for several DISTINCT keys in
+    /// one round-trip. Returns one [`SeqBlock`] per entry, in request order.
+    ///
+    /// **Non-idempotent (whole batch):** on `ClientError::SeqUncertain` the
+    /// entire batch may or may not have committed — do NOT retry; reconcile
+    /// first (the atomic server contract means it is all-or-nothing, so there is
+    /// never a partial mix to untangle). All other errors are pre-commit-certain.
+    ///
+    /// Client-side pre-checks reject only universally-invalid input: an empty
+    /// batch, a duplicate key, an empty/oversized key, or a zero count. The
+    /// per-entry count cap and the batch-size cap are server-side and are
+    /// forwarded for the server to reject, so a client built against one
+    /// configuration stays correct against a server with another.
+    pub async fn get_seq_batch(
+        &self,
+        entries: &[(&str, u32)],
+    ) -> Result<Vec<SeqBlock>, ClientError> {
+        if entries.is_empty() {
+            return Err(ClientError::InvalidCount(0));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(entries.len());
+        for (key, count) in entries {
+            if key.is_empty() || key.len() > tsoracle_core::MAX_SEQ_KEY_LEN {
+                return Err(ClientError::InvalidSeqKey);
+            }
+            if *count == 0 {
+                return Err(ClientError::InvalidCount(0));
+            }
+            if !seen.insert(*key) {
+                // Distinct-key contract — mirror the server's pre-commit reject.
+                return Err(ClientError::InvalidSeqKey);
+            }
+        }
+        retry::issue_seq_batch_rpc(&self.pool, entries).await
+    }
+
     /// Read the leader's current safe-point in physical-millisecond units.
     ///
     /// Targets the cached leader if known, otherwise the first configured
@@ -980,6 +1016,391 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "malformed success: one call"
+        );
+    }
+
+    /// `get_seq_batch` returns one [`SeqBlock`] per entry, in request order,
+    /// with each block's start/count/epoch matching the server's echoed grant.
+    /// Uses a fake server that echoes grants positionally from a shared counter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_batch_returns_blocks_in_request_order() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        const EPOCH: u128 = 77;
+
+        // Simple echo server: for each entry, allocate `count` ordinals from a
+        // shared counter and echo them back in request order.
+        let counter = Arc::new(AtomicU64::new(0));
+        let server_counter = counter.clone();
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq_batch(move |req| {
+                let counter = server_counter.clone();
+                async move {
+                    let mut grants = Vec::with_capacity(req.entries.len());
+                    for entry in &req.entries {
+                        let start = counter.fetch_add(u64::from(entry.count), Ordering::SeqCst);
+                        grants.push(tsoracle_proto::v1::SeqGrantEntry {
+                            key: entry.key.clone(),
+                            start,
+                            count: entry.count,
+                        });
+                    }
+                    let (hi, lo) = tsoracle_core::Epoch(EPOCH).to_wire();
+                    Ok(tsoracle_proto::v1::GetSeqBatchResponse {
+                        grants,
+                        epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                    })
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .expect("client must build");
+
+        let blocks = client
+            .get_seq_batch(&[("orders", 5), ("invoices", 3)])
+            .await
+            .expect("get_seq_batch must succeed");
+
+        assert_eq!(blocks.len(), 2, "one block per entry");
+        // First entry: "orders" with count 5, starting at 0.
+        assert_eq!(blocks[0].start, 0);
+        assert_eq!(blocks[0].count, 5);
+        assert_eq!(blocks[0].epoch, EPOCH);
+        // Second entry: "invoices" with count 3, gapless after orders.
+        assert_eq!(blocks[1].start, 5);
+        assert_eq!(blocks[1].count, 3);
+        assert_eq!(blocks[1].epoch, EPOCH);
+    }
+
+    /// Duplicate keys are rejected client-side without hitting the server.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_batch_rejects_duplicate_keys_without_hitting_server() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        // Server should never be reached; count calls to prove it.
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq_batch(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::internal("should not be called"))
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .expect("client must build");
+
+        // Duplicate key "orders" — must be caught client-side.
+        match client.get_seq_batch(&[("orders", 1), ("orders", 2)]).await {
+            Err(ClientError::InvalidSeqKey) => {}
+            other => panic!("duplicate key must return InvalidSeqKey, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "duplicate-key rejection must not reach the server"
+        );
+    }
+
+    /// A malformed success response (wrong grants length, mismatched key/count,
+    /// or missing epoch) surfaces as `SeqUncertain`. The server is called
+    /// exactly once — the ambiguity is not retried.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_batch_malformed_success_is_uncertain() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // Case 1: grants.len() != entries.len() (one fewer grant than requested).
+        {
+            let calls = Arc::new(AtomicU64::new(0));
+            let server_calls = calls.clone();
+            let addr = crate::test_support::FakeTso::new()
+                .on_get_seq_batch(move |_req| {
+                    let calls = server_calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let (hi, lo) = tsoracle_core::Epoch(1).to_wire();
+                        // Return only one grant for a two-entry request.
+                        Ok(tsoracle_proto::v1::GetSeqBatchResponse {
+                            grants: vec![tsoracle_proto::v1::SeqGrantEntry {
+                                key: "orders".into(),
+                                start: 0,
+                                count: 5,
+                            }],
+                            epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                        })
+                    }
+                })
+                .spawn()
+                .await;
+
+            let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+                .retry_policy(RetryPolicy {
+                    max_attempts: 3,
+                    per_attempt_deadline: Duration::from_secs(2),
+                    overall_deadline: Duration::from_secs(5),
+                    base_backoff: Duration::ZERO,
+                    leader_ttl: Duration::from_secs(30),
+                })
+                .build()
+                .await
+                .expect("client must build");
+
+            match client
+                .get_seq_batch(&[("orders", 5), ("invoices", 3)])
+                .await
+            {
+                Err(ClientError::SeqUncertain) => {}
+                other => panic!("wrong grants.len must surface as SeqUncertain, got {other:?}"),
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "malformed success must not trigger a retry"
+            );
+        }
+
+        // Case 2: grant.count mismatches the requested count.
+        {
+            let calls = Arc::new(AtomicU64::new(0));
+            let server_calls = calls.clone();
+            let addr = crate::test_support::FakeTso::new()
+                .on_get_seq_batch(move |req| {
+                    let calls = server_calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let (hi, lo) = tsoracle_core::Epoch(1).to_wire();
+                        // Echo the right key but wrong count for the first entry.
+                        let grants = req
+                            .entries
+                            .iter()
+                            .enumerate()
+                            .map(|(i, e)| tsoracle_proto::v1::SeqGrantEntry {
+                                key: e.key.clone(),
+                                start: 0,
+                                // Tamper: inflate count for the first entry.
+                                count: if i == 0 { e.count + 1 } else { e.count },
+                            })
+                            .collect();
+                        Ok(tsoracle_proto::v1::GetSeqBatchResponse {
+                            grants,
+                            epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                        })
+                    }
+                })
+                .spawn()
+                .await;
+
+            let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+                .retry_policy(RetryPolicy {
+                    max_attempts: 3,
+                    per_attempt_deadline: Duration::from_secs(2),
+                    overall_deadline: Duration::from_secs(5),
+                    base_backoff: Duration::ZERO,
+                    leader_ttl: Duration::from_secs(30),
+                })
+                .build()
+                .await
+                .expect("client must build");
+
+            match client
+                .get_seq_batch(&[("orders", 5), ("invoices", 3)])
+                .await
+            {
+                Err(ClientError::SeqUncertain) => {}
+                other => panic!("count-mismatch grant must surface as SeqUncertain, got {other:?}"),
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "malformed success must not trigger a retry"
+            );
+        }
+
+        // Case 3: missing epoch on an otherwise-valid response.
+        {
+            let calls = Arc::new(AtomicU64::new(0));
+            let server_calls = calls.clone();
+            let addr = crate::test_support::FakeTso::new()
+                .on_get_seq_batch(move |req| {
+                    let calls = server_calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let grants = req
+                            .entries
+                            .iter()
+                            .map(|e| tsoracle_proto::v1::SeqGrantEntry {
+                                key: e.key.clone(),
+                                start: 0,
+                                count: e.count,
+                            })
+                            .collect();
+                        // No epoch — protocol violation.
+                        Ok(tsoracle_proto::v1::GetSeqBatchResponse {
+                            grants,
+                            epoch: None,
+                        })
+                    }
+                })
+                .spawn()
+                .await;
+
+            let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+                .retry_policy(RetryPolicy {
+                    max_attempts: 3,
+                    per_attempt_deadline: Duration::from_secs(2),
+                    overall_deadline: Duration::from_secs(5),
+                    base_backoff: Duration::ZERO,
+                    leader_ttl: Duration::from_secs(30),
+                })
+                .build()
+                .await
+                .expect("client must build");
+
+            match client
+                .get_seq_batch(&[("orders", 5), ("invoices", 3)])
+                .await
+            {
+                Err(ClientError::SeqUncertain) => {}
+                other => panic!("missing epoch must surface as SeqUncertain, got {other:?}"),
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "malformed success must not trigger a retry"
+            );
+        }
+
+        // Case 4: grant.key mismatches the requested key (the other branch of
+        // the per-entry `||` guard, distinct from the count-mismatch Case 2).
+        {
+            let calls = Arc::new(AtomicU64::new(0));
+            let server_calls = calls.clone();
+            let addr = crate::test_support::FakeTso::new()
+                .on_get_seq_batch(move |req| {
+                    let calls = server_calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let (hi, lo) = tsoracle_core::Epoch(1).to_wire();
+                        // Echo the right count but tamper the first grant's key.
+                        let grants = req
+                            .entries
+                            .iter()
+                            .enumerate()
+                            .map(|(i, e)| tsoracle_proto::v1::SeqGrantEntry {
+                                key: if i == 0 {
+                                    format!("{}-tampered", e.key)
+                                } else {
+                                    e.key.clone()
+                                },
+                                start: 0,
+                                count: e.count,
+                            })
+                            .collect();
+                        Ok(tsoracle_proto::v1::GetSeqBatchResponse {
+                            grants,
+                            epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+                        })
+                    }
+                })
+                .spawn()
+                .await;
+
+            let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+                .retry_policy(RetryPolicy {
+                    max_attempts: 3,
+                    per_attempt_deadline: Duration::from_secs(2),
+                    overall_deadline: Duration::from_secs(5),
+                    base_backoff: Duration::ZERO,
+                    leader_ttl: Duration::from_secs(30),
+                })
+                .build()
+                .await
+                .expect("client must build");
+
+            match client
+                .get_seq_batch(&[("orders", 5), ("invoices", 3)])
+                .await
+            {
+                Err(ClientError::SeqUncertain) => {}
+                other => panic!("key-mismatch grant must surface as SeqUncertain, got {other:?}"),
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "malformed success must not trigger a retry"
+            );
+        }
+    }
+
+    /// A post-send server error (e.g. `INTERNAL`) from `GetSeqBatch` surfaces as
+    /// `SeqUncertain` and the server is invoked exactly once — never retried.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_seq_batch_post_send_error_is_uncertain_without_retry() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let server_calls = calls.clone();
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq_batch(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(tonic::Status::internal("permanent dense driver fault"))
+                }
+            })
+            .spawn()
+            .await;
+
+        let client = ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .expect("client must build");
+
+        match client
+            .get_seq_batch(&[("orders", 1), ("invoices", 2)])
+            .await
+        {
+            Err(ClientError::SeqUncertain) => {}
+            other => panic!("post-send INTERNAL must be SeqUncertain, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "post-send INTERNAL must NOT be retried (possible committed advance)"
         );
     }
 }
