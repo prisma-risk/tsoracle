@@ -12,6 +12,14 @@ cargo run -p example-metrics-prometheus
 
 The example binds the gRPC server on `127.0.0.1:50552` and the Prometheus scrape endpoint on `127.0.0.1:9552` (one above the stock bin's default `9551`, so the two can run side-by-side). Ctrl-C drains in-flight RPCs and exits cleanly.
 
+If either port is already occupied, override the defaults:
+
+```bash
+TSORACLE_EXAMPLE_GRPC_ADDR=127.0.0.1:50557 \
+TSORACLE_EXAMPLE_METRICS_ADDR=127.0.0.1:9557 \
+cargo run -p example-metrics-prometheus
+```
+
 Scrape it from another terminal:
 
 ```bash

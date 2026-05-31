@@ -10,7 +10,7 @@ What none of those reach is the **deployment envelope**: the layer between "the 
 
 - The `process` topology is **single-node**. Its doc comment is explicit: `tsoracle serve` is single-node, and `StressConfig::validate` rejects `nodes != 1`. It SIGKILLs and respawns one child to exercise the file driver's persisted high-water across crashes. It never runs a multi-process cluster.
 - The `raft` and `paxos` topologies are multi-node but share an in-process `MemNetwork`. There are no sockets, no TCP, no DNS, no real peer transport between separate OS processes.
-- The multi-node **example** binaries lag the stock binary on **SIGTERM**. `tsoracle serve` already drives graceful drain on SIGTERM via its `shutdown_signal()` helper (`crates/tsoracle-bin/src/main.rs`, added in #245), but `examples/openraft-standalone` and `examples/paxos-standalone` wire only `tokio::signal::ctrl_c()` (SIGINT) into `serve_with_shutdown`. Those examples are exactly what a cluster runs (the stock binary is single-node), so under Kubernetes — which terminates pods with SIGTERM — the cooperative-cancel and `WatchGuard` shutdown machinery never runs.
+- Kubernetes lifecycle is still outside the normal unit and deterministic-simulation envelope. The multi-node examples now use the same SIGINT/SIGTERM-aware `shutdown_signal()` helper as the stock binary, but only a real container lane validates that Kubernetes termination, readiness, DNS, and PVC behavior compose correctly.
 
 A kind ("Kubernetes IN Docker") lane fills exactly this envelope and nothing below it.
 
@@ -36,7 +36,7 @@ Out of scope (already covered, cheaper and deterministic elsewhere):
 
 These are the findings that justify the lane. Each is invisible to every current harness.
 
-1. **SIGTERM is ignored by the example binaries.** Pods would ride out the full grace period and get SIGKILLed on every ordinary rollout or scale-down, never running cooperative cancel. The stock `tsoracle serve` already handles this (#245); the standalone examples a cluster actually runs do not — see "Prerequisites" below.
+1. **SIGTERM regression coverage.** The standalone example binaries are the shape a multi-process cluster runs, so the lane must keep proving that ordinary rollout or scale-down sends SIGTERM, triggers cooperative cancel, and exits before the Kubernetes grace period expires.
 2. **PVC reattach correctness.** When a pod reschedules onto a new node, does the RocksDB raft log/snapshot survive and recover to the right cursor? The [snapshot-policy restart](consensus-integration.md) logic is exercised only against tempdirs today.
 3. **DNS-based peer discovery.** The standalone example takes static `id=host:port` peer maps. Mapping StatefulSet ordinals to node IDs and headless-Service FQDNs to peer addresses is new wiring with its own failure modes (resolution timing on cold start, pod IP churn).
 4. **Readiness semantics.** A follower returning `FAILED_PRECONDITION` with a leader hint is healthy and must stay in Service rotation. A naive `GetTs`-based readiness probe would wrongly evict every follower; this lane pins the correct TCP-based contract.

@@ -7,8 +7,7 @@ cd "$(dirname "$0")/.."
 mkdir -p .data
 rm -rf .data/n1 .data/n2 .data/n3
 
-PEERS="1=127.0.0.1:51001,2=127.0.0.1:51002,3=127.0.0.1:51003"
-TSO_PEERS="1=127.0.0.1:50561,2=127.0.0.1:50562,3=127.0.0.1:50563"
+MEMBERS="1=127.0.0.1:51001/127.0.0.1:50561/127.0.0.1:52001,2=127.0.0.1:51002/127.0.0.1:50562/127.0.0.1:52002,3=127.0.0.1:51003/127.0.0.1:50563/127.0.0.1:52003"
 
 pids=()
 trap 'echo "shutting down..."; kill "${pids[@]}" 2>/dev/null || true; wait' INT TERM
@@ -19,11 +18,17 @@ BIN="$TARGET_DIR/debug/openraft-standalone"
 
 run_node() {
   local id="$1"; local raft="$2"; local tso="$3"; local bootstrap="${4:-}"
-  "$BIN" \
-    --id "$id" --raft-addr "$raft" --tso-addr "$tso" \
-    --peers "$PEERS" --tso-peers "$TSO_PEERS" \
-    --raft-dir ".data/n$id" $bootstrap \
-    > ".data/n$id.log" 2>&1 &
+  if [[ "$bootstrap" == "--bootstrap" ]]; then
+    "$BIN" \
+      --id "$id" --raft-addr "$raft" --tso-addr "$tso" \
+      --raft-dir ".data/n$id" --bootstrap --members "$MEMBERS" \
+      > ".data/n$id.log" 2>&1 &
+  else
+    "$BIN" \
+      --id "$id" --raft-addr "$raft" --tso-addr "$tso" \
+      --raft-dir ".data/n$id" \
+      > ".data/n$id.log" 2>&1 &
+  fi
   pids+=("$!")
 }
 

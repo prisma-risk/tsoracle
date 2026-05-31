@@ -1,6 +1,6 @@
 # Three-node tsoracle cluster on OmniPaxos (standalone)
 
-Multi-process tsoracle cluster backed by [OmniPaxos](https://omnipaxos.com), wired together via [`tsoracle-driver-paxos`](../../crates/tsoracle-driver-paxos/). The driver crate provides the `ConsensusDriver` impl, the `HighWaterCommand` log entry, the apply-task state machine, the `Epoch ↔ Ballot` encoding, and `StandaloneHost` — a host that owns its own OmniPaxos cluster + apply pipeline. This example supplies the rest: a tonic peer transport (`src/network.rs`), the OmniPaxos `ClusterConfig` glue (`src/main.rs`), and CLI plumbing.
+Multi-process tsoracle cluster backed by [OmniPaxos](https://omnipaxos.com), wired through [`tsoracle-standalone`](../../crates/tsoracle-standalone/) and [`tsoracle-driver-paxos`](../../crates/tsoracle-driver-paxos/). The standalone crate owns the OmniPaxos storage, peer transport, driver construction, and apply pipeline; this example is the thin operator-facing wrapper that parses CLI flags, starts the tsoracle gRPC server, and wires graceful shutdown.
 
 If your service already runs OmniPaxos for other state and you want TSO to share it, see the [`paxos-piggyback`](../paxos-piggyback/) example instead.
 
@@ -39,9 +39,9 @@ Unlike the openraft variant, OmniPaxos does **not** need a one-time `--bootstrap
 
 Against any node:
 
-    grpcurl -plaintext -d '{"count":1}' 127.0.0.1:50581 tsoracle.v1.TsoService/GetTs
+    grpcurl -v -plaintext -d '{"count":1}' 127.0.0.1:50581 tsoracle.v1.TsoService/GetTs
 
-A follower will respond with a `LeaderHint` trailer pointing at the current leader's tsoracle address (see `--tso-peers`). That trailer comes from `PaxosDriver::leadership_events`, which delegates the per-state mapping to the toolkit's `LeadershipState::from_omnipaxos` over the `Peer` list passed to `StandaloneHost::builder().peers(...)`.
+A follower will respond with a `LeaderHint` trailer pointing at the current leader's tsoracle address (see `--tso-peers`). That trailer comes from the standalone Paxos driver's leadership stream, which resolves the elected leader through the TSO peer map.
 
 ## Observe failover
 
@@ -49,10 +49,9 @@ Find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that pr
 
 ## What's in this example
 
-- `src/main.rs` — CLI parse, RocksDB open with one column family for the paxos log, `OmniPaxos::build`, the three-binding driver wiring: `StandaloneHost::builder` → `host.start(sink)` → `PaxosDriver::new`. About 110 lines including config and storage.
-- `src/network.rs` — tonic peer transport. A single fire-and-forget unary RPC (`Send(PaxosMessage) → Ack`) carries postcard-encoded `omnipaxos::messages::Message<HighWaterCommand>` payloads. The `PeerSink` implements `MessageSink<HighWaterCommand>` (the contract `StandaloneHost::start` consumes); the `PaxosPeerService` server feeds inbound payloads to `OmniPaxos::handle_incoming`.
-- `proto/paxos.proto`, `build.rs` — peer-RPC service definition + tonic codegen.
-- `scripts/run.sh` — 3-node bring-up.
+- `src/main.rs` — CLI parse, `DriverConfig::Paxos`, `tsoracle_standalone::build`, `Server::builder()`, and SIGINT/SIGTERM-aware shutdown via `tsoracle_server::shutdown_signal()`.
+- `scripts/run.sh` — 3-node bring-up with a fresh `.data/` directory and reflection enabled so the `grpcurl` quickstart works.
+- The OmniPaxos peer transport, RocksDB storage, driver construction, and apply pipeline live in [`tsoracle-standalone`](../../crates/tsoracle-standalone/) and [`tsoracle-driver-paxos`](../../crates/tsoracle-driver-paxos/).
 
 ## Production caveats
 

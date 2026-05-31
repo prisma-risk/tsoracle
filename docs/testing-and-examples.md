@@ -1,6 +1,6 @@
 # Testing and Examples
 
-Three runnable example crates under `examples/`, each illustrating a different layer of the stack, plus a survey of the test patterns the workspace uses. The examples are self-contained crates; build any of them with `cargo run -p example-<name>`.
+Nine runnable example crates live under `examples/`, each illustrating a different layer of the stack, plus a survey of the test patterns the workspace uses. The examples are self-contained crates; build any of them with `cargo run -p example-<name>`. This page gives the orientation; each example README carries the copy-paste quickstart for that crate.
 
 ## Embedded-server example
 
@@ -32,7 +32,7 @@ No openraft, no real network, no real disk. The `InMemoryDriver` exposes `become
 
 ## openraft-standalone example
 
-`examples/openraft-standalone/` is the worked HA setup: three independent processes, each running a tsoracle server backed by `tsoracle-driver-openraft`. The integration body is just two driver bindings (`StandaloneHost::new`, `OpenraftDriver::with_peers`) in `src/main.rs`; everything else is operational plumbing (tonic raft peer transport in `src/network.rs`, openraft `Config` + bootstrap in `src/main.rs`).
+`examples/openraft-standalone/` is the worked HA setup: three independent processes, each running a tsoracle server backed by `tsoracle-driver-openraft` through the `tsoracle-standalone` helper crate. The example's `src/main.rs` is deliberately thin: parse CLI flags, call `tsoracle_standalone::build`, mount the resulting driver in `tsoracle_server::Server`, and wire SIGINT/SIGTERM shutdown.
 
 See the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-standalone) for prerequisites, manual node startup, and design notes. Quickstart:
 
@@ -40,13 +40,13 @@ See the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/exa
 examples/openraft-standalone/scripts/run.sh
 ```
 
-starts three node processes in the background, with logs under `examples/openraft-standalone/.data/n*.log`. Node 1 carries `--bootstrap`; nodes 2 and 3 join. Issue a timestamp with `grpcurl` against any node — followers respond with a `LeaderHint` trailer pointing at the current leader's advertised tsoracle address. The trailer is populated from the `NodeId -> tsoracle-addr` map passed to `OpenraftDriver::with_peers` (a list of `TsoPeer { node_id, endpoint }`), which the driver consults on the follower branch to resolve the elected leader's advertised endpoint.
+starts three node processes in the background, with logs under `examples/openraft-standalone/.data/n*.log`. Node 1 carries `--bootstrap` and `--members`; nodes 2 and 3 join from their replicated membership state. Issue a timestamp with `grpcurl -v` against any node — followers return `FAILED_PRECONDITION` with a `LeaderHint` trailer pointing at the current leader's advertised tsoracle address. The trailer is populated from the `service_endpoint` entries seeded by `--members`.
 
 What this example demonstrates:
 
-- The minimum boot sequence: `RocksdbLogStore` (from `tsoracle-openraft-toolkit`) + `RocksdbSnapshotStore` + `HighWaterStateMachine::with_store` + `StandaloneHost` + `OpenraftDriver`, all sharing one `Arc<DB>` so the log and snapshot fsync together. The integration code is a handful of `let` bindings in `main.rs`, with endpoint resolution supplied to `OpenraftDriver::with_peers` as a `TsoPeer` list.
-- Generic endpoint resolution: `OpenraftDriver::with_peers` takes a `NodeId -> tsoracle-addr` map (as `TsoPeer { node_id, endpoint }` entries) and resolves the elected leader's advertised endpoint for `LeaderHint` redirects — no host-specific driver wrapper required.
-- Snapshots are persisted through `RocksdbSnapshotStore` (sharing the same rocksdb instance as the log store), so the example runs with openraft's default snapshot policy and the raft log is bounded. Embedders with custom state machines that still keep state in memory should disable snapshots via `SnapshotPolicy::Never` — see the `openraft-piggyback` example.
+- The dedicated-cluster shape: persistent RocksDB-backed raft state, a tonic peer transport, and a `ConsensusDriver` built by `tsoracle-standalone`.
+- Membership-seeded endpoint resolution: each member carries raft, tsoracle service, and admin endpoints; the driver resolves `LeaderHint` from the leader's replicated membership node.
+- Graceful process shutdown: the standalone examples use the same `tsoracle_server::shutdown_signal()` helper as the stock binary, so SIGINT and SIGTERM both drain the server before process exit.
 
 To observe failover: find the current leader in the logs (`grep "Leader" .data/n*.log`), kill that process, watch the survivors elect, then re-issue `GetTs`. Typical re-leader latency is 2–5 seconds (election + fence).
 
@@ -70,6 +70,40 @@ pub enum HostCommand {
 ```
 
 Your apply path enforces TSO monotonicity (`max(prev, target)`) in a field next to your KV map; your snapshot carries both halves; your `OpenraftHighWaterHost` impl wraps `HighWaterCommand::Advance(AdvancePayload { at_least })` in `HostCommand::Tso` when submitting. See [`docs/consensus-integration.md`](consensus-integration.md#openrafthighwaterhost-trait) for the trait contract and the [example's README](https://github.com/prisma-risk/tsoracle/tree/main/examples/openraft-piggyback) for the walkthrough.
+
+## Paxos examples
+
+`examples/paxos-standalone/` is the OmniPaxos counterpart to `openraft-standalone`: three processes, tonic peer transport through `tsoracle-standalone`, RocksDB-backed storage, and follower redirects via `LeaderHint`.
+
+```bash
+examples/paxos-standalone/scripts/run.sh
+```
+
+`examples/paxos-piggyback/` is the OmniPaxos counterpart to `openraft-piggyback`: a single-binary, in-process demo where host KV commands and TSO high-water commands share one Paxos log. The same `run_demo()` function backs the README quickstart and the example's smoke test.
+
+```bash
+cargo run -p example-paxos-piggyback
+```
+
+`examples/paxos-embedded/` shows the closest OmniPaxos shape to `embedded-server`. OmniPaxos needs a quorum, so the example runs all three Paxos nodes inside one process over the toolkit's `MemNetwork` and exposes three tsoracle gRPC endpoints.
+
+```bash
+cargo run -p example-paxos-embedded
+```
+
+## Metrics and TLS examples
+
+`examples/metrics-prometheus/` installs `metrics-exporter-prometheus` before building the server, drives background load, and exposes `/metrics` on a separate scrape port.
+
+```bash
+cargo run -p example-metrics-prometheus
+```
+
+`examples/tls-mtls/` exercises plain TLS, mTLS, a custom connector, and an intentionally misconfigured mTLS client against fresh in-memory certificates.
+
+```bash
+cargo run -p example-tls-mtls
+```
 
 ## Testing strategy
 
