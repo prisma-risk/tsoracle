@@ -71,11 +71,9 @@ mod openraft_driver {
         DriverConfig, MemberAddr, OpenraftConfig, RaftTuning, StandaloneError, build,
     };
 
-    // The boot-and-drain test below is the only consumer of these imports +
-    // `build_openraft_with_listeners` + `lease_port`. Gating them on
-    // `test-support` keeps the `--no-default-features --features openraft`
-    // build (config-error tests only) warning-clean.
-    #[cfg(feature = "test-support")]
+    // The default-feature openraft tests use `lease_port`; the
+    // `build_openraft_with_listeners` seam and leadership-stream helpers are
+    // test-support-only.
     use crate::common::lease_port;
     #[cfg(feature = "test-support")]
     use std::time::Duration;
