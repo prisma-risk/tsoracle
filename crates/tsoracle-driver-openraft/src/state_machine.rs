@@ -61,8 +61,8 @@ use tsoracle_codec::{
     VersionedCodec, decode_framed, decode_postcard_exact, encode_framed, encode_postcard,
 };
 use tsoracle_openraft_toolkit::{
-    ActiveWriteVersion, BASELINE_WRITE_VERSION, DENSE_WRITE_VERSION, MAX_READABLE_VERSION,
-    MIN_READABLE_VERSION, codec_io_error,
+    ActiveWriteVersion, BASELINE_WRITE_VERSION, BATCH_WRITE_VERSION, DENSE_WRITE_VERSION,
+    MAX_READABLE_VERSION, MIN_READABLE_VERSION, codec_io_error,
 };
 
 use crate::log_entry::{HighWaterCommand, SetFormatVersionPayload};
@@ -142,6 +142,10 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
             // Ungated — production reads dense snapshots from v5-activated
             // clusters without any feature flag.
             v if v == DENSE_WRITE_VERSION => decode_postcard_exact(body),
+            // v6 (BATCH_WRITE_VERSION): snapshot layout is byte-identical to v5;
+            // batch adds a log command, not snapshot state, so the same decoder
+            // applies.
+            v if v == BATCH_WRITE_VERSION => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -174,6 +178,10 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
             }
             // v5: the current (dense) layout encodes directly. Ungated.
             v if v == DENSE_WRITE_VERSION => encode_postcard(self),
+            // v6 (BATCH_WRITE_VERSION): snapshot layout is byte-identical to v5;
+            // batch adds a log command, not snapshot state, so the same encoder
+            // applies.
+            v if v == BATCH_WRITE_VERSION => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -193,6 +201,10 @@ impl VersionedCodec for PersistedSnapshot {
             // inside gains dense bytes). Ungated — production reads v5
             // envelopes once activated.
             v if v == DENSE_WRITE_VERSION => decode_postcard_exact(body),
+            // v6 (BATCH_WRITE_VERSION): envelope layout is byte-identical to v5;
+            // batch adds a log command, not snapshot state, so the same decoder
+            // applies.
+            v if v == BATCH_WRITE_VERSION => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -206,6 +218,10 @@ impl VersionedCodec for PersistedSnapshot {
             v if v == BASELINE_WRITE_VERSION => encode_postcard(self),
             // v5: envelope layout unchanged; real ungated arm for production.
             v if v == DENSE_WRITE_VERSION => encode_postcard(self),
+            // v6 (BATCH_WRITE_VERSION): envelope layout is byte-identical to v5;
+            // batch adds a log command, not snapshot state, so the same encoder
+            // applies.
+            v if v == BATCH_WRITE_VERSION => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -1607,8 +1623,9 @@ mod tests {
         // MAX_READABLE_VERSION] and reject anything outside it. This is
         // what makes an OLD-version on-disk snapshot readable after the
         // active version moves forward. Asserted against the codec range
-        // directly so it covers the full readable range [MIN = 4, MAX = 5] —
-        // iterating v4 (decode-and-lift) and v5 (direct decode).
+        // directly so it covers the full readable range [MIN = 4, MAX = 6] —
+        // iterating v4 (decode-and-lift), v5 (direct decode), and v6
+        // (byte-identical to v5).
         // Empty dense map + cap 0 so the v4 encode arm (which projects to the
         // frozen V4 struct) is lossless; assert_eq!(decoded, payload) holds
         // for every version in the readable range because the decode-and-lift
@@ -2557,6 +2574,39 @@ mod tests {
         );
         assert_eq!(decoded.dense, dense, "dense map must survive roundtrip");
         assert_eq!(decoded.dense_cap, 500, "dense_cap must survive roundtrip");
+    }
+
+    #[test]
+    fn snapshot_payload_round_trips_at_v6() {
+        use tsoracle_codec::{decode_framed, encode_framed};
+        use tsoracle_openraft_toolkit::BATCH_WRITE_VERSION;
+
+        let mut dense = std::collections::BTreeMap::new();
+        dense.insert("orders".to_string(), 9u64);
+
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 777,
+            last_applied: Some(log_id(9)),
+            last_membership: StoredMem::default(),
+            dense: dense.clone(),
+            dense_cap: 32,
+        };
+
+        let framed = encode_framed(BATCH_WRITE_VERSION, &payload).expect("v6 encode");
+        assert_eq!(framed[0], BATCH_WRITE_VERSION, "leading byte must be v6");
+
+        let decoded: HighWaterStateMachineSnapshot = decode_framed(
+            tsoracle_openraft_toolkit::MIN_READABLE_VERSION,
+            tsoracle_openraft_toolkit::MAX_READABLE_VERSION,
+            &framed,
+        )
+        .expect("v6 decode");
+        assert_eq!(
+            decoded, payload,
+            "v6 roundtrip must produce the original payload"
+        );
+        assert_eq!(decoded.dense, dense, "dense map must survive v6 roundtrip");
+        assert_eq!(decoded.dense_cap, 32, "dense_cap must survive v6 roundtrip");
     }
 
     #[test]

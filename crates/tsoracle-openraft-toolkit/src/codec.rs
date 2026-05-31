@@ -51,11 +51,11 @@ pub const MIN_READABLE_VERSION: u8 = 4;
 /// Newest on-disk/wire format version this binary has a parser for. Only ever
 /// grows. Decode accepts `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`.
 ///
-/// Today this is 5 (`DENSE_WRITE_VERSION`): a v5-capable binary can read both
-/// the v4 baseline layout and the v5 dense layout. A node writes
-/// `BASELINE_WRITE_VERSION` (4) until a committed `SetFormatVersion` activation
-/// advances the active write version through the all-members gate.
-pub const MAX_READABLE_VERSION: u8 = 5;
+/// Today this is 6 (`BATCH_WRITE_VERSION`): a v6-capable binary can read the
+/// v4 baseline layout, the v5 dense layout, and the v6 batch layout. A node
+/// writes `BASELINE_WRITE_VERSION` (4) until a committed `SetFormatVersion`
+/// activation advances the active write version through the all-members gate.
+pub const MAX_READABLE_VERSION: u8 = 6;
 
 // Compile-time guard: the readable range must be non-empty (`MIN <= MAX`) or
 // every decode rejects every record. Catches a future inverted-constants edit
@@ -76,6 +76,12 @@ pub const BASELINE_WRITE_VERSION: u8 = 4;
 /// version has been activated to at least this value through the all-members
 /// gate — otherwise an older member could receive an entry it cannot decode.
 pub const DENSE_WRITE_VERSION: u8 = 5;
+
+/// The write version that introduces the `AdvanceDenseBatch` log command. The
+/// state-machine snapshot shape is unchanged from `DENSE_WRITE_VERSION` — this
+/// version gates which *commands* may be appended, not the snapshot layout, so
+/// a v6 snapshot is byte-identical to a v5 one.
+pub const BATCH_WRITE_VERSION: u8 = 6;
 
 /// Process-shared, runtime-mutable active write version.
 ///
@@ -187,10 +193,11 @@ mod tests {
     #[test]
     fn version_constants_are_at_expected_values() {
         assert_eq!(MIN_READABLE_VERSION, 4);
-        // MAX is 5 to cover the dense write version (DENSE_WRITE_VERSION).
-        assert_eq!(MAX_READABLE_VERSION, 5);
+        // MAX is 6 to cover the batch write version (BATCH_WRITE_VERSION).
+        assert_eq!(MAX_READABLE_VERSION, 6);
         assert_eq!(BASELINE_WRITE_VERSION, 4);
         assert_eq!(DENSE_WRITE_VERSION, 5);
+        assert_eq!(BATCH_WRITE_VERSION, 6);
     }
 
     #[test]
