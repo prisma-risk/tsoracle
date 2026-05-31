@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.2.0...tsoracle-standalone-v1.3.0) - 2026-05-31
+
+### Added
+
+- enable metrics feature in all published images ([#606](https://github.com/prisma-risk/tsoracle/pull/606))
+
 ## [1.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.1.3...tsoracle-standalone-v1.2.0) - 2026-05-31
 
 ### Added
