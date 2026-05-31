@@ -28,8 +28,9 @@ use tonic::{Request, Response, Status};
 use tsoracle_consensus::ConsensusError;
 use tsoracle_core::{CommitOutcome, CoreError, Epoch, PeerEndpoint};
 use tsoracle_proto::v1::{
-    EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetSeqRequest, GetSeqResponse,
-    GetTsRequest, GetTsResponse, LeaderHint, tso_service_server::TsoService,
+    EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetSeqBatchRequest,
+    GetSeqBatchResponse, GetSeqRequest, GetSeqResponse, GetTsRequest, GetTsResponse, LeaderHint,
+    SeqGrantEntry, tso_service_server::TsoService,
 };
 
 use crate::leader_hint::not_leader_status;
@@ -328,6 +329,161 @@ impl TsoService for TsoServiceImpl {
             // permanent fault (PermanentDriver, AdvanceOutOfRange) the client
             // MUST NOT silently retry → INTERNAL, matching the ConsensusError
             // contract and the get_ts extension path's PersistDisposition split.
+            Err(ConsensusError::TransientDriver(source)) => {
+                Err(Status::unavailable(source.to_string()))
+            }
+            Err(other) => Err(Status::internal(other.to_string())),
+        }
+    }
+
+    async fn get_seq_batch(
+        &self,
+        req: Request<GetSeqBatchRequest>,
+    ) -> Result<Response<GetSeqBatchResponse>, Status> {
+        let GetSeqBatchRequest { entries } = req.into_inner();
+
+        self.server.reporter.get_seq_batch_requests.increment(1);
+
+        if !self.server.core.is_serving() {
+            return Err(not_leader_status(
+                &self.server.reporter,
+                leader_hint_from(&self.server),
+            ));
+        }
+
+        // Batch-shape validation (pre-commit, all INVALID_ARGUMENT).
+        if entries.is_empty() {
+            return Err(Status::invalid_argument(
+                "batch must contain at least one entry",
+            ));
+        }
+        let max_keys = self.server.core.max_seq_batch_keys();
+        if entries.len() as u32 > max_keys {
+            return Err(Status::invalid_argument(format!(
+                "batch has {} entries; the maximum is {max_keys}",
+                entries.len()
+            )));
+        }
+        // Distinct keys. A duplicate is a client bug (the caller coalesces its
+        // own counts) and is rejected before any consensus append.
+        let mut seen = std::collections::HashSet::with_capacity(entries.len());
+        for entry in &entries {
+            if !seen.insert(entry.key.as_str()) {
+                return Err(Status::invalid_argument(format!(
+                    "duplicate key in batch: {}",
+                    entry.key
+                )));
+            }
+        }
+
+        // Per-entry leadership/key/count validation, reusing the single-key core
+        // gate. Build the validated (SeqKey, count) list in request order.
+        let mut validated: Vec<(tsoracle_core::SeqKey, u32)> = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            match self.server.core.seq_validate(&entry.key, entry.count) {
+                Ok(seq_key) => validated.push((seq_key, entry.count)),
+                Err(tsoracle_core::CoreError::NotLeader) => {
+                    return Err(not_leader_status(
+                        &self.server.reporter,
+                        leader_hint_from(&self.server),
+                    ));
+                }
+                Err(tsoracle_core::CoreError::SeqKeyEmpty)
+                | Err(tsoracle_core::CoreError::SeqKeyTooLong { .. }) => {
+                    return Err(Status::invalid_argument("invalid sequence key"));
+                }
+                Err(tsoracle_core::CoreError::SeqCountZero)
+                | Err(tsoracle_core::CoreError::SeqCountTooLarge { .. }) => {
+                    return Err(Status::invalid_argument(
+                        "count must be between 1 and the maximum",
+                    ));
+                }
+                Err(other) => return Err(Status::internal(other.to_string())),
+            }
+        }
+
+        let epoch = match self.server.core.current_epoch() {
+            Some(e) => e,
+            None => {
+                return Err(not_leader_status(
+                    &self.server.reporter,
+                    leader_hint_from(&self.server),
+                ));
+            }
+        };
+
+        match self
+            .server
+            .consensus
+            .advance_dense_batch(&validated, epoch)
+            .await
+        {
+            Ok(starts) => {
+                // A conforming driver returns exactly one start per entry, in
+                // request order. Guard it: a buggy/custom driver returning too
+                // few (or too many) would otherwise let `zip` silently truncate
+                // and emit a response with fewer grants than requested,
+                // violating the proto's one-grant-per-entry contract. The
+                // durable advance already happened, so this is a post-commit
+                // server invariant breach -> Internal (not a retry-safe error).
+                if starts.len() != validated.len() {
+                    return Err(Status::internal(format!(
+                        "driver returned {} starts for a {}-entry batch",
+                        starts.len(),
+                        validated.len()
+                    )));
+                }
+                let (hi, lo) = epoch.to_wire();
+                let mut grants = Vec::with_capacity(validated.len());
+                let mut total: u64 = 0;
+                for ((seq_key, count), start) in validated.iter().zip(starts.iter()) {
+                    let grant =
+                        tsoracle_core::SeqGrant::try_new(seq_key.clone(), *start, *count, epoch)
+                            .map_err(core_status)?;
+                    total += u64::from(grant.count());
+                    grants.push(SeqGrantEntry {
+                        key: grant.key().as_str().to_string(),
+                        start: grant.start(),
+                        count: grant.count(),
+                    });
+                }
+                self.server.reporter.get_seq_batch_success.increment(1);
+                self.server
+                    .reporter
+                    .seq_batch_keys
+                    .record(grants.len() as f64);
+                self.server
+                    .reporter
+                    .seq_batch_values_issued
+                    .increment(total);
+                Ok(Response::new(GetSeqBatchResponse {
+                    grants,
+                    epoch: Some(EpochWire { hi, lo }),
+                }))
+            }
+            Err(ConsensusError::SeqKeyCardinalityExceeded { cap }) => {
+                self.server
+                    .reporter
+                    .seq_batch_cardinality_rejected
+                    .increment(1);
+                Err(Status::resource_exhausted(format!(
+                    "dense key cardinality cap {cap} reached"
+                )))
+            }
+            Err(ConsensusError::SeqOverflow) => {
+                Err(Status::failed_precondition("dense counter overflow"))
+            }
+            Err(ConsensusError::NotLeader { .. }) | Err(ConsensusError::Fenced { .. }) => Err(
+                not_leader_status(&self.server.reporter, leader_hint_from(&self.server)),
+            ),
+            Err(ConsensusError::DenseUnsupported) => Err(Status::unimplemented(
+                "dense sequences are not supported by this consensus driver",
+            )),
+            Err(ConsensusError::DenseBatchNotActivated { required, active }) => {
+                Err(Status::failed_precondition(format!(
+                    "dense batch format not yet activated (cluster at write version {active}, requires {required})"
+                )))
+            }
             Err(ConsensusError::TransientDriver(source)) => {
                 Err(Status::unavailable(source.to_string()))
             }

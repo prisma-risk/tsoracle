@@ -31,6 +31,14 @@ use crate::{CoreError, Epoch};
 /// Maximum length, in bytes, of a sequence key's UTF-8 encoding.
 pub const MAX_SEQ_KEY_LEN: usize = 128;
 
+/// Default cap on the number of `(key, count)` entries in one `GetSeqBatch`
+/// request. A soft anti-abuse guardrail bounding fan-out and the size of one
+/// atomic consensus entry; operators tune it via
+/// [`ServerBuilder::max_seq_batch_keys`].
+///
+/// [`ServerBuilder::max_seq_batch_keys`]: https://docs.rs/tsoracle-server
+pub const DEFAULT_MAX_SEQ_BATCH_KEYS: u32 = 128;
+
 /// Default per-call ceiling on `GetSeq`'s `count` — the largest block a single
 /// request may reserve when the server has not overridden it.
 ///

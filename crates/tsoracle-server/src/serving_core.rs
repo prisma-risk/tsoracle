@@ -88,10 +88,17 @@ pub(crate) struct ServingCore {
     /// `seq_validate` enforces the operator-configured policy without a
     /// back-reference to `Server`.
     max_seq_count: u32,
+    /// Cap on the number of `(key, count)` entries accepted in one
+    /// `GetSeqBatch` request, from
+    /// [`ServerBuilder::max_seq_batch_keys`](crate::ServerBuilder::max_seq_batch_keys)
+    /// (default [`tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS`]). Held here so
+    /// `max_seq_batch_keys()` can enforce the policy without a back-reference
+    /// to `Server`.
+    max_seq_batch_keys: u32,
 }
 
 impl ServingCore {
-    pub(crate) fn new(window_ahead: Duration, max_seq_count: u32) -> Self {
+    pub(crate) fn new(window_ahead: Duration, max_seq_count: u32, max_seq_batch_keys: u32) -> Self {
         let (state_tx, _) = watch::channel(ServingState::NotServing {
             leader_endpoint: None,
             leader_epoch: None,
@@ -104,6 +111,7 @@ impl ServingCore {
             extension_gate: RwLock::new(()),
             window_ahead,
             max_seq_count,
+            max_seq_batch_keys,
         }
     }
 
@@ -228,6 +236,12 @@ impl ServingCore {
             .validate_request(key, count, self.max_seq_count)
     }
 
+    /// Operator-configured cap on the number of `(key, count)` entries accepted
+    /// in one `GetSeqBatch` request.
+    pub(crate) fn max_seq_batch_keys(&self) -> u32 {
+        self.max_seq_batch_keys
+    }
+
     pub(crate) fn commit_extension(
         &self,
         actual: u64,
@@ -317,7 +331,11 @@ mod tests {
         // lands even when no receiver is subscribed (`receiver_count == 0`). Were
         // a publish site to use `send`, this would be silently dropped and a
         // leaderless-then-leader core could stay NotServing forever.
-        let core = ServingCore::new(Duration::from_secs(3), tsoracle_core::DEFAULT_MAX_SEQ_COUNT);
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
         assert_eq!(core.state_tx.receiver_count(), 0);
 
         let hint = PeerEndpoint::try_from("new-leader:9000").unwrap();
@@ -341,7 +359,11 @@ mod tests {
         // the read barrier on the current task; if step_down tried to take the
         // write lock it would deadlock here (single-threaded runtime, lock held
         // by us). Reaching the assertion proves it never touches the gate.
-        let core = ServingCore::new(Duration::from_secs(3), tsoracle_core::DEFAULT_MAX_SEQ_COUNT);
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
         let slot = core.extension_slot().await;
         let _barrier = slot.drain_barrier().await;
 
@@ -359,7 +381,11 @@ mod tests {
         // extension readers to drain. `try_write` is a deterministic probe of
         // that exclusion (no timing): it fails while a read barrier is held and
         // succeeds once it is released.
-        let core = ServingCore::new(Duration::from_secs(3), tsoracle_core::DEFAULT_MAX_SEQ_COUNT);
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
         let slot = core.extension_slot().await;
         let barrier = slot.drain_barrier().await;
 
@@ -381,7 +407,11 @@ mod tests {
         // A fresh core is NotLeader (no epoch). prepare_extension must surface
         // that as `NotLeader` so the caller emits a redirect, and would_grant is
         // false.
-        let core = ServingCore::new(Duration::from_secs(3), tsoracle_core::DEFAULT_MAX_SEQ_COUNT);
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
         let slot = core.extension_slot().await;
         assert!(matches!(
             slot.prepare_extension(1, 1_000),
@@ -396,7 +426,11 @@ mod tests {
         // `ServingState`; it must agree with `serving_state`'s variant across
         // every transition. Fresh core is NotServing -> false; publish_serving
         // -> true; step_down -> false again.
-        let core = ServingCore::new(Duration::from_secs(3), tsoracle_core::DEFAULT_MAX_SEQ_COUNT);
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
         assert!(!core.is_serving(), "fresh core is NotServing");
         assert!(matches!(
             core.serving_state(),
@@ -419,7 +453,11 @@ mod tests {
 
     #[test]
     fn try_grant_without_leadership_is_not_leader() {
-        let core = ServingCore::new(Duration::from_secs(3), tsoracle_core::DEFAULT_MAX_SEQ_COUNT);
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
         assert!(matches!(core.try_grant(1, 1), Err(CoreError::NotLeader)));
     }
 
@@ -428,7 +466,11 @@ mod tests {
         // become_leader(floor, ceiling, epoch) seeds a serveable
         // window; a grant at the floor returns timestamps stamped with the
         // seeded epoch.
-        let core = ServingCore::new(Duration::from_secs(3), tsoracle_core::DEFAULT_MAX_SEQ_COUNT);
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
         core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
             .expect("seed must succeed (ceiling >= floor)");
         let grant = core.try_grant(1_000, 1).expect("grant must succeed");
@@ -442,7 +484,11 @@ mod tests {
         // the call site. Seed a serveable window first so the clear is
         // observable, then assert both effects: NotServing with no leader hint,
         // and a now-cleared allocator (try_grant -> NotLeader).
-        let core = ServingCore::new(Duration::from_secs(3), tsoracle_core::DEFAULT_MAX_SEQ_COUNT);
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
         core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
             .expect("seed must succeed (ceiling >= floor)");
         assert!(core.try_grant(1_000, 1).is_ok(), "seeded core must grant");

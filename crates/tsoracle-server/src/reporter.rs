@@ -144,6 +144,16 @@ pub struct Reporter {
     pub seq_values_issued: ReporterCounter,
     pub seq_cardinality_rejected: ReporterCounter,
 
+    // get_seq_batch hot path. Batch keeps its OWN values/cardinality counters
+    // (rather than sharing the single-key ones) so the `tsoracle.get_seq.*`
+    // single-key series stays free of batch traffic and each RPC is separately
+    // observable.
+    pub get_seq_batch_requests: ReporterCounter,
+    pub get_seq_batch_success: ReporterCounter,
+    pub seq_batch_keys: ReporterHistogram,
+    pub seq_batch_values_issued: ReporterCounter,
+    pub seq_batch_cardinality_rejected: ReporterCounter,
+
     // leader / fence
     pub not_leader: ReporterCounter,
     pub leader_transitions: ReporterCounter,
@@ -173,6 +183,13 @@ impl Reporter {
             seq_values_issued: ReporterCounter::new("tsoracle.get_seq.values_issued"),
             seq_cardinality_rejected: ReporterCounter::new(
                 "tsoracle.get_seq.cardinality_rejected.total",
+            ),
+            get_seq_batch_requests: ReporterCounter::new("tsoracle.get_seq.batch.requests.total"),
+            get_seq_batch_success: ReporterCounter::new("tsoracle.get_seq.batch.success.total"),
+            seq_batch_keys: ReporterHistogram::new("tsoracle.get_seq.batch.keys"),
+            seq_batch_values_issued: ReporterCounter::new("tsoracle.get_seq.batch.values_issued"),
+            seq_batch_cardinality_rejected: ReporterCounter::new(
+                "tsoracle.get_seq.batch.cardinality_rejected.total",
             ),
             not_leader: ReporterCounter::new("tsoracle.not_leader.total"),
             leader_transitions: ReporterCounter::new("tsoracle.leader_transition.total"),
