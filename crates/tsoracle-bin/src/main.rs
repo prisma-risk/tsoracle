@@ -435,6 +435,164 @@ fn classify_activation(resp: &ChangeResponse) -> ActivationOutcome {
 }
 
 #[cfg(feature = "openraft")]
+fn role_label(role: i32) -> &'static str {
+    use tsoracle_standalone::admin_proto::MemberRole;
+    match MemberRole::try_from(role) {
+        Ok(MemberRole::Voter) => "voter",
+        Ok(MemberRole::Learner) => "learner",
+        _ => "unknown",
+    }
+}
+
+#[cfg(feature = "openraft")]
+fn render_capabilities_table(
+    report: &tsoracle_standalone::admin_proto::CapabilityReport,
+) -> String {
+    let mut out = String::from("node  min_readable  max_readable  active_write\n");
+    for member in &report.members {
+        if member.reachable {
+            out.push_str(&format!(
+                "{:<4}  {:<12}  {:<12}  {}\n",
+                member.id,
+                member.min_readable_version,
+                member.max_readable_version,
+                member.active_write_version
+            ));
+        } else {
+            let detail = if member.unreachable_detail.is_empty() {
+                String::new()
+            } else {
+                format!("    ({})", member.unreachable_detail)
+            };
+            out.push_str(&format!(
+                "{:<4}  {:<12}  {:<12}  {}{}\n",
+                member.id, "-", "-", "unreachable", detail
+            ));
+        }
+    }
+    out
+}
+
+#[cfg(feature = "openraft")]
+fn render_members_with_caps(report: &tsoracle_standalone::admin_proto::CapabilityReport) -> String {
+    let leader = if report.has_leader {
+        report.leader.to_string()
+    } else {
+        "none".to_string()
+    };
+    let mut out = format!("leader: {leader}\n");
+    for member in &report.members {
+        let caps = if member.reachable {
+            format!(
+                "min_readable={} max_readable={} active_write={}",
+                member.min_readable_version,
+                member.max_readable_version,
+                member.active_write_version
+            )
+        } else if member.unreachable_detail.is_empty() {
+            "capabilities=unreachable".to_string()
+        } else {
+            format!("capabilities=unreachable ({})", member.unreachable_detail)
+        };
+        out.push_str(&format!(
+            "  id={} role={} raft={} service={} admin={} {}\n",
+            member.id,
+            role_label(member.role),
+            member.raft_addr,
+            member.service_endpoint,
+            member.admin_endpoint,
+            caps
+        ));
+    }
+    out
+}
+
+#[cfg(feature = "openraft")]
+#[derive(serde::Serialize)]
+struct JsonMember {
+    id: u64,
+    role: String,
+    raft_addr: String,
+    service_endpoint: String,
+    admin_endpoint: String,
+    reachable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_readable_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_readable_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_write_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unreachable_detail: Option<String>,
+}
+
+#[cfg(feature = "openraft")]
+#[derive(serde::Serialize)]
+struct JsonReport {
+    leader: Option<u64>,
+    members: Vec<JsonMember>,
+}
+
+#[cfg(feature = "openraft")]
+fn to_json_report(report: &tsoracle_standalone::admin_proto::CapabilityReport) -> JsonReport {
+    let members = report
+        .members
+        .iter()
+        .map(|member| {
+            let (min_r, max_r, active_w, detail) = if member.reachable {
+                (
+                    Some(member.min_readable_version),
+                    Some(member.max_readable_version),
+                    Some(member.active_write_version),
+                    None,
+                )
+            } else {
+                (None, None, None, Some(member.unreachable_detail.clone()))
+            };
+            JsonMember {
+                id: member.id,
+                role: role_label(member.role).to_string(),
+                raft_addr: member.raft_addr.clone(),
+                service_endpoint: member.service_endpoint.clone(),
+                admin_endpoint: member.admin_endpoint.clone(),
+                reachable: member.reachable,
+                min_readable_version: min_r,
+                max_readable_version: max_r,
+                active_write_version: active_w,
+                unreachable_detail: detail,
+            }
+        })
+        .collect();
+    JsonReport {
+        leader: if report.has_leader {
+            Some(report.leader)
+        } else {
+            None
+        },
+        members,
+    }
+}
+
+#[cfg(feature = "openraft")]
+async fn call_report_capabilities(
+    client: &mut tsoracle_standalone::admin_proto::membership_admin_client::MembershipAdminClient<
+        tonic::transport::Channel,
+    >,
+) -> anyhow::Result<tsoracle_standalone::admin_proto::CapabilityReport> {
+    use tsoracle_standalone::admin_proto::ReportCapabilitiesRequest;
+    match client
+        .report_capabilities(ReportCapabilitiesRequest {})
+        .await
+    {
+        Ok(resp) => Ok(resp.into_inner()),
+        Err(status) if status.code() == tonic::Code::Unimplemented => {
+            anyhow::bail!("this node's driver does not support format capabilities (openraft only)")
+        }
+        Err(status) => Err(anyhow::Error::new(status).context("report_capabilities")),
+    }
+}
+
+#[cfg(feature = "openraft")]
 async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
     use cli::AdminCmd;
     use tsoracle_standalone::admin_proto::membership_admin_client::MembershipAdminClient;
@@ -525,6 +683,11 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
             let tls = admin_client_tls(&args.tls)?;
             let channel = admin_connect(&args.endpoint, tls.as_ref()).await?;
             let mut client = MembershipAdminClient::new(channel);
+            if args.capabilities {
+                let report = call_report_capabilities(&mut client).await?;
+                print!("{}", render_members_with_caps(&report));
+                return Ok(());
+            }
             let view = client
                 .list_members(ListMembersRequest {})
                 .await
@@ -619,6 +782,102 @@ async fn dispatch_admin(cmd: cli::AdminCmd) -> Result<()> {
                 .await?,
             )
         }
+        AdminCmd::Capabilities(args) => {
+            let tls = admin_client_tls(&args.tls)?;
+            let channel = admin_connect(&args.endpoint, tls.as_ref()).await?;
+            let mut client = MembershipAdminClient::new(channel);
+            let report = call_report_capabilities(&mut client).await?;
+            if args.json {
+                let json = serde_json::to_string_pretty(&to_json_report(&report))
+                    .context("serialize capabilities json")?;
+                println!("{json}");
+            } else {
+                print!("{}", render_capabilities_table(&report));
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(all(test, feature = "openraft"))]
+mod capabilities_render_tests {
+    use super::{render_capabilities_table, render_members_with_caps, to_json_report};
+    use tsoracle_standalone::admin_proto::{CapabilityReport, MemberCapabilities, MemberRole};
+
+    fn reachable(id: u64) -> MemberCapabilities {
+        MemberCapabilities {
+            id,
+            role: MemberRole::Voter as i32,
+            raft_addr: format!("h{id}:1"),
+            service_endpoint: format!("h{id}:2"),
+            admin_endpoint: format!("h{id}:3"),
+            reachable: true,
+            min_readable_version: 4,
+            max_readable_version: 6,
+            active_write_version: 4,
+            unreachable_detail: String::new(),
+        }
+    }
+
+    fn unreachable(id: u64) -> MemberCapabilities {
+        MemberCapabilities {
+            id,
+            role: MemberRole::Voter as i32,
+            raft_addr: format!("h{id}:1"),
+            service_endpoint: format!("h{id}:2"),
+            admin_endpoint: format!("h{id}:3"),
+            reachable: false,
+            min_readable_version: 0,
+            max_readable_version: 0,
+            active_write_version: 0,
+            unreachable_detail: "connection refused".to_string(),
+        }
+    }
+
+    fn report() -> CapabilityReport {
+        CapabilityReport {
+            members: vec![reachable(1), unreachable(3)],
+            has_leader: true,
+            leader: 1,
+        }
+    }
+
+    #[test]
+    fn table_has_header_and_reachable_and_unreachable_rows() {
+        let out = render_capabilities_table(&report());
+        let mut lines = out.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "node  min_readable  max_readable  active_write"
+        );
+        let reachable_row = lines.next().unwrap();
+        assert!(reachable_row.starts_with('1'));
+        assert!(reachable_row.contains('4') && reachable_row.contains('6'));
+        let unreachable_row = lines.next().unwrap();
+        assert!(unreachable_row.starts_with('3'));
+        assert!(unreachable_row.contains("unreachable"));
+        assert!(unreachable_row.contains("(connection refused)"));
+    }
+
+    #[test]
+    fn members_view_augments_each_line_with_caps() {
+        let out = render_members_with_caps(&report());
+        assert!(out.contains("leader: 1"));
+        assert!(out.contains("id=1") && out.contains("active_write=4"));
+        assert!(
+            out.contains("id=3") && out.contains("capabilities=unreachable (connection refused)")
+        );
+    }
+
+    #[test]
+    fn json_omits_version_fields_when_unreachable() {
+        let json = serde_json::to_string(&to_json_report(&report())).unwrap();
+        assert!(json.contains("\"leader\":1"));
+        assert!(json.contains("\"active_write_version\":4"));
+        assert!(json.contains("\"unreachable_detail\":\"connection refused\""));
+        let unreachable_obj = json.split("\"id\":3").nth(1).unwrap();
+        assert!(!unreachable_obj.contains("active_write_version"));
+        assert!(unreachable_obj.contains("\"reachable\":false"));
     }
 }
 
