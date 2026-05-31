@@ -600,6 +600,16 @@ mod tests {
         ));
     }
 
+    /// The `unreachable!` arm in `classify_activation_outcome` covers every
+    /// dense `ApplyOutcome` variant, including the batch variants added in this
+    /// release. Driving any one of them proves the arm compiles and runs; the
+    /// test deliberately panics via `should_panic`.
+    #[test]
+    #[should_panic(expected = "dense ApplyOutcome")]
+    fn classify_activation_outcome_dense_batch_advanced_is_unreachable() {
+        classify_activation_outcome(ApplyOutcome::DenseBatchAdvanced { starts: vec![0] }, 7).ok();
+    }
+
     #[test]
     fn membership_changed_since_gate_is_a_distinct_variant() {
         // Pin that the variant is constructible and matchable; it is the

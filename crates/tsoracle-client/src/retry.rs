@@ -2429,4 +2429,382 @@ mod tests {
             ),
         }
     }
+
+    // ------------------------------------------------------------------
+    // seq_batch_* tests: analogues of the seq_* tests above for the
+    // GetSeqBatch (multi-key) path. Each mirrors the structural intent of
+    // its single-key sibling; only the RPC call and fake handler differ.
+    // ------------------------------------------------------------------
+
+    /// Helper: build a well-formed `GetSeqBatchResponse` that echoes the
+    /// first request entry back (key="orders", count=1, start=100) with a
+    /// fixed epoch. Used by tests whose batch handler succeeds.
+    fn batch_ok_response(
+        req: tsoracle_proto::v1::GetSeqBatchRequest,
+    ) -> tsoracle_proto::v1::GetSeqBatchResponse {
+        let (hi, lo) = tsoracle_core::Epoch(9).to_wire();
+        let grants = req
+            .entries
+            .iter()
+            .scan(100u64, |start, entry| {
+                let grant = tsoracle_proto::v1::SeqGrantEntry {
+                    key: entry.key.clone(),
+                    start: *start,
+                    count: entry.count,
+                };
+                *start += u64::from(entry.count);
+                Some(grant)
+            })
+            .collect();
+        tsoracle_proto::v1::GetSeqBatchResponse {
+            grants,
+            epoch: Some(tsoracle_proto::v1::EpochWire { hi, lo }),
+        }
+    }
+
+    /// Dense-batch analogue of `seq_follows_leader_hint_chain_to_leader`:
+    /// GetSeqBatch redirected by NOT_LEADER+hint several times must follow
+    /// the chain to the live leader and return blocks. Exercises
+    /// `issue_seq_batch_rpc`'s LeaderHint redirect arm.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_batch_follows_leader_hint_chain_to_leader() {
+        use std::future::Future;
+        use std::pin::Pin;
+        const REDIRECTS: usize = 3;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq_batch(move |req| {
+                let calls = server_calls.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    if n < REDIRECTS {
+                        Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                            leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                            leader_epoch: None,
+                        }))
+                    } else {
+                        Ok(batch_ok_response(req))
+                    }
+                }
+            })
+            .spawn()
+            .await;
+
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                }) as Pin<Box<dyn Future<Output = Result<_, _>> + Send>>
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
+
+        let blocks = issue_seq_batch_rpc(&pool, &[("orders", 1), ("invoices", 2)])
+            .await
+            .expect("a redirect chain ending at a live leader must yield blocks");
+        assert_eq!(blocks.len(), 2, "one block per batch entry");
+        assert_eq!(blocks[0].start, 100, "orders block start");
+        assert_eq!(blocks[0].count, 1);
+        assert_eq!(blocks[0].epoch, 9);
+        assert_eq!(blocks[1].start, 101, "invoices block start after orders");
+        assert_eq!(blocks[1].count, 2);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            REDIRECTS + 1,
+            "the loop must dial through all {REDIRECTS} redirects to the leader",
+        );
+    }
+
+    /// Batch analogue of `seq_endpointless_hint_fails_fast`: a NOT_LEADER
+    /// whose hint is present but carries no endpoint classifies as
+    /// `HintUnusable { Rejected }` and causes `issue_seq_batch_rpc` to fail
+    /// fast rather than ride out the deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_batch_endpointless_hint_fails_fast() {
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq_batch(|_req| async {
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: None,
+                    leader_epoch: None,
+                }))
+            })
+            .spawn()
+            .await;
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec![format!("http://{addr}")], None, false, policy);
+
+        let start = Instant::now();
+        let result = issue_seq_batch_rpc(&pool, &[("orders", 1), ("invoices", 2)]).await;
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(result, Err(ClientError::Rpc(_))),
+            "an unfollowable hint must surface a definitive Rpc error, got {result:?}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "an unfollowable hint must fail fast, not ride out the deadline; took {elapsed:?}",
+        );
+    }
+
+    /// Batch analogue of `seq_dead_pool_surfaces_error_fast`: a pool whose
+    /// endpoints all refuse to connect must surface an error fast (all
+    /// connect failures are pre-commit-certain; no `SeqUncertain` risk).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_batch_dead_pool_surfaces_error_fast() {
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_millis(100),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(
+            vec!["http://127.0.0.1:1".into(), "http://127.0.0.1:2".into()],
+            None,
+            false,
+            policy,
+        );
+        let start = Instant::now();
+        let result = issue_seq_batch_rpc(&pool, &[("orders", 1), ("invoices", 2)]).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "all-dead pool must surface an error");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a dead pool must fail fast, not ride out the full deadline; took {elapsed:?}",
+        );
+    }
+
+    /// Batch analogue of `seq_success_without_epoch_is_uncertain`: a batch
+    /// success response that omits the epoch is a protocol violation;
+    /// `issue_seq_batch_rpc` must surface `SeqUncertain`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_batch_success_without_epoch_is_uncertain() {
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq_batch(|req| async move {
+                let grants = req
+                    .entries
+                    .iter()
+                    .map(|e| tsoracle_proto::v1::SeqGrantEntry {
+                        key: e.key.clone(),
+                        start: 0,
+                        count: e.count,
+                    })
+                    .collect();
+                Ok(tsoracle_proto::v1::GetSeqBatchResponse {
+                    grants,
+                    epoch: None, // protocol violation
+                })
+            })
+            .spawn()
+            .await;
+
+        let pool = ChannelPool::new(vec![format!("http://{addr}")], None, false, short_policy());
+        match issue_seq_batch_rpc(&pool, &[("orders", 1), ("invoices", 2)]).await {
+            Err(ClientError::SeqUncertain) => {}
+            other => panic!("epoch-less batch success must be SeqUncertain, got {other:?}"),
+        }
+    }
+
+    /// Batch analogue of `seq_endless_redirect_is_bounded_by_cap`: a cluster
+    /// that hints an endless redirect chain must be bounded by the absolute
+    /// cross-pass redirect cap, not the overall deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_batch_endless_redirect_is_bounded_by_cap() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq_batch(move |_req| {
+                let calls = server_calls.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                        leader_endpoint: Some(format!("redirect-{}:1", n + 1)),
+                        leader_epoch: None,
+                    }))
+                }
+            })
+            .spawn()
+            .await;
+
+        let connector: Arc<crate::transport::ChannelConnector> =
+            Arc::new(move |_endpoint: &str| {
+                let target = format!("http://{addr}");
+                Box::pin(async move {
+                    tonic::transport::Endpoint::from_shared(target)
+                        .map_err(ClientError::from)?
+                        .connect()
+                        .await
+                        .map_err(ClientError::from)
+                }) as Pin<Box<dyn Future<Output = Result<_, _>> + Send>>
+            });
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            per_attempt_deadline: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(10),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec!["redirect-0:1".into()], Some(connector), false, policy);
+
+        let start = Instant::now();
+        let err = issue_seq_batch_rpc(&pool, &[("orders", 1), ("invoices", 2)])
+            .await
+            .expect_err("an endless redirect chain must surface an error, not blocks");
+        let elapsed = start.elapsed();
+        let dials = calls.load(Ordering::SeqCst);
+
+        match err {
+            ClientError::Rpc(status) => {
+                assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+                assert!(
+                    status
+                        .message()
+                        .contains("absolute leader-hint redirect cap"),
+                    "must surface the absolute-cap rejection, got {:?}",
+                    status.message(),
+                );
+            }
+            other => panic!("expected a bounded ClientError::Rpc, got {other:?}"),
+        }
+        assert!(
+            dials >= MAX_TOTAL_LEADER_REDIRECTS as usize
+                && dials <= (MAX_TOTAL_LEADER_REDIRECTS + 2 * MAX_LEADER_REDIRECTS) as usize,
+            "dials must be bounded by the absolute cap, not the deadline; got {dials}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the cap (not the 10s deadline) must terminate the churn; took {elapsed:?}",
+        );
+    }
+
+    /// Batch analogue of `seq_stale_epoch_hint_rides_out_then_surfaces_election`:
+    /// a follower that hints an older-epoch leader triggers the StaleEpoch
+    /// election signal and `issue_seq_batch_rpc` rides it out until the
+    /// overall deadline, surfacing `FAILED_PRECONDITION`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_batch_stale_epoch_hint_rides_out_then_surfaces_election() {
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq_batch(|_req| async {
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: Some("b:1".into()),
+                    leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
+                }))
+            })
+            .spawn()
+            .await;
+
+        let endpoint = format!("http://{addr}");
+        let pool = ChannelPool::new(vec![endpoint.clone()], None, false, short_policy());
+
+        // Wait until the fake peer is accepting and replying FAILED_PRECONDITION.
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(mut client) = pool.client(&endpoint).await {
+                let replied = client
+                    .get_seq_batch(tsoracle_proto::v1::GetSeqBatchRequest {
+                        entries: vec![tsoracle_proto::v1::SeqRequestEntry {
+                            key: "orders".into(),
+                            count: 1,
+                        }],
+                    })
+                    .await
+                    .err()
+                    .is_some_and(|s| s.code() == tonic::Code::FailedPrecondition);
+                if replied {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "fake follower never came up"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Cache the endpoint as leader at epoch 10 so the epoch-5 hint is stale.
+        pool.record_success(&endpoint, 10);
+
+        match issue_seq_batch_rpc(&pool, &[("orders", 1), ("invoices", 2)]).await {
+            Err(ClientError::Rpc(status)) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "a stale-hint batch ride-out must surface the election FAILED_PRECONDITION",
+            ),
+            other => panic!("expected a ridden-out FAILED_PRECONDITION, got {other:?}"),
+        }
+    }
+
+    /// Batch analogue of `seq_ride_out_skips_squeezed_attempt_and_surfaces_election`:
+    /// a budget-squeezed final ride-out attempt must NOT be issued on the batch
+    /// path. Without the guard the second attempt would time out post-send
+    /// and surface `SeqUncertain`, masking the election signal.
+    ///
+    /// Construction: the server delays every reply by 300ms; the policy grants
+    /// a 500ms per-attempt / 500ms overall budget. The first attempt drains
+    /// ~300ms, leaving ~200ms overall — too little for a full per-attempt
+    /// window. The squeezed second attempt must be skipped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seq_batch_ride_out_skips_squeezed_attempt_and_surfaces_election() {
+        let addr = crate::test_support::FakeTso::new()
+            .on_get_seq_batch(|_req| async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Err(make_status_with_hint(tsoracle_proto::v1::LeaderHint {
+                    leader_endpoint: Some("b:1".into()),
+                    leader_epoch: Some(tsoracle_proto::v1::EpochWire { hi: 0, lo: 5 }),
+                }))
+            })
+            .spawn()
+            .await;
+
+        let endpoint = format!("http://{addr}");
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            per_attempt_deadline: Duration::from_millis(500),
+            overall_deadline: Duration::from_millis(500),
+            base_backoff: Duration::ZERO,
+            leader_ttl: Duration::from_secs(30),
+        };
+        let pool = ChannelPool::new(vec![endpoint.clone()], None, false, policy);
+
+        // Cache the endpoint as epoch-10 leader so the epoch-5 hint is stale.
+        pool.record_success(&endpoint, 10);
+
+        match issue_seq_batch_rpc(&pool, &[("orders", 1), ("invoices", 2)]).await {
+            Err(ClientError::Rpc(status)) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "a budget-squeezed batch ride-out must surface the election \
+                 FAILED_PRECONDITION, not a manufactured SeqUncertain",
+            ),
+            other => panic!(
+                "a squeezed batch ride-out attempt must not be issued and time out; \
+                 expected the election FAILED_PRECONDITION, got {other:?}"
+            ),
+        }
+    }
 }
