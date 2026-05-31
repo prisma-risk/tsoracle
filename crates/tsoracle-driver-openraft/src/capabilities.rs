@@ -209,6 +209,33 @@ pub async fn gather_with<S: CapabilitySource>(
     Ok(gathered)
 }
 
+/// Tolerant sibling of [`gather_with`]: query every member for its
+/// capabilities, but instead of failing closed on the first unreachable peer,
+/// capture each member's result. Returns one entry per member, in membership
+/// order, with the local node answered directly from `local_capabilities`.
+///
+/// Where [`gather_with`] backs the activation gate (which must refuse to
+/// proceed on a member it cannot confirm), this backs the read-only
+/// capabilities report (which must surface an unreachable member rather than
+/// hide the whole cluster behind one failure).
+pub async fn report_with<S: CapabilitySource>(
+    local_node: NodeId,
+    local_capabilities: NodeCapabilities,
+    membership: &[(NodeId, S::Node)],
+    source: &S,
+) -> Vec<(NodeId, Result<NodeCapabilities, String>)> {
+    let mut reports = Vec::with_capacity(membership.len());
+    for (node_id, member) in membership {
+        let result = if *node_id == local_node {
+            Ok(local_capabilities)
+        } else {
+            source.query(*node_id, member).await
+        };
+        reports.push((*node_id, result));
+    }
+    reports
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +484,50 @@ mod tests {
             err,
             FormatActivationError::MemberUnreachable { node_id: 2, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn report_with_answers_local_directly_and_queries_remotes() {
+        let source = FakeSource {
+            responses: HashMap::from([(2u64, Ok(caps(3, 5)))]),
+        };
+        let membership: Vec<(NodeId, ())> = vec![(1, ()), (2, ())];
+        let reports = report_with(1, caps(3, 4), &membership, &source).await;
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].0, 1);
+        assert_eq!(reports[0].1.as_ref().unwrap().active_write_version, 3);
+        assert_eq!(reports[1].0, 2);
+        assert_eq!(reports[1].1.as_ref().unwrap().max_readable_version, 5);
+    }
+
+    #[tokio::test]
+    async fn report_with_captures_unreachable_without_short_circuiting() {
+        // Node 2 is unreachable; node 3 must still be reported (gather_with
+        // would have bailed at node 2). This is the tolerant contract.
+        let source = FakeSource {
+            responses: HashMap::from([
+                (2u64, Err("connection refused".to_string())),
+                (3u64, Ok(caps(3, 4))),
+            ]),
+        };
+        let membership: Vec<(NodeId, ())> = vec![(1, ()), (2, ()), (3, ())];
+        let reports = report_with(1, caps(3, 4), &membership, &source).await;
+        assert_eq!(reports.len(), 3);
+        assert!(reports[0].1.is_ok());
+        assert_eq!(reports[1].1.as_ref().unwrap_err(), "connection refused");
+        assert!(
+            reports[2].1.is_ok(),
+            "node 3 reported despite node 2 failing"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_with_empty_membership_is_empty() {
+        let source = FakeSource {
+            responses: HashMap::new(),
+        };
+        let membership: Vec<(NodeId, ())> = vec![];
+        let reports = report_with(1, caps(3, 4), &membership, &source).await;
+        assert!(reports.is_empty());
     }
 }

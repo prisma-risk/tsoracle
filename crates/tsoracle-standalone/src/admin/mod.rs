@@ -86,6 +86,39 @@ pub struct NewMember {
     pub admin_endpoint: String,
 }
 
+/// A member's format-version capabilities, or the reason it could not be
+/// reached. The read-only capabilities report carries one of these per member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityState {
+    /// The member answered: the oldest/newest formats its binary can read and
+    /// the version it is actively writing right now.
+    Reported {
+        min_readable: u8,
+        max_readable: u8,
+        active_write: u8,
+    },
+    /// The member could not be queried; `detail` is the human-readable reason.
+    Unreachable { detail: String },
+}
+
+/// One member's identity (reusing [`MemberEntry`]) plus its capability state.
+/// Reusing `MemberEntry` lets the `capabilities` table and the `members
+/// --capabilities` listing render from the same report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberCapability {
+    pub member: MemberEntry,
+    pub caps: CapabilityState,
+}
+
+/// A cluster-wide snapshot of every member's format capabilities, built from a
+/// single membership read on the queried node so membership, roles, leader,
+/// and the gather target stay consistent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityReport {
+    pub members: Vec<MemberCapability>,
+    pub leader: Option<u64>,
+}
+
 /// Membership-admin failure modes.
 #[derive(Debug, thiserror::Error)]
 pub enum AdminError {
@@ -141,6 +174,12 @@ pub trait MembershipAdmin: Send + Sync {
     /// `Unsupported` on drivers without zero-downtime format migration
     /// (file, paxos).
     async fn activate_format(&self, target: u8) -> Result<(), AdminError>;
+
+    /// Report every current member's format-version capabilities (read-only,
+    /// answerable on any node). The openraft impl gathers tolerantly — an
+    /// unreachable member is reported, not fatal. Drivers without the
+    /// format-migration surface (file, paxos) return `Unsupported`.
+    async fn report_capabilities(&self) -> Result<CapabilityReport, AdminError>;
 }
 
 /// Admin handle for drivers without runtime membership (file, and — in this
@@ -171,6 +210,10 @@ impl MembershipAdmin for UnsupportedAdmin {
         Err(AdminError::Unsupported)
     }
     async fn activate_format(&self, _target: u8) -> Result<(), AdminError> {
+        Err(AdminError::Unsupported)
+    }
+
+    async fn report_capabilities(&self) -> Result<CapabilityReport, AdminError> {
         Err(AdminError::Unsupported)
     }
 }
@@ -217,6 +260,15 @@ mod tests {
         let admin = UnsupportedAdmin::new(empty_view());
         assert!(matches!(
             admin.activate_format(5).await,
+            Err(AdminError::Unsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unsupported_admin_rejects_report_capabilities() {
+        let admin = UnsupportedAdmin::new(empty_view());
+        assert!(matches!(
+            admin.report_capabilities().await,
             Err(AdminError::Unsupported)
         ));
     }

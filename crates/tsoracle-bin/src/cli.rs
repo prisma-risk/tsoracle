@@ -53,8 +53,9 @@ pub enum Cmd {
 #[cfg(feature = "openraft")]
 #[derive(Subcommand, Debug)]
 pub enum AdminCmd {
-    /// List current members.
-    Members(AdminEndpointArgs),
+    /// List current members. With `--capabilities`, also gather and show each
+    /// member's format-version capabilities.
+    Members(MembersArgs),
     /// Add a non-voting learner.
     AddLearner(AddLearnerArgs),
     /// Promote a learner to voter.
@@ -68,6 +69,10 @@ pub enum AdminCmd {
     /// 4=local-range-rejected (TARGET_OUT_OF_RANGE — receiving node's
     /// MAX_READABLE_VERSION < target), 1=other failure.
     ActivateFormat(ActivateFormatArgs),
+    /// Report every member's format-version capabilities (min/max readable and
+    /// active write version). Read-only; answerable by any node. Use before
+    /// `activate-format` to confirm the cluster is ready for a target version.
+    Capabilities(CapabilitiesArgs),
 }
 
 #[cfg(feature = "openraft")]
@@ -86,10 +91,26 @@ pub struct AdminClientTlsArgs {
 
 #[cfg(feature = "openraft")]
 #[derive(Parser, Debug)]
-pub struct AdminEndpointArgs {
+pub struct MembersArgs {
     /// Any node's admin endpoint, e.g. `https://127.0.0.1:50561`.
     #[arg(long)]
     pub endpoint: String,
+    /// Also gather and display each member's format-version capabilities.
+    #[arg(long)]
+    pub capabilities: bool,
+    #[command(flatten)]
+    pub tls: AdminClientTlsArgs,
+}
+
+#[cfg(feature = "openraft")]
+#[derive(Parser, Debug)]
+pub struct CapabilitiesArgs {
+    /// Any node's admin endpoint, e.g. `https://127.0.0.1:50561`.
+    #[arg(long)]
+    pub endpoint: String,
+    /// Emit the report as JSON instead of the aligned table.
+    #[arg(long)]
+    pub json: bool,
     #[command(flatten)]
     pub tls: AdminClientTlsArgs,
 }
@@ -291,4 +312,66 @@ pub struct InitArgs {
 
 pub fn parse_duration(input: &str) -> Result<Duration, String> {
     humantime::parse_duration(input).map_err(|e| e.to_string())
+}
+
+#[cfg(all(test, feature = "openraft"))]
+mod admin_capabilities_parse_tests {
+    use super::{AdminCmd, Cli, Cmd};
+    use clap::Parser;
+
+    #[test]
+    fn capabilities_parses_endpoint() {
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "admin",
+            "capabilities",
+            "--endpoint",
+            "http://127.0.0.1:51002",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Some(Cmd::Admin(AdminCmd::Capabilities(args))) => {
+                assert_eq!(args.endpoint, "http://127.0.0.1:51002");
+                assert!(!args.json);
+            }
+            other => panic!("expected Capabilities, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capabilities_json_flag_sets_true() {
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "admin",
+            "capabilities",
+            "--endpoint",
+            "http://x",
+            "--json",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Some(Cmd::Admin(AdminCmd::Capabilities(args))) => assert!(args.json),
+            other => panic!("expected Capabilities, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn members_capabilities_flag_sets_true() {
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "admin",
+            "members",
+            "--endpoint",
+            "http://x",
+            "--capabilities",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Some(Cmd::Admin(AdminCmd::Members(args))) => {
+                assert_eq!(args.endpoint, "http://x");
+                assert!(args.capabilities);
+            }
+            other => panic!("expected Members, got {other:?}"),
+        }
+    }
 }

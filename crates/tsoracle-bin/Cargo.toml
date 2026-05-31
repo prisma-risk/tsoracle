@@ -25,6 +25,8 @@ bt         = ["tsoracle-server/bt"]
 anyhow                = "1"
 humantime             = "2"
 clap                  = { workspace = true }
+serde                 = { workspace = true }
+serde_json            = { workspace = true }
 tokio                 = { workspace = true, features = ["signal"] }
 tracing               = { workspace = true }
 tracing-subscriber    = { workspace = true }

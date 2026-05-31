@@ -3236,6 +3236,8 @@ dependencies = [
  "humantime",
  "parking_lot",
  "rcgen",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-stream",

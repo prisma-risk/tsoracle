@@ -36,8 +36,9 @@ use crate::admin_proto::membership_admin_server::{
     MembershipAdmin as GrpcAdmin, MembershipAdminServer,
 };
 use crate::admin_proto::{
-    ActivateFormatRequest, AddLearnerRequest, AdminErrorKind, ChangeResponse, ListMembersRequest,
-    MemberEntry, MemberRole, MembershipView, PromoteRequest, RemoveNodeRequest,
+    ActivateFormatRequest, AddLearnerRequest, AdminErrorKind, CapabilityReport, ChangeResponse,
+    ListMembersRequest, MemberCapabilities, MemberEntry, MemberRole, MembershipView,
+    PromoteRequest, RemoveNodeRequest, ReportCapabilitiesRequest,
 };
 
 /// Admin RPCs carry only ids and host:port strings, so a tight decode/encode
@@ -212,6 +213,65 @@ impl GrpcAdmin for AdminServiceImpl {
         Ok(Response::new(change_response(
             self.admin.activate_format(target).await,
         )))
+    }
+
+    async fn report_capabilities(
+        &self,
+        _req: Request<ReportCapabilitiesRequest>,
+    ) -> Result<Response<CapabilityReport>, Status> {
+        let report = self
+            .admin
+            .report_capabilities()
+            .await
+            .map_err(|err| match err {
+                AdminError::Unsupported => {
+                    Status::unimplemented("format capabilities are not supported by this driver")
+                }
+                other => Status::internal(other.to_string()),
+            })?;
+        let members = report
+            .members
+            .into_iter()
+            .map(|entry| {
+                let (reachable, min_readable, max_readable, active_write, detail) = match entry.caps
+                {
+                    crate::admin::CapabilityState::Reported {
+                        min_readable,
+                        max_readable,
+                        active_write,
+                    } => (
+                        true,
+                        u32::from(min_readable),
+                        u32::from(max_readable),
+                        u32::from(active_write),
+                        String::new(),
+                    ),
+                    crate::admin::CapabilityState::Unreachable { detail } => {
+                        (false, 0, 0, 0, detail)
+                    }
+                };
+                MemberCapabilities {
+                    id: entry.member.id,
+                    role: match entry.member.role {
+                        crate::admin::MemberRole::Voter => MemberRole::Voter as i32,
+                        crate::admin::MemberRole::Learner => MemberRole::Learner as i32,
+                    },
+                    raft_addr: entry.member.raft_addr,
+                    service_endpoint: entry.member.service_endpoint,
+                    admin_endpoint: entry.member.admin_endpoint,
+                    reachable,
+                    min_readable_version: min_readable,
+                    max_readable_version: max_readable,
+                    active_write_version: active_write,
+                    unreachable_detail: detail,
+                }
+            })
+            .collect();
+        Ok(Response::new(CapabilityReport {
+            members,
+            has_leader: report.leader.is_some(),
+            leader: report.leader.unwrap_or_default(),
+        }))
     }
 }
 

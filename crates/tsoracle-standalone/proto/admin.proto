@@ -47,6 +47,12 @@ service MembershipAdmin {
   // unit variant); the operator (or shell orchestrator) re-issues against a
   // known leader rather than auto-redirecting.
   rpc ActivateFormat(ActivateFormatRequest) returns (ChangeResponse);
+  // Report every current member's format-version capabilities (read-only,
+  // answerable by any node). The openraft driver gathers tolerantly: an
+  // unreachable member is returned with `reachable=false` and a detail
+  // string rather than failing the whole call. paxos/file return
+  // UNIMPLEMENTED (they have no format-migration surface).
+  rpc ReportCapabilities(ReportCapabilitiesRequest) returns (CapabilityReport);
 }
 
 // A node's role in the current membership.
@@ -106,6 +112,33 @@ message ActivateFormatRequest {
   // Target format version. proto3 has no uint8, so encoded as uint32; the
   // handler validates the value fits u8 before forwarding.
   uint32 target = 1;
+}
+
+message ReportCapabilitiesRequest {}
+
+// One member's identity plus its format-version capabilities. proto3 has no
+// uint8, so the three versions are uint32 (server-produced u8 values, widened).
+// When `reachable` is false the version fields are 0 and `unreachable_detail`
+// carries why the member could not be queried.
+message MemberCapabilities {
+  uint64 id = 1;
+  MemberRole role = 2;
+  string raft_addr = 3;
+  string service_endpoint = 4;
+  string admin_endpoint = 5;
+  bool reachable = 6;
+  uint32 min_readable_version = 7;
+  uint32 max_readable_version = 8;
+  uint32 active_write_version = 9;
+  string unreachable_detail = 10;
+}
+
+// Cluster-wide capability snapshot. `has_leader` + `leader` jointly encode
+// `Option<u64>` exactly as in `MembershipView`.
+message CapabilityReport {
+  repeated MemberCapabilities members = 1;
+  bool has_leader = 2;
+  uint64 leader = 3;
 }
 
 // Typed error kinds for `ChangeResponse`. Adding a new variant is backwards

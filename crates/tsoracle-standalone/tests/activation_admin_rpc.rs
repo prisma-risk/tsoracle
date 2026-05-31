@@ -73,6 +73,12 @@ impl MembershipAdmin for ProgrammableAdmin {
             .take()
             .expect("activate_format called more than once")
     }
+
+    async fn report_capabilities(
+        &self,
+    ) -> Result<tsoracle_standalone::admin::CapabilityReport, AdminError> {
+        Err(AdminError::Unsupported)
+    }
 }
 
 fn handler(admin: ProgrammableAdmin) -> impl GrpcAdmin {
