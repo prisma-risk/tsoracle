@@ -108,7 +108,8 @@ pub(crate) fn classify(error: ConsensusError) -> PersistDisposition {
         dense_error @ (ConsensusError::DenseUnsupported
         | ConsensusError::SeqKeyCardinalityExceeded { .. }
         | ConsensusError::SeqOverflow
-        | ConsensusError::DenseNotActivated { .. }) => {
+        | ConsensusError::DenseNotActivated { .. }
+        | ConsensusError::DenseBatchNotActivated { .. }) => {
             PersistDisposition::Permanent(Box::new(dense_error))
         }
     }
@@ -202,6 +203,27 @@ mod tests {
                 );
                 // The concrete type is preserved (downcast succeeds), proving we
                 // boxed the real error rather than a stringified copy.
+                assert!(source.downcast_ref::<ConsensusError>().is_some());
+            }
+            other => panic!("expected Permanent, got a different disposition: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dense_batch_not_activated_is_permanent() {
+        // The batch-not-activated variant is unreachable on the high-water
+        // persist path, but classify must still route it as Permanent (non-
+        // retryable) with its real Display preserved, like its dense siblings.
+        let disposition = classify(ConsensusError::DenseBatchNotActivated {
+            required: 6,
+            active: 5,
+        });
+        match disposition {
+            PersistDisposition::Permanent(source) => {
+                assert_eq!(
+                    source.to_string(),
+                    "dense batch sequences require write version 6 but the cluster is at 5; activate the format first"
+                );
                 assert!(source.downcast_ref::<ConsensusError>().is_some());
             }
             other => panic!("expected Permanent, got a different disposition: {other:?}"),
