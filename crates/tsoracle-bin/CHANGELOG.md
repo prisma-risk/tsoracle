@@ -4,6 +4,13 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v2.1.0...tsoracle-v2.2.0) - 2026-06-01
+
+### Added
+
+- *(bin)* expose Prometheus metrics exporter in tsoracle binary ([#608](https://github.com/prisma-risk/tsoracle/pull/608))
+- enable metrics feature in all published images ([#606](https://github.com/prisma-risk/tsoracle/pull/606))
+
 ## [2.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v2.0.3...tsoracle-v2.1.0) - 2026-05-31
 
 ### Added
