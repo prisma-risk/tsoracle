@@ -52,6 +52,8 @@ Default is 1 second. On leadership gain, the new leader first computes `serving_
 - `tsoracle.client.driver.in_flight` — 0 or 1 indicating whether the driver currently has an outgoing batch in flight (gauge)
 - `tsoracle.client.driver.abandoned_waiters.total` — waiters whose result could not be delivered because the caller dropped its `get_ts()` future (a client-side timeout or cancellation) before the driver finished delivering (counter). An occasional bump is benign; a sustained or spiking rate is a cancellation storm — callers are giving up before the oracle answers, usually because client deadlines are tighter than current end-to-end latency (correlate with `tsoracle.client.connect.duration` and the server's `get_ts` latency) or because a leader election is making requests time out (correlate with `tsoracle.client.not_leader.total` / `tsoracle.client.leader_pivots.total`).
 
+The stock `tsoracle serve` binary installs a Prometheus exporter when built with the `metrics` feature; published images enable it. It listens on `127.0.0.1:9551` by default, can be moved with `--metrics-listen <host:port>`, and can be disabled with `--no-metrics`. The container entrypoint exposes the same controls as `METRICS_LISTEN` and `NO_METRICS=true`.
+
 Both libraries are exporter-agnostic: embedders install whichever recorder they want (`metrics-exporter-prometheus`, `metrics-exporter-influx`, a custom sink) before constructing the `Server` or `Client`. The example below wires Prometheus over an HTTP listener for a process that hosts either side:
 
 ```toml

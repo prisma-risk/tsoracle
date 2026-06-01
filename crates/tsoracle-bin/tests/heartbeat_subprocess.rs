@@ -72,6 +72,14 @@ enum AwaitOutcome {
     Timeout(SocketAddr),
 }
 
+#[cfg(feature = "metrics")]
+fn disable_metrics_exporter_for_test(cmd: &mut Command) {
+    cmd.arg("--no-metrics");
+}
+
+#[cfg(not(feature = "metrics"))]
+fn disable_metrics_exporter_for_test(_cmd: &mut Command) {}
+
 /// Wait for each address in `ready_idx` to start accepting connections,
 /// racing every wait against the child exiting early.
 async fn await_listening(
@@ -134,6 +142,7 @@ where
     for attempt in 0..MAX_ATTEMPTS {
         let addrs = bind_unused_set(n_ports).await;
         let mut cmd = build(&addrs);
+        disable_metrics_exporter_for_test(&mut cmd);
         // tracing_subscriber::fmt() (the binary's default) writes to STDOUT, so
         // pipe stdout to capture heartbeat log lines. Also pipe stderr to detect
         // EADDRINUSE on early-exit retry logic.

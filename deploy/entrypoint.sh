@@ -33,7 +33,13 @@ fi
 : "${WINDOW_AHEAD:=3s}"
 : "${FAILOVER_ADVANCE:=1s}"
 : "${LOG_LEVEL:=info}"
-common="--window-ahead ${WINDOW_AHEAD} --failover-advance ${FAILOVER_ADVANCE} --log ${LOG_LEVEL}"
+metrics=""
+if [ "${NO_METRICS:-false}" = "true" ]; then
+    metrics="--no-metrics"
+elif [ -n "${METRICS_LISTEN:-}" ]; then
+    metrics="--metrics-listen ${METRICS_LISTEN}"
+fi
+common="--window-ahead ${WINDOW_AHEAD} --failover-advance ${FAILOVER_ADVANCE} --log ${LOG_LEVEL} ${metrics}"
 
 case "$DRIVER" in
 file)

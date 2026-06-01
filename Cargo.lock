@@ -3234,6 +3234,7 @@ dependencies = [
  "clap",
  "futures",
  "humantime",
+ "metrics-exporter-prometheus",
  "parking_lot",
  "rcgen",
  "serde",

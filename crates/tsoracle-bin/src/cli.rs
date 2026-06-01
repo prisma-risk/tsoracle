@@ -190,6 +190,14 @@ pub struct CommonServeArgs {
     /// Log level.
     #[arg(long, default_value = "info")]
     pub log: String,
+    /// Prometheus /metrics listen address.
+    #[cfg(feature = "metrics")]
+    #[arg(long, default_value = "127.0.0.1:9551")]
+    pub metrics_listen: SocketAddr,
+    /// Disable the Prometheus metrics exporter.
+    #[cfg(feature = "metrics")]
+    #[arg(long)]
+    pub no_metrics: bool,
     /// PEM server certificate chain for the client gRPC API (enables TLS).
     #[arg(long)]
     pub tls_cert: Option<std::path::PathBuf>,
@@ -373,5 +381,61 @@ mod admin_capabilities_parse_tests {
             }
             other => panic!("expected Members, got {other:?}"),
         }
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_args_tests {
+    use super::{Cli, Cmd, ServeCmd};
+    use clap::Parser;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn serve_metrics_args_default_to_loopback_exporter() {
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "serve",
+            "file",
+            "--state-dir",
+            "/tmp/tsoracle-data",
+        ])
+        .unwrap();
+        let Some(Cmd::Serve(serve)) = cli.cmd else {
+            panic!("expected serve command");
+        };
+        let ServeCmd::File(args) = *serve else {
+            panic!("expected file args");
+        };
+        assert_eq!(
+            args.common.metrics_listen,
+            SocketAddr::from(([127, 0, 0, 1], 9551))
+        );
+        assert!(!args.common.no_metrics);
+    }
+
+    #[test]
+    fn serve_metrics_args_allow_override_and_disable() {
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "serve",
+            "file",
+            "--metrics-listen",
+            "0.0.0.0:9551",
+            "--no-metrics",
+            "--state-dir",
+            "/tmp/tsoracle-data",
+        ])
+        .unwrap();
+        let Some(Cmd::Serve(serve)) = cli.cmd else {
+            panic!("expected serve command");
+        };
+        let ServeCmd::File(args) = *serve else {
+            panic!("expected file args");
+        };
+        assert_eq!(
+            args.common.metrics_listen,
+            SocketAddr::from(([0, 0, 0, 0], 9551))
+        );
+        assert!(args.common.no_metrics);
     }
 }
