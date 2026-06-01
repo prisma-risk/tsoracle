@@ -141,6 +141,10 @@ pub async fn spawn_into(
         .arg(&handle.data_dir)
         .arg("--log")
         .arg("warn")
+        // The harness scrapes no metrics, and the exporter otherwise binds a
+        // fixed port (127.0.0.1:9551) that collides across the parallel
+        // process tests and kill/respawn cycles. Accepted in every build.
+        .arg("--no-metrics")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

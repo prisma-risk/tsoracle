@@ -194,8 +194,9 @@ pub struct CommonServeArgs {
     #[cfg(feature = "metrics")]
     #[arg(long, default_value = "127.0.0.1:9551")]
     pub metrics_listen: SocketAddr,
-    /// Disable the Prometheus metrics exporter.
-    #[cfg(feature = "metrics")]
+    /// Disable the Prometheus metrics exporter. Accepted in every build so
+    /// scripts and test harnesses can pass it unconditionally; it is a no-op
+    /// when the binary is compiled without the `metrics` feature.
     #[arg(long)]
     pub no_metrics: bool,
     /// PEM server certificate chain for the client gRPC API (enables TLS).
@@ -436,6 +437,35 @@ mod metrics_args_tests {
             args.common.metrics_listen,
             SocketAddr::from(([0, 0, 0, 0], 9551))
         );
+        assert!(args.common.no_metrics);
+    }
+}
+
+#[cfg(all(test, not(feature = "metrics")))]
+mod no_metrics_flag_without_feature_tests {
+    use super::{Cli, Cmd, ServeCmd};
+    use clap::Parser;
+
+    // The stress process harness (and other scripts) pass `--no-metrics`
+    // unconditionally; it must parse even in builds compiled without the
+    // `metrics` feature, where it is a documented no-op.
+    #[test]
+    fn serve_accepts_no_metrics_without_feature() {
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "serve",
+            "file",
+            "--no-metrics",
+            "--state-dir",
+            "/tmp/tsoracle-data",
+        ])
+        .unwrap();
+        let Some(Cmd::Serve(serve)) = cli.cmd else {
+            panic!("expected serve command");
+        };
+        let ServeCmd::File(args) = *serve else {
+            panic!("expected file args");
+        };
         assert!(args.common.no_metrics);
     }
 }

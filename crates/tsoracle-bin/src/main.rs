@@ -254,7 +254,10 @@ fn install_metrics_exporter(common: &CommonServeArgs) -> Result<()> {
 }
 
 #[cfg(not(feature = "metrics"))]
-fn install_metrics_exporter(_common: &CommonServeArgs) -> Result<()> {
+fn install_metrics_exporter(common: &CommonServeArgs) -> Result<()> {
+    if common.no_metrics {
+        tracing::debug!("--no-metrics ignored: built without the `metrics` feature");
+    }
     Ok(())
 }
 
