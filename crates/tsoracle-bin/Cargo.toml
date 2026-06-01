@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle"
-version      = "2.2.0"
+version      = "2.2.1"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
