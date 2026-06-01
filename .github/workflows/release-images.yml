@@ -54,11 +54,11 @@ jobs:
       - name: Build file + openraft + umbrella and smoke
         run: |
           docker build -f deploy/Dockerfile --build-arg FEATURES=file,metrics -t tsoracle-file:pr .
-          docker run --rm --entrypoint tsoracle tsoracle-file:pr --help | head -1
+          docker run --rm --entrypoint tsoracle tsoracle-file:pr serve file --help | grep -q -- --metrics-listen
           docker build -f deploy/Dockerfile --build-arg FEATURES=openraft,metrics -t tsoracle-openraft:pr .
-          docker run --rm --entrypoint tsoracle tsoracle-openraft:pr --help | head -1
+          docker run --rm --entrypoint tsoracle tsoracle-openraft:pr serve openraft --help | grep -q -- --metrics-listen
           docker build -f deploy/Dockerfile --build-arg FEATURES=file,openraft,paxos,metrics -t tsoracle:pr .
-          docker run --rm --entrypoint tsoracle tsoracle:pr --help | head -1
+          docker run --rm --entrypoint tsoracle tsoracle:pr serve paxos --help | grep -q -- --metrics-listen
           curl -fsSL https://get.helm.sh/helm-v3.15.0-linux-amd64.tar.gz | tar xz
           ./linux-amd64/helm lint deploy/charts/tsoracle
           PATH="$PWD/linux-amd64:$PATH" sh deploy/charts/tsoracle/tests/render.sh
@@ -73,8 +73,8 @@ jobs:
       fail-fast: false
       matrix:
         # `variant` selects which driver subset is compiled into the binary.
-        # Every published image includes the `metrics` feature so tsoracle
-        # emits the documented Prometheus-ready signals.
+        # Every published image includes the `metrics` feature so the stock
+        # binary emits and exports the documented Prometheus signals.
         variant: [file, openraft, umbrella]
         arch: [amd64, arm64]
         include:

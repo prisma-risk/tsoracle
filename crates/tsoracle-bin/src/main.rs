@@ -233,6 +233,31 @@ fn client_tls_config(
     }
 }
 
+#[cfg(feature = "metrics")]
+fn install_metrics_exporter(common: &CommonServeArgs) -> Result<()> {
+    if common.no_metrics {
+        tracing::info!("Prometheus metrics exporter disabled");
+        return Ok(());
+    }
+
+    metrics_exporter_prometheus::PrometheusBuilder::new()
+        .with_http_listener(common.metrics_listen)
+        .install()
+        .with_context(|| {
+            format!(
+                "install Prometheus metrics exporter on {}",
+                common.metrics_listen
+            )
+        })?;
+    tracing::info!(addr = %common.metrics_listen, "Prometheus metrics exporter listening");
+    Ok(())
+}
+
+#[cfg(not(feature = "metrics"))]
+fn install_metrics_exporter(_common: &CommonServeArgs) -> Result<()> {
+    Ok(())
+}
+
 /// Assemble the peer `PeerTlsConfig` from the all-or-nothing flag trio.
 #[cfg(any(feature = "openraft", feature = "paxos"))]
 fn peer_tls_config(
@@ -321,6 +346,8 @@ async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(&common.log).unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
+
+    install_metrics_exporter(&common)?;
 
     let mut node: Standalone = tsoracle_standalone::build(cfg)
         .await
