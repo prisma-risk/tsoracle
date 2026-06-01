@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v2.2.0...tsoracle-v2.2.1) - 2026-06-01
+
+### Fixed
+
+- *(stress)* disable metrics exporter in spawned process-topology nodes ([#610](https://github.com/prisma-risk/tsoracle/pull/610))
+
 ## [2.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v2.1.0...tsoracle-v2.2.0) - 2026-06-01
 
 ### Added
