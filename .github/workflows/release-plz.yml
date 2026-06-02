@@ -1,6 +1,19 @@
 name: release-plz
 
+# Split triggers, each event drives exactly one job (see the `if:` guards below):
+#   - workflow_dispatch (manual, Actions tab "Run workflow") fires ONLY the
+#     `release-pr` job. This is deliberate: the Release PR is opened/updated on
+#     demand instead of on every push, so we don't churn a Release PR on each
+#     commit to main. Cut a release by manually dispatching this workflow.
+#   - push to main fires ONLY the `release` job. Merging the Release PR is itself
+#     a push to main, so the merge still auto-tags + cargo-publishes the bumped
+#     crates — publish-on-merge is unchanged.
 on:
+  # Manual trigger (Actions tab → "Run workflow") — drives `release-pr` only,
+  # so the Release PR is opened/updated on demand instead of on every commit.
+  workflow_dispatch:
+  # Push to main — drives `release` only; a Release PR merge is a push to main,
+  # so publish-on-merge still happens automatically.
   push:
     branches:
       - main
@@ -16,6 +29,9 @@ jobs:
   # Publishes (tags + cargo publish + GitHub Release) whenever the release PR
   # has been merged into main. No-op on every other push.
   release:
+    # Publish only on push to main (i.e. a merged Release PR), never on manual
+    # dispatch — `release-pr` owns the manual path.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     name: release-plz release
     runs-on: ubuntu-latest
     environment: crates-io
@@ -260,10 +276,12 @@ jobs:
             --clobber \
             --repo "$GITHUB_REPOSITORY"
 
-  # Opens or updates the release PR whenever main moves. The PR contains the
-  # version bumps + CHANGELOG diffs; merging it triggers the `release` job
-  # above on the next push.
+  # Opens or updates the release PR. The PR contains the version bumps +
+  # CHANGELOG diffs; merging it triggers the `release` job above on the next
+  # push. Manual only: runs on workflow_dispatch so the Release PR is cut on
+  # demand rather than on every push to main.
   release-pr:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     name: release-plz PR
     runs-on: ubuntu-latest
     permissions:
