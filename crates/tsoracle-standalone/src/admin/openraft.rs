@@ -61,7 +61,7 @@ fn map_write_error(err: RaftError<TypeConfig, ClientWriteError<TypeConfig>>) -> 
 
 /// Map a `FormatActivationError` into an `AdminError` using the dedicated
 /// kinds added above. `NotLeader` is a unit variant in
-/// `FormatActivationError` (see capabilities.rs:107-110), so the resulting
+/// `FormatActivationError`, so the resulting
 /// `AdminError::NotLeader.leader_admin_endpoint` is always None — the
 /// CLI cannot auto-redirect to the leader for activation; the operator
 /// (or shell orchestrator) must re-issue against a known leader.

@@ -126,7 +126,7 @@ async fn await_listening(
 /// - `build` constructs the `Command` for each attempt and is called once
 ///   per retry. The closure captures stable test state (tempdirs, certs);
 ///   `--bootstrap` is idempotent so reusing a `raft_dir` across attempts
-///   is safe (`drivers/openraft/mod.rs:284-285`).
+///   is safe.
 async fn retry_spawn<F>(
     n_ports: usize,
     ready_idx: &[usize],
