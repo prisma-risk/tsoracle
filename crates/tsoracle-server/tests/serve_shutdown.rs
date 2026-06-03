@@ -171,7 +171,7 @@ async fn serve_with_listener_translates_watch_panic_to_server_error() {
     // `catch_unwind` in `into_router`, which republishes NotServing and
     // re-raises. The outer serve loop then surfaces it as
     // `ServerError::WatchPanic`. This path exercises the catch_unwind
-    // branch (server.rs:200-210), `panic_payload_to_string`, and the
+    // branch in `into_router`, `panic_payload_to_string`, and the
     // join-handle error mapping in `join_to_server_result`.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 

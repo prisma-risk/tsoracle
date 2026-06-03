@@ -31,7 +31,7 @@
 //!
 //! The `+1` is load-bearing: a prior leader at physical_ms = prior_max could
 //! have served logical = LOGICAL_MAX, so the new leader MUST start strictly
-//! above prior_max. `tests/leader_watch.rs:46` pins this arithmetically.
+//! above prior_max. The `leader_watch` integration tests pin this arithmetically.
 
 use futures::StreamExt;
 use std::sync::Arc;

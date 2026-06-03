@@ -341,14 +341,13 @@ async fn build_openraft_inner(
 
     // Wrap host in Arc so both the driver and the membership admin can hold
     // it. OpenraftDriver has two constructors: `new(host: H)` and
-    // `from_arc(host: Arc<H>)` — use the Arc form here (driver.rs:77).
+    // `from_arc(host: Arc<H>)` — use the Arc form here.
     let host = std::sync::Arc::new(StandaloneHost::new(raft, state_machine_for_host));
     let driver = OpenraftDriver::from_arc(host.clone());
 
-    // First production caller of PeerCapabilitySource (it has been
-    // #[allow(dead_code)] in network.rs:273-285 waiting for this wire-up).
-    // The peer TLS config is `Option<PeerTlsMaterial>`; extract the client
-    // side with `.as_ref().map(|m| m.client.clone())`.
+    // First production caller of `PeerCapabilitySource`. The peer TLS config
+    // is `Option<PeerTlsMaterial>`; extract the client side with
+    // `.as_ref().map(|m| m.client.clone())`.
     let capability_source = std::sync::Arc::new(
         crate::drivers::openraft::network::PeerCapabilitySource::new(
             peer_tls.as_ref().map(|m| m.client.clone()),
