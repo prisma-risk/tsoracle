@@ -26,8 +26,6 @@
 //! leader-watch task in the `Server::into_router_parts()` spawn site so both
 //! the embedder path (`into_router()`) and the daemon path (`serve*`) get it.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 use std::time::Duration;
 
