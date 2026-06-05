@@ -28,11 +28,6 @@
 //! both the global `metrics::` recorder (Prometheus path, unchanged) and a
 //! local `Arc<AtomicU64>` that the heartbeat task can read without depending
 //! on any installed recorder.
-//!
-//! **Scaffold note**: items are introduced here and wired up in later plan
-//! tasks (T3–T11). `#![allow(dead_code)]` is present for that reason and
-//! will become unnecessary once the call sites land in Task 7.
-#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +36,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tsoracle_core::IgnoreReason;
 
 pub struct ReporterCounter {
+    // Read only by the `metrics`-gated recorder forward in `increment`; with the
+    // `metrics` feature off the local atomic is the counter's sole live state.
+    #[cfg_attr(not(feature = "metrics"), allow(dead_code))]
     name: &'static str,
     local: Arc<AtomicU64>,
 }
@@ -59,12 +57,17 @@ impl ReporterCounter {
         self.local.fetch_add(n, Ordering::Relaxed);
     }
 
+    // Read only by the heartbeat task, which is compiled solely under `tracing`.
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     pub(crate) fn snapshot(&self) -> u64 {
         self.local.load(Ordering::Relaxed)
     }
 }
 
 pub struct ReporterHistogram {
+    // Read only by the `metrics`-gated recorder forward in `record`; with the
+    // `metrics` feature off the histogram carries no local state.
+    #[cfg_attr(not(feature = "metrics"), allow(dead_code))]
     name: &'static str,
 }
 
@@ -98,6 +101,8 @@ impl ReporterTimestamp {
     }
 
     /// `None` if never touched, else the most recent unix-ms.
+    // Read only by the heartbeat task, which is compiled solely under `tracing`.
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     pub(crate) fn snapshot(&self) -> Option<u64> {
         let v = self.local.load(Ordering::Relaxed);
         (v != 0).then_some(v)
