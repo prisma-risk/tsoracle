@@ -28,7 +28,6 @@ use std::sync::Arc;
 use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
 use parking_lot::Mutex;
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
-use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tsoracle_consensus::ConsensusDriver;
 use tsoracle_driver_paxos::{HighWaterCommand, PaxosDriver, SnapshotPolicy, StandaloneHost};
@@ -37,7 +36,7 @@ use tsoracle_paxos_toolkit::storage::RocksdbStorage;
 
 use crate::config::PaxosConfig;
 use crate::error::StandaloneError;
-use crate::{Standalone, TransportHandle};
+use crate::{FatalSignal, Standalone, TransportHandle};
 
 use network::{PeerSink, server as peer_server};
 
@@ -166,18 +165,13 @@ async fn build_paxos_inner(
             })?;
     }
     let router = builder.add_service(peer_service);
-    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-    let join = tokio::spawn(async move {
-        let shutdown = async {
-            let _ = cancel_rx.await;
-        };
-        if let Err(err) = router
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
-            .await
-        {
-            tracing::error!(error = ?err, "paxos peer server died");
-        }
-    });
+    // Fail-fast signal for the peer server: an unexpected exit must take the
+    // whole node down instead of leaving the consensus driver unreachable.
+    let fatal = FatalSignal::new();
+    let transport =
+        TransportHandle::spawn_supervised("paxos peer server", fatal.clone(), move |shutdown| {
+            router.serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
+        });
 
     let admin_view = crate::admin::MembershipView {
         members: cfg
@@ -229,11 +223,12 @@ async fn build_paxos_inner(
     let driver = Arc::new(PaxosDriver::new(host, leader_subscriber));
     Ok(Standalone {
         driver: driver as Arc<dyn ConsensusDriver>,
-        transport: TransportHandle::new(cancel_tx, join),
+        transport,
         drain: None,
         admin: std::sync::Arc::new(crate::admin::UnsupportedAdmin::new(admin_view)),
         admin_transport: crate::TransportHandle::noop(),
         admin_listen_addr: None,
+        fatal,
     })
 }
 

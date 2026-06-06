@@ -60,6 +60,23 @@ mod file_driver {
         );
         node.shutdown().await;
     }
+
+    /// The file driver spawns no transport servers, so its fail-fast signal
+    /// can never trip — before or after shutdown.
+    #[tokio::test]
+    async fn file_fatal_signal_stays_untripped() {
+        let dir = tempdir().unwrap();
+        let node = build(DriverConfig::File(FileConfig {
+            state_dir: dir.path().join("state"),
+        }))
+        .await
+        .expect("build file driver");
+
+        let fatal = node.fatal_signal();
+        assert_eq!(fatal.check(), None);
+        node.shutdown().await;
+        assert_eq!(fatal.check(), None);
+    }
 }
 
 #[cfg(feature = "openraft")]
@@ -158,6 +175,33 @@ mod openraft_driver {
         let drain = node.take_drain().expect("openraft driver has a drain step");
         drain.await;
         node.shutdown().await;
+    }
+
+    /// Cooperative shutdown of the peer (and absent admin) transport is a
+    /// requested stop, not a server death: the fail-fast signal stays clear.
+    /// The trip path itself is covered by the transport supervision unit
+    /// tests — a real listener can't be forced to error from out here.
+    #[cfg(feature = "test-support")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graceful_shutdown_leaves_fatal_untripped() {
+        let dir = tempdir().unwrap();
+        let (raft_addr, raft_lease) = lease_port().await;
+        let cfg = single_node_cfg(raft_addr, "127.0.0.1:1", dir.path().join("raft"));
+
+        let node = build_openraft_with_listeners(cfg, raft_lease.into_listener(), None)
+            .await
+            .expect("build openraft driver");
+
+        let fatal = node.fatal_signal();
+        assert_eq!(fatal.check(), None);
+        // `shutdown()` joins the supervisor tasks, so a (wrong) trip from the
+        // cooperative stop would be visible immediately after.
+        node.shutdown().await;
+        assert_eq!(
+            fatal.check(),
+            None,
+            "graceful transport shutdown must not trip the fail-fast signal"
+        );
     }
 
     #[tokio::test]
@@ -479,7 +523,14 @@ mod paxos_driver {
             node.take_drain().is_none(),
             "paxos driver has no pre-shutdown drain step"
         );
+        let fatal = node.fatal_signal();
+        assert_eq!(fatal.check(), None);
         node.shutdown().await;
+        assert_eq!(
+            fatal.check(),
+            None,
+            "graceful transport shutdown must not trip the fail-fast signal"
+        );
     }
 
     /// A node absent from its own peer map can never be elected, so `build`
