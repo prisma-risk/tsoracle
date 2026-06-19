@@ -13,10 +13,18 @@ on:
   # so the Release PR is opened/updated on demand instead of on every commit.
   workflow_dispatch:
   # Push to main — drives `release` only; a Release PR merge is a push to main,
-  # so publish-on-merge still happens automatically.
+  # so publish-on-merge still happens automatically. Path-gated to CHANGELOG.md
+  # changes: release-plz owns those files (changelog_update = true) and rewrites
+  # them on every release, so a Release PR merge always matches while ordinary
+  # feature/fix commits don't — the publish job no longer runs on every commit.
+  # A stray CHANGELOG edit at most triggers a harmless no-op `release` (it only
+  # publishes crates whose version isn't already tagged). Path filters are ignored
+  # for workflow_dispatch, so the manual `release-pr` path is unaffected.
   push:
     branches:
       - main
+    paths:
+      - '**/CHANGELOG.md'
 
 # Tighten default token scope; each job opts in to what it needs.
 permissions:
@@ -27,7 +35,10 @@ env:
 
 jobs:
   # Publishes (tags + cargo publish + GitHub Release) whenever the release PR
-  # has been merged into main. No-op on every other push.
+  # has been merged into main. The push trigger is path-gated to CHANGELOG.md
+  # changes (see `on:` above), so this no longer fires on ordinary commits; it
+  # runs on release PR merges, and harmlessly no-ops on the rare non-release
+  # CHANGELOG edit.
   release:
     # Publish only on push to main (i.e. a merged Release PR), never on manual
     # dispatch — `release-pr` owns the manual path.
