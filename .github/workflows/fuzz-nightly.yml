@@ -74,7 +74,7 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Skip non-matching target (manual dispatch)
         # When dispatched manually with a specific target, all other matrix
@@ -98,18 +98,18 @@ jobs:
 
       - name: Install protoc
         timeout-minutes: 5
-        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f  # v1.6.1
         with:
           packages: protobuf-compiler
           version: 1
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2.81.10
+        uses: taiki-e/install-action@682e7d9e49c5e653d371fc6adbda67653461378a  # v2.82.4
         with:
           tool: cargo-fuzz@0.13.1
 
       - name: Restore working corpus
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', format('fuzz/fuzz_targets/{0}.rs', matrix.target)) }}-${{ github.run_id }}
@@ -173,7 +173,7 @@ jobs:
 
       - name: Save working corpus (even on failure)
         if: always()
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/save@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', format('fuzz/fuzz_targets/{0}.rs', matrix.target)) }}-${{ github.run_id }}
