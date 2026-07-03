@@ -4,8 +4,4 @@
 # separately by the auto-issue composite action's inline target -> @user
 # map in .github/actions/fuzz-auto-issue/action.yml.
 
-/crates/tsoracle-driver-file/   @SebastianThiebaud @crmerrill @idmao
-/crates/tsoracle-proto/         @SebastianThiebaud @crmerrill @idmao
-/fuzz/                          @SebastianThiebaud @crmerrill @idmao
-/.github/workflows/fuzz-*.yml   @SebastianThiebaud @crmerrill @idmao
-/.github/actions/fuzz-*/        @SebastianThiebaud @crmerrill @idmao
+*   @SebastianThiebaud @crmerrill @idmao
