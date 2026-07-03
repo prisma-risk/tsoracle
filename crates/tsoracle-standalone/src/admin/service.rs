@@ -26,8 +26,6 @@
 
 use std::sync::Arc;
 
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
@@ -275,26 +273,29 @@ impl GrpcAdmin for AdminServiceImpl {
     }
 }
 
-/// Spawn the admin gRPC server on `listener` under a cancel token. The caller
-/// is responsible for the `TcpListener::bind` (the openraft driver build path
-/// does this immediately before calling us). Keeping the bind in the caller
-/// lets test-only entry points hand in a `TcpListener` that has been held
-/// continuously since `lease_port()` — eliminating the close/rebind race
-/// window where another `bind(:0)` could snatch the freshly-freed ephemeral
-/// port. When `admin_tls` is `Some`, the server requires a client certificate
-/// signed by the configured admin CA (mTLS). Returns the actual bound
-/// `SocketAddr` (resolves :0 to the OS-picked port) for caller-side
-/// observability — stored on `Standalone::admin_listen_addr`.
+/// Spawn the admin gRPC server on `listener` under transport supervision.
+/// The caller is responsible for the `TcpListener::bind` (the openraft driver
+/// build path does this immediately before calling us). Keeping the bind in
+/// the caller lets test-only entry points hand in a `TcpListener` that has
+/// been held continuously since `lease_port()` — eliminating the close/rebind
+/// race window where another `bind(:0)` could snatch the freshly-freed
+/// ephemeral port. When `admin_tls` is `Some`, the server requires a client
+/// certificate signed by the configured admin CA (mTLS). An unexpected exit
+/// of the spawned server trips `fatal` so the node fails fast instead of
+/// running on without its admin surface. Returns the supervised transport
+/// handle plus the actual bound `SocketAddr` (resolves :0 to the OS-picked
+/// port) for caller-side observability — stored on
+/// `Standalone::admin_listen_addr`.
 pub(crate) async fn serve_admin(
     admin: Arc<dyn MembershipAdmin>,
     listener: tokio::net::TcpListener,
     admin_tls: Option<crate::admin_tls::AdminTlsMaterial>,
-) -> Result<(oneshot::Sender<()>, JoinHandle<()>, std::net::SocketAddr), std::io::Error> {
+    fatal: crate::FatalSignal,
+) -> Result<(crate::TransportHandle, std::net::SocketAddr), std::io::Error> {
     let bound = listener.local_addr()?;
     let service = MembershipAdminServer::new(AdminServiceImpl::new(admin))
         .max_decoding_message_size(MAX_ADMIN_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_ADMIN_MESSAGE_BYTES);
-    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let mut builder = tonic::transport::Server::builder();
     if let Some(material) = admin_tls {
         // tls_config() on a pre-validated ServerTlsConfig cannot fail in
@@ -305,17 +306,10 @@ pub(crate) async fn serve_admin(
             std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string())
         })?;
     }
-    let join = tokio::spawn(async move {
-        let shutdown = async {
-            let _ = cancel_rx.await;
-        };
-        if let Err(err) = builder
+    let handle = crate::TransportHandle::spawn_supervised("admin server", fatal, move |shutdown| {
+        builder
             .add_service(service)
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
-            .await
-        {
-            tracing::error!(error = ?err, "admin server died");
-        }
     });
-    Ok((cancel_tx, join, bound))
+    Ok((handle, bound))
 }

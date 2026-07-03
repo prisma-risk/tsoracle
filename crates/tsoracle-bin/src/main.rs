@@ -345,6 +345,31 @@ async fn admin_connect(
         .with_context(|| format!("connect {endpoint}"))
 }
 
+/// Resolve when the node should stop serving clients. Two ways in:
+///
+/// - the OS shutdown signal — graceful: run the driver's pre-shutdown drain
+///   (openraft: leadership handoff) before the gRPC server stops accepting;
+/// - a transport server died (`fatal` tripped) — fail fast: skip the drain,
+///   since the node is already degraded and the priority is a quick exit so
+///   an orchestrator can restart it, not a best-effort handoff over a
+///   possibly-broken transport.
+async fn wait_for_stop(
+    shutdown_signal: impl std::future::Future<Output = ()>,
+    fatal: tsoracle_standalone::FatalSignal,
+    drain: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
+) {
+    tokio::select! {
+        () = shutdown_signal => {
+            if let Some(drain) = drain {
+                drain.await;
+            }
+        }
+        component = fatal.tripped() => {
+            tracing::error!(component, "transport server died; shutting down to fail fast");
+        }
+    }
+}
+
 async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(&common.log).unwrap_or_else(|_| EnvFilter::new("info")))
@@ -375,19 +400,22 @@ async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
     println!("serving on {local_addr}");
     tracing::info!(addr = %local_addr, "tsoracle serving");
 
-    // On drain, run the driver's pre-shutdown step (openraft: leadership
-    // handoff) BEFORE the gRPC server stops accepting, then let serve drain.
-    let shutdown = async move {
-        tsoracle_server::shutdown_signal().await;
-        if let Some(drain) = drain {
-            drain.await;
-        }
-    };
+    // Stop on the OS shutdown signal (graceful: drain first) or on a fatal
+    // transport failure (fail fast: a node whose peer/admin server died must
+    // not keep running as a zombie).
+    let fatal = node.fatal_signal();
+    let shutdown = wait_for_stop(tsoracle_server::shutdown_signal(), fatal.clone(), drain);
     let result = server
         .serve_with_listener(listener, shutdown)
         .await
         .context("serve");
     node.shutdown().await;
+    if let Some(component) = fatal.check() {
+        // Non-zero exit so an orchestrator restarts the node.
+        return Err(anyhow::anyhow!(
+            "{component} terminated unexpectedly; exiting"
+        ));
+    }
     result
 }
 
@@ -908,6 +936,52 @@ mod capabilities_render_tests {
         let unreachable_obj = json.split("\"id\":3").nth(1).unwrap();
         assert!(!unreachable_obj.contains("active_write_version"));
         assert!(unreachable_obj.contains("\"reachable\":false"));
+    }
+}
+
+#[cfg(test)]
+mod wait_for_stop_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tsoracle_standalone::FatalSignal;
+
+    use super::wait_for_stop;
+
+    type DrainFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+    fn drain_probe() -> (Arc<AtomicBool>, Option<DrainFuture>) {
+        let drained = Arc::new(AtomicBool::new(false));
+        let drain_flag = drained.clone();
+        let drain: DrainFuture = Box::pin(async move {
+            drain_flag.store(true, Ordering::SeqCst);
+        });
+        (drained, Some(drain))
+    }
+
+    /// A fatal transport failure stops the node without any OS signal, and
+    /// skips the graceful drain: the node is already degraded, so the
+    /// priority is a fast exit and restart, not a leadership handoff.
+    #[tokio::test]
+    async fn fatal_trip_stops_without_signal_and_skips_drain() {
+        let fatal = FatalSignal::new();
+        let (drained, drain) = drain_probe();
+        fatal.trip("peer server");
+        wait_for_stop(std::future::pending(), fatal, drain).await;
+        assert!(
+            !drained.load(Ordering::SeqCst),
+            "fatal path must skip the graceful drain"
+        );
+    }
+
+    /// The OS-signal path keeps the existing graceful order: drain runs
+    /// before the stop future resolves.
+    #[tokio::test]
+    async fn signal_path_runs_drain_before_stopping() {
+        let fatal = FatalSignal::new();
+        let (drained, drain) = drain_probe();
+        wait_for_stop(std::future::ready(()), fatal, drain).await;
+        assert!(drained.load(Ordering::SeqCst));
     }
 }
 

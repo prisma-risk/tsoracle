@@ -75,7 +75,7 @@ pub mod admin_proto {
 }
 
 mod transport;
-pub use transport::TransportHandle;
+pub use transport::{FatalSignal, TransportHandle};
 
 #[cfg(any(feature = "openraft", feature = "paxos"))]
 pub(crate) mod peer_tls;
@@ -103,6 +103,10 @@ pub struct Standalone {
     /// `None` when no admin listener was requested or for drivers that do not
     /// serve an admin surface (file, paxos).
     admin_listen_addr: Option<std::net::SocketAddr>,
+    /// Fail-fast signal shared by the transport supervisors: trips when a
+    /// peer or admin server task exits unexpectedly. Inert for the file
+    /// driver, which spawns no servers.
+    fatal: FatalSignal,
 }
 
 impl Standalone {
@@ -126,6 +130,16 @@ impl Standalone {
     /// drivers without an admin surface.
     pub fn admin_listen_addr(&self) -> Option<std::net::SocketAddr> {
         self.admin_listen_addr
+    }
+
+    /// Fail-fast signal: resolves if a peer or admin transport server task
+    /// dies while the node is supposed to be healthy (issue #616's zombie
+    /// mode). The bin selects on [`FatalSignal::tripped`] next to the OS
+    /// shutdown signal and exits non-zero so an orchestrator restarts the
+    /// node instead of leaving the consensus driver running with no peer
+    /// transport.
+    pub fn fatal_signal(&self) -> FatalSignal {
+        self.fatal.clone()
     }
 }
 

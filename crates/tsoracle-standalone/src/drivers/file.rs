@@ -29,7 +29,7 @@ use tsoracle_driver_file::FileDriver;
 
 use crate::config::FileConfig;
 use crate::error::StandaloneError;
-use crate::{Standalone, TransportHandle};
+use crate::{FatalSignal, Standalone, TransportHandle};
 
 /// One-shot seeded initialization for the file driver (migration setup).
 pub fn init_file_seeded(state_dir: &Path, seed_physical_ms: u64) -> Result<(), StandaloneError> {
@@ -59,6 +59,8 @@ pub(crate) fn build_file(cfg: FileConfig) -> Result<Standalone, StandaloneError>
         )),
         admin_transport: crate::TransportHandle::noop(),
         admin_listen_addr: None,
+        // No transport servers, so nothing can ever trip it.
+        fatal: FatalSignal::new(),
     })
 }
 

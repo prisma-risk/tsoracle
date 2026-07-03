@@ -29,7 +29,6 @@ use std::sync::Arc;
 
 use openraft::{Config, Raft};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
-use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tsoracle_consensus::ConsensusDriver;
 use tsoracle_driver_openraft::{
@@ -42,7 +41,7 @@ use tsoracle_openraft_toolkit::{
 
 use crate::config::OpenraftConfig;
 use crate::error::StandaloneError;
-use crate::{Standalone, TransportHandle};
+use crate::{FatalSignal, Standalone, TransportHandle};
 
 use network::{MAX_PEER_MESSAGE_BYTES, PeerFactory, WriteVersionSource, server as peer_server};
 
@@ -300,18 +299,14 @@ async fn build_openraft_inner(
             })?;
     }
     let router = builder.add_service(peer_service);
-    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-    let join = tokio::spawn(async move {
-        let shutdown = async {
-            let _ = cancel_rx.await;
-        };
-        if let Err(e) = router
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
-            .await
-        {
-            tracing::error!(error = ?e, "raft peer server died");
-        }
-    });
+    // One fail-fast signal for both of this node's transport servers (peer +
+    // admin): an unexpected exit of either must take the whole node down
+    // instead of leaving the consensus driver running unreachable.
+    let fatal = FatalSignal::new();
+    let transport =
+        TransportHandle::spawn_supervised("raft peer server", fatal.clone(), move |shutdown| {
+            router.serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
+        });
 
     // Bootstrap once (after the peer server is listening).
     if cfg.bootstrap {
@@ -375,26 +370,31 @@ async fn build_openraft_inner(
                         source,
                     })?,
             };
-            let (cancel, join, bound) =
-                crate::admin::service::serve_admin(admin.clone(), listener, admin_tls_material)
-                    .await
-                    .map_err(|source| StandaloneError::AdminBind {
-                        addr: listen,
-                        source,
-                    })?;
-            (TransportHandle::new(cancel, join), Some(bound))
+            let (admin_handle, bound) = crate::admin::service::serve_admin(
+                admin.clone(),
+                listener,
+                admin_tls_material,
+                fatal.clone(),
+            )
+            .await
+            .map_err(|source| StandaloneError::AdminBind {
+                addr: listen,
+                source,
+            })?;
+            (admin_handle, Some(bound))
         }
         (None, _) => (TransportHandle::noop(), None),
     };
 
     Ok(Standalone {
         driver: driver as Arc<dyn ConsensusDriver>,
-        transport: TransportHandle::new(cancel_tx, join),
+        transport,
         drain: Some(Box::pin(async move {
             handoff::graceful_leader_handoff(&raft_for_drain, my_id).await
         })),
         admin,
         admin_transport,
         admin_listen_addr,
+        fatal,
     })
 }
