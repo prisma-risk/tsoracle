@@ -59,7 +59,7 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install pinned nightly toolchain
         # The pin lives in fuzz/rust-toolchain.toml; this step installs the
@@ -71,13 +71,13 @@ jobs:
 
       - name: Install protoc
         timeout-minutes: 5
-        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9  # v1.6.3
         with:
           packages: protobuf-compiler
           version: 1
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2.81.10
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
         with:
           tool: cargo-fuzz@0.13.1
 
@@ -87,7 +87,7 @@ jobs:
         # key would silently discard newly-discovered corpus entries).
         # restore-keys does prefix-match fallback to the most recent matching
         # entry; the last fallback line catches harness refactors.
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', format('fuzz/fuzz_targets/{0}.rs', matrix.target)) }}-${{ github.run_id }}
@@ -148,7 +148,7 @@ jobs:
 
       - name: Save working corpus (even on failure)
         if: always()
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', format('fuzz/fuzz_targets/{0}.rs', matrix.target)) }}-${{ github.run_id }}

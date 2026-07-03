@@ -42,7 +42,7 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install pinned nightly toolchain
         # Match the pin used by fuzz/rust-toolchain.toml so the two nightly
@@ -62,7 +62,7 @@ jobs:
 
       - name: System deps
         timeout-minutes: 5
-        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05  # v1.6.0
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9  # v1.6.3
         with:
           packages: protobuf-compiler clang libclang-dev
           version: 1
