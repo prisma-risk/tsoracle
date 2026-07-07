@@ -4,6 +4,17 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [3.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.1.0...tsoracle-server-v3.2.0) - 2026-07-07
+
+### Added
+
+- add lease API and safe frontier ([#660](https://github.com/prisma-risk/tsoracle/pull/660))
+
+### Other
+
+- *(server)* drop blanket dead_code allows in reporter/heartbeat ([#638](https://github.com/prisma-risk/tsoracle/pull/638))
+- replace stale line-number citations with symbol references ([#633](https://github.com/prisma-risk/tsoracle/pull/633))
+
 ## [3.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.0.1...tsoracle-server-v3.1.0) - 2026-05-31
 
 ### Added

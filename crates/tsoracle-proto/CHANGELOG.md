@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-proto-v1.2.0...tsoracle-proto-v1.3.0) - 2026-07-07
+
+### Added
+
+- add lease API and safe frontier ([#660](https://github.com/prisma-risk/tsoracle/pull/660))
+
 ## [1.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-proto-v1.1.0...tsoracle-proto-v1.2.0) - 2026-05-31
 
 ### Added

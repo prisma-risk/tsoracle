@@ -4,6 +4,20 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v2.2.1...tsoracle-v2.3.0) - 2026-07-07
+
+### Added
+
+- add lease API and safe frontier ([#660](https://github.com/prisma-risk/tsoracle/pull/660))
+
+### Fixed
+
+- *(standalone)* fail fast when a peer or admin server task dies ([#644](https://github.com/prisma-risk/tsoracle/pull/644))
+
+### Other
+
+- replace stale line-number citations with symbol references ([#633](https://github.com/prisma-risk/tsoracle/pull/633))
+
 ## [2.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-v2.2.0...tsoracle-v2.2.1) - 2026-06-01
 
 ### Fixed
