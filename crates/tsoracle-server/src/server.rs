@@ -31,7 +31,9 @@ use tonic::transport::Server as TonicServer;
 use tsoracle_consensus::ConsensusDriver;
 #[cfg(any(test, feature = "test-fakes"))]
 use tsoracle_core::{CoreError, WindowGrant};
-use tsoracle_core::{Epoch, PeerEndpoint};
+use tsoracle_core::{
+    DEFAULT_LEASE_TTL_CEILING_MS, DEFAULT_LEASE_TTL_FLOOR_MS, Epoch, PeerEndpoint,
+};
 use tsoracle_proto::v1::tso_service_server::TsoServiceServer;
 
 use crate::bt::Bt;
@@ -55,6 +57,8 @@ pub enum BuildError {
     /// misconfiguration surfaces immediately rather than at first request.
     #[error("max_seq_batch_keys must be >= 1 (0 would reject every GetSeqBatch request)")]
     ZeroMaxSeqBatchKeys,
+    #[error("lease_ttl_floor must be non-zero and no greater than lease_ttl_ceiling")]
+    LeaseTtlBoundsInvalid,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,6 +120,8 @@ pub struct ServerBuilder {
     heartbeat_interval: Duration,
     max_seq_count: u32,
     max_seq_batch_keys: u32,
+    lease_ttl_floor: Duration,
+    lease_ttl_ceiling: Duration,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
     tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -131,6 +137,8 @@ impl Default for ServerBuilder {
             heartbeat_interval: Duration::from_secs(10),
             max_seq_count: tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
             max_seq_batch_keys: tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+            lease_ttl_floor: Duration::from_millis(DEFAULT_LEASE_TTL_FLOOR_MS),
+            lease_ttl_ceiling: Duration::from_millis(DEFAULT_LEASE_TTL_CEILING_MS),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
             tls_config: None,
         }
@@ -152,6 +160,18 @@ impl ServerBuilder {
     }
     pub fn failover_advance(mut self, failover_advance: Duration) -> Self {
         self.failover_advance = failover_advance;
+        self
+    }
+
+    /// Server-enforced lower bound on requested lease TTLs.
+    pub fn lease_ttl_floor(mut self, lease_ttl_floor: Duration) -> Self {
+        self.lease_ttl_floor = lease_ttl_floor;
+        self
+    }
+
+    /// Server-enforced upper bound on requested lease TTLs.
+    pub fn lease_ttl_ceiling(mut self, lease_ttl_ceiling: Duration) -> Self {
+        self.lease_ttl_ceiling = lease_ttl_ceiling;
         self
     }
 
@@ -244,6 +264,9 @@ impl ServerBuilder {
         if self.max_seq_batch_keys == 0 {
             return Err(BuildError::ZeroMaxSeqBatchKeys);
         }
+        if self.lease_ttl_floor.is_zero() || self.lease_ttl_floor > self.lease_ttl_ceiling {
+            return Err(BuildError::LeaseTtlBoundsInvalid);
+        }
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
         Ok(Server {
             consensus,
@@ -252,6 +275,8 @@ impl ServerBuilder {
             failover_advance: self.failover_advance,
             shutdown_grace: self.shutdown_grace,
             heartbeat_interval: self.heartbeat_interval,
+            lease_ttl_floor: self.lease_ttl_floor,
+            lease_ttl_ceiling: self.lease_ttl_ceiling,
             core: Arc::new(ServingCore::new(
                 self.window_ahead,
                 self.max_seq_count,
@@ -269,6 +294,8 @@ pub struct Server {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) window_ahead: Duration,
     pub(crate) failover_advance: Duration,
+    pub(crate) lease_ttl_floor: Duration,
+    pub(crate) lease_ttl_ceiling: Duration,
     /// Bound on the graceful-shutdown wait for the leader-watch task before a
     /// forced abort. See [`ServerBuilder::shutdown_grace`].
     pub(crate) shutdown_grace: Duration,
@@ -1186,6 +1213,28 @@ mod tests {
             .max_seq_batch_keys(1)
             .build()
             .expect("max_seq_batch_keys(1) must build");
+    }
+
+    #[test]
+    fn build_rejects_inverted_lease_ttl_bounds() {
+        match Server::builder()
+            .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .lease_ttl_floor(Duration::from_secs(10))
+            .lease_ttl_ceiling(Duration::from_secs(5))
+            .build()
+        {
+            Err(BuildError::LeaseTtlBoundsInvalid) => {}
+            Err(other) => panic!("expected LeaseTtlBoundsInvalid, got {other:?}"),
+            Ok(_) => panic!("inverted lease TTL bounds must be rejected"),
+        }
+    }
+
+    #[test]
+    fn build_accepts_default_lease_ttl_bounds() {
+        Server::builder()
+            .consensus_driver(Arc::new(crate::test_fakes::InMemoryDriver::new()))
+            .build()
+            .expect("default lease TTL bounds must build");
     }
 
     #[test]

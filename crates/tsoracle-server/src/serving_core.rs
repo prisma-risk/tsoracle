@@ -53,8 +53,8 @@ use tokio::sync::{
     watch,
 };
 use tsoracle_core::{
-    Allocator, CommitOutcome, CoreError, Epoch, PeerEndpoint, PhysicalMs, SeqAllocator, SeqKey,
-    WindowGrant,
+    AcquireDecision, Allocator, CommitOutcome, CoreError, Epoch, LeaseError, LeaseRecord,
+    LeaseTable, PeerEndpoint, PhysicalMs, SeqAllocator, SeqKey, WindowGrant,
 };
 
 use crate::server::ServingState;
@@ -65,6 +65,7 @@ pub(crate) struct ServingCore {
     /// leadership transitions as `allocator` so `get_seq` cannot proceed
     /// during fencing. Held in a `parking_lot::Mutex` to match `allocator`.
     seq_allocator: Mutex<SeqAllocator>,
+    lease_table: Mutex<LeaseTable>,
     /// Source of truth for serving state. Mints receivers for `subscribe` and is
     /// read synchronously via `serving_state`; publish sites use `send_replace`
     /// so transitions land even with zero receivers (see #346).
@@ -106,6 +107,7 @@ impl ServingCore {
         ServingCore {
             allocator: Mutex::new(Allocator::new()),
             seq_allocator: Mutex::new(SeqAllocator::new()),
+            lease_table: Mutex::new(LeaseTable::new()),
             state_tx,
             extension_lock: AsyncMutex::new(()),
             extension_gate: RwLock::new(()),
@@ -133,6 +135,22 @@ impl ServingCore {
     /// and has no direct allocator handle).
     pub(crate) fn current_epoch(&self) -> Option<Epoch> {
         self.allocator.lock().epoch()
+    }
+
+    /// Safe frontier in physical-millisecond units:
+    /// `min(min over unexpired lease bounds, committed_high_water)`.
+    ///
+    /// The direct term is the allocator's durable ceiling for direct issuance;
+    /// a frozen lease bound stalls the frontier at that bound until expiry,
+    /// then the frontier advances past it.
+    pub(crate) fn safe_frontier_physical_ms(&self, now_ms: u64) -> u64 {
+        let Some(high_water) = self.allocator.lock().committed_high_water() else {
+            return 0;
+        };
+        match self.lease_table.lock().min_unexpired_bound(now_ms) {
+            Some(bound) => high_water.min(bound),
+            None => high_water,
+        }
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<ServingState> {
@@ -183,6 +201,7 @@ impl ServingCore {
     ) {
         self.allocator.lock().step_down();
         self.seq_allocator.lock().step_down();
+        self.lease_table.lock().clear();
         self.state_tx.send_replace(ServingState::NotServing {
             leader_endpoint,
             leader_epoch,
@@ -224,6 +243,70 @@ impl ServingCore {
         // Mirror leadership gain on the dense gate so get_seq requests track
         // the same epoch as get_ts: both paths must be fenced in lockstep.
         self.seq_allocator.lock().become_leader(epoch);
+        Ok(())
+    }
+
+    pub(crate) fn seed_leases(&self, records: Vec<LeaseRecord>, now_ms: u64) {
+        self.lease_table.lock().seed(records, now_ms);
+    }
+
+    pub(crate) fn lease_prepare_acquire(
+        &self,
+        holder: &[u8],
+        holder_epoch: u64,
+        now_ms: u64,
+    ) -> Result<AcquireDecision, LeaseError> {
+        self.lease_table
+            .lock()
+            .prepare_acquire(holder, holder_epoch, now_ms)
+    }
+
+    pub(crate) fn lease_prepare_renew(
+        &self,
+        lease_id: u64,
+        now_ms: u64,
+    ) -> Result<LeaseRecord, LeaseError> {
+        self.lease_table.lock().prepare_renew(lease_id, now_ms)
+    }
+
+    pub(crate) fn lease_prepare_release(&self, lease_id: u64) -> Option<LeaseRecord> {
+        self.lease_table.lock().prepare_release(lease_id)
+    }
+
+    pub(crate) fn lease_projected_live_set(
+        &self,
+        upsert: Option<&LeaseRecord>,
+        supersede: Option<u64>,
+        remove: Option<u64>,
+        now_ms: u64,
+    ) -> Vec<LeaseRecord> {
+        self.lease_table
+            .lock()
+            .projected_live_set(upsert, supersede, remove, now_ms)
+    }
+
+    pub(crate) fn lease_commit(
+        &self,
+        upsert: Option<LeaseRecord>,
+        supersede: Option<u64>,
+        remove: Option<u64>,
+        epoch: Epoch,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        if self.allocator.lock().epoch() != Some(epoch) {
+            return Err(CoreError::NotLeader);
+        }
+        let mut table = self.lease_table.lock();
+        if let Some(id) = remove {
+            table.commit_release(id, now_ms);
+        }
+        if let Some(record) = upsert {
+            if supersede.is_some() || table.prepare_release(record.lease_id).is_none() {
+                table.commit_acquire(record, supersede, now_ms);
+            } else {
+                table.commit_renew(record, now_ms);
+            }
+        }
         Ok(())
     }
 

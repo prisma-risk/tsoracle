@@ -386,6 +386,8 @@ async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
         .consensus_driver(node.driver.clone())
         .window_ahead(common.window_ahead)
         .failover_advance(common.failover_advance)
+        .lease_ttl_floor(common.lease_ttl_floor)
+        .lease_ttl_ceiling(common.lease_ttl_ceiling)
         .heartbeat_interval(common.heartbeat_interval);
     if let Some(tls) = tls {
         builder = builder.tls_config(tls);

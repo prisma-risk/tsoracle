@@ -232,6 +232,11 @@ pub(crate) async fn run_leader_watch(
                         // LOGICAL_MAX), so the new leader must start strictly
                         // above prior_max — hence the +1 below.
                         let prior_max = server.consensus.load_high_water().await?;
+                        let lease_records = match server.consensus.load_leases().await {
+                            Ok(records) => records,
+                            Err(ConsensusError::LeasesUnsupported) => Vec::new(),
+                            Err(err) => return Err(err.into()),
+                        };
 
                         tsoracle_failpoint::failpoint!(
                             "server::fence::after_load_before_persist",
@@ -275,6 +280,7 @@ pub(crate) async fn run_leader_watch(
                         server
                             .core
                             .seed_on_leadership_gained(serving_floor, actual, epoch)?;
+                        server.core.seed_leases(lease_records, now);
 
                         // Publish serving, then release the drain guard.
                         server.core.publish_serving();

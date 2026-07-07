@@ -38,11 +38,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Notify, watch};
 use tokio_stream::wrappers::WatchStream;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
-use tsoracle_core::{Epoch, PeerEndpoint};
+use tsoracle_core::{Epoch, LeaseRecord, PeerEndpoint};
 
 #[derive(Clone)]
 pub struct InMemoryDriver {
     state: Arc<Mutex<u64>>,
+    leases: Arc<Mutex<Vec<LeaseRecord>>>,
     tx: watch::Sender<LeaderState>,
     rx: watch::Receiver<LeaderState>,
 }
@@ -52,6 +53,7 @@ impl Default for InMemoryDriver {
         let (tx, rx) = watch::channel(LeaderState::Unknown);
         InMemoryDriver {
             state: Arc::new(Mutex::new(0)),
+            leases: Arc::new(Mutex::new(Vec::new())),
             tx,
             rx,
         }
@@ -86,6 +88,10 @@ impl InMemoryDriver {
     pub fn current_high_water(&self) -> u64 {
         *self.state.lock()
     }
+
+    pub fn current_leases(&self) -> Vec<LeaseRecord> {
+        self.leases.lock().clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -108,6 +114,19 @@ impl ConsensusDriver for InMemoryDriver {
             *high_water = at_least;
         }
         Ok(*high_water)
+    }
+
+    async fn load_leases(&self) -> Result<Vec<LeaseRecord>, ConsensusError> {
+        Ok(self.leases.lock().clone())
+    }
+
+    async fn persist_leases(
+        &self,
+        live: &[LeaseRecord],
+        _epoch: Epoch,
+    ) -> Result<(), ConsensusError> {
+        *self.leases.lock() = live.to_vec();
+        Ok(())
     }
 }
 

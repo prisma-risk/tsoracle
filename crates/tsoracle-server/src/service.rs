@@ -28,8 +28,10 @@ use tonic::{Request, Response, Status};
 use tsoracle_consensus::ConsensusError;
 use tsoracle_core::{CommitOutcome, CoreError, Epoch, PeerEndpoint};
 use tsoracle_proto::v1::{
-    EpochWire, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetSeqBatchRequest,
+    AcquireLeaseRequest, AcquireLeaseResponse, EpochWire, GetCurrentMaxSafeRequest,
+    GetCurrentMaxSafeResponse, GetSafeFrontierRequest, GetSafeFrontierResponse, GetSeqBatchRequest,
     GetSeqBatchResponse, GetSeqRequest, GetSeqResponse, GetTsRequest, GetTsResponse, LeaderHint,
+    ReleaseLeaseRequest, ReleaseLeaseResponse, RenewLeaseRequest, RenewLeaseResponse,
     SeqGrantEntry, tso_service_server::TsoService,
 };
 
@@ -51,7 +53,7 @@ fn wire_epoch(epoch: Option<Epoch>) -> Option<EpochWire> {
 /// Snapshot the best-available leader hint from the serving-state channel. Used
 /// wherever we need to surface a `FAILED_PRECONDITION` "not leader" response
 /// from a service-layer code path; matches what the fast NOT_LEADER gate emits.
-fn leader_hint_from(server: &Server) -> LeaderHint {
+pub(crate) fn leader_hint_from(server: &Server) -> LeaderHint {
     let (leader_endpoint, leader_epoch) = match server.core.serving_state() {
         ServingState::NotServing {
             leader_endpoint,
@@ -69,7 +71,7 @@ fn leader_hint_from(server: &Server) -> LeaderHint {
     }
 }
 
-fn core_status(error: CoreError) -> Status {
+pub(crate) fn core_status(error: CoreError) -> Status {
     match error {
         CoreError::NotLeader => Status::failed_precondition("not leader"),
         CoreError::WindowExhausted => Status::internal("window exhausted"),
@@ -489,6 +491,52 @@ impl TsoService for TsoServiceImpl {
             }
             Err(other) => Err(Status::internal(other.to_string())),
         }
+    }
+
+    async fn acquire_lease(
+        &self,
+        req: Request<AcquireLeaseRequest>,
+    ) -> Result<Response<AcquireLeaseResponse>, Status> {
+        crate::lease_flow::acquire_lease(&self.server, req.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    async fn renew_lease(
+        &self,
+        req: Request<RenewLeaseRequest>,
+    ) -> Result<Response<RenewLeaseResponse>, Status> {
+        crate::lease_flow::renew_lease(&self.server, req.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    async fn release_lease(
+        &self,
+        req: Request<ReleaseLeaseRequest>,
+    ) -> Result<Response<ReleaseLeaseResponse>, Status> {
+        crate::lease_flow::release_lease(&self.server, req.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    async fn get_safe_frontier(
+        &self,
+        _request: Request<GetSafeFrontierRequest>,
+    ) -> Result<Response<GetSafeFrontierResponse>, Status> {
+        let now_ms = self.server.clock.now_ms();
+        let frontier_physical_ms = self.server.core.safe_frontier_physical_ms(now_ms);
+        let (epoch_hi, epoch_lo) = self
+            .server
+            .core
+            .current_epoch()
+            .unwrap_or(Epoch::ZERO)
+            .to_wire();
+        Ok(Response::new(GetSafeFrontierResponse {
+            frontier_physical_ms,
+            epoch_hi,
+            epoch_lo,
+        }))
     }
 }
 

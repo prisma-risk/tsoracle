@@ -26,6 +26,15 @@ Return the durably-persisted high-water. The read MUST be linearized — the ret
 - **etcd:** transactional update: read current value, compare-and-swap with `max(current, at_least)`. The lease + revision number gives you epoch fencing.
 - **Single-node:** read current value under a mutex, take max, write the record atomically (write-then-rename + dir fsync), return.
 
+## Leases (optional)
+
+`load_leases` and `persist_leases` back the lease RPCs. Both default to `ConsensusError::LeasesUnsupported`; a driver that only serves direct timestamps can leave them alone, and the server's failover fence treats that as an empty lease set.
+
+- `load_leases` returns the durably committed lease set, linearized with the same read contract as `load_high_water`.
+- `persist_leases(live, epoch)` atomically replaces the full live lease set. `live` is absolute state, not a delta, so replay is idempotent. The `epoch` argument fences stale proposers through the same mechanisms as `persist_high_water`.
+
+This is intentionally unlike `advance_dense`: dense sequence advances are fetch-add operations that must commit exactly once, while lease persistence is full-set replacement. Superseding an older lease and inserting the newer lease happens in one persisted set.
+
 ## Single-leader is intrinsic, not a consensus choice
 
 Any correct TSO has at most one writer to the durable high-water at any moment. This is irreducible — concurrent writers can issue duplicate timestamps. So the `ConsensusDriver` contract implicitly requires single-writer-at-a-time. Multi-writer "consensus" implementations (CRDT, last-write-wins) are not compatible with tsoracle.

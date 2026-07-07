@@ -36,12 +36,13 @@ sequenceDiagram
 
 ## The ConsensusDriver trait
 
-The `ConsensusDriver` trait in `tsoracle-consensus` is the single injection point for HA and durable persistence. Three required methods, plus two optional dense-sequence methods:
+The `ConsensusDriver` trait in `tsoracle-consensus` is the single injection point for HA and durable persistence. Three required methods, plus optional dense-sequence and lease methods:
 
 - [`leadership_events`](#leadership_events) — emit leader-state transitions
 - [`load_high_water`](#load_high_water) — read the durable high-water, linearized
 - [`persist_high_water`](#persist_high_water) — advance the durable high-water, monotonically, fenced by epoch
 - [`load_dense_seq` / `advance_dense`](#dense-sequences-optional) — *optional*: back the `GetSeq` RPC. Both default to `DenseUnsupported`; override them to serve gapless sequences.
+- [`load_leases` / `persist_leases`](#leases-optional) — *optional*: back the lease RPCs. Both default to `LeasesUnsupported`; override them to make lease grants durable across failover.
 
 Code lives in `crates/tsoracle-consensus/src/lib.rs`.
 
@@ -89,6 +90,15 @@ Per-driver recipes:
 - **paxos / others:** leave defaulted (`DenseUnsupported`) until the per-key advance can be threaded through the log; the server answers `GetSeq` with `UNIMPLEMENTED` in the meantime.
 
 See [Driver Comparison → Dense gapless sequences](driver-comparison.md#dense-gapless-sequences-getseq) for the support matrix and [Interface Reference → GetSeq](interface-reference.md#rpc-getseq) for the wire contract.
+
+## Leases (optional)
+
+Two optional methods back `AcquireLease`, `RenewLease`, and `ReleaseLease`. They default to `Err(ConsensusError::LeasesUnsupported)`, which the server maps to gRPC `UNIMPLEMENTED` for the lease RPCs. The failover fence treats an unsupported driver as an empty lease set so timestamp serving still boots normally.
+
+- `async fn load_leases(&self) -> Result<Vec<LeaseRecord>, ConsensusError>` — return the durably committed lease set, linearized with the same read contract as `load_high_water`. The fence calls this on every leadership gain and seeds the in-memory lease table from it.
+- `async fn persist_leases(&self, live: &[LeaseRecord], epoch: Epoch) -> Result<(), ConsensusError>` — atomically replace the full live lease set. The argument is absolute state, not a delta, so replay is idempotent and a release or expiry prune is just a set replacement. `epoch` fences stale proposers using the same driver-specific mechanisms as `persist_high_water`.
+
+This differs from dense sequences: `advance_dense` is a non-idempotent fetch-add and must commit exactly once, while `persist_leases` is idempotent full-state replacement. A grant that supersedes an older lease persists both records in one full-set write, making supersession atomic. The file driver is the reference implementation: it stores a versioned, checksummed `leases` file with tmpfile fsync, rename, and directory fsync.
 
 ## Choosing a driver
 

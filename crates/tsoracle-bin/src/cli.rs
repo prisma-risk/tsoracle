@@ -183,6 +183,12 @@ pub struct CommonServeArgs {
     /// Advance on leadership gain.
     #[arg(long, value_parser = parse_duration, default_value = "1s")]
     pub failover_advance: Duration,
+    /// Server-enforced lower bound on requested lease TTLs.
+    #[arg(long, value_parser = parse_duration, default_value = "5s")]
+    pub lease_ttl_floor: Duration,
+    /// Server-enforced upper bound on requested lease TTLs.
+    #[arg(long, value_parser = parse_duration, default_value = "300s")]
+    pub lease_ttl_ceiling: Duration,
     /// Interval between proof-of-life heartbeat log lines. Default 10s.
     /// Pass `0s` to disable.
     #[arg(long, value_parser = parse_duration, default_value = "10s")]
@@ -321,6 +327,54 @@ pub struct InitArgs {
 
 pub fn parse_duration(input: &str) -> Result<Duration, String> {
     humantime::parse_duration(input).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod common_serve_args_tests {
+    use super::{Cli, Cmd, ServeCmd};
+    use clap::Parser;
+    use std::time::Duration;
+
+    #[test]
+    fn lease_ttl_flags_parse_with_defaults_and_override() {
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "serve",
+            "file",
+            "--state-dir",
+            "/tmp/tsoracle-data",
+        ])
+        .unwrap();
+        let Some(Cmd::Serve(serve)) = cli.cmd else {
+            panic!("expected serve command");
+        };
+        let ServeCmd::File(args) = *serve else {
+            panic!("expected file args");
+        };
+        assert_eq!(args.common.lease_ttl_floor, Duration::from_secs(5));
+        assert_eq!(args.common.lease_ttl_ceiling, Duration::from_secs(300));
+
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "serve",
+            "file",
+            "--lease-ttl-floor",
+            "10s",
+            "--lease-ttl-ceiling",
+            "120s",
+            "--state-dir",
+            "/tmp/tsoracle-data",
+        ])
+        .unwrap();
+        let Some(Cmd::Serve(serve)) = cli.cmd else {
+            panic!("expected serve command");
+        };
+        let ServeCmd::File(args) = *serve else {
+            panic!("expected file args");
+        };
+        assert_eq!(args.common.lease_ttl_floor, Duration::from_secs(10));
+        assert_eq!(args.common.lease_ttl_ceiling, Duration::from_secs(120));
+    }
 }
 
 #[cfg(all(test, feature = "openraft"))]

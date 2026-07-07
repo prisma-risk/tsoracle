@@ -17,7 +17,7 @@ The wire source of truth lives in the [`tsoracle-proto`](../crates/tsoracle-prot
 
 ### Service: `tsoracle.v1.TsoService`
 
-Three RPCs — `GetTs` (timestamps), `GetSeq` (gapless sequences), and `GetCurrentMaxSafe` (safe-point reads). Default port is **`50551`** (loopback by default; configurable via `--listen`). The server speaks gRPC over HTTP/2 in either plaintext (`h2c`) or TLS, controlled by `--tls-cert`/`--tls-key`/`--tls-client-ca`.
+Seven RPCs — `GetTs` (timestamps), `GetSeq` / `GetSeqBatch` (gapless sequences), `GetCurrentMaxSafe` (legacy safe-point reads), `AcquireLease`, `RenewLease`, `ReleaseLease`, and `GetSafeFrontier` (lease-aware safe-frontier reads). Default port is **`50551`** (loopback by default; configurable via `--listen`). The server speaks gRPC over HTTP/2 in either plaintext (`h2c`) or TLS, controlled by `--tls-cert`/`--tls-key`/`--tls-client-ca`.
 
 #### RPC: `GetTs`
 
@@ -118,6 +118,88 @@ Allocate a contiguous block of `count` dense ordinals for a named `key` — a ga
 | `INTERNAL` | A permanent driver fault or violated invariant reached after the request was admitted; the durable advance may have committed. | — | **No** — ambiguous |
 
 Because the dense path is non-idempotent, `tsoracle-client` treats any post-send failure that is *not* provably pre-commit-certain (a transport timeout after the request was sent, or `INTERNAL`) as `ClientError::SeqUncertain` and does **not** retry it — the advance may already have committed. Every pre-commit-certain status above is handled or retried normally. See [GetSeq — dense, gapless sequences](client-api-and-usage.md#getseq--dense-gapless-sequences) for the caller's reconciliation contract.
+
+#### RPC: `AcquireLease`
+
+Acquire or idempotently re-acquire a stamping lease for an opaque holder group. Only the current leader serves this RPC.
+
+**Request — `AcquireLeaseRequest`:**
+
+| Field | Type | Constraint | Meaning |
+|---|---|---|---|
+| `holder` | `bytes` (1) | 1..=128 bytes | Opaque holder-group key; compared only for byte equality. |
+| `holder_epoch` | `uint64` (2) | caller-defined monotone value within `holder` | Equal epoch is idempotent, higher epoch supersedes, lower epoch rejects. |
+| `ttl_ms` | `uint64` (3) | server floor/ceiling, defaults 5s/300s | Requested lease TTL in milliseconds. |
+
+**Response — `AcquireLeaseResponse`:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `lease_id` | `uint64` (1) | Stable identity for renew/release. Equal to the acquire-time committed high-water value. |
+| `ts_upper_bound` | `uint64` (2) | Highest physical millisecond the holder may stamp. |
+| `expires_at_ms` | `uint64` (3) | Server-clock expiry in unix milliseconds. Expiry is `now_ms >= expires_at_ms`. |
+| `epoch` | `EpochWire` (4) | Leader epoch that granted the lease. |
+
+**Error statuses returned from `AcquireLease`:**
+
+| `tonic::Code` | When | Trailer |
+|---|---|---|
+| `FAILED_PRECONDITION` | This node is not the leader, or the requested holder epoch is stale. | Leader hint on not-leader only |
+| `INVALID_ARGUMENT` | Empty/oversized holder or TTL outside server bounds. | — |
+| `UNIMPLEMENTED` | The consensus driver does not support durable leases. | — |
+| `UNAVAILABLE` | A transient high-water or lease-set persist failure occurred before the grant committed in memory. | — |
+| `INTERNAL` | Permanent driver fault or allocator invariant violation. | — |
+
+#### RPC: `RenewLease`
+
+Advance a live lease's bound and expiry, re-arming its acquire-time TTL.
+
+**Request — `RenewLeaseRequest`:** `lease_id` (`uint64`, field 1).
+
+**Response — `RenewLeaseResponse`:** `ts_upper_bound` (`uint64`, field 1), `expires_at_ms` (`uint64`, field 2), and `epoch` (`EpochWire`, field 3).
+
+**Error statuses returned from `RenewLease`:**
+
+| `tonic::Code` | When | Trailer |
+|---|---|---|
+| `FAILED_PRECONDITION` | Not leader, expired lease, or superseded lease. | Leader hint on not-leader only |
+| `NOT_FOUND` | Unknown lease id. | — |
+| `UNIMPLEMENTED` | The consensus driver does not support durable leases. | — |
+| `UNAVAILABLE` | Transient persist failure before the renewal committed in memory. | — |
+| `INTERNAL` | Permanent driver fault or invariant violation. | — |
+
+#### RPC: `ReleaseLease`
+
+Surrender a lease immediately. Release is idempotent: unknown, expired, or already-released ids succeed without a durable write.
+
+**Request — `ReleaseLeaseRequest`:** `lease_id` (`uint64`, field 1).
+
+**Response — `ReleaseLeaseResponse`:** empty.
+
+**Error statuses returned from `ReleaseLease`:**
+
+| `tonic::Code` | When | Trailer |
+|---|---|---|
+| `FAILED_PRECONDITION` | This node is not the leader. | Leader hint |
+| `UNIMPLEMENTED` | The consensus driver does not support durable leases. | — |
+| `UNAVAILABLE` | Transient lease-set persist failure. | — |
+| `INTERNAL` | Permanent driver fault or invariant violation. | — |
+
+#### RPC: `GetSafeFrontier`
+
+Read the lease-aware safe frontier: `min(unexpired lease ts_upper_bound values, committed high-water)`, in physical-millisecond units.
+
+**Request — `GetSafeFrontierRequest`:** empty.
+
+**Response — `GetSafeFrontierResponse`:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `frontier_physical_ms` | `uint64` (1) | Lease-aware frontier; zero on followers or before a leader admits a window. |
+| `epoch_hi` | `uint64` (2) | Upper 64 bits of the leader epoch. |
+| `epoch_lo` | `uint64` (3) | Lower 64 bits of the leader epoch. |
+
+Followers return `frontier_physical_ms = 0` and zero epoch, matching `GetCurrentMaxSafe`; this RPC does not redirect.
 
 ### Service: `tsoracle.admin.v1.MembershipAdmin`
 
@@ -243,6 +325,8 @@ These come from `CommonServeArgs`. Every `serve` mode accepts them with the same
 | `--listen` | `SocketAddr` | `127.0.0.1:50551` | Client-facing gRPC listen address (the `TsoService` port). |
 | `--window-ahead` | duration (humantime) | `3s` | How far ahead of wall-clock the leader advances its persisted high-water. Higher values reduce extension frequency at the cost of a larger time-to-live for a stale leader's window. See [Sizing window_ahead](operations.md#sizing-window_ahead). |
 | `--failover-advance` | duration | `1s` | How far past the recovered high-water the failover fence advances on leadership gain. Must exceed the worst-case wall-clock skew between leaders. See [Sizing failover_advance](operations.md#sizing-failover_advance). |
+| `--lease-ttl-floor` | duration | `5s` | Lower bound on requested lease TTLs. |
+| `--lease-ttl-ceiling` | duration | `300s` | Upper bound on requested lease TTLs. |
 | `--log` | string | `info` | `tracing` env-filter directive (`info`, `debug`, `tsoracle_server=debug,info`, etc.). |
 | `--tls-cert` | path | — | PEM server certificate chain for the client gRPC API. Enables TLS on `--listen`. |
 | `--tls-key` | path | — | PEM private key paired with `--tls-cert`. |

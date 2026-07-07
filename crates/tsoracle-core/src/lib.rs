@@ -28,6 +28,7 @@
 
 mod allocator;
 mod epoch;
+mod lease;
 mod peer;
 pub mod seq;
 mod timestamp;
@@ -36,6 +37,10 @@ pub mod docs;
 
 pub use allocator::{Allocator, CommitOutcome, CoreError, IgnoreReason, PhysicalMs, WindowGrant};
 pub use epoch::Epoch;
+pub use lease::{
+    AcquireDecision, DEFAULT_LEASE_TTL_CEILING_MS, DEFAULT_LEASE_TTL_FLOOR_MS, LeaseError,
+    LeaseRecord, LeaseTable, MAX_LEASE_HOLDER_LEN, validate_lease_request,
+};
 pub use peer::{PeerEndpoint, PeerEndpointError, TsoPeer};
 pub use seq::{
     DEFAULT_MAX_SEQ_BATCH_KEYS, DEFAULT_MAX_SEQ_COUNT, MAX_SEQ_KEY_LEN, SeqAllocator, SeqGrant,
