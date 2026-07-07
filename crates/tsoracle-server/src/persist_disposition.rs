@@ -109,7 +109,8 @@ pub(crate) fn classify(error: ConsensusError) -> PersistDisposition {
         | ConsensusError::SeqKeyCardinalityExceeded { .. }
         | ConsensusError::SeqOverflow
         | ConsensusError::DenseNotActivated { .. }
-        | ConsensusError::DenseBatchNotActivated { .. }) => {
+        | ConsensusError::DenseBatchNotActivated { .. }
+        | ConsensusError::LeasesUnsupported) => {
             PersistDisposition::Permanent(Box::new(dense_error))
         }
     }

@@ -35,9 +35,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
 use tokio_stream::wrappers::WatchStream;
 use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
-use tsoracle_core::{Epoch, PHYSICAL_MS_MAX};
+use tsoracle_core::{Epoch, LeaseRecord, PHYSICAL_MS_MAX};
 
-use crate::{dense_record, record};
+use crate::{dense_record, lease_record, record};
 
 /// Default genesis cardinality cap for a freshly-initialized dense record.
 /// Immutable once written (Plan 1 has no reconfiguration path).
@@ -92,6 +92,8 @@ pub struct FileDriver {
     /// In-memory mirror of the on-disk dense map. The `Mutex` serializes
     /// the read-modify-write fetch-add so concurrent callers don't race.
     dense: tokio::sync::Mutex<DenseState>,
+    /// In-memory mirror of the on-disk lease set.
+    leases: tokio::sync::Mutex<Vec<LeaseRecord>>,
 }
 
 impl FileDriver {
@@ -146,6 +148,14 @@ impl FileDriver {
                 cap: DEFAULT_DENSE_CARDINALITY_CAP,
             }
         };
+        let leases_path = dir.join("leases");
+        let leases = if leases_path.exists() {
+            let bytes = fs::read(&leases_path)?;
+            lease_record::decode(&bytes)
+                .map_err(|e| FileDriverError::Io(std::io::Error::other(e)))?
+        } else {
+            Vec::new()
+        };
 
         let (tx, rx) = watch::channel(LeaderState::Leader { epoch: Epoch::ZERO });
         Ok(Arc::new(FileDriver {
@@ -156,6 +166,7 @@ impl FileDriver {
             leader_rx: rx,
             _lock: lock_file,
             dense: tokio::sync::Mutex::new(dense_state),
+            leases: tokio::sync::Mutex::new(leases),
         }))
     }
 
@@ -350,6 +361,65 @@ fn write_dense_record(
     Ok(())
 }
 
+/// Atomically persist the lease set. Mirrors `write_record`'s
+/// tmp+fsync+rename+dir-fsync protocol for the `leases` file.
+fn write_lease_record(dir: &Path, records: &[LeaseRecord]) -> Result<(), FileDriverError> {
+    tsoracle_failpoint::failpoint!("file_driver::leases::before_write", |_arg: Option<
+        String,
+    >|
+     -> Result<
+        (),
+        FileDriverError,
+    > {
+        Err(FileDriverError::Io(std::io::Error::other(
+            "failpoint: file_driver::leases::before_write",
+        )))
+    });
+
+    let tmp = dir.join("leases.tmp");
+    let final_path = dir.join("leases");
+    let bytes = lease_record::encode(records);
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    tsoracle_failpoint::failpoint!(
+        "file_driver::leases::after_tmp_fsync_before_rename",
+        |_arg: Option<String>| -> Result<(), FileDriverError> {
+            Err(FileDriverError::Io(std::io::Error::other(
+                "failpoint: file_driver::leases::after_tmp_fsync_before_rename",
+            )))
+        }
+    );
+
+    fs::rename(&tmp, &final_path)?;
+
+    tsoracle_failpoint::failpoint!("file_driver::leases::after_rename_before_dir_fsync");
+
+    #[cfg(unix)]
+    {
+        let dir_file = fs::File::open(dir)?;
+        let fd = dir_file.as_raw_fd();
+        // SAFETY: fd is a valid open directory descriptor for the duration of this call.
+        let rc = unsafe { libc::fsync(fd) };
+        if rc != 0 {
+            return Err(FileDriverError::Io(std::io::Error::last_os_error()));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let final_file = fs::OpenOptions::new().write(true).open(&final_path)?;
+        final_file.sync_all()?;
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl ConsensusDriver for FileDriver {
     fn leadership_events(&self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
@@ -498,6 +568,26 @@ impl ConsensusDriver for FileDriver {
 
         dense.map = new_map;
         Ok(starts)
+    }
+
+    async fn load_leases(&self) -> Result<Vec<LeaseRecord>, ConsensusError> {
+        Ok(self.leases.lock().await.clone())
+    }
+
+    async fn persist_leases(
+        &self,
+        live: &[LeaseRecord],
+        _epoch: Epoch,
+    ) -> Result<(), ConsensusError> {
+        let _guard = self.write_lock.lock().await;
+        let dir = self.dir.clone();
+        let to_write = live.to_vec();
+        tokio::task::spawn_blocking(move || write_lease_record(&dir, &to_write))
+            .await
+            .map_err(|e| ConsensusError::PermanentDriver(Box::new(std::io::Error::other(e))))?
+            .map_err(|e| ConsensusError::PermanentDriver(Box::new(e)))?;
+        *self.leases.lock().await = live.to_vec();
+        Ok(())
     }
 }
 
@@ -684,6 +774,55 @@ mod dense_tests {
             Err(tsoracle_consensus::ConsensusError::SeqOverflow)
         ));
         assert_eq!(d.load_dense_seq(&key("k")).await.unwrap(), u64::MAX - 5);
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn rec(lease_id: u64) -> LeaseRecord {
+        LeaseRecord {
+            lease_id,
+            holder: format!("holder-{lease_id}").into_bytes(),
+            holder_epoch: lease_id + 10,
+            ttl_ms: 10_000,
+            ts_upper_bound: lease_id * 100,
+            expires_at_ms: lease_id * 100 + 10_000,
+            superseded: lease_id % 2 == 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_dir_has_empty_lease_set() {
+        let dir = tempdir().unwrap();
+        let driver = FileDriver::open_or_init(dir.path()).unwrap();
+        assert_eq!(
+            driver.load_leases().await.unwrap(),
+            Vec::<LeaseRecord>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_leases_then_load_leases_roundtrips() {
+        let dir = tempdir().unwrap();
+        let driver = FileDriver::open_or_init(dir.path()).unwrap();
+        let records = vec![rec(1), rec(2)];
+        driver.persist_leases(&records, Epoch(1)).await.unwrap();
+        assert_eq!(driver.load_leases().await.unwrap(), records);
+    }
+
+    #[tokio::test]
+    async fn leases_survive_reopen() {
+        let dir = tempdir().unwrap();
+        let records = vec![rec(1), rec(2)];
+        {
+            let driver = FileDriver::open_or_init(dir.path()).unwrap();
+            driver.persist_leases(&records, Epoch(1)).await.unwrap();
+        }
+        let reopened = FileDriver::open_or_init(dir.path()).unwrap();
+        assert_eq!(reopened.load_leases().await.unwrap(), records);
     }
 }
 

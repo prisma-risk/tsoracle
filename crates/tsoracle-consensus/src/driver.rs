@@ -162,6 +162,30 @@ pub trait ConsensusDriver: Send + Sync + 'static {
         let (_, _) = (entries, expected_epoch);
         Err(ConsensusError::DenseUnsupported)
     }
+
+    /// Read the durably-committed lease set. Linearized, like
+    /// [`load_high_water`](Self::load_high_water): the returned set must
+    /// reflect every lease write durably committed before this call started,
+    /// from any prior leader at any prior epoch. Default: unsupported.
+    async fn load_leases(&self) -> Result<Vec<tsoracle_core::LeaseRecord>, ConsensusError> {
+        Err(ConsensusError::LeasesUnsupported)
+    }
+
+    /// Durably replace the full live lease set, atomically.
+    ///
+    /// `live` is absolute state, not a delta, so replay is idempotent. The
+    /// server serializes lease mutations on its window-extension lock and
+    /// supplies `epoch` for stale-proposer fencing under the same mechanisms
+    /// documented on [`persist_high_water`](Self::persist_high_water).
+    /// Default: unsupported.
+    async fn persist_leases(
+        &self,
+        live: &[tsoracle_core::LeaseRecord],
+        epoch: Epoch,
+    ) -> Result<(), ConsensusError> {
+        let (_, _) = (live, epoch);
+        Err(ConsensusError::LeasesUnsupported)
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +268,29 @@ mod tests {
                     Err(ConsensusError::DenseUnsupported)
                 ),
                 "default advance_dense_batch is DenseUnsupported",
+            );
+            assert!(
+                matches!(
+                    driver.load_leases().await,
+                    Err(ConsensusError::LeasesUnsupported)
+                ),
+                "default load_leases is LeasesUnsupported",
+            );
+            let record = tsoracle_core::LeaseRecord {
+                lease_id: 1,
+                holder: b"g1".to_vec(),
+                holder_epoch: 1,
+                ttl_ms: 10_000,
+                ts_upper_bound: 1,
+                expires_at_ms: 10_001,
+                superseded: false,
+            };
+            assert!(
+                matches!(
+                    driver.persist_leases(&[record], Epoch(1)).await,
+                    Err(ConsensusError::LeasesUnsupported)
+                ),
+                "default persist_leases is LeasesUnsupported",
             );
         });
     }

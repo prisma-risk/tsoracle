@@ -78,6 +78,8 @@ pub enum ConsensusError {
         "dense batch sequences require write version {required} but the cluster is at {active}; activate the format first"
     )]
     DenseBatchNotActivated { required: u8, active: u8 },
+    #[error("leases are not supported by this driver")]
+    LeasesUnsupported,
 }
 
 #[cfg(test)]

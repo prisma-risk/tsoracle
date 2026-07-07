@@ -56,8 +56,10 @@ use crate::{Server, ServerError, ServingState};
 use crate::leader_hint::not_leader_status;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use tsoracle_proto::v1::{
+    AcquireLeaseRequest, AcquireLeaseResponse, GetSafeFrontierRequest, GetSafeFrontierResponse,
     GetSeqBatchRequest, GetSeqBatchResponse, GetSeqRequest, GetSeqResponse, GetTsRequest,
-    GetTsResponse, LeaderHint,
+    GetTsResponse, LeaderHint, ReleaseLeaseRequest, ReleaseLeaseResponse, RenewLeaseRequest,
+    RenewLeaseResponse,
     tso_service_server::{TsoService, TsoServiceServer},
 };
 
@@ -342,13 +344,59 @@ impl TsoService for FixedHintService {
             },
         ))
     }
+
+    async fn acquire_lease(
+        &self,
+        _request: tonic::Request<AcquireLeaseRequest>,
+    ) -> Result<tonic::Response<AcquireLeaseResponse>, tonic::Status> {
+        Err(not_leader_status(
+            &crate::reporter::Reporter::for_tests(),
+            LeaderHint {
+                leader_endpoint: Some(self.hint_endpoint.clone()),
+                leader_epoch: None,
+            },
+        ))
+    }
+
+    async fn renew_lease(
+        &self,
+        _request: tonic::Request<RenewLeaseRequest>,
+    ) -> Result<tonic::Response<RenewLeaseResponse>, tonic::Status> {
+        Err(not_leader_status(
+            &crate::reporter::Reporter::for_tests(),
+            LeaderHint {
+                leader_endpoint: Some(self.hint_endpoint.clone()),
+                leader_epoch: None,
+            },
+        ))
+    }
+
+    async fn release_lease(
+        &self,
+        _request: tonic::Request<ReleaseLeaseRequest>,
+    ) -> Result<tonic::Response<ReleaseLeaseResponse>, tonic::Status> {
+        Err(not_leader_status(
+            &crate::reporter::Reporter::for_tests(),
+            LeaderHint {
+                leader_endpoint: Some(self.hint_endpoint.clone()),
+                leader_epoch: None,
+            },
+        ))
+    }
+
+    async fn get_safe_frontier(
+        &self,
+        _request: tonic::Request<GetSafeFrontierRequest>,
+    ) -> Result<tonic::Response<GetSafeFrontierResponse>, tonic::Status> {
+        Ok(tonic::Response::new(GetSafeFrontierResponse::default()))
+    }
 }
 
 /// Bind a TLS gRPC peer on `127.0.0.1:0` that always replies `NOT_LEADER` with a
 /// leader-hint trailer pointing at `hint_endpoint`, and return its address. The
-/// spawned task is detached and lives until the test process exits. See
-/// the private `FixedHintService` for why tests inject the hint here rather than through a
-/// real server's leader-watch path.
+/// spawned task is detached and lives until the test process exits.
+/// `FixedHintService` explains why tests inject the hint here rather than
+/// through a real server's leader-watch path.
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub async fn boot_fixed_hint_server_tls(
     hint_endpoint: String,

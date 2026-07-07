@@ -32,6 +32,7 @@ mod fence;
 #[cfg(feature = "tracing")]
 pub(crate) mod heartbeat;
 mod leader_hint;
+mod lease_flow;
 mod persist_disposition;
 pub(crate) mod reporter;
 mod server;

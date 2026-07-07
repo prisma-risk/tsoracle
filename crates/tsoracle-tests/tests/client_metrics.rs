@@ -191,6 +191,42 @@ impl TsoService for MalformedHintService {
             "get_seq_batch not implemented in test stub",
         ))
     }
+
+    async fn acquire_lease(
+        &self,
+        _request: tonic::Request<tsoracle_proto::v1::AcquireLeaseRequest>,
+    ) -> Result<tonic::Response<tsoracle_proto::v1::AcquireLeaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "acquire_lease not implemented in test stub",
+        ))
+    }
+
+    async fn renew_lease(
+        &self,
+        _request: tonic::Request<tsoracle_proto::v1::RenewLeaseRequest>,
+    ) -> Result<tonic::Response<tsoracle_proto::v1::RenewLeaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "renew_lease not implemented in test stub",
+        ))
+    }
+
+    async fn release_lease(
+        &self,
+        _request: tonic::Request<tsoracle_proto::v1::ReleaseLeaseRequest>,
+    ) -> Result<tonic::Response<tsoracle_proto::v1::ReleaseLeaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "release_lease not implemented in test stub",
+        ))
+    }
+
+    async fn get_safe_frontier(
+        &self,
+        _request: tonic::Request<tsoracle_proto::v1::GetSafeFrontierRequest>,
+    ) -> Result<tonic::Response<tsoracle_proto::v1::GetSafeFrontierResponse>, tonic::Status> {
+        Ok(tonic::Response::new(
+            tsoracle_proto::v1::GetSafeFrontierResponse::default(),
+        ))
+    }
 }
 
 /// Bind a malformed-hint fake server on a random port. Returns its socket

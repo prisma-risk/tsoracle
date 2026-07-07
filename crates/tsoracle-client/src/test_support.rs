@@ -32,8 +32,10 @@ use std::time::Duration;
 
 use tsoracle_proto::v1::tso_service_server::{TsoService, TsoServiceServer};
 use tsoracle_proto::v1::{
-    GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse, GetSeqBatchRequest, GetSeqBatchResponse,
-    GetSeqRequest, GetSeqResponse, GetTsRequest, GetTsResponse,
+    AcquireLeaseRequest, AcquireLeaseResponse, GetCurrentMaxSafeRequest, GetCurrentMaxSafeResponse,
+    GetSafeFrontierRequest, GetSafeFrontierResponse, GetSeqBatchRequest, GetSeqBatchResponse,
+    GetSeqRequest, GetSeqResponse, GetTsRequest, GetTsResponse, ReleaseLeaseRequest,
+    ReleaseLeaseResponse, RenewLeaseRequest, RenewLeaseResponse,
 };
 
 use crate::RetryPolicy;
@@ -202,5 +204,39 @@ impl TsoService for FakeTso {
         (self.get_seq_batch)(request.into_inner())
             .await
             .map(tonic::Response::new)
+    }
+
+    async fn acquire_lease(
+        &self,
+        _request: tonic::Request<AcquireLeaseRequest>,
+    ) -> Result<tonic::Response<AcquireLeaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "acquire_lease not implemented in test stub",
+        ))
+    }
+
+    async fn renew_lease(
+        &self,
+        _request: tonic::Request<RenewLeaseRequest>,
+    ) -> Result<tonic::Response<RenewLeaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "renew_lease not implemented in test stub",
+        ))
+    }
+
+    async fn release_lease(
+        &self,
+        _request: tonic::Request<ReleaseLeaseRequest>,
+    ) -> Result<tonic::Response<ReleaseLeaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "release_lease not implemented in test stub",
+        ))
+    }
+
+    async fn get_safe_frontier(
+        &self,
+        _request: tonic::Request<GetSafeFrontierRequest>,
+    ) -> Result<tonic::Response<GetSafeFrontierResponse>, tonic::Status> {
+        Ok(tonic::Response::new(GetSafeFrontierResponse::default()))
     }
 }

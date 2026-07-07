@@ -12,6 +12,12 @@ Do not run `window_ahead` below 100 ms with the file driver. The fsync rate domi
 
 Default is 1 second. On leadership gain, the new leader first computes `serving_floor = max(prior_max + 1, now_ms)` and then persists `requested = serving_floor + failover_advance`. The `+1` is mandatory because `prior_max` is an inclusive high-water: the prior leader could have served `(prior_max, LOGICAL_MAX)`. Larger `failover_advance` values give more headroom against clock skew between old and new leaders; smaller values reduce timestamp "jumps" visible to clients. 1 second is appropriate for most deployments; consider 5–10 seconds if your nodes' clocks may differ by more than a second.
 
+## Sizing lease TTLs
+
+Lease TTLs are bounded by the server. The default floor is 5 seconds; it keeps sub-failover TTLs from turning every leadership blip into an availability event. The default ceiling is 300 seconds; it bounds how long a dead holder can stall the lease-aware safe frontier.
+
+As guidance, choose a TTL comfortably above your worst-case tsoracle failover window: leader election, failover fence, and client re-route. Holders should renew at roughly TTL/3 so one missed renewal window does not immediately expire the lease. `failover_advance` needs no lease-specific tuning: lease bounds are committed-high-water values, so the existing fence already advances strictly above every outstanding bound. Granting or renewing a lease advances that same shared high-water; `GetCurrentMaxSafe` may jump forward on lease activity, while `GetSafeFrontier` is the lease-aware surface that accounts for unexpired lease bounds.
+
 ## Monitoring hooks
 
 `tsoracle-server`, `tsoracle-client`, and the OmniPaxos backend (`tsoracle-driver-paxos` / `tsoracle-paxos-toolkit`) emit signals through the [`metrics`](https://docs.rs/metrics) crate facade. Emission is gated behind the `metrics` Cargo feature on each crate (off by default so the dependency stays opt-in for embedders who do not want it); enabling the feature on `tsoracle-driver-paxos` also turns it on for the toolkit it depends on. The client additionally emits structured events through the [`tracing`](https://docs.rs/tracing) crate; `tracing` is on by default for `tsoracle-client` (matching `tsoracle-server`).
@@ -21,6 +27,11 @@ Default is 1 second. On leadership gain, the new leader first computes `serving_
 - `tsoracle.get_ts.requests.total` — total well-formed GetTs RPCs offered, counted at entry before the NOT_LEADER gate; the honest offered load (counter)
 - `tsoracle.get_ts.success.total` — GetTs RPCs that returned a grant; `requests.total - success.total` is the failure count (counter)
 - `tsoracle.get_ts.timestamps_issued` — sum of `count` across all successful GetTs responses (counter)
+- `tsoracle.lease.acquire.requests.total` — AcquireLease RPCs offered (counter)
+- `tsoracle.lease.acquire.success.total` — AcquireLease RPCs that returned a lease, including idempotent same-epoch re-acquires (counter)
+- `tsoracle.lease.renew.requests.total` — RenewLease RPCs offered (counter)
+- `tsoracle.lease.renew.success.total` — RenewLease RPCs that advanced a live lease (counter)
+- `tsoracle.lease.release.requests.total` — ReleaseLease RPCs offered; releases are idempotent, so there is no separate success counter (counter)
 - `tsoracle.window.extensions.total` — number of persist_high_water calls (counter)
 - `tsoracle.window.extension_latency` — duration of persist_high_water (histogram, seconds)
 - `tsoracle.window.extensions.ignored.not_leader.total` — a persisted window extension was dropped because this node was no longer leader; sustained non-zero rates indicate epoch churn (counter)

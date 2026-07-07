@@ -28,6 +28,7 @@
 
 pub mod dense_record;
 mod driver;
+mod lease_record;
 pub mod record;
 
 pub use driver::{FileDriver, FileDriverError};

@@ -28,6 +28,8 @@ Window extension is split into `prepare_window_extension` (sync, no I/O, compute
 
 `ConsensusDriver::persist_high_water(at_least, epoch)` is "advance to at least," never "absolute set." A stale or reordered call MUST be silently absorbed without regression. This is defense in depth: even with the allocator's internal monotonicity, a buggy caller, a clock-skew event, or a racing extension cannot regress the durable high-water. The driver returns the actual persisted value so the caller learns the true state.
 
+Lease bounds use the same authority. `AcquireLease` and `RenewLease` first advance the committed high-water through this monotonic `persist_high_water` contract, then persist the lease record whose `ts_upper_bound` is that committed value. The monotonicity proof therefore covers lease bounds without a second argument: a failover fence that loads and advances above the high-water is automatically above every outstanding lease bound.
+
 ## Monotonicity proof
 
 A new leader at epoch `E_new` must not issue any timestamp at or below any timestamp the prior leader at epoch `E_prev < E_new` could have issued.

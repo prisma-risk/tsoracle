@@ -53,6 +53,39 @@ service TsoService {
   // non-idempotent: an ambiguous failure means the whole batch may or may not
   // have committed — clients treat it as `SeqUncertain` and must not retry.
   rpc GetSeqBatch(GetSeqBatchRequest) returns (GetSeqBatchResponse);
+
+  // Acquire (or idempotently re-acquire) a stamping lease for an opaque
+  // holder group. The returned `ts_upper_bound` is the highest physical_ms
+  // the holder may stamp; it is allocated through the same durable
+  // high-water discipline as GetTs window extension, and the lease record
+  // is durably persisted before this RPC returns, so leases survive
+  // failover. A request whose `holder` matches an active lease at a
+  // strictly higher `holder_epoch` atomically supersedes the old lease
+  // (its bound stops advancing; it still counts toward the safe frontier
+  // until it expires). Same-epoch re-acquire returns the live lease
+  // unchanged; a lower epoch is rejected with FAILED_PRECONDITION.
+  //
+  // Leader-only, like GetTs: a non-leader returns FAILED_PRECONDITION with
+  // the `tsoracle-leader-hint-bin` trailer.
+  rpc AcquireLease(AcquireLeaseRequest) returns (AcquireLeaseResponse);
+
+  // Advance a live lease's bound and expiry, re-arming its acquire-time TTL.
+  // Rejected with NOT_FOUND for an unknown lease_id and with
+  // FAILED_PRECONDITION for an expired or superseded lease. Leader-only,
+  // with the same routing as AcquireLease.
+  rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
+
+  // Gracefully surrender a lease: it immediately stops counting toward the
+  // safe frontier. Idempotent — releasing an unknown, expired, or already
+  // released lease succeeds. Leader-only, same routing as AcquireLease.
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+
+  // Read the safe frontier: min over every unexpired lease's ts_upper_bound
+  // (active or superseded) and the issued-but-unleased high-water (the
+  // allocator's committed high-water). Generalizes GetCurrentMaxSafe; same
+  // follower behavior — followers return 0 with a zero epoch, and the leader
+  // answers authoritatively.
+  rpc GetSafeFrontier(GetSafeFrontierRequest) returns (GetSafeFrontierResponse);
 }
 
 message GetTsRequest {
@@ -157,4 +190,55 @@ message LeaderHint {
 message EpochWire {
   uint64 hi = 1;
   uint64 lo = 2;
+}
+
+message AcquireLeaseRequest {
+  // Opaque holder-group key, 1..=128 bytes. tsoracle compares it only for
+  // byte equality.
+  bytes holder = 1;
+  // Supersede ordering within the holder group. Strictly higher supersedes;
+  // equal is idempotent; lower rejects.
+  uint64 holder_epoch = 2;
+  // Requested TTL in milliseconds. Server-enforced floor/ceiling default to
+  // 5s / 300s; out-of-bounds requests fail INVALID_ARGUMENT.
+  uint64 ttl_ms = 3;
+}
+
+message AcquireLeaseResponse {
+  // Stable lease identity for RenewLease/ReleaseLease.
+  uint64 lease_id = 1;
+  // Highest physical-millisecond the holder may stamp.
+  uint64 ts_upper_bound = 2;
+  // Server-clock expiry in milliseconds since Unix epoch.
+  uint64 expires_at_ms = 3;
+  // tsoracle leader epoch that granted the lease; bundled so a
+  // half-populated epoch is unrepresentable, matching GetSeqResponse.epoch.
+  EpochWire epoch = 4;
+}
+
+message RenewLeaseRequest {
+  uint64 lease_id = 1;
+}
+
+message RenewLeaseResponse {
+  uint64 ts_upper_bound = 1;
+  uint64 expires_at_ms = 2;
+  EpochWire epoch = 3;
+}
+
+message ReleaseLeaseRequest {
+  uint64 lease_id = 1;
+}
+
+message ReleaseLeaseResponse {}
+
+message GetSafeFrontierRequest {}
+
+message GetSafeFrontierResponse {
+  // The safe frontier in physical-millisecond units; zero on a follower or
+  // a leader that has not yet admitted a window.
+  uint64 frontier_physical_ms = 1;
+  // Leader epoch, split like GetCurrentMaxSafeResponse.epoch_hi/epoch_lo.
+  uint64 epoch_hi = 2;
+  uint64 epoch_lo = 3;
 }

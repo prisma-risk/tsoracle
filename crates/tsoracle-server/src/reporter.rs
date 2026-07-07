@@ -159,6 +159,13 @@ pub struct Reporter {
     pub seq_batch_values_issued: ReporterCounter,
     pub seq_batch_cardinality_rejected: ReporterCounter,
 
+    // lease control-plane
+    pub lease_acquire_requests: ReporterCounter,
+    pub lease_acquire_success: ReporterCounter,
+    pub lease_renew_requests: ReporterCounter,
+    pub lease_renew_success: ReporterCounter,
+    pub lease_release_requests: ReporterCounter,
+
     // leader / fence
     pub not_leader: ReporterCounter,
     pub leader_transitions: ReporterCounter,
@@ -196,6 +203,11 @@ impl Reporter {
             seq_batch_cardinality_rejected: ReporterCounter::new(
                 "tsoracle.get_seq.batch.cardinality_rejected.total",
             ),
+            lease_acquire_requests: ReporterCounter::new("tsoracle.lease.acquire.requests.total"),
+            lease_acquire_success: ReporterCounter::new("tsoracle.lease.acquire.success.total"),
+            lease_renew_requests: ReporterCounter::new("tsoracle.lease.renew.requests.total"),
+            lease_renew_success: ReporterCounter::new("tsoracle.lease.renew.success.total"),
+            lease_release_requests: ReporterCounter::new("tsoracle.lease.release.requests.total"),
             not_leader: ReporterCounter::new("tsoracle.not_leader.total"),
             leader_transitions: ReporterCounter::new("tsoracle.leader_transition.total"),
             fence_transient_retries: ReporterCounter::new(
