@@ -48,6 +48,7 @@ pub use retry_policy::RetryPolicy;
 pub use seq_attempt::SeqBlock;
 pub use transport::BoxError;
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
@@ -305,6 +306,35 @@ impl Client {
         Ok((endpoint, budget, pair, svc, cell))
     }
 
+    async fn control_plane_rpc<ProtoResponse, Output, Rpc, RpcFuture, Map>(
+        &self,
+        rpc: Rpc,
+        map: Map,
+    ) -> Result<Output, ClientError>
+    where
+        Rpc: FnOnce(TsoServiceClient<Channel>) -> RpcFuture,
+        RpcFuture: Future<Output = Result<tonic::Response<ProtoResponse>, tonic::Status>>,
+        Map: FnOnce(ProtoResponse) -> Result<Output, ClientError>,
+    {
+        let (endpoint, budget, pair, svc, cell) = self.control_plane_client().await?;
+        let rpc_budget = pair.remaining();
+        let err = match tokio::time::timeout(rpc_budget, rpc(svc)).await {
+            Ok(Ok(response)) => return map(response.into_inner()),
+            Ok(Err(status)) => ClientError::Rpc(status),
+            // A timed-out RPC surfaces as `DeadlineExceeded` (transport-class
+            // per `is_transport_failure`), so the eviction tail below drops the
+            // possibly-half-open channel — matching the `get_ts` attempt path.
+            Err(_) => ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
+                "rpc exceeded its share of per_attempt_deadline \
+                 ({rpc_budget:?} of {budget:?})"
+            ))),
+        };
+        if crate::retry_policy::is_transport_failure(&err) {
+            self.pool.evict_if_current(&endpoint, &cell);
+        }
+        Err(err)
+    }
+
     /// Read the leader's current safe-point in physical-millisecond units.
     ///
     /// Targets the cached leader if known, otherwise the first configured
@@ -321,51 +351,19 @@ impl Client {
     /// failure evicts the cached channel so a half-open / black-holing
     /// connection is dropped before the next poll lands on it.
     pub async fn get_current_max_safe(&self) -> Result<MaxSafe, ClientError> {
-        let endpoint = self
-            .pool
-            .cached_leader()
-            .or_else(|| self.pool.iter_round_robin().into_iter().next())
-            .ok_or(ClientError::NoReachableEndpoints)?;
-        let budget = self.pool.retry_policy().per_attempt_deadline;
-        // One budget shared across connect + RPC: a slow connect eats into
-        // the RPC's time rather than each phase getting a fresh full budget,
-        // so a single call never runs longer than ~`per_attempt_deadline`.
-        let pair = crate::budget::PairBudget::start(budget);
-        let (mut svc, cell) =
-            match tokio::time::timeout(budget, self.pool.client_with_cell(&endpoint)).await {
-                Ok(Ok(leased)) => leased,
-                // `client_with_cell` already evicts its own cell on a failed
-                // dial, so there is nothing to evict here.
-                Ok(Err(err)) => return Err(err),
-                Err(_) => {
-                    return Err(ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
-                        "connect exceeded per_attempt_deadline of {budget:?}"
-                    ))));
-                }
-            };
-        let rpc_budget = pair.remaining();
-        let rpc = svc.get_current_max_safe(tsoracle_proto::v1::GetCurrentMaxSafeRequest {});
-        let err = match tokio::time::timeout(rpc_budget, rpc).await {
-            Ok(Ok(response)) => {
-                let inner = response.into_inner();
-                return Ok(MaxSafe {
+        self.control_plane_rpc(
+            |mut svc| async move {
+                svc.get_current_max_safe(tsoracle_proto::v1::GetCurrentMaxSafeRequest {})
+                    .await
+            },
+            |inner| {
+                Ok(MaxSafe {
                     max_safe_physical_ms: inner.max_safe_physical_ms,
                     epoch: Epoch::from_wire(inner.epoch_hi, inner.epoch_lo),
-                });
-            }
-            Ok(Err(status)) => ClientError::Rpc(status),
-            // A timed-out RPC surfaces as `DeadlineExceeded` (transport-class
-            // per `is_transport_failure`), so the eviction tail below drops the
-            // possibly-half-open channel — matching the `get_ts` attempt path.
-            Err(_) => ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
-                "rpc exceeded its share of per_attempt_deadline \
-                 ({rpc_budget:?} of {budget:?})"
-            ))),
-        };
-        if crate::retry_policy::is_transport_failure(&err) {
-            self.pool.evict_if_current(&endpoint, &cell);
-        }
-        Err(err)
+                })
+            },
+        )
+        .await
     }
 
     /// Acquire a stamping lease for an opaque holder group.
@@ -381,106 +379,76 @@ impl Client {
         ttl: Duration,
     ) -> Result<Lease, ClientError> {
         let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
-        let (endpoint, budget, pair, mut svc, cell) = self.control_plane_client().await?;
-        let rpc_budget = pair.remaining();
-        let rpc = svc.acquire_lease(tsoracle_proto::v1::AcquireLeaseRequest {
-            holder: holder.to_vec(),
-            holder_epoch,
-            ttl_ms,
-        });
-        let err = match tokio::time::timeout(rpc_budget, rpc).await {
-            Ok(Ok(response)) => {
-                let inner = response.into_inner();
-                return Ok(Lease {
+        let holder = holder.to_vec();
+        self.control_plane_rpc(
+            |mut svc| async move {
+                svc.acquire_lease(tsoracle_proto::v1::AcquireLeaseRequest {
+                    holder,
+                    holder_epoch,
+                    ttl_ms,
+                })
+                .await
+            },
+            |inner| {
+                Ok(Lease {
                     lease_id: inner.lease_id,
                     ts_upper_bound: inner.ts_upper_bound,
                     expires_at_ms: inner.expires_at_ms,
                     epoch: required_epoch(inner.epoch, "lease response missing epoch")?,
-                });
-            }
-            Ok(Err(status)) => ClientError::Rpc(status),
-            Err(_) => ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
-                "rpc exceeded its share of per_attempt_deadline \
-                 ({rpc_budget:?} of {budget:?})"
-            ))),
-        };
-        if crate::retry_policy::is_transport_failure(&err) {
-            self.pool.evict_if_current(&endpoint, &cell);
-        }
-        Err(err)
+                })
+            },
+        )
+        .await
     }
 
     /// Renew a live lease, re-arming its acquire-time TTL.
     ///
     /// Single-attempt control-plane call; callers own retry and re-route policy.
     pub async fn renew_lease(&self, lease_id: u64) -> Result<LeaseRenewal, ClientError> {
-        let (endpoint, budget, pair, mut svc, cell) = self.control_plane_client().await?;
-        let rpc_budget = pair.remaining();
-        let rpc = svc.renew_lease(tsoracle_proto::v1::RenewLeaseRequest { lease_id });
-        let err = match tokio::time::timeout(rpc_budget, rpc).await {
-            Ok(Ok(response)) => {
-                let inner = response.into_inner();
-                return Ok(LeaseRenewal {
+        self.control_plane_rpc(
+            |mut svc| async move {
+                svc.renew_lease(tsoracle_proto::v1::RenewLeaseRequest { lease_id })
+                    .await
+            },
+            |inner| {
+                Ok(LeaseRenewal {
                     ts_upper_bound: inner.ts_upper_bound,
                     expires_at_ms: inner.expires_at_ms,
                     epoch: required_epoch(inner.epoch, "lease renewal missing epoch")?,
-                });
-            }
-            Ok(Err(status)) => ClientError::Rpc(status),
-            Err(_) => ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
-                "rpc exceeded its share of per_attempt_deadline \
-                 ({rpc_budget:?} of {budget:?})"
-            ))),
-        };
-        if crate::retry_policy::is_transport_failure(&err) {
-            self.pool.evict_if_current(&endpoint, &cell);
-        }
-        Err(err)
+                })
+            },
+        )
+        .await
     }
 
     /// Release a lease. The server treats unknown or already-released leases as
     /// success, making graceful surrender idempotent.
     pub async fn release_lease(&self, lease_id: u64) -> Result<(), ClientError> {
-        let (endpoint, budget, pair, mut svc, cell) = self.control_plane_client().await?;
-        let rpc_budget = pair.remaining();
-        let rpc = svc.release_lease(tsoracle_proto::v1::ReleaseLeaseRequest { lease_id });
-        let err = match tokio::time::timeout(rpc_budget, rpc).await {
-            Ok(Ok(_response)) => return Ok(()),
-            Ok(Err(status)) => ClientError::Rpc(status),
-            Err(_) => ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
-                "rpc exceeded its share of per_attempt_deadline \
-                 ({rpc_budget:?} of {budget:?})"
-            ))),
-        };
-        if crate::retry_policy::is_transport_failure(&err) {
-            self.pool.evict_if_current(&endpoint, &cell);
-        }
-        Err(err)
+        self.control_plane_rpc(
+            |mut svc| async move {
+                svc.release_lease(tsoracle_proto::v1::ReleaseLeaseRequest { lease_id })
+                    .await
+            },
+            |_inner| Ok(()),
+        )
+        .await
     }
 
     /// Read the lease-aware safe frontier in physical-millisecond units.
     pub async fn get_safe_frontier(&self) -> Result<SafeFrontier, ClientError> {
-        let (endpoint, budget, pair, mut svc, cell) = self.control_plane_client().await?;
-        let rpc_budget = pair.remaining();
-        let rpc = svc.get_safe_frontier(tsoracle_proto::v1::GetSafeFrontierRequest {});
-        let err = match tokio::time::timeout(rpc_budget, rpc).await {
-            Ok(Ok(response)) => {
-                let inner = response.into_inner();
-                return Ok(SafeFrontier {
+        self.control_plane_rpc(
+            |mut svc| async move {
+                svc.get_safe_frontier(tsoracle_proto::v1::GetSafeFrontierRequest {})
+                    .await
+            },
+            |inner| {
+                Ok(SafeFrontier {
                     frontier_physical_ms: inner.frontier_physical_ms,
                     epoch: Epoch::from_wire(inner.epoch_hi, inner.epoch_lo),
-                });
-            }
-            Ok(Err(status)) => ClientError::Rpc(status),
-            Err(_) => ClientError::Rpc(tonic::Status::deadline_exceeded(format!(
-                "rpc exceeded its share of per_attempt_deadline \
-                 ({rpc_budget:?} of {budget:?})"
-            ))),
-        };
-        if crate::retry_policy::is_transport_failure(&err) {
-            self.pool.evict_if_current(&endpoint, &cell);
-        }
-        Err(err)
+                })
+            },
+        )
+        .await
     }
 }
 

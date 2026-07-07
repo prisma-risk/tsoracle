@@ -37,7 +37,7 @@ use tsoracle_proto::v1::{
 use tsoracle_server::Server;
 use tsoracle_server::test_fakes::{InMemoryDriver, MockClock};
 use tsoracle_server::test_support::{
-    boot_server, wait_for_grpc_handshake, wait_until_not_serving, wait_until_serving,
+    boot_leader_server, wait_until_not_serving, wait_until_serving,
 };
 
 const START_MS: u64 = 1_000_000;
@@ -58,16 +58,7 @@ async fn boot_leader(
         .failover_advance(Duration::from_millis(200))
         .build()
         .unwrap();
-    let mut booted = boot_server(server).await;
-    driver.become_leader(epoch);
-    wait_until_serving(&mut booted.state_rx).await;
-    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
-        .await
-        .unwrap();
-    let client = TsoServiceClient::connect(format!("http://{}", booted.addr))
-        .await
-        .unwrap();
-    (booted, client)
+    boot_leader_server(server, || driver.become_leader(epoch)).await
 }
 
 fn acquire_req(holder: &[u8], holder_epoch: u64, ttl_ms: u64) -> AcquireLeaseRequest {
@@ -418,15 +409,7 @@ async fn failed_lease_persist_fails_the_rpc_without_committing() {
         .failover_advance(Duration::from_millis(200))
         .build()
         .unwrap();
-    let mut booted = boot_server(server).await;
-    driver.become_leader(Epoch(1));
-    wait_until_serving(&mut booted.state_rx).await;
-    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
-        .await
-        .unwrap();
-    let mut client = TsoServiceClient::connect(format!("http://{}", booted.addr))
-        .await
-        .unwrap();
+    let (booted, mut client) = boot_leader_server(server, || driver.become_leader(Epoch(1))).await;
 
     driver.fail_leases(true);
     assert_eq!(

@@ -48,7 +48,8 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::service::Routes;
-use tonic::transport::{Endpoint, Server as TonicServer};
+use tonic::transport::{Channel, Endpoint, Server as TonicServer};
+use tsoracle_proto::v1::tso_service_client::TsoServiceClient;
 
 use crate::{Server, ServerError, ServingState};
 
@@ -243,6 +244,32 @@ pub async fn wait_for_grpc_handshake(
             }
         }
     }
+}
+
+/// Wait for tonic readiness and connect a generated TSO client to `booted`.
+pub async fn connect_tso_client(addr: SocketAddr) -> TsoServiceClient<Channel> {
+    wait_for_grpc_handshake(addr, Duration::from_secs(5))
+        .await
+        .expect("test server must accept a gRPC handshake");
+    TsoServiceClient::connect(format!("http://{addr}"))
+        .await
+        .expect("connect generated TSO client to test server")
+}
+
+/// Boot a server, run the caller's leadership transition, wait until it serves,
+/// and return a connected generated TSO client.
+pub async fn boot_leader_server<F>(
+    server: Server,
+    become_leader: F,
+) -> (BootedServer, TsoServiceClient<Channel>)
+where
+    F: FnOnce(),
+{
+    let mut booted = boot_server(server).await;
+    become_leader();
+    wait_until_serving(&mut booted.state_rx).await;
+    let client = connect_tso_client(booted.addr).await;
+    (booted, client)
 }
 
 /// TLS-aware counterpart to [`wait_for_grpc_handshake`]. Probes the server

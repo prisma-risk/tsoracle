@@ -298,50 +298,69 @@ fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
     Ok(())
 }
 
-/// Atomically persist the dense map. Mirrors `write_record`'s tmp+fsync+rename+dir-fsync
-/// protocol (and its failpoint structure) for the dense `dense` file.
-fn write_dense_record(
-    dir: &Path,
-    map: &std::collections::BTreeMap<String, u64>,
-    cap: u64,
-) -> Result<(), FileDriverError> {
-    tsoracle_failpoint::failpoint!("file_driver::dense::before_write", |_arg: Option<
-        String,
-    >|
-     -> Result<
-        (),
-        FileDriverError,
-    > {
-        Err(FileDriverError::Io(std::io::Error::other(
-            "failpoint: file_driver::dense::before_write",
-        )))
-    });
+struct FramedFileWrite {
+    name: &'static str,
+    before_write: &'static str,
+    after_tmp_fsync_before_rename: &'static str,
+    after_rename_before_dir_fsync: &'static str,
+}
 
-    let tmp = dir.join("dense.tmp");
-    let final_path = dir.join("dense");
-    let bytes = dense_record::encode(map, cap);
+const DENSE_FILE_WRITE: FramedFileWrite = FramedFileWrite {
+    name: "dense",
+    before_write: "file_driver::dense::before_write",
+    after_tmp_fsync_before_rename: "file_driver::dense::after_tmp_fsync_before_rename",
+    after_rename_before_dir_fsync: "file_driver::dense::after_rename_before_dir_fsync",
+};
+
+const LEASES_FILE_WRITE: FramedFileWrite = FramedFileWrite {
+    name: "leases",
+    before_write: "file_driver::leases::before_write",
+    after_tmp_fsync_before_rename: "file_driver::leases::after_tmp_fsync_before_rename",
+    after_rename_before_dir_fsync: "file_driver::leases::after_rename_before_dir_fsync",
+};
+
+fn failpoint_io_error(name: &str) -> FileDriverError {
+    FileDriverError::Io(std::io::Error::other(format!("failpoint: {name}")))
+}
+
+/// Atomically persist a framed file through tmp+fsync+rename+dir-fsync.
+fn write_framed_file(
+    dir: &Path,
+    spec: FramedFileWrite,
+    bytes: &[u8],
+) -> Result<(), FileDriverError> {
+    tsoracle_failpoint::failpoint!(
+        spec.before_write,
+        |_arg: Option<String>| -> Result<(), FileDriverError> {
+            Err(failpoint_io_error(spec.before_write))
+        }
+    );
+
+    let tmp = dir.join(format!("{}.tmp", spec.name));
+    let final_path = dir.join(spec.name);
 
     let mut file = fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(&tmp)?;
-    file.write_all(&bytes)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
 
-    tsoracle_failpoint::failpoint!(
-        "file_driver::dense::after_tmp_fsync_before_rename",
-        |_arg: Option<String>| -> Result<(), FileDriverError> {
-            Err(FileDriverError::Io(std::io::Error::other(
-                "failpoint: file_driver::dense::after_tmp_fsync_before_rename",
-            )))
-        }
-    );
+    tsoracle_failpoint::failpoint!(spec.after_tmp_fsync_before_rename, |_arg: Option<
+        String,
+    >|
+     -> Result<
+        (),
+        FileDriverError,
+    > {
+        Err(failpoint_io_error(spec.after_tmp_fsync_before_rename))
+    });
 
     fs::rename(&tmp, &final_path)?;
 
-    tsoracle_failpoint::failpoint!("file_driver::dense::after_rename_before_dir_fsync");
+    tsoracle_failpoint::failpoint!(spec.after_rename_before_dir_fsync);
 
     #[cfg(unix)]
     {
@@ -361,63 +380,20 @@ fn write_dense_record(
     Ok(())
 }
 
-/// Atomically persist the lease set. Mirrors `write_record`'s
-/// tmp+fsync+rename+dir-fsync protocol for the `leases` file.
+/// Atomically persist the dense map.
+fn write_dense_record(
+    dir: &Path,
+    map: &std::collections::BTreeMap<String, u64>,
+    cap: u64,
+) -> Result<(), FileDriverError> {
+    let bytes = dense_record::encode(map, cap);
+    write_framed_file(dir, DENSE_FILE_WRITE, &bytes)
+}
+
+/// Atomically persist the lease set.
 fn write_lease_record(dir: &Path, records: &[LeaseRecord]) -> Result<(), FileDriverError> {
-    tsoracle_failpoint::failpoint!("file_driver::leases::before_write", |_arg: Option<
-        String,
-    >|
-     -> Result<
-        (),
-        FileDriverError,
-    > {
-        Err(FileDriverError::Io(std::io::Error::other(
-            "failpoint: file_driver::leases::before_write",
-        )))
-    });
-
-    let tmp = dir.join("leases.tmp");
-    let final_path = dir.join("leases");
     let bytes = lease_record::encode(records);
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&tmp)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    drop(file);
-
-    tsoracle_failpoint::failpoint!(
-        "file_driver::leases::after_tmp_fsync_before_rename",
-        |_arg: Option<String>| -> Result<(), FileDriverError> {
-            Err(FileDriverError::Io(std::io::Error::other(
-                "failpoint: file_driver::leases::after_tmp_fsync_before_rename",
-            )))
-        }
-    );
-
-    fs::rename(&tmp, &final_path)?;
-
-    tsoracle_failpoint::failpoint!("file_driver::leases::after_rename_before_dir_fsync");
-
-    #[cfg(unix)]
-    {
-        let dir_file = fs::File::open(dir)?;
-        let fd = dir_file.as_raw_fd();
-        // SAFETY: fd is a valid open directory descriptor for the duration of this call.
-        let rc = unsafe { libc::fsync(fd) };
-        if rc != 0 {
-            return Err(FileDriverError::Io(std::io::Error::last_os_error()));
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let final_file = fs::OpenOptions::new().write(true).open(&final_path)?;
-        final_file.sync_all()?;
-    }
-    Ok(())
+    write_framed_file(dir, LEASES_FILE_WRITE, &bytes)
 }
 
 #[async_trait::async_trait]

@@ -28,6 +28,7 @@
 
 pub mod dense_record;
 mod driver;
+mod framed_record;
 mod lease_record;
 pub mod record;
 

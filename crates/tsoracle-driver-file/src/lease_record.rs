@@ -29,8 +29,11 @@
 
 use tsoracle_core::LeaseRecord;
 
+use crate::framed_record::{self, FrameError};
+
 pub const MAGIC: &[u8; 4] = b"TSOO";
 pub const VERSION: u8 = 1;
+const MIN_LEN: usize = framed_record::HEADER_LEN + 4 + framed_record::CRC_LEN;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LeaseRecordError {
@@ -46,6 +49,22 @@ pub enum LeaseRecordError {
     Malformed,
 }
 
+impl From<FrameError> for LeaseRecordError {
+    fn from(error: FrameError) -> Self {
+        match error {
+            FrameError::TooShort(len) => LeaseRecordError::TooShort(len),
+            FrameError::BadMagic(magic) => LeaseRecordError::BadMagic(magic),
+            FrameError::UnsupportedVersion(version) => {
+                LeaseRecordError::UnsupportedVersion(version)
+            }
+            FrameError::ChecksumMismatch { stored, computed } => {
+                LeaseRecordError::ChecksumMismatch { stored, computed }
+            }
+            FrameError::Malformed => LeaseRecordError::Malformed,
+        }
+    }
+}
+
 pub fn encode(records: &[LeaseRecord]) -> Vec<u8> {
     debug_assert!(
         records.len() <= u32::MAX as usize,
@@ -55,58 +74,39 @@ pub fn encode(records: &[LeaseRecord]) -> Vec<u8> {
     records.sort_by_key(|r| r.lease_id);
 
     let holder_bytes: usize = records.iter().map(|r| r.holder.len()).sum();
-    let mut buf = Vec::with_capacity(4 + 1 + 4 + records.len() * 43 + holder_bytes + 4);
-    buf.extend_from_slice(MAGIC);
-    buf.push(VERSION);
-    buf.extend_from_slice(&(records.len() as u32).to_le_bytes());
-    for record in &records {
-        debug_assert!(
-            record.holder.len() <= u16::MAX as usize,
-            "holder length exceeds u16"
-        );
-        buf.extend_from_slice(&record.lease_id.to_le_bytes());
-        buf.extend_from_slice(&(record.holder.len() as u16).to_le_bytes());
-        buf.extend_from_slice(&record.holder);
-        buf.extend_from_slice(&record.holder_epoch.to_le_bytes());
-        buf.extend_from_slice(&record.ttl_ms.to_le_bytes());
-        buf.extend_from_slice(&record.ts_upper_bound.to_le_bytes());
-        buf.extend_from_slice(&record.expires_at_ms.to_le_bytes());
-        buf.push(u8::from(record.superseded));
-    }
-    let crc = crc32c::crc32c(&buf);
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf
+    framed_record::encode(
+        MAGIC,
+        VERSION,
+        4 + records.len() * 43 + holder_bytes,
+        |buf| {
+            buf.extend_from_slice(&(records.len() as u32).to_le_bytes());
+            for record in &records {
+                debug_assert!(
+                    record.holder.len() <= u16::MAX as usize,
+                    "holder length exceeds u16"
+                );
+                buf.extend_from_slice(&record.lease_id.to_le_bytes());
+                buf.extend_from_slice(&(record.holder.len() as u16).to_le_bytes());
+                buf.extend_from_slice(&record.holder);
+                buf.extend_from_slice(&record.holder_epoch.to_le_bytes());
+                buf.extend_from_slice(&record.ttl_ms.to_le_bytes());
+                buf.extend_from_slice(&record.ts_upper_bound.to_le_bytes());
+                buf.extend_from_slice(&record.expires_at_ms.to_le_bytes());
+                buf.push(u8::from(record.superseded));
+            }
+        },
+    )
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Vec<LeaseRecord>, LeaseRecordError> {
-    if bytes.len() < 13 {
-        return Err(LeaseRecordError::TooShort(bytes.len()));
-    }
-    if &bytes[0..4] != MAGIC {
-        return Err(LeaseRecordError::BadMagic([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-        ]));
-    }
-    if bytes[4] != VERSION {
-        return Err(LeaseRecordError::UnsupportedVersion(bytes[4]));
-    }
-    let body = &bytes[..bytes.len() - 4];
-    let stored = u32::from_le_bytes(
-        bytes[bytes.len() - 4..]
-            .try_into()
-            .map_err(|_| LeaseRecordError::Malformed)?,
-    );
-    let computed = crc32c::crc32c(body);
-    if stored != computed {
-        return Err(LeaseRecordError::ChecksumMismatch { stored, computed });
-    }
-
+    let body =
+        framed_record::decode(bytes, MAGIC, VERSION, MIN_LEN).map_err(LeaseRecordError::from)?;
     let record_count = u32::from_le_bytes(
-        body[5..9]
+        body[0..4]
             .try_into()
             .map_err(|_| LeaseRecordError::Malformed)?,
     );
-    let mut pos = 9;
+    let mut pos = 4;
     let mut records = Vec::with_capacity(record_count as usize);
     let mut prev_id = None;
     for _ in 0..record_count {
