@@ -1,6 +1,6 @@
 [package]
 name                   = "tsoracle-standalone"
-version                = "1.3.1"
+version                = "1.3.2"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -37,7 +37,7 @@ test-support = []
 [dependencies]
 tsoracle-core      = { path = "../tsoracle-core", version = "2.3.0" }
 tsoracle-consensus = { path = "../tsoracle-consensus", version = "2.2.0" }
-tsoracle-server    = { path = "../tsoracle-server", version = "3.2.0" }
+tsoracle-server    = { path = "../tsoracle-server", version = "3.2.1" }
 tokio              = { workspace = true, features = ["signal", "net", "rt"] }
 tracing            = { workspace = true }
 thiserror          = { workspace = true }
