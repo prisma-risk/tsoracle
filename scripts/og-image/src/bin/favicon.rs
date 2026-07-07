@@ -34,23 +34,18 @@ use std::path::PathBuf;
 fn main() -> Result<()> {
     let repo_root = find_repo_root()?;
     let svg_path = repo_root.join("site/static/favicon.svg");
-    let svg = fs::read_to_string(&svg_path)
-        .with_context(|| format!("reading {}", svg_path.display()))?;
+    let svg =
+        fs::read_to_string(&svg_path).with_context(|| format!("reading {}", svg_path.display()))?;
 
-    let mut options = usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
-    let tree = usvg::Tree::from_str(&svg, &options)
-        .map_err(|e| anyhow!("parsing SVG: {e}"))?;
+    let options = usvg::Options::default();
+    let tree = usvg::Tree::from_str(&svg, &options).map_err(|e| anyhow!("parsing SVG: {e}"))?;
 
     let view = tree.size();
     let source_w = view.width();
 
-    for (size, name) in [
-        (32u32, "favicon-32.png"),
-        (180u32, "apple-touch-icon.png"),
-    ] {
-        let mut pixmap = tiny_skia::Pixmap::new(size, size)
-            .ok_or_else(|| anyhow!("allocating pixmap"))?;
+    for (size, name) in [(32u32, "favicon-32.png"), (180u32, "apple-touch-icon.png")] {
+        let mut pixmap =
+            tiny_skia::Pixmap::new(size, size).ok_or_else(|| anyhow!("allocating pixmap"))?;
         let scale = size as f32 / source_w;
         let transform = tiny_skia::Transform::from_scale(scale, scale);
         resvg::render(&tree, transform, &mut pixmap.as_mut());

@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" font-family="'JetBrains Mono', monospace">
-    <rect width="1200" height="630" fill="#0E0E10"/>
-    <rect x="60" y="60" width="6" height="510" fill="#FFB000"/>
-    <text x="100" y="120" fill="#FFB000" font-size="32" font-weight="700">tsoracle</text>
-    <text x="100" y="320" fill="#E8E6E3" font-size="36" font-weight="700">__TITLE__</text>
-    <text x="100" y="570" fill="#8A8A86" font-size="22">__DATELINE__</text>
-</svg>

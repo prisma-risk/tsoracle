@@ -17,10 +17,11 @@ name = "tsoracle-favicon"
 path = "src/bin/favicon.rs"
 
 [dependencies]
-resvg     = "0.45"
-tiny-skia = "0.11"
-usvg      = "0.45"
-toml      = "0.8"
-serde     = { version = "1", features = ["derive"] }
-walkdir   = "2"
-anyhow    = "1"
+embedded-graphics = "0.8"
+resvg             = { version = "0.47", default-features = false }
+tiny-skia         = "0.12"
+usvg              = { version = "0.47", default-features = false }
+toml              = "0.8"
+serde             = { version = "1", features = ["derive"] }
+walkdir           = "2"
+anyhow            = "1"

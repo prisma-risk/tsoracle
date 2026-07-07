@@ -24,29 +24,44 @@
 //! Generates social-card PNGs for tsoracle.rs.
 //!
 //! Reads every Markdown post under `site/content/posts/`, parses the TOML
-//! front-matter for `title` + `date`, substitutes them into `template.svg`,
-//! and rasterizes the result to `site/static/og/<slug>.png` (per-post) and
-//! `site/static/og-default.png` (site-wide fallback). Outputs are gitignored
-//! and regenerated unconditionally on every run.
+//! front-matter for `title` + `date`, and rasterizes a 1200x630 PNG to
+//! `site/static/og/<slug>.png` (per-post) and `site/static/og-default.png`
+//! (site-wide fallback). Outputs are gitignored and regenerated
+//! unconditionally on every run.
 //!
-//! JetBrainsMono TTFs are bundled under `../fonts/` and loaded explicitly,
-//! so the generator does not depend on the host environment having the font
-//! installed (CI's Ubuntu runners do not).
+//! Text is drawn with an embedded bitmap font, so the generator does not
+//! depend on host fonts or a font parser.
 
 use anyhow::{anyhow, Context, Result};
-use resvg::tiny_skia;
+use embedded_graphics::{
+    draw_target::DrawTarget,
+    geometry::{OriginDimensions, Point, Size},
+    mono_font::{
+        ascii::{FONT_9X18, FONT_9X18_BOLD},
+        MonoFont, MonoTextStyle,
+    },
+    pixelcolor::{Rgb888, RgbColor},
+    prelude::Drawable,
+    text::{Baseline, Text},
+    Pixel,
+};
 use serde::Deserialize;
+use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tiny_skia::{Color, Paint, Pixmap, PremultipliedColorU8, Rect, Transform};
 use walkdir::WalkDir;
 
-const TEMPLATE: &str = include_str!("../template.svg");
-const FONT_REGULAR: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
-const FONT_BOLD: &[u8] = include_bytes!("../fonts/JetBrainsMono-Bold.ttf");
 const POSTS_DIR: &str = "site/content/posts";
 const OUT_PER_POST: &str = "site/static/og";
 const OUT_DEFAULT: &str = "site/static/og-default.png";
 const DEFAULT_TITLE: &str = "Strictly monotonic timestamps in Rust";
+const IMAGE_WIDTH: u32 = 1200;
+const IMAGE_HEIGHT: u32 = 630;
+const BACKGROUND: [u8; 3] = [0x0E, 0x0E, 0x10];
+const ACCENT: [u8; 3] = [0xFF, 0xB0, 0x00];
+const TITLE_COLOR: [u8; 3] = [0xE8, 0xE6, 0xE3];
+const MUTED: [u8; 3] = [0x8A, 0x8A, 0x86];
 
 #[derive(Deserialize)]
 struct FrontMatter {
@@ -90,7 +105,11 @@ fn main() -> Result<()> {
         generated += 1;
     }
 
-    eprintln!("og-image: {} post images + 1 default = {} PNGs", generated, generated + 1);
+    eprintln!(
+        "og-image: {} post images + 1 default = {} PNGs",
+        generated,
+        generated + 1
+    );
     Ok(())
 }
 
@@ -124,20 +143,11 @@ fn truncate_title(title: &str) -> String {
     const MAX_CHARS: usize = 56;
     let char_count = title.chars().count();
     if char_count <= MAX_CHARS {
-        return escape_xml(title);
+        return title.to_string();
     }
     let mut truncated: String = title.chars().take(MAX_CHARS - 1).collect();
     truncated.push('…');
-    escape_xml(&truncated)
-}
-
-fn escape_xml(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    truncated
 }
 
 fn render_to_png(title: &str, date: &str, out_path: &Path) -> Result<()> {
@@ -147,22 +157,111 @@ fn render_to_png(title: &str, date: &str, out_path: &Path) -> Result<()> {
         format!("{} · tsoracle.rs", date)
     };
 
-    let svg = TEMPLATE
-        .replace("__TITLE__", title)
-        .replace("__DATELINE__", &escape_xml(&dateline));
+    let mut pixmap =
+        Pixmap::new(IMAGE_WIDTH, IMAGE_HEIGHT).ok_or_else(|| anyhow!("allocating pixmap"))?;
+    pixmap.fill(color(BACKGROUND));
 
-    let mut options = usvg::Options::default();
-    {
-        let fontdb = options.fontdb_mut();
-        fontdb.load_font_data(FONT_REGULAR.to_vec());
-        fontdb.load_font_data(FONT_BOLD.to_vec());
-    }
+    fill_rect(&mut pixmap, 60.0, 60.0, 6.0, 510.0, ACCENT);
+    draw_text(&mut pixmap, "tsoracle", &FONT_9X18_BOLD, 2, 100, 86, ACCENT);
+    draw_text(
+        &mut pixmap,
+        title,
+        &FONT_9X18_BOLD,
+        2,
+        100,
+        284,
+        TITLE_COLOR,
+    );
+    draw_text(&mut pixmap, &dateline, &FONT_9X18, 1, 100, 548, MUTED);
 
-    let tree = usvg::Tree::from_str(&svg, &options)
-        .map_err(|e| anyhow!("parsing SVG: {e}"))?;
-    let mut pixmap = tiny_skia::Pixmap::new(1200, 630)
-        .ok_or_else(|| anyhow!("allocating pixmap"))?;
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
     pixmap.save_png(out_path)?;
     Ok(())
+}
+
+fn fill_rect(pixmap: &mut Pixmap, x: f32, y: f32, width: f32, height: f32, rgb: [u8; 3]) {
+    let mut paint = Paint::default();
+    paint.set_color(color(rgb));
+    let rect = Rect::from_xywh(x, y, width, height).expect("static rectangle dimensions are valid");
+    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+}
+
+fn color(rgb: [u8; 3]) -> Color {
+    Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255)
+}
+
+fn draw_text(
+    pixmap: &mut Pixmap,
+    text: &str,
+    font: &'static MonoFont<'static>,
+    scale: u32,
+    x: i32,
+    y: i32,
+    rgb: [u8; 3],
+) {
+    let style = MonoTextStyle::new(font, rgb888(rgb));
+    let mut target = ScaledPixmapTarget { pixmap, scale };
+    let logical_x = x / scale as i32;
+    let logical_y = y / scale as i32;
+    Text::with_baseline(text, Point::new(logical_x, logical_y), style, Baseline::Top)
+        .draw(&mut target)
+        .expect("drawing into pixmap cannot fail");
+}
+
+fn rgb888(rgb: [u8; 3]) -> Rgb888 {
+    Rgb888::new(rgb[0], rgb[1], rgb[2])
+}
+
+struct ScaledPixmapTarget<'a> {
+    pixmap: &'a mut Pixmap,
+    scale: u32,
+}
+
+impl DrawTarget for ScaledPixmapTarget<'_> {
+    type Color = Rgb888;
+    type Error = Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> std::result::Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        let width = self.pixmap.width() as i32;
+        let height = self.pixmap.height() as i32;
+        let stride = self.pixmap.width() as usize;
+        let scale = self.scale as i32;
+        let output = self.pixmap.pixels_mut();
+
+        for Pixel(point, color) in pixels {
+            let color = PremultipliedColorU8::from_rgba(color.r(), color.g(), color.b(), 255)
+                .expect("opaque color is valid");
+            let start_x = point.x * scale;
+            let start_y = point.y * scale;
+
+            for dy in 0..scale {
+                let y = start_y + dy;
+                if !(0..height).contains(&y) {
+                    continue;
+                }
+
+                for dx in 0..scale {
+                    let x = start_x + dx;
+                    if !(0..width).contains(&x) {
+                        continue;
+                    }
+
+                    output[y as usize * stride + x as usize] = color;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl OriginDimensions for ScaledPixmapTarget<'_> {
+    fn size(&self) -> Size {
+        Size::new(
+            self.pixmap.width() / self.scale,
+            self.pixmap.height() / self.scale,
+        )
+    }
 }
