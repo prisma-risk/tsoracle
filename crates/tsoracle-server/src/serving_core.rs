@@ -293,10 +293,20 @@ impl ServingCore {
         epoch: Epoch,
         now_ms: u64,
     ) -> Result<(), CoreError> {
+        // The epoch check MUST run under the table lock. Checked before the
+        // lock, a step-down interleaving between check and mutation would
+        // re-insert records into the just-cleared follower table. Under the
+        // lock the guard is airtight because `step_down` clears the
+        // allocator's epoch BEFORE it takes this lock to clear the table:
+        // either the check observes the cleared epoch and refuses, or the
+        // mutation lands first and the step-down's clear wipes it. The
+        // nested order (table, then allocator) is unique to this function —
+        // every other path takes the two locks sequentially, never nested —
+        // so it cannot invert against anything.
+        let mut table = self.lease_table.lock();
         if self.allocator.lock().epoch() != Some(epoch) {
             return Err(CoreError::NotLeader);
         }
-        let mut table = self.lease_table.lock();
         if let Some(id) = remove {
             table.commit_release(id, now_ms);
         }
@@ -592,5 +602,87 @@ mod tests {
             matches!(core.try_grant(1_000, 1), Err(CoreError::NotLeader)),
             "enter_fencing must clear the allocator"
         );
+    }
+
+    fn lease_record(now_ms: u64) -> LeaseRecord {
+        LeaseRecord {
+            lease_id: 1,
+            holder: b"g1".to_vec(),
+            holder_epoch: 1,
+            ttl_ms: 10_000,
+            ts_upper_bound: 1,
+            expires_at_ms: now_ms + 10_000,
+            superseded: false,
+        }
+    }
+
+    #[test]
+    fn lease_commit_at_the_current_epoch_applies() {
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
+        core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
+            .expect("seed must succeed (ceiling >= floor)");
+
+        core.lease_commit(Some(lease_record(1_000)), None, None, Epoch(3), 1_000)
+            .expect("commit at the current epoch must apply");
+
+        assert_eq!(core.lease_table.lock().min_unexpired_bound(1_000), Some(1));
+    }
+
+    #[test]
+    fn lease_commit_refuses_a_stale_epoch_and_leaves_the_table_untouched() {
+        // The guard's observable contract: a commit carrying an epoch the
+        // allocator no longer serves is refused without touching the table.
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
+        core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
+            .expect("seed must succeed (ceiling >= floor)");
+        core.step_down(None, None);
+
+        assert!(matches!(
+            core.lease_commit(Some(lease_record(1_000)), None, None, Epoch(3), 1_000),
+            Err(CoreError::NotLeader)
+        ));
+        assert_eq!(core.lease_table.lock().min_unexpired_bound(1_000), None);
+    }
+
+    #[test]
+    fn raced_lease_commit_never_survives_a_step_down() {
+        // The interleaving the guard exists for: `lease_commit` racing
+        // `step_down`. With the epoch check held under the table lock the
+        // outcome is binary in every interleaving — the commit is refused
+        // (the step-down's allocator clear won) or its record is wiped (the
+        // step-down's table clear runs after the mutation) — so a phantom
+        // record can never outlive the race. A regression to the old
+        // check-then-lock shape lets some interleavings apply the mutation
+        // to the already-cleared table, which the repetition here catches.
+        for _ in 0..200 {
+            let core = std::sync::Arc::new(ServingCore::new(
+                Duration::from_secs(3),
+                tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+                tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+            ));
+            core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
+                .expect("seed must succeed (ceiling >= floor)");
+
+            let stepper = {
+                let core = std::sync::Arc::clone(&core);
+                std::thread::spawn(move || core.step_down(None, None))
+            };
+            let _ = core.lease_commit(Some(lease_record(1_000)), None, None, Epoch(3), 1_000);
+            stepper.join().expect("step_down thread must not panic");
+
+            assert_eq!(
+                core.lease_table.lock().min_unexpired_bound(1_000),
+                None,
+                "a lease committed against a raced step-down must not survive it"
+            );
+        }
     }
 }
