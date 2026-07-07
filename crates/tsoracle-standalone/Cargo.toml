@@ -1,6 +1,6 @@
 [package]
 name                   = "tsoracle-standalone"
-version                = "1.3.0"
+version                = "1.3.1"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -35,18 +35,18 @@ metrics  = [
 test-support = []
 
 [dependencies]
-tsoracle-core      = { path = "../tsoracle-core", version = "2.2.0" }
-tsoracle-consensus = { path = "../tsoracle-consensus", version = "2.1.0" }
-tsoracle-server    = { path = "../tsoracle-server", version = "3.1.0" }
+tsoracle-core      = { path = "../tsoracle-core", version = "2.3.0" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "2.2.0" }
+tsoracle-server    = { path = "../tsoracle-server", version = "3.2.0" }
 tokio              = { workspace = true, features = ["signal", "net", "rt"] }
 tracing            = { workspace = true }
 thiserror          = { workspace = true }
 
 # file
-tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "2.1.0", optional = true }
+tsoracle-driver-file = { path = "../tsoracle-driver-file", version = "2.2.0", optional = true }
 
 # openraft
-tsoracle-driver-openraft = { path = "../tsoracle-driver-openraft", version = "2.2.0", optional = true }
+tsoracle-driver-openraft = { path = "../tsoracle-driver-openraft", version = "2.2.1", optional = true }
 tsoracle-openraft-toolkit = { path = "../tsoracle-openraft-toolkit", version = "1.2.0", features = ["rocksdb-log-store"], optional = true }
 openraft     = { workspace = true, optional = true }
 # `net` is required for tokio_stream::wrappers::TcpListenerStream, used by both
@@ -56,8 +56,8 @@ async-trait  = { workspace = true }
 futures      = { workspace = true, optional = true }
 
 # paxos
-tsoracle-driver-paxos  = { path = "../tsoracle-driver-paxos", version = "2.0.2", optional = true }
-tsoracle-paxos-toolkit = { path = "../tsoracle-paxos-toolkit", version = "1.0.4", features = ["rocksdb-storage"], optional = true }
+tsoracle-driver-paxos  = { path = "../tsoracle-driver-paxos", version = "2.0.3", optional = true }
+tsoracle-paxos-toolkit = { path = "../tsoracle-paxos-toolkit", version = "1.0.5", features = ["rocksdb-storage"], optional = true }
 omnipaxos   = { workspace = true, features = ["serde"], optional = true }
 parking_lot = { workspace = true, optional = true }
 

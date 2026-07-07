@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v2.1.0...tsoracle-consensus-v2.2.0) - 2026-07-07
+
+### Added
+
+- add lease API and safe frontier ([#660](https://github.com/prisma-risk/tsoracle/pull/660))
+
 ## [2.1.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v2.0.1...tsoracle-consensus-v2.1.0) - 2026-05-31
 
 ### Added

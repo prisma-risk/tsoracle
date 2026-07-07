@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.3.0...tsoracle-standalone-v1.3.1) - 2026-07-07
+
+### Fixed
+
+- *(standalone)* fail fast when a peer or admin server task dies ([#644](https://github.com/prisma-risk/tsoracle/pull/644))
+
+### Other
+
+- replace stale line-number citations with symbol references ([#633](https://github.com/prisma-risk/tsoracle/pull/633))
+
 ## [1.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.2.0...tsoracle-standalone-v1.3.0) - 2026-06-01
 
 ### Added

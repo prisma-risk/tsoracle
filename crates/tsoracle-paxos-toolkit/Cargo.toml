@@ -1,7 +1,7 @@
 [package]
 name         = "tsoracle-paxos-toolkit"
 description  = "Reusable OmniPaxos glue: RocksDB storage, lifecycle helpers, test fakes"
-version      = "1.0.4"
+version      = "1.0.5"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -37,8 +37,8 @@ tokio              = { workspace = true }
 tokio-stream       = { workspace = true }
 tracing            = { workspace = true }
 tsoracle-codec     = { workspace = true }
-tsoracle-consensus = { path = "../tsoracle-consensus", version = "2.1.0" }
-tsoracle-core      = { path = "../tsoracle-core", version = "2.2.0" }
+tsoracle-consensus = { path = "../tsoracle-consensus", version = "2.2.0" }
+tsoracle-core      = { path = "../tsoracle-core", version = "2.3.0" }
 tsoracle-failpoint = { workspace = true }
 
 [dev-dependencies]
