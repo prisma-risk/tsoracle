@@ -27,8 +27,11 @@
 
 use std::collections::BTreeMap;
 
+use crate::framed_record::{self, FrameError};
+
 pub const MAGIC: &[u8; 4] = b"TSOD";
 pub const VERSION: u8 = 1;
+const MIN_LEN: usize = framed_record::HEADER_LEN + 8 + 4 + framed_record::CRC_LEN;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DenseRecordError {
@@ -46,60 +49,52 @@ pub enum DenseRecordError {
     NonUtf8Key,
 }
 
+impl From<FrameError> for DenseRecordError {
+    fn from(error: FrameError) -> Self {
+        match error {
+            FrameError::TooShort(len) => DenseRecordError::TooShort(len),
+            FrameError::BadMagic(magic) => DenseRecordError::BadMagic(magic),
+            FrameError::UnsupportedVersion(version) => {
+                DenseRecordError::UnsupportedVersion(version)
+            }
+            FrameError::ChecksumMismatch { stored, computed } => {
+                DenseRecordError::ChecksumMismatch { stored, computed }
+            }
+            FrameError::Malformed => DenseRecordError::Malformed,
+        }
+    }
+}
+
 pub fn encode(map: &BTreeMap<String, u64>, cap: u64) -> Vec<u8> {
     debug_assert!(map.len() <= u32::MAX as usize, "key_count exceeds u32");
-    let mut buf = Vec::with_capacity(4 + 1 + 8 + 4 + map.len() * 24 + 4);
-    buf.extend_from_slice(MAGIC);
-    buf.push(VERSION);
-    buf.extend_from_slice(&cap.to_le_bytes());
-    buf.extend_from_slice(&(map.len() as u32).to_le_bytes());
-    for (key, counter) in map {
-        let kb = key.as_bytes();
-        // key length is bounded by MAX_SEQ_KEY_LEN (<= u16::MAX) at the API edge.
-        debug_assert!(kb.len() <= u16::MAX as usize, "key length exceeds u16");
-        buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
-        buf.extend_from_slice(kb);
-        buf.extend_from_slice(&counter.to_le_bytes());
-    }
-    let crc = crc32c::crc32c(&buf);
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf
+    framed_record::encode(MAGIC, VERSION, 8 + 4 + map.len() * 24, |buf| {
+        buf.extend_from_slice(&cap.to_le_bytes());
+        buf.extend_from_slice(&(map.len() as u32).to_le_bytes());
+        for (key, counter) in map {
+            let kb = key.as_bytes();
+            // key length is bounded by MAX_SEQ_KEY_LEN (<= u16::MAX) at the API edge.
+            debug_assert!(kb.len() <= u16::MAX as usize, "key length exceeds u16");
+            buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
+            buf.extend_from_slice(kb);
+            buf.extend_from_slice(&counter.to_le_bytes());
+        }
+    })
 }
 
 pub fn decode(bytes: &[u8]) -> Result<(BTreeMap<String, u64>, u64), DenseRecordError> {
-    // minimum: magic(4) + version(1) + cap(8) + key_count(4) + crc(4) = 21
-    if bytes.len() < 21 {
-        return Err(DenseRecordError::TooShort(bytes.len()));
-    }
-    if &bytes[0..4] != MAGIC {
-        return Err(DenseRecordError::BadMagic([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-        ]));
-    }
-    if bytes[4] != VERSION {
-        return Err(DenseRecordError::UnsupportedVersion(bytes[4]));
-    }
-    let body = &bytes[..bytes.len() - 4];
-    let stored = u32::from_le_bytes(
-        bytes[bytes.len() - 4..]
-            .try_into()
-            .map_err(|_| DenseRecordError::Malformed)?,
-    );
-    let computed = crc32c::crc32c(body);
-    if stored != computed {
-        return Err(DenseRecordError::ChecksumMismatch { stored, computed });
-    }
+    let body =
+        framed_record::decode(bytes, MAGIC, VERSION, MIN_LEN).map_err(DenseRecordError::from)?;
     let cap = u64::from_le_bytes(
-        bytes[5..13]
+        body[0..8]
             .try_into()
             .map_err(|_| DenseRecordError::Malformed)?,
     );
     let key_count = u32::from_le_bytes(
-        bytes[13..17]
+        body[8..12]
             .try_into()
             .map_err(|_| DenseRecordError::Malformed)?,
     );
-    let mut pos = 17;
+    let mut pos = 12;
     let mut map = BTreeMap::new();
     let mut prev_key: Option<String> = None;
     for _ in 0..key_count {

@@ -29,7 +29,7 @@ use tsoracle_client::{Client, ClientError};
 use tsoracle_core::Epoch;
 use tsoracle_server::Server;
 use tsoracle_server::test_fakes::{InMemoryDriver, MockClock};
-use tsoracle_server::test_support::{boot_server, wait_for_grpc_handshake, wait_until_serving};
+use tsoracle_server::test_support::boot_leader_server;
 
 const START_MS: u64 = 1_000_000;
 
@@ -47,12 +47,8 @@ async fn boot_client() -> (
         .failover_advance(Duration::from_millis(200))
         .build()
         .unwrap();
-    let mut booted = boot_server(server).await;
-    driver.become_leader(Epoch(1));
-    wait_until_serving(&mut booted.state_rx).await;
-    wait_for_grpc_handshake(booted.addr, Duration::from_secs(5))
-        .await
-        .unwrap();
+    let (booted, _proto_client) =
+        boot_leader_server(server, || driver.become_leader(Epoch(1))).await;
     let client = Client::connect(vec![format!("http://{}", booted.addr)])
         .await
         .unwrap();
