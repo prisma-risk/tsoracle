@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [3.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.2.0...tsoracle-server-v3.2.1) - 2026-07-07
+
+### Fixed
+
+- *(server)* make the lease-commit epoch guard atomic with the table mutation ([#664](https://github.com/prisma-risk/tsoracle/pull/664))
+
+### Other
+
+- consolidate lease API helpers ([#663](https://github.com/prisma-risk/tsoracle/pull/663))
+
 ## [3.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.1.0...tsoracle-server-v3.2.0) - 2026-07-07
 
 ### Added
