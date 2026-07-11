@@ -52,7 +52,7 @@ fn new_peer_targeting(
     net: &Arc<MemNetwork<TestTypeConfig>>,
     from: u64,
     to: u64,
-) -> impl RaftNetworkV2<TestTypeConfig> {
+) -> impl RaftNetworkV2<TestTypeConfig, SnapshotData = std::io::Cursor<Vec<u8>>> {
     let mut factory = net.factory_for(from);
     futures::executor::block_on(factory.new_client(
         to,
@@ -66,7 +66,7 @@ fn sample_vote() -> VoteOf<TestTypeConfig> {
     Vote::new(1, 1)
 }
 
-fn sample_snapshot() -> SnapshotOf<TestTypeConfig> {
+fn sample_snapshot() -> SnapshotOf<TestTypeConfig, std::io::Cursor<Vec<u8>>> {
     Snapshot {
         meta: SnapshotMeta::default(),
         snapshot: std::io::Cursor::new(Vec::new()),

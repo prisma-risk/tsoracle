@@ -120,6 +120,8 @@ pub struct UnreachablePeer {
 }
 
 impl RaftNetworkV2<TypeConfig> for UnreachablePeer {
+    type SnapshotData = std::io::Cursor<Vec<u8>>;
+
     async fn append_entries(
         &mut self,
         _rpc: AppendEntriesRequest<TypeConfig>,
@@ -145,7 +147,7 @@ impl RaftNetworkV2<TypeConfig> for UnreachablePeer {
     async fn full_snapshot(
         &mut self,
         _vote: VoteOf<TypeConfig>,
-        _snapshot: SnapshotOf<TypeConfig>,
+        _snapshot: SnapshotOf<TypeConfig, Self::SnapshotData>,
         _cancel: impl std::future::Future<Output = ReplicationClosed> + OptionalSend + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {

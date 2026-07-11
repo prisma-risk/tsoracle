@@ -39,7 +39,7 @@ use openraft::error::{
 use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
-    VoteRequest, VoteResponse,
+    TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::storage::RaftStateMachine;
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
@@ -50,7 +50,7 @@ use crate::test_fakes::partition::PartitionController;
 /// Receiver-side dispatch trait. Wraps a concrete `Raft<C, SM>` so the
 /// network registry doesn't need to be parameterized over `SM`.
 #[async_trait]
-trait RaftAdapter<C: RaftTypeConfig>: Send + Sync + 'static {
+trait RaftAdapter<C: RaftTypeConfig, SD: OptionalSend + 'static>: Send + Sync + 'static {
     async fn append_entries(
         &self,
         req: AppendEntriesRequest<C>,
@@ -61,18 +61,23 @@ trait RaftAdapter<C: RaftTypeConfig>: Send + Sync + 'static {
     async fn install_full_snapshot(
         &self,
         vote: VoteOf<C>,
-        snapshot: SnapshotOf<C>,
+        snapshot: SnapshotOf<C, SD>,
     ) -> Result<SnapshotResponse<C>, Fatal<C>>;
 
-    async fn transfer_leader(&self, req: TransferLeaderRequest<C>) -> Result<(), Fatal<C>>;
+    async fn transfer_leader(
+        &self,
+        req: TransferLeaderRequest<C>,
+    ) -> Result<TransferLeaderResponse<C>, Fatal<C>>;
 }
+
+type RaftAdapterHandle<C, SD> = Arc<dyn RaftAdapter<C, SD>>;
 
 struct RaftHandle<C: RaftTypeConfig, SM: RaftStateMachine<C>> {
     raft: Raft<C, SM>,
 }
 
 #[async_trait]
-impl<C, SM> RaftAdapter<C> for RaftHandle<C, SM>
+impl<C, SM> RaftAdapter<C, SM::SnapshotData> for RaftHandle<C, SM>
 where
     C: RaftTypeConfig,
     SM: RaftStateMachine<C> + 'static,
@@ -91,25 +96,30 @@ where
     async fn install_full_snapshot(
         &self,
         vote: VoteOf<C>,
-        snapshot: SnapshotOf<C>,
+        snapshot: SnapshotOf<C, SM::SnapshotData>,
     ) -> Result<SnapshotResponse<C>, Fatal<C>> {
         self.raft.install_full_snapshot(vote, snapshot).await
     }
 
-    async fn transfer_leader(&self, req: TransferLeaderRequest<C>) -> Result<(), Fatal<C>> {
+    async fn transfer_leader(
+        &self,
+        req: TransferLeaderRequest<C>,
+    ) -> Result<TransferLeaderResponse<C>, Fatal<C>> {
         self.raft.handle_transfer_leader(req).await
     }
 }
 
 /// In-memory network registry. One per cluster.
-pub struct MemNetwork<C: RaftTypeConfig> {
-    nodes: RwLock<HashMap<C::NodeId, Arc<dyn RaftAdapter<C>>>>,
+pub struct MemNetwork<C: RaftTypeConfig, SD: OptionalSend + 'static = std::io::Cursor<Vec<u8>>> {
+    nodes: RwLock<HashMap<C::NodeId, RaftAdapterHandle<C, SD>>>,
     partitions: Arc<PartitionController<C::NodeId>>,
 }
 
-impl<C: RaftTypeConfig> MemNetwork<C>
+impl<C, SD> MemNetwork<C, SD>
 where
+    C: RaftTypeConfig,
     C::NodeId: Copy,
+    SD: OptionalSend + 'static,
 {
     /// Build a fresh, empty in-memory network with no peers registered and no
     /// partitions installed.
@@ -123,7 +133,7 @@ where
     /// Mint a `RaftNetworkFactory` whose `new_client` calls will route to peers
     /// registered on this network, tagging outgoing RPCs as originating from
     /// `self_id`.
-    pub fn factory_for(self: &Arc<Self>, self_id: C::NodeId) -> MemNetworkFactory<C> {
+    pub fn factory_for(self: &Arc<Self>, self_id: C::NodeId) -> MemNetworkFactory<C, SD> {
         MemNetworkFactory {
             net: Arc::clone(self),
             self_id,
@@ -134,9 +144,9 @@ where
     /// factory to `id` dispatch into this handle.
     pub fn register<SM>(&self, id: C::NodeId, raft: Raft<C, SM>)
     where
-        SM: RaftStateMachine<C> + 'static,
+        SM: RaftStateMachine<C, SnapshotData = SD> + 'static,
     {
-        let handle: Arc<dyn RaftAdapter<C>> = Arc::new(RaftHandle { raft });
+        let handle: RaftAdapterHandle<C, SD> = Arc::new(RaftHandle { raft });
         self.nodes.write().unwrap().insert(id, handle);
     }
 
@@ -146,23 +156,28 @@ where
         Arc::clone(&self.partitions)
     }
 
-    fn dispatch(&self, target: &C::NodeId) -> Option<Arc<dyn RaftAdapter<C>>> {
+    fn dispatch(&self, target: &C::NodeId) -> Option<RaftAdapterHandle<C, SD>> {
         self.nodes.read().unwrap().get(target).cloned()
     }
 }
 
 /// Factory handed to `Raft::new`. One per node; carries the node's own id so
 /// partition checks know which side of the wire the RPC is leaving from.
-pub struct MemNetworkFactory<C: RaftTypeConfig> {
-    net: Arc<MemNetwork<C>>,
+pub struct MemNetworkFactory<
+    C: RaftTypeConfig,
+    SD: OptionalSend + 'static = std::io::Cursor<Vec<u8>>,
+> {
+    net: Arc<MemNetwork<C, SD>>,
     self_id: C::NodeId,
 }
 
-impl<C: RaftTypeConfig> RaftNetworkFactory<C> for MemNetworkFactory<C>
+impl<C, SD> RaftNetworkFactory<C> for MemNetworkFactory<C, SD>
 where
+    C: RaftTypeConfig,
     C::NodeId: Copy,
+    SD: OptionalSend + 'static,
 {
-    type Network = MemNetworkPeer<C>;
+    type Network = MemNetworkPeer<C, SD>;
 
     async fn new_client(&mut self, target: C::NodeId, _node: &C::Node) -> Self::Network {
         MemNetworkPeer {
@@ -175,16 +190,21 @@ where
 
 /// Per-target client. Looks the target up in the shared registry on every RPC
 /// so a node can be reopened mid-test and have its replacement picked up.
-pub struct MemNetworkPeer<C: RaftTypeConfig> {
-    net: Arc<MemNetwork<C>>,
+pub struct MemNetworkPeer<C: RaftTypeConfig, SD: OptionalSend + 'static = std::io::Cursor<Vec<u8>>>
+{
+    net: Arc<MemNetwork<C, SD>>,
     from: C::NodeId,
     to: C::NodeId,
 }
 
-impl<C: RaftTypeConfig> RaftNetworkV2<C> for MemNetworkPeer<C>
+impl<C, SD> RaftNetworkV2<C> for MemNetworkPeer<C, SD>
 where
+    C: RaftTypeConfig,
     C::NodeId: Copy,
+    SD: OptionalSend + 'static,
 {
+    type SnapshotData = SD;
+
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<C>,
@@ -236,7 +256,7 @@ where
     async fn full_snapshot(
         &mut self,
         vote: VoteOf<C>,
-        snapshot: SnapshotOf<C>,
+        snapshot: SnapshotOf<C, Self::SnapshotData>,
         _cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<C>, StreamingError<C>> {
@@ -266,7 +286,7 @@ where
         &mut self,
         req: TransferLeaderRequest<C>,
         _option: RPCOption,
-    ) -> Result<(), RPCError<C>> {
+    ) -> Result<TransferLeaderResponse<C>, RPCError<C>> {
         if !self.net.partitions.is_reachable(self.from, self.to) {
             return Err(RPCError::Network(NetworkError::from_string(format!(
                 "mem-network: partitioned {:?} -> {:?}",

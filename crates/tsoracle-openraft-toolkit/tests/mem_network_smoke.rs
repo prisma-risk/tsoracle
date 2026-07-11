@@ -61,12 +61,11 @@ declare_raft_types_ext! {
         Node            = SmokeNode,
         AppData         = SmokeCmd,
         AppDataResponse = SmokeApplied,
-        SnapshotData    = std::io::Cursor<Vec<u8>>,
 }
 
 type LogId = LogIdOf<SmokeConfig>;
 type SnapMeta = SnapshotMetaOf<SmokeConfig>;
-type SnapOf = SnapshotOf<SmokeConfig>;
+type SnapOf = SnapshotOf<SmokeConfig, std::io::Cursor<Vec<u8>>>;
 type StoredMem = StoredMembershipOf<SmokeConfig>;
 
 #[derive(Clone)]
@@ -103,6 +102,8 @@ impl Default for SmokeStateMachine {
 }
 
 impl RaftSnapshotBuilder<SmokeConfig> for SmokeStateMachine {
+    type SnapshotData = std::io::Cursor<Vec<u8>>;
+
     async fn build_snapshot(&mut self) -> Result<SnapOf, io::Error> {
         let core = self.core.lock();
         let meta = SnapMeta {
@@ -120,6 +121,7 @@ impl RaftSnapshotBuilder<SmokeConfig> for SmokeStateMachine {
 }
 
 impl RaftStateMachine<SmokeConfig> for SmokeStateMachine {
+    type SnapshotData = std::io::Cursor<Vec<u8>>;
     type SnapshotBuilder = Self;
 
     async fn applied_state(&mut self) -> Result<(Option<LogId>, StoredMem), io::Error> {

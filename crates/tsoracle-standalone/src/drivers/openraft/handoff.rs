@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use openraft::Raft;
 use openraft::async_runtime::watch::WatchReceiver;
+use openraft::storage::RaftStateMachine;
 
 use tsoracle_driver_openraft::TypeConfig;
 
@@ -70,7 +71,7 @@ pub(crate) fn pick_handoff_target(
 /// error or timeout falls through to a normal drain.
 pub(crate) async fn graceful_leader_handoff<SM>(raft: &Raft<TypeConfig, SM>, me: NodeId)
 where
-    SM: Send + Sync + 'static,
+    SM: RaftStateMachine<TypeConfig> + Send + Sync + 'static,
 {
     if raft.current_leader().await != Some(me) {
         return;

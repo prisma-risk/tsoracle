@@ -138,7 +138,6 @@ mod tests {
             Node            = ProbePeer,
             AppData         = ProbeData,
             AppDataResponse = ProbeApplied,
-            SnapshotData    = std::io::Cursor<Vec<u8>>,
     }
 
     #[test]

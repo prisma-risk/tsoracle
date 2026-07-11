@@ -105,7 +105,6 @@ declare_raft_types_ext! {
         Node            = HostPeer,
         AppData         = HostCommand,
         AppDataResponse = HostApplied,
-        SnapshotData    = Cursor<Vec<u8>>,
 }
 
 // ---------- Snapshot payload ----------
@@ -181,7 +180,11 @@ impl HostStateMachine {
 }
 
 impl RaftSnapshotBuilder<HostTypeConfig> for HostStateMachine {
-    async fn build_snapshot(&mut self) -> Result<SnapshotOf<HostTypeConfig>, io::Error> {
+    type SnapshotData = Cursor<Vec<u8>>;
+
+    async fn build_snapshot(
+        &mut self,
+    ) -> Result<SnapshotOf<HostTypeConfig, Self::SnapshotData>, io::Error> {
         let (bytes, meta) = {
             let mut core = self.core.lock();
             core.snapshot_idx += 1;
@@ -211,6 +214,7 @@ impl RaftSnapshotBuilder<HostTypeConfig> for HostStateMachine {
 }
 
 impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
+    type SnapshotData = Cursor<Vec<u8>>;
     type SnapshotBuilder = Self;
 
     async fn applied_state(&mut self) -> Result<(Option<LogId>, StoredMem), io::Error> {
@@ -350,7 +354,7 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
 
     async fn get_current_snapshot(
         &mut self,
-    ) -> Result<Option<SnapshotOf<HostTypeConfig>>, io::Error> {
+    ) -> Result<Option<SnapshotOf<HostTypeConfig, Self::SnapshotData>>, io::Error> {
         let core = self.core.lock();
         Ok(core
             .current_snapshot

@@ -71,7 +71,7 @@ use crate::type_config::{ApplyOutcome, HighWaterApplied, TypeConfig};
 
 type LogId = LogIdOf<TypeConfig>;
 type SnapMeta = SnapshotMetaOf<TypeConfig>;
-type SnapOf = SnapshotOf<TypeConfig>;
+type SnapOf = SnapshotOf<TypeConfig, Cursor<Vec<u8>>>;
 type SnapData = Cursor<Vec<u8>>;
 type StoredMem = StoredMembershipOf<TypeConfig>;
 
@@ -535,6 +535,8 @@ impl HighWaterStateMachine {
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
+    type SnapshotData = Cursor<Vec<u8>>;
+
     async fn build_snapshot(&mut self) -> Result<SnapOf, io::Error> {
         // Build the payload + meta under the lock, then release it before
         // calling the store: `SnapshotStore::save` may do disk I/O (rocksdb
@@ -587,6 +589,7 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
 }
 
 impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
+    type SnapshotData = Cursor<Vec<u8>>;
     type SnapshotBuilder = Self;
 
     async fn applied_state(&mut self) -> Result<(Option<LogId>, StoredMem), io::Error> {

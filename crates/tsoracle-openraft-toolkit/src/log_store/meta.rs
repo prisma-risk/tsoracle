@@ -161,7 +161,6 @@ mod tests {
             Node            = MetaPeer,
             AppData         = MetaData,
             AppDataResponse = MetaApplied,
-            SnapshotData    = std::io::Cursor<Vec<u8>>,
     }
 
     #[test]

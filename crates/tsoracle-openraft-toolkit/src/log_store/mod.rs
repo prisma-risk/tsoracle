@@ -730,7 +730,6 @@ mod record_codec_tests {
             Node            = RecPeer,
             AppData         = RecData,
             AppDataResponse = RecApplied,
-            SnapshotData    = std::io::Cursor<Vec<u8>>,
     }
 
     type RecEntry = openraft::type_config::alias::EntryOf<RecConfig>;
@@ -805,7 +804,6 @@ mod active_write_version_wiring_tests {
             Node            = WirePeer,
             AppData         = WireData,
             AppDataResponse = WireApplied,
-            SnapshotData    = std::io::Cursor<Vec<u8>>,
     }
 
     fn open_empty_store() -> (
