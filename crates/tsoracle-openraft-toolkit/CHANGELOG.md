@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v1.2.0...tsoracle-openraft-toolkit-v1.3.0) - 2026-07-11
+
+### Added
+
+- *(openraft)* upgrade to alpha.29 ([#670](https://github.com/prisma-risk/tsoracle/pull/670))
+
 ## [1.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-openraft-toolkit-v1.1.0...tsoracle-openraft-toolkit-v1.2.0) - 2026-05-31
 
 ### Added
