@@ -50,8 +50,9 @@ use openraft::errors::ReplicationClosed;
 use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
-    VoteRequest, VoteResponse,
+    TransferLeaderResponse, VoteRequest, VoteResponse,
 };
+use openraft::storage::RaftStateMachine;
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use tokio::sync::Mutex;
 use tonic::transport::{Channel, ClientTlsConfig};
@@ -376,6 +377,8 @@ impl PeerNetwork {
 }
 
 impl RaftNetworkV2<TypeConfig> for PeerNetwork {
+    type SnapshotData = Cursor<Vec<u8>>;
+
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
@@ -411,13 +414,11 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
         &mut self,
         req: TransferLeaderRequest<TypeConfig>,
         option: RPCOption,
-    ) -> Result<(), RPCError<TypeConfig>> {
+    ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
         let mut c = self.client().await?;
         let payload =
             postcard::to_stdvec(&req).map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
-        // The reply payload is empty by contract; we only care that the RPC
-        // landed within the deadline.
-        unary_call(
+        let reply = unary_call(
             &self.pool,
             self.target,
             &self.addr,
@@ -428,7 +429,9 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
             }),
         )
         .await?;
-        Ok(())
+        let response = postcard::from_bytes(&reply.payload)
+            .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
+        Ok(response)
     }
 
     async fn vote(
@@ -469,7 +472,7 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
     async fn full_snapshot(
         &mut self,
         vote: VoteOf<TypeConfig>,
-        snapshot: SnapshotOf<TypeConfig>,
+        snapshot: SnapshotOf<TypeConfig, Self::SnapshotData>,
         cancel: impl Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
@@ -541,13 +544,19 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
 // PeerServiceImpl — tonic server, demuxes RaftMessage → Raft API calls.
 // ---------------------------------------------------------------------------
 
-pub struct PeerServiceImpl<SM = ()> {
+pub struct PeerServiceImpl<SM>
+where
+    SM: RaftStateMachine<TypeConfig, SnapshotData = Cursor<Vec<u8>>>,
+{
     pub raft: openraft::Raft<TypeConfig, SM>,
     pub active_write_version: WriteVersionSource,
 }
 
 #[tonic::async_trait]
-impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
+impl<SM> RaftPeerService for PeerServiceImpl<SM>
+where
+    SM: RaftStateMachine<TypeConfig, SnapshotData = Cursor<Vec<u8>>> + Send + Sync + 'static,
+{
     async fn append_entries(
         &self,
         request: tonic::Request<RaftMessage>,
@@ -601,12 +610,15 @@ impl<SM: Send + Sync + 'static> RaftPeerService for PeerServiceImpl<SM> {
             .map_err(tonic::Status::invalid_argument)?;
         let body: TransferLeaderRequest<TypeConfig> = postcard::from_bytes(&message.payload)
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
-        self.raft
+        let response = self
+            .raft
             .handle_transfer_leader(body)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        let payload =
+            postcard::to_stdvec(&response).map_err(|e| tonic::Status::internal(e.to_string()))?;
         Ok(tonic::Response::new(RaftMessage {
-            payload: Vec::new(),
+            payload,
             format_version: wire::stamp((self.active_write_version)()),
         }))
     }
@@ -761,10 +773,13 @@ where
 /// `active_write_version` source is consulted to stamp `format_version` on
 /// every response body (read per-RPC so a future activation flip is picked up
 /// live).
-pub fn server<SM: Send + Sync + 'static>(
+pub fn server<SM>(
     raft: openraft::Raft<TypeConfig, SM>,
     active_write_version: WriteVersionSource,
-) -> RaftPeerServiceServer<PeerServiceImpl<SM>> {
+) -> RaftPeerServiceServer<PeerServiceImpl<SM>>
+where
+    SM: RaftStateMachine<TypeConfig, SnapshotData = Cursor<Vec<u8>>> + Send + Sync + 'static,
+{
     RaftPeerServiceServer::new(PeerServiceImpl {
         raft,
         active_write_version,

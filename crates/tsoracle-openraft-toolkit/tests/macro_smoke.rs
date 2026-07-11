@@ -55,7 +55,6 @@ declare_raft_types_ext! {
         Node            = TestPeer,
         AppData         = TestAppData,
         AppDataResponse = TestAppliedState,
-        SnapshotData    = std::io::Cursor<Vec<u8>>,
 }
 
 // Same config with every optional override exercised, to confirm the override

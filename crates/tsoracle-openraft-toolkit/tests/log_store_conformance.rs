@@ -23,7 +23,7 @@
 
 #![cfg(feature = "rocksdb-log-store")]
 
-//! Drives openraft 0.10.0-alpha.20's bundled `Suite::test_all` against the
+//! Drives openraft 0.10.0-alpha.29's bundled `Suite::test_all` against the
 //! rocksdb-backed [`RocksdbLogStore`].
 //!
 //! The bundled suite tests `RaftLogStorage` and `RaftStateMachine` together
@@ -74,7 +74,7 @@ fn err_src(msg: impl ToString) -> <TestTypeConfig as RaftTypeConfig>::ErrorSourc
 
 type TestLogId = LogIdOf<TestTypeConfig>;
 type TestSnapshotMeta = SnapshotMetaOf<TestTypeConfig>;
-type TestSnapshot = SnapshotOf<TestTypeConfig>;
+type TestSnapshot = SnapshotOf<TestTypeConfig, Cursor<Vec<u8>>>;
 type TestStoredMembership = StoredMembershipOf<TestTypeConfig>;
 
 #[derive(Clone, Default)]
@@ -104,6 +104,7 @@ struct SnapshotPayload {
 }
 
 impl RaftStateMachine<TestTypeConfig> for StubStateMachine {
+    type SnapshotData = Cursor<Vec<u8>>;
     type SnapshotBuilder = Self;
 
     async fn applied_state(
@@ -173,6 +174,8 @@ impl RaftStateMachine<TestTypeConfig> for StubStateMachine {
 }
 
 impl RaftSnapshotBuilder<TestTypeConfig> for StubStateMachine {
+    type SnapshotData = Cursor<Vec<u8>>;
+
     async fn build_snapshot(&mut self) -> Result<TestSnapshot, io::Error> {
         let mut s = self.state.lock().unwrap();
         s.snapshot_counter += 1;

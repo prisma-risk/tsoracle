@@ -52,7 +52,6 @@ declare_raft_types_ext! {
         Node            = TestPeer,
         AppData         = TestAppData,
         AppDataResponse = TestAppliedState,
-        SnapshotData    = std::io::Cursor<Vec<u8>>,
 }
 
 /// Concrete `LeaderId` / `CommittedLeaderId` type used by `TestTypeConfig`.

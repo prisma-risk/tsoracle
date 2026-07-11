@@ -27,8 +27,6 @@
 //! inherits the toolkit's defaults (`NodeId = u64`, `Term = u64`, `LeaderId =
 //! leader_id_adv::LeaderId<u64, u64>`, `Responder = OneshotResponder`).
 
-use std::io::Cursor;
-
 use serde::{Deserialize, Serialize};
 use tsoracle_core::PeerEndpoint;
 use tsoracle_openraft_toolkit::declare_raft_types_ext;
@@ -164,7 +162,6 @@ declare_raft_types_ext! {
         Node            = OpenraftPeer,
         AppData         = HighWaterCommand,
         AppDataResponse = HighWaterApplied,
-        SnapshotData    = Cursor<Vec<u8>>,
 }
 
 /// The concrete raft log entry for this type config, as decoded from the log

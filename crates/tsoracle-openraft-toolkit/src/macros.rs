@@ -24,12 +24,15 @@
 //! Macros for declaring an openraft `RaftTypeConfig` with sensible defaults.
 //!
 //! Consumers supply only the slots that actually vary (`Node`, `AppData`,
-//! `AppDataResponse`, `SnapshotData`, optionally `NodeId`/`Entry`/`AsyncRuntime`/
-//! `Responder`); everything else is inherited from the defaults below.
+//! `AppDataResponse`, optionally `NodeId`/`Entry`/`AsyncRuntime`/`Responder`);
+//! everything else is inherited from the defaults below. Snapshot data is
+//! associated with openraft's state-machine and network traits rather than
+//! `RaftTypeConfig`. The legacy `SnapshotData` slot is still accepted and
+//! ignored so existing macro invocations can migrate independently.
 //!
 //! # Why a direct trait impl instead of wrapping `openraft::declare_raft_types!`
 //!
-//! openraft 0.10.0-alpha.20's `declare_raft_types!` macro does not accept a
+//! openraft 0.10.0-alpha.29's `declare_raft_types!` macro does not accept a
 //! `Responder<T> = ...` override — its `Responder<T>` slot has a `where` clause
 //! that the macro's `$type_id:ident = $type:ty` entry grammar can't express.
 //! The openraft test file (`raft/declare_raft_types_test.rs`) calls this out
@@ -52,8 +55,6 @@
 ///   `Clone + Default + Eq + PartialEq + Debug + Serialize + DeserializeOwned + Send + Sync + 'static`)
 /// - `AppData` — log entry payload (openraft's `D`)
 /// - `AppDataResponse` — state-machine apply result (openraft's `R`)
-/// - `SnapshotData` — snapshot wire format (must satisfy openraft's
-///   `AsyncRead + AsyncSeek + AsyncWrite + Unpin + Send + 'static`)
 ///
 /// Optional overrides:
 /// - `NodeId` (default `u64`)
@@ -64,6 +65,9 @@
 ///   where `C` and `T` are the GAT's in-scope `Self` and `T` (i.e. write the
 ///   override as `openraft::impls::OneshotResponder<Self, T>`). Default
 ///   `openraft::impls::OneshotResponder<Self, T>`.
+/// - `SnapshotData` — deprecated compatibility slot; snapshot data is now
+///   declared on `RaftStateMachine`, `RaftSnapshotBuilder`, and
+///   `RaftNetworkV2`.
 ///
 /// Inherited (non-overridable) defaults:
 /// - `Term = u64`
@@ -83,7 +87,6 @@
 ///         Node            = MyPeer,
 ///         AppData         = MyLogEntry,
 ///         AppDataResponse = MyAppliedState,
-///         SnapshotData    = std::io::Cursor<Vec<u8>>,
 /// }
 /// ```
 #[macro_export]
@@ -95,7 +98,7 @@ macro_rules! declare_raft_types_ext {
         $( Entry           = $entry:ty , )?
         AppData            = $app_data:ty ,
         AppDataResponse    = $app_resp:ty ,
-        SnapshotData       = $snap:ty ,
+        $( SnapshotData    = $snap:ty , )?
         $( AsyncRuntime    = $runtime:ty , )?
         $( Responder       = $responder:ty , )?
     ) => {
@@ -111,7 +114,6 @@ macro_rules! declare_raft_types_ext {
             type LeaderId     = ::openraft::impls::leader_id_adv::LeaderId<Self::Term, Self::NodeId>;
             type Vote         = ::openraft::impls::Vote<Self::LeaderId>;
             type Entry        = $crate::__first_or_default_entry!($( $entry, )?);
-            type SnapshotData = $snap;
             type AsyncRuntime = $crate::__first_or_default_runtime!($( $runtime, )?);
             type Responder<T>
                 = $crate::__first_or_default_responder!($( $responder, )?)
