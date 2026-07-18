@@ -5,7 +5,7 @@
 # stage for RUN to see it.
 ARG FEATURES=""
 
-FROM rust:1-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a AS build
+FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS build
 ARG FEATURES
 WORKDIR /src
 # RocksDB (openraft/paxos toolkits) needs clang+cmake for bindgen; tsoracle-proto
@@ -16,7 +16,7 @@ RUN apt-get update \
 COPY . .
 RUN cargo build --release -p tsoracle --bin tsoracle ${FEATURES:+--no-default-features --features $FEATURES}
 
-FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS runtime
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 # OCI image metadata. IMAGE_TITLE/IMAGE_DESCRIPTION are passed per-variant by the
 # release-images workflow so each driver image (tsoracle-file, tsoracle-openraft,
 # tsoracle) carries its own description; defaults cover a bare `docker build`. This
