@@ -375,6 +375,11 @@ async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
         .with_env_filter(EnvFilter::try_new(&common.log).unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
+    // Install the process signal handlers before bootstrap or listener
+    // readiness. The returned future retains signals received during startup
+    // until the server begins polling it.
+    let shutdown_signal = tsoracle_server::shutdown_signal();
+
     install_metrics_exporter(&common)?;
 
     let mut node: Standalone = tsoracle_standalone::build(cfg)
@@ -406,7 +411,7 @@ async fn run_serve(common: CommonServeArgs, cfg: DriverConfig) -> Result<()> {
     // transport failure (fail fast: a node whose peer/admin server died must
     // not keep running as a zombie).
     let fatal = node.fatal_signal();
-    let shutdown = wait_for_stop(tsoracle_server::shutdown_signal(), fatal.clone(), drain);
+    let shutdown = wait_for_stop(shutdown_signal, fatal.clone(), drain);
     let result = server
         .serve_with_listener(listener, shutdown)
         .await

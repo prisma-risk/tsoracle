@@ -33,6 +33,10 @@
 /// kills the process mid-flight and a supervisor SIGKILLs it after the grace
 /// period. On non-unix targets only Ctrl-C is available.
 ///
+/// On Unix, calling this function installs both signal handlers synchronously,
+/// before the returned future is first polled. Call it before advertising
+/// process readiness so a shutdown request cannot race handler registration.
+///
 /// ```no_run
 /// # async fn run(server: tsoracle_server::Server) -> Result<(), tsoracle_server::ServerError> {
 /// let addr = "0.0.0.0:50551".parse().unwrap();
@@ -42,30 +46,54 @@
 /// # }
 /// ```
 #[cfg(unix)]
-pub async fn shutdown_signal() {
+pub fn shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
     use tokio::signal::unix::{SignalKind, signal};
 
-    let mut sigterm = match signal(SignalKind::terminate()) {
-        Ok(stream) => stream,
-        Err(_error) => {
-            // Installing the SIGTERM handler only fails on resource exhaustion
-            // or an invalid signal — neither expected here. Degrade to Ctrl-C
-            // rather than refuse to shut down an otherwise-healthy node.
-            #[cfg(feature = "tracing")]
-            tracing::warn!(error = %_error, "could not install SIGTERM handler; only Ctrl-C will trigger shutdown");
-            let _ = tokio::signal::ctrl_c().await;
-            #[cfg(feature = "tracing")]
-            tracing::info!(signal = "SIGINT", "shutdown signal received");
-            return;
-        }
-    };
+    // `signal(...)` registers with Tokio synchronously. Keep both calls outside
+    // the async block so the default terminate-the-process dispositions are
+    // replaced before the returned future can be parked behind server startup.
+    let sigterm = signal(SignalKind::terminate());
+    let sigint = signal(SignalKind::interrupt());
 
-    let _signal_name = tokio::select! {
-        _ = tokio::signal::ctrl_c() => "SIGINT",
-        _ = sigterm.recv() => "SIGTERM",
-    };
-    #[cfg(feature = "tracing")]
-    tracing::info!(signal = _signal_name, "shutdown signal received");
+    async move {
+        let _signal_name = match (sigterm, sigint) {
+            (Ok(mut sigterm), Ok(mut sigint)) => {
+                tokio::select! {
+                    _ = sigint.recv() => "SIGINT",
+                    _ = sigterm.recv() => "SIGTERM",
+                }
+            }
+            (Ok(mut sigterm), Err(_sigint_error)) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    error = %_sigint_error,
+                    "could not install SIGINT handler; only SIGTERM will trigger shutdown"
+                );
+                let _ = sigterm.recv().await;
+                "SIGTERM"
+            }
+            (Err(_sigterm_error), Ok(mut sigint)) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    error = %_sigterm_error,
+                    "could not install SIGTERM handler; only SIGINT will trigger shutdown"
+                );
+                let _ = sigint.recv().await;
+                "SIGINT"
+            }
+            (Err(_sigterm_error), Err(_sigint_error)) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    sigterm_error = %_sigterm_error,
+                    sigint_error = %_sigint_error,
+                    "could not install SIGTERM or SIGINT handler"
+                );
+                std::future::pending::<&'static str>().await
+            }
+        };
+        #[cfg(feature = "tracing")]
+        tracing::info!(signal = _signal_name, "shutdown signal received");
+    }
 }
 
 /// Resolves when the process receives Ctrl-C. See the unix variant for the full
