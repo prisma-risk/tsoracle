@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [3.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.2.1...tsoracle-server-v3.2.2) - 2026-07-18
+
+### Fixed
+
+- *(server)* register shutdown signals before startup readiness ([#675](https://github.com/prisma-risk/tsoracle/pull/675))
+
 ## [3.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.2.0...tsoracle-server-v3.2.1) - 2026-07-07
 
 ### Fixed
