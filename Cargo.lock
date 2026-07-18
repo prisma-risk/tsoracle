@@ -3236,7 +3236,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tsoracle"
-version = "2.3.2"
+version = "2.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3452,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-server"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -3495,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-standalone"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "async-trait",
  "futures",
