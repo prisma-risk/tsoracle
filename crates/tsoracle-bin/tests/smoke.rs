@@ -253,9 +253,8 @@ async fn sigterm_triggers_graceful_shutdown() {
     let binary_path = env!("CARGO_BIN_EXE_tsoracle");
     let state_dir = tempdir().unwrap();
 
-    // Wait until the SIGTERM handler is live: it is registered when the
-    // shutdown future is first polled, which happens once tonic is serving —
-    // i.e. by the time the listener is accepting connections.
+    // `run_serve` registers SIGTERM before bootstrap and before binding the
+    // listener, so TCP readiness also proves the handler is already live.
     let (mut child, _addrs) = retry_spawn(1, &[0], Duration::from_secs(10), |addrs| {
         let mut cmd = Command::new(binary_path);
         cmd.arg("serve")

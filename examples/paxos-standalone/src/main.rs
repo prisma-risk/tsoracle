@@ -57,6 +57,7 @@ struct Cli {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let cli = Cli::parse();
+    let shutdown_signal = tsoracle_server::shutdown_signal();
     let peer_tls = match (cli.peer_tls_cert, cli.peer_tls_key, cli.peer_tls_ca) {
         (None, None, None) => None,
         (Some(cert), Some(key), Some(ca)) => Some(PeerTlsConfig { cert, key, ca }),
@@ -84,7 +85,7 @@ async fn main() -> Result<()> {
         cli.node_id, cli.tso_listen
     );
     let shutdown = async move {
-        tsoracle_server::shutdown_signal().await;
+        shutdown_signal.await;
         if let Some(drain) = drain {
             drain.await;
         }

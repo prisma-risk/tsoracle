@@ -49,18 +49,13 @@ async fn shutdown_signal_resolves_on_sigterm() {
         .with_test_writer()
         .try_init();
 
-    let waiter = tokio::spawn(tsoracle_server::shutdown_signal());
-
-    // `shutdown_signal` installs the SIGTERM handler the first time the spawned
-    // task is polled — replacing the default "terminate the process"
-    // disposition. Wait until it is parked on the handler before raising the
-    // signal so the raise cannot kill the test process through the default
-    // disposition.
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Construct but do not poll the future before raising SIGTERM. The helper
+    // must replace the default terminate-the-process disposition synchronously
+    // so a signal received during process startup is retained for later.
+    let waiter = tsoracle_server::shutdown_signal();
     raise(Signal::SIGTERM).expect("raising SIGTERM at our own process must succeed");
 
     tokio::time::timeout(Duration::from_secs(5), waiter)
         .await
-        .expect("shutdown_signal must resolve within 5s of SIGTERM")
-        .expect("the shutdown_signal task must not panic");
+        .expect("shutdown_signal must resolve within 5s of SIGTERM");
 }

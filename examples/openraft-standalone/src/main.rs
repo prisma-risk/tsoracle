@@ -92,6 +92,7 @@ fn parse_members(input: &str) -> Result<BTreeMap<u64, MemberAddr>> {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let cli = Cli::parse();
+    let shutdown_signal = tsoracle_server::shutdown_signal();
     let members = cli.members.as_deref().map(parse_members).transpose()?;
     let peer_tls = match (cli.peer_tls_cert, cli.peer_tls_key, cli.peer_tls_ca) {
         (None, None, None) => None,
@@ -122,7 +123,7 @@ async fn main() -> Result<()> {
         cli.id, cli.tso_addr
     );
     let shutdown = async move {
-        tsoracle_server::shutdown_signal().await;
+        shutdown_signal.await;
         if let Some(drain) = drain {
             drain.await;
         }
