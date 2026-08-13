@@ -32,9 +32,8 @@ publish_no_verify = false
 semver_check = false
 
 # Only open a release PR when the commits since the last release include at
-# least one user-visible change (`feat:`, `fix:`, `perf:` — with or without
-# scope or `!` breaking marker). Commits prefixed `chore:`, `ci:`, `docs:`,
-# `refactor:`, `style:`, `test:`, or `build:` don't trigger a release on
-# their own, but they still appear in the changelog under "Other" when a
-# real release does happen.
-release_commits = "^(feat|fix|perf)"
+# least one release-worthy change (`feat:`, `fix:`, `perf:`, `refactor:` — with
+# or without scope or `!` breaking marker). Commits prefixed `chore:`, `ci:`,
+# `docs:`, `style:`, `test:`, or `build:` don't trigger a release on their own,
+# but they still appear in the changelog under "Other" when a release happens.
+release_commits = "^(feat|fix|perf|refactor)"

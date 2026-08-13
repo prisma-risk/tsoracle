@@ -234,11 +234,11 @@ A handful of files sit on the request-handling hot path. They carry a `// #[Perf
 
 Releases run on [release-plz](https://release-plz.dev/). Each crate is versioned **independently** — a change to one crate bumps only that crate (and any dependents whose `version = "..."` pin release-plz updates), not the whole workspace. The flow is:
 
-1. Land commits on `main` using [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `chore:`, etc.). The prefix determines the semver bump, and `release_commits = "^(feat|fix|perf)"` in [`release-plz.toml`](release-plz.toml) means only `feat:`/`fix:`/`perf:` commits trigger a release for the crate they touch — `chore:`, `docs:`, `refactor:`, `style:`, `test:`, and `build:` do not.
+1. Land commits on `main` using [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `chore:`, etc.). The prefix determines the semver bump, and `release_commits = "^(feat|fix|perf|refactor)"` in [`release-plz.toml`](release-plz.toml) means `feat:`/`fix:`/`perf:`/`refactor:` commits trigger a release for the crate they touch — `chore:`, `docs:`, `style:`, `test:`, and `build:` do not.
 2. The `release-plz PR` workflow opens (or updates) a "Release PR" with the version bump and per-crate `CHANGELOG.md` diffs.
 3. Reviewing and merging that PR triggers the `release-plz release` job: it tags each crate (e.g. `tsoracle-core-v0.2.0`) and runs `cargo publish` in dependency order. A GitHub Release is created per tag.
 
-> **Adding public API to a library crate (e.g. `tsoracle-proto`) must use `feat:` or `fix:`, never `refactor:`.** The API surface is user-visible to *dependent crates* even when the gRPC wire contract (the `v1` proto package) is unchanged — a new `pub` item, re-export, or function is a release-worthy change. Because crates version independently and `refactor:` does not trigger a release, labelling such a change `refactor:` leaves the published crate behind: a dependent that already uses the new symbol then fails `cargo publish --verify` because it resolves the dependency to the stale, still-published version. Keep the proto package version (`tsoracle.v1`) and the crate version (`tsoracle-proto` on crates.io) distinct in your head — the former is the wire contract, the latter is the Rust packaging semver that dependents compile against.
+> **Adding public API to a library crate (e.g. `tsoracle-proto`) must use `feat:` or `fix:`, never `refactor:`.** The API surface is user-visible to *dependent crates* even when the gRPC wire contract (the `v1` proto package) is unchanged — a new `pub` item, re-export, or function is not a behavior-preserving refactor. Use the accurate prefix so release notes and semantic-version intent describe the published API change correctly. Keep the proto package version (`tsoracle.v1`) and the crate version (`tsoracle-proto` on crates.io) distinct in your head — the former is the wire contract, the latter is the Rust packaging semver that dependents compile against.
 
 ### Before the first publish (one-time bootstrap)
 
@@ -258,4 +258,3 @@ make release-dry-run
 ```
 
 It iterates `cargo publish --dry-run -p <crate>` over every publishable crate in dependency order. Catches packaging issues (missing readme, license-allow-list violations, broken `include` lists) before they reach the release PR.
-
