@@ -5,7 +5,7 @@
 # stage for RUN to see it.
 ARG FEATURES=""
 
-FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS build
+FROM rust:1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS build
 ARG FEATURES
 WORKDIR /src
 # RocksDB (openraft/paxos toolkits) needs clang+cmake for bindgen; tsoracle-proto
