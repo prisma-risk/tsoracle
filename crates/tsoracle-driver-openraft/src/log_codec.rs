@@ -54,13 +54,12 @@ impl LogStoreCodec<TypeConfig> for OpenraftLogCodec {
         // to propose one before activation; this is the second line so a gate
         // regression fails the write here at the leader rather than committing a
         // poison entry a pre-v6 follower cannot decode.
-        if version < tsoracle_openraft_toolkit::BATCH_WRITE_VERSION {
-            if let openraft::EntryPayload::Normal(
+        if version < tsoracle_openraft_toolkit::BATCH_WRITE_VERSION
+            && let openraft::EntryPayload::Normal(
                 crate::log_entry::HighWaterCommand::AdvanceDenseBatch { .. },
             ) = &entry.payload
-            {
-                return Err(CodecError::NotRepresentable { version });
-            }
+        {
+            return Err(CodecError::NotRepresentable { version });
         }
         encode_postcard(entry)
     }

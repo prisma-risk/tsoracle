@@ -431,10 +431,10 @@ impl HighWaterStateMachine {
             // `decode_framed` accepted the byte above, so it is within
             // `[MIN, MAX_READABLE_VERSION]` and never exceeds what this binary
             // can write.
-            if let Some(&snapshot_version) = bytes.first() {
-                if snapshot_version > active_write_version.get() {
-                    active_write_version.set(snapshot_version);
-                }
+            if let Some(&snapshot_version) = bytes.first()
+                && snapshot_version > active_write_version.get()
+            {
+                active_write_version.set(snapshot_version);
             }
         }
         let state_machine = Self {
@@ -905,11 +905,11 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
         // v4-encode `NotRepresentable` guard on its next `build_snapshot`. The
         // byte is already within `[MIN, MAX_READABLE_VERSION]` (decode_framed
         // accepted it above), so this never exceeds what this binary can write.
-        if let Some(&snapshot_version) = bytes.first() {
-            if snapshot_version > self.active_write_version.get() {
-                self.active_write_version.set(snapshot_version);
-                crate::observability::record_active_write_version(snapshot_version);
-            }
+        if let Some(&snapshot_version) = bytes.first()
+            && snapshot_version > self.active_write_version.get()
+        {
+            self.active_write_version.set(snapshot_version);
+            crate::observability::record_active_write_version(snapshot_version);
         }
 
         let persisted = PersistedSnapshot {

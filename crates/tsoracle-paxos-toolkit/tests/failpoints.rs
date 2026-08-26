@@ -135,10 +135,8 @@ fn counter_with_op(
             .key()
             .labels()
             .any(|label| label.key() == "op" && label.value() == expected_op);
-        if has_op {
-            if let DebugValue::Counter(n) = value {
-                return *n;
-            }
+        if has_op && let DebugValue::Counter(n) = value {
+            return *n;
         }
     }
     0

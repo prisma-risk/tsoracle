@@ -183,10 +183,10 @@ async fn wait_for_leader(nodes: &[Node]) -> anyhow::Result<usize> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         for (idx, node) in nodes.iter().enumerate() {
-            if let Some(leader_id) = node.raft.current_leader().await {
-                if leader_id == node.id {
-                    return Ok(idx);
-                }
+            if let Some(leader_id) = node.raft.current_leader().await
+                && leader_id == node.id
+            {
+                return Ok(idx);
             }
         }
         if Instant::now() >= deadline {
@@ -229,10 +229,10 @@ async fn build_client(nodes: &[Node]) -> anyhow::Result<TsoClient> {
 /// the demo runs single-threaded against committed in-process state.
 async fn high_water_of_leader(nodes: &[Node]) -> u64 {
     for node in nodes {
-        if let Some(leader_id) = node.raft.current_leader().await {
-            if leader_id == node.id {
-                return node.sm.high_water().await;
-            }
+        if let Some(leader_id) = node.raft.current_leader().await
+            && leader_id == node.id
+        {
+            return node.sm.high_water().await;
         }
     }
     0
@@ -351,11 +351,11 @@ pub async fn run_demo() -> anyhow::Result<DemoOutcome> {
     let new_leader_id = loop {
         let mut found_id: Option<u64> = None;
         for survivor in &survivors {
-            if let Some(leader_id) = survivor.raft.current_leader().await {
-                if leader_id == survivor.id {
-                    found_id = Some(survivor.id);
-                    break;
-                }
+            if let Some(leader_id) = survivor.raft.current_leader().await
+                && leader_id == survivor.id
+            {
+                found_id = Some(survivor.id);
+                break;
             }
         }
         if let Some(leader_id) = found_id {

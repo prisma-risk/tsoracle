@@ -10,7 +10,7 @@ If your service already runs OmniPaxos for other state and you want TSO to share
 
 ## Prerequisites
 
-- Rust 1.88+ (workspace toolchain).
+- Rust 1.96+ (workspace toolchain).
 - `protoc` installed (`brew install protobuf` on macOS).
 - For `GetTs` smoke tests: `grpcurl` (optional but convenient).
 

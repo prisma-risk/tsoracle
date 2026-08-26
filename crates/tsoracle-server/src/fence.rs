@@ -73,8 +73,7 @@ const FENCE_TRANSIENT_RETRY_WARN_INTERVAL: u32 = 20;
 fn warn_on_stuck_fence(transient_retries: u32) -> bool {
     transient_retries >= FENCE_TRANSIENT_RETRY_WARN_AFTER
         && (transient_retries - FENCE_TRANSIENT_RETRY_WARN_AFTER)
-            % FENCE_TRANSIENT_RETRY_WARN_INTERVAL
-            == 0
+            .is_multiple_of(FENCE_TRANSIENT_RETRY_WARN_INTERVAL)
 }
 
 /// Debug-only guard that a driver-surfaced [`LeaderState`] honors the

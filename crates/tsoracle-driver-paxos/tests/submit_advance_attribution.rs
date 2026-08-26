@@ -98,10 +98,10 @@ async fn submit_advance_commits_an_attributable_barrier_for_this_call() {
             LogEntry::Decided(HighWaterCommand::Advance(AdvancePayload { at_least: 42 })) => {
                 saw_this_calls_advance = true;
             }
-            LogEntry::Decided(HighWaterCommand::Barrier { node, .. }) if *node == leader_id => {
-                if saw_this_calls_advance {
-                    barrier_from_this_node_after_advance = true;
-                }
+            LogEntry::Decided(HighWaterCommand::Barrier { node, .. })
+                if *node == leader_id && saw_this_calls_advance =>
+            {
+                barrier_from_this_node_after_advance = true;
             }
             _ => {}
         }

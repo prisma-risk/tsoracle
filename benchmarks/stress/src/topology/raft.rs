@@ -511,11 +511,11 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut new_leader = None;
         while std::time::Instant::now() < deadline {
-            if let Some(candidate) = topology.controller.current_leader() {
-                if candidate != original_leader {
-                    new_leader = Some(candidate);
-                    break;
-                }
+            if let Some(candidate) = topology.controller.current_leader()
+                && candidate != original_leader
+            {
+                new_leader = Some(candidate);
+                break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

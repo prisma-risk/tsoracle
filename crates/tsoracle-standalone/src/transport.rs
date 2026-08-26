@@ -168,10 +168,10 @@ impl TransportHandle {
             // Receiver dropped (task already gone) is fine.
             let _ = cancel.send(());
         }
-        if let Some(join) = self.join.take() {
-            if let Err(err) = join.await {
-                tracing::warn!(error = ?err, "peer transport task join error");
-            }
+        if let Some(join) = self.join.take()
+            && let Err(err) = join.await
+        {
+            tracing::warn!(error = ?err, "peer transport task join error");
         }
     }
 }

@@ -49,10 +49,10 @@ impl SeqTracker {
     pub fn record_block(&mut self, key: &str, start: u64, count: u32) {
         self.calls += 1;
         self.serving = true;
-        if let Some(&expected) = self.expected_next.get(key) {
-            if start != expected {
-                self.gap_violations += 1;
-            }
+        if let Some(&expected) = self.expected_next.get(key)
+            && start != expected
+        {
+            self.gap_violations += 1;
         }
         self.expected_next
             .insert(key.to_string(), start + u64::from(count));

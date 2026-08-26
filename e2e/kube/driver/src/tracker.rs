@@ -46,10 +46,10 @@ impl<T: Ord + Copy> Tracker<T> {
 
     pub fn record_ok(&mut self, ts: T) {
         self.calls += 1;
-        if let Some(prev) = self.last {
-            if ts <= prev {
-                self.violations += 1;
-            }
+        if let Some(prev) = self.last
+            && ts <= prev
+        {
+            self.violations += 1;
         }
         self.last = Some(ts);
     }

@@ -279,10 +279,10 @@ async fn wait_for_leader(nodes: &[Node]) -> anyhow::Result<usize> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         for (idx, node) in nodes.iter().enumerate() {
-            if let Some(leader_id) = node.omnipaxos.lock().get_current_leader() {
-                if leader_id == node.id {
-                    return Ok(idx);
-                }
+            if let Some(leader_id) = node.omnipaxos.lock().get_current_leader()
+                && leader_id == node.id
+            {
+                return Ok(idx);
             }
         }
         if Instant::now() >= deadline {
@@ -467,11 +467,11 @@ pub async fn run_demo() -> anyhow::Result<DemoOutcome> {
             if idx == leader_idx {
                 continue;
             }
-            if let Some(leader_id) = node.omnipaxos.lock().get_current_leader() {
-                if leader_id == node.id {
-                    new_leader_idx = Some(idx);
-                    break;
-                }
+            if let Some(leader_id) = node.omnipaxos.lock().get_current_leader()
+                && leader_id == node.id
+            {
+                new_leader_idx = Some(idx);
+                break;
             }
         }
         if new_leader_idx.is_some() {

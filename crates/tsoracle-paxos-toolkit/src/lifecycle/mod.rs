@@ -336,10 +336,10 @@ where
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(handle) = self.handle.take() {
-            if let Err(err) = handle.await {
-                error!(error = ?err, "paxos runner task terminated abnormally");
-            }
+        if let Some(handle) = self.handle.take()
+            && let Err(err) = handle.await
+        {
+            error!(error = ?err, "paxos runner task terminated abnormally");
         }
         // The tick task drops `outbound_tx` as it exits, closing the queue so
         // the sender task finishes once it has drained — unless it is wedged
