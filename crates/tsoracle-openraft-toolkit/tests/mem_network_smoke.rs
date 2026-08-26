@@ -241,10 +241,10 @@ async fn three_node_mem_network_elects_and_replicates() {
     let leader_id = timeout(Duration::from_secs(10), async {
         loop {
             for (id, raft, _, _) in nodes.iter() {
-                if let Some(l) = raft.current_leader().await {
-                    if l == *id {
-                        return *id;
-                    }
+                if let Some(l) = raft.current_leader().await
+                    && l == *id
+                {
+                    return *id;
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

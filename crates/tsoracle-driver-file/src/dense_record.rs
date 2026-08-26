@@ -128,10 +128,10 @@ pub fn decode(bytes: &[u8]) -> Result<(BTreeMap<String, u64>, u64), DenseRecordE
         // and (b) rejects non-canonical orderings, making decode canonical so
         // that re-encoding a decoded record reproduces the exact input bytes
         // (the strict round-trip the fuzz target asserts).
-        if let Some(prev) = &prev_key {
-            if key <= *prev {
-                return Err(DenseRecordError::Malformed);
-            }
+        if let Some(prev) = &prev_key
+            && key <= *prev
+        {
+            return Err(DenseRecordError::Malformed);
         }
         prev_key = Some(key.clone());
         map.insert(key, counter);

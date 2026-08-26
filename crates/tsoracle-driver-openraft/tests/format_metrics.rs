@@ -82,10 +82,11 @@ fn install_recorder() -> Snapshotter {
 
 fn counter_value(snapshot: &[RecordedMetric], name: &str) -> u64 {
     for (composite, _unit, _desc, value) in snapshot {
-        if composite.kind() == MetricKind::Counter && composite.key().name() == name {
-            if let DebugValue::Counter(n) = value {
-                return *n;
-            }
+        if composite.kind() == MetricKind::Counter
+            && composite.key().name() == name
+            && let DebugValue::Counter(n) = value
+        {
+            return *n;
         }
     }
     0
@@ -93,10 +94,11 @@ fn counter_value(snapshot: &[RecordedMetric], name: &str) -> u64 {
 
 fn gauge_value(snapshot: &[RecordedMetric], name: &str) -> Option<f64> {
     for (composite, _unit, _desc, value) in snapshot {
-        if composite.kind() == MetricKind::Gauge && composite.key().name() == name {
-            if let DebugValue::Gauge(g) = value {
-                return Some(g.into_inner());
-            }
+        if composite.kind() == MetricKind::Gauge
+            && composite.key().name() == name
+            && let DebugValue::Gauge(g) = value
+        {
+            return Some(g.into_inner());
         }
     }
     None

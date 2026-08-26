@@ -503,8 +503,7 @@ impl RaftNetworkV2<TypeConfig> for PeerNetwork {
             })
             .collect::<Vec<_>>();
 
-        let outbound =
-            futures::stream::iter(std::iter::once(header_chunk).chain(data_chunks.into_iter()));
+        let outbound = futures::stream::iter(std::iter::once(header_chunk).chain(data_chunks));
 
         let mut c = self.client().await.map_err(|e| match e {
             RPCError::Network(n) => StreamingError::Network(n),

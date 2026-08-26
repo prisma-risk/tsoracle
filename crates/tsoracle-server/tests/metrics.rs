@@ -61,10 +61,11 @@ fn install_recorder() -> Snapshotter {
 
 fn counter_value(snapshot: &[RecordedMetric], name: &str) -> u64 {
     for (composite, _unit, _desc, value) in snapshot {
-        if composite.kind() == MetricKind::Counter && composite.key().name() == name {
-            if let DebugValue::Counter(n) = value {
-                return *n;
-            }
+        if composite.kind() == MetricKind::Counter
+            && composite.key().name() == name
+            && let DebugValue::Counter(n) = value
+        {
+            return *n;
         }
     }
     0
@@ -72,10 +73,11 @@ fn counter_value(snapshot: &[RecordedMetric], name: &str) -> u64 {
 
 fn histogram_sample_count(snapshot: &[RecordedMetric], name: &str) -> usize {
     for (composite, _unit, _desc, value) in snapshot {
-        if composite.kind() == MetricKind::Histogram && composite.key().name() == name {
-            if let DebugValue::Histogram(samples) = value {
-                return samples.len();
-            }
+        if composite.kind() == MetricKind::Histogram
+            && composite.key().name() == name
+            && let DebugValue::Histogram(samples) = value
+        {
+            return samples.len();
         }
     }
     0

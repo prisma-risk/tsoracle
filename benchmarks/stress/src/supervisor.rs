@@ -339,26 +339,27 @@ impl Supervisor {
         //     fence freshness is the authoritative cross-leadership check over
         //     a tighter window; suppressing here avoids a duplicate report of
         //     the same boundary regression.
-        if !monotonicity_flagged && !chaos_covered {
-            if let Some(prior) = self.state.completed_high_water {
-                // `issued_at >= prior.recv_time` is the happens-before test.
-                // We also require `recv_time >= prior.recv_time`: it is normally
-                // implied (recv_time >= issued_at), but the latency path already
-                // guards against an apparent backward clock, so we keep both and
-                // stay quiet if the two stamps disagree under skew.
-                if sample.issued_at >= prior.recv_time
-                    && sample.recv_time >= prior.recv_time
-                    && sample.ts <= prior.ts
-                {
-                    self.state.violations.push(Violation {
-                        kind: ViolationKind::CrossClientRealtimeMonotonicity {
-                            prior_completed_ts: prior.ts,
-                            got: sample.ts,
-                            sample: sample.clone(),
-                        },
-                        at: Instant::now(),
-                    });
-                }
+        if !monotonicity_flagged
+            && !chaos_covered
+            && let Some(prior) = self.state.completed_high_water
+        {
+            // `issued_at >= prior.recv_time` is the happens-before test.
+            // We also require `recv_time >= prior.recv_time`: it is normally
+            // implied (recv_time >= issued_at), but the latency path already
+            // guards against an apparent backward clock, so we keep both and
+            // stay quiet if the two stamps disagree under skew.
+            if sample.issued_at >= prior.recv_time
+                && sample.recv_time >= prior.recv_time
+                && sample.ts <= prior.ts
+            {
+                self.state.violations.push(Violation {
+                    kind: ViolationKind::CrossClientRealtimeMonotonicity {
+                        prior_completed_ts: prior.ts,
+                        got: sample.ts,
+                        sample: sample.clone(),
+                    },
+                    at: Instant::now(),
+                });
             }
         }
         // Advance the completed high-water on every sample (gates above only

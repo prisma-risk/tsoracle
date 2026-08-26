@@ -77,10 +77,11 @@ fn install_recorder() -> Snapshotter {
 fn counter_value(snapshot: &[RecordedMetric], name: &str) -> u64 {
     let mut total = 0u64;
     for (composite, _unit, _desc, value) in snapshot {
-        if composite.kind() == MetricKind::Counter && composite.key().name() == name {
-            if let DebugValue::Counter(n) = value {
-                total = total.saturating_add(*n);
-            }
+        if composite.kind() == MetricKind::Counter
+            && composite.key().name() == name
+            && let DebugValue::Counter(n) = value
+        {
+            total = total.saturating_add(*n);
         }
     }
     total
@@ -100,10 +101,8 @@ fn counter_value_with_label(
             .key()
             .labels()
             .any(|l| l.key() == label_key && l.value() == label_value);
-        if matches_label {
-            if let DebugValue::Counter(n) = value {
-                return *n;
-            }
+        if matches_label && let DebugValue::Counter(n) = value {
+            return *n;
         }
     }
     0
@@ -112,10 +111,11 @@ fn counter_value_with_label(
 fn histogram_sample_count(snapshot: &[RecordedMetric], name: &str) -> usize {
     let mut total = 0usize;
     for (composite, _unit, _desc, value) in snapshot {
-        if composite.kind() == MetricKind::Histogram && composite.key().name() == name {
-            if let DebugValue::Histogram(samples) = value {
-                total = total.saturating_add(samples.len());
-            }
+        if composite.kind() == MetricKind::Histogram
+            && composite.key().name() == name
+            && let DebugValue::Histogram(samples) = value
+        {
+            total = total.saturating_add(samples.len());
         }
     }
     total

@@ -766,7 +766,7 @@ mod lease_tests {
             ttl_ms: 10_000,
             ts_upper_bound: lease_id * 100,
             expires_at_ms: lease_id * 100 + 10_000,
-            superseded: lease_id % 2 == 0,
+            superseded: lease_id.is_multiple_of(2),
         }
     }
 

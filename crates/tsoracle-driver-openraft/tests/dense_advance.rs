@@ -122,10 +122,10 @@ async fn find_leader_idx(cluster: &TestCluster) -> usize {
     timeout(Duration::from_secs(10), async {
         loop {
             for (idx, node) in cluster.nodes.iter().enumerate() {
-                if let Some(l) = node.raft.current_leader().await {
-                    if l == node.id {
-                        return idx;
-                    }
+                if let Some(l) = node.raft.current_leader().await
+                    && l == node.id
+                {
+                    return idx;
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

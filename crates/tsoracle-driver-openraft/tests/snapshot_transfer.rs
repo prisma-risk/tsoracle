@@ -99,10 +99,10 @@ async fn find_leader_idx(nodes: &[SnapshotNode]) -> usize {
     timeout(Duration::from_secs(10), async {
         loop {
             for (idx, node) in nodes.iter().enumerate() {
-                if let Some(leader) = node.raft.current_leader().await {
-                    if leader == node.id {
-                        return idx;
-                    }
+                if let Some(leader) = node.raft.current_leader().await
+                    && leader == node.id
+                {
+                    return idx;
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -215,10 +215,10 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     let leader_snapshot_log_id = timeout(Duration::from_secs(10), async move {
         loop {
             let metrics = leader_raft.metrics().borrow_watched().clone();
-            if let Some(snapshot_log_id) = metrics.snapshot {
-                if snapshot_log_id.index >= 5 {
-                    return snapshot_log_id;
-                }
+            if let Some(snapshot_log_id) = metrics.snapshot
+                && snapshot_log_id.index >= 5
+            {
+                return snapshot_log_id;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

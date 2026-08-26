@@ -309,24 +309,24 @@ async fn build_openraft_inner(
         });
 
     // Bootstrap once (after the peer server is listening).
-    if cfg.bootstrap {
-        if let Some(members) = cfg.initial_membership {
-            let nodes: BTreeMap<u64, OpenraftPeer> = members
-                .into_iter()
-                .map(|(id, m)| {
-                    (
-                        id,
-                        OpenraftPeer {
-                            addr: m.raft_addr,
-                            service_endpoint: m.service_endpoint,
-                            admin_endpoint: m.admin_endpoint,
-                        },
-                    )
-                })
-                .collect();
-            if let Err(e) = raft.initialize(nodes).await {
-                tracing::warn!(error = ?e, "initialize() returned an error (expected if already initialized)");
-            }
+    if cfg.bootstrap
+        && let Some(members) = cfg.initial_membership
+    {
+        let nodes: BTreeMap<u64, OpenraftPeer> = members
+            .into_iter()
+            .map(|(id, m)| {
+                (
+                    id,
+                    OpenraftPeer {
+                        addr: m.raft_addr,
+                        service_endpoint: m.service_endpoint,
+                        admin_endpoint: m.admin_endpoint,
+                    },
+                )
+            })
+            .collect();
+        if let Err(e) = raft.initialize(nodes).await {
+            tracing::warn!(error = ?e, "initialize() returned an error (expected if already initialized)");
         }
     }
 

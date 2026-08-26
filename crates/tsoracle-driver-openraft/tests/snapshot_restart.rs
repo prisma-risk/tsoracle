@@ -130,10 +130,10 @@ async fn snapshot_persists_across_restart_when_log_is_purged() {
         let mut inspector = log_inspector;
         loop {
             let state = inspector.get_log_state().await.unwrap();
-            if let Some(purged) = state.last_purged_log_id {
-                if purged.index >= snapshot_log_id.index {
-                    return purged;
-                }
+            if let Some(purged) = state.last_purged_log_id
+                && purged.index >= snapshot_log_id.index
+            {
+                return purged;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
