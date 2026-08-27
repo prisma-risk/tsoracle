@@ -4,6 +4,13 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.2.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v2.2.0...tsoracle-driver-file-v2.2.1) - 2026-08-27
+
+### Other
+
+- bump toolchain to 1.96.1 and MSRV to 1.96 ([#690](https://github.com/prisma-risk/tsoracle/pull/690))
+- consolidate lease API helpers ([#663](https://github.com/prisma-risk/tsoracle/pull/663))
+
 ## [2.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v2.1.0...tsoracle-driver-file-v2.2.0) - 2026-07-07
 
 ### Added
