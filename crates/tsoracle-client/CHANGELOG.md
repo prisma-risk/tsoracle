@@ -4,6 +4,13 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [1.3.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v1.3.0...tsoracle-client-v1.3.1) - 2026-08-27
+
+### Other
+
+- bump toolchain to 1.96.1 and MSRV to 1.96 ([#690](https://github.com/prisma-risk/tsoracle/pull/690))
+- consolidate lease API helpers ([#663](https://github.com/prisma-risk/tsoracle/pull/663))
+
 ## [1.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v1.2.0...tsoracle-client-v1.3.0) - 2026-07-07
 
 ### Added
