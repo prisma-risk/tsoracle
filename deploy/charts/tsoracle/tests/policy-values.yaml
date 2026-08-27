@@ -1,0 +1,5 @@
+# Minimal values that make this chart render on its own, so the shared probe
+# policy gate has something to inspect. It exists to render, not to describe
+# production: every value here is a placeholder chosen for being obviously fake.
+driver: file
+replicas: 1

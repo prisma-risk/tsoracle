@@ -77,17 +77,24 @@ spec:
               containerPort: {{ .Values.ports.client }}
             - name: admin
               containerPort: {{ .Values.ports.admin }}
+          {{- /* Startup owns the boot window so liveness does not. Without it, liveness restarted the container at 40s, and a container killed mid-boot is retried with the same deadline rather than a larger one — a permanent crash loop for a node whose store replay or peer catch-up runs long. Startup shares the liveness target, which is what it should do; that all three probes are one tcpSocket check is the known gap recorded in values.yaml. */}}
+          startupProbe:
+            tcpSocket:
+              port: tso
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
           readinessProbe:
             tcpSocket:
               port: tso
-            initialDelaySeconds: 2
-            periodSeconds: 5
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           livenessProbe:
             tcpSocket:
               port: tso
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 3
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

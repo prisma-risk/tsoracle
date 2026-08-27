@@ -23,6 +23,23 @@ persistence:
   size: 1Gi
   storageClassName: ""
 resources: {}
+# Kubernetes probe surface, shared by both the file-driver Deployment and the HA StatefulSet.
+#
+# startup.periodSeconds * startup.failureThreshold is the cold-boot budget, and it exists so liveness does not own the boot window: a container killed mid-boot is retried with the same deadline, never a larger one, so a node whose store replay or peer catch-up runs long would crash-loop rather than start slowly. liveness.initialDelaySeconds covers the same budget independently, because kubernetes/kubernetes#105308 means the startup gate does not reliably suppress liveness.
+#
+# KNOWN GAP: all three probes are the same tcpSocket check, because tsoracle exposes no health surface. Readiness therefore reports only that the port accepts connections — it cannot distinguish a node that can mint timestamps from one that is up but has lost quorum, so an HA replica that cannot serve stays in the client Service. Closing this needs a real readiness signal (a gRPC health service with distinct liveness and readiness services, as cg-notify and cg-compute expose), and what "ready" means for the oracle is a design decision rather than a chart one. Until then the fleet probe policy reports probes-must-differ against this chart, correctly.
+probes:
+  startup:
+    periodSeconds: 5
+    failureThreshold: 24      # 120s cold-boot budget, covering store replay and peer catch-up
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    failureThreshold: 3
+  liveness:
+    initialDelaySeconds: 120  # >= startup.periodSeconds * startup.failureThreshold
+    periodSeconds: 10
+    failureThreshold: 3
 terminationGracePeriodSeconds: 30
 # The image runs as non-root uid 10001; fsGroup makes a freshly-provisioned PVC
 # group-writable so RocksDB/file-driver state can be created (required on most
