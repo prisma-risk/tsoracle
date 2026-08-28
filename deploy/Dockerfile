@@ -16,7 +16,7 @@ RUN apt-get update \
 COPY . .
 RUN cargo build --release -p tsoracle --bin tsoracle ${FEATURES:+--no-default-features --features $FEATURES}
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 # OCI image metadata. IMAGE_TITLE/IMAGE_DESCRIPTION are passed per-variant by the
 # release-images workflow so each driver image (tsoracle-file, tsoracle-openraft,
 # tsoracle) carries its own description; defaults cover a bare `docker build`. This
