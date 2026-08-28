@@ -229,7 +229,7 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
-      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532  # v2
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2
         with:
           tool: cargo-llvm-cov
       - name: system deps
