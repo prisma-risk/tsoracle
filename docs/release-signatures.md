@@ -38,12 +38,13 @@ slsa-verifier verify-artifact \
     tsoracle-0.1.14.crate
 ```
 
-The signing workflow is triggered by `push: main` (release-plz publishes
-inside that workflow run), so the SLSA generator records the source ref as
-`refs/heads/main`. Verification uses `--source-branch main`, not
-`--source-tag`. The specific release tag is still verifiable via
-`git verify-tag` (see [Verifying release tags](#verifying-release-tags)
-below) and via the commit SHA recorded in the provenance.
+The signing workflow is triggered when the trusted release-plz PR closes as
+merged into `main`. GitHub resolves that merged-PR event to `refs/heads/main`,
+so the SLSA generator records the source ref as the main branch. Verification
+uses `--source-branch main`, not `--source-tag`. The specific release tag is
+still verifiable via `git verify-tag` (see
+[Verifying release tags](#verifying-release-tags) below) and via the commit SHA
+recorded in the provenance.
 
 Successful output ends with:
 

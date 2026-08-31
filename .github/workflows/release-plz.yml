@@ -5,22 +5,19 @@ name: release-plz
 #     `release-pr` job. This is deliberate: the Release PR is opened/updated on
 #     demand instead of on every push, so we don't churn a Release PR on each
 #     commit to main. Cut a release by manually dispatching this workflow.
-#   - push to main fires ONLY the `release` job. Merging the Release PR is itself
-#     a push to main, so the merge still auto-tags + cargo-publishes the bumped
-#     crates — publish-on-merge is unchanged.
+#   - closing a trusted release-plz PR as merged into main fires ONLY the
+#     `release` job. The event is authenticated against the public release bot,
+#     same-repository branch, and default branch before any publication token is
+#     exposed.
 on:
   # Manual trigger (Actions tab → "Run workflow") — drives `release-pr` only,
   # so the Release PR is opened/updated on demand instead of on every commit.
   workflow_dispatch:
-  # Push to main — drives `release` only; a Release PR merge is a push to main,
-  # so publish-on-merge still happens automatically. Path-gated to CHANGELOG.md
-  # changes: release-plz owns those files (changelog_update = true) and rewrites
-  # them on every release, so a Release PR merge always matches while ordinary
-  # feature/fix commits don't — the publish job no longer runs on every commit.
-  # A stray CHANGELOG edit at most triggers a harmless no-op `release` (it only
-  # publishes crates whose version isn't already tagged). Path filters are ignored
-  # for workflow_dispatch, so the manual `release-pr` path is unaffected.
-  push:
+  # A merged release PR drives `release`. The job-level condition below binds
+  # publication to the public release-plz bot and its same-repository branch;
+  # ordinary CHANGELOG edits and lookalike PRs cannot reach the release token.
+  pull_request:
+    types: [closed]
     branches:
       - main
     paths:
@@ -34,15 +31,22 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # Publishes (tags + cargo publish + GitHub Release) whenever the release PR
-  # has been merged into main. The push trigger is path-gated to CHANGELOG.md
-  # changes (see `on:` above), so this no longer fires on ordinary commits; it
-  # runs on release PR merges, and harmlessly no-ops on the rare non-release
-  # CHANGELOG edit.
+  # Publishes (tags + cargo publish + GitHub Release) only for a release-plz PR
+  # that the public bot opened from this repository and that merged into the
+  # repository's main/default branch.
   release:
-    # Publish only on push to main (i.e. a merged Release PR), never on manual
-    # dispatch — `release-pr` owns the manual path.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      github.ref == 'refs/heads/main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'release-plz-') &&
+      github.event.pull_request.user.id == 286791072 &&
+      github.event.pull_request.user.login == 'prismarisk-public-release[bot]' &&
+      github.event.pull_request.user.type == 'Bot'
     name: release-plz release
     runs-on: ubuntu-latest
     environment: crates-io
@@ -288,9 +292,9 @@ jobs:
             --repo "$GITHUB_REPOSITORY"
 
   # Opens or updates the release PR. The PR contains the version bumps +
-  # CHANGELOG diffs; merging it triggers the `release` job above on the next
-  # push. Manual only: runs on workflow_dispatch so the Release PR is cut on
-  # demand rather than on every push to main.
+  # CHANGELOG diffs; closing that trusted PR as merged triggers the `release`
+  # job above. Manual only: runs on workflow_dispatch so the Release PR is cut
+  # on demand rather than on every push to main.
   release-pr:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     name: release-plz PR
