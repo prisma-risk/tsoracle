@@ -26,7 +26,9 @@
 use prost::Message;
 use tonic::Status;
 use tonic::metadata::{BinaryMetadataKey, BinaryMetadataValue};
-use tsoracle_proto::v1::{LEADER_HINT_TRAILER_KEY, LeaderHint, LeaderHintLookup};
+#[cfg(any(test, feature = "test-support"))]
+use tsoracle_proto::v1::LeaderHintLookup;
+use tsoracle_proto::v1::{LEADER_HINT_TRAILER_KEY, LeaderHint};
 
 pub fn not_leader_status(reporter: &crate::reporter::Reporter, hint: LeaderHint) -> Status {
     // Single chokepoint: every NOT_LEADER rejection in the service layer
@@ -74,6 +76,7 @@ fn with_leader_hint(mut status: Status, hint: LeaderHint, key_str: &str) -> Stat
 /// (`Absent`) and "garbage trailer" (`Malformed`) collapse to `None`, since the
 /// server's only decode caller is its own test surface, which has no use for
 /// the wire-protocol-bug distinction the client tracks.
+#[cfg(any(test, feature = "test-support"))]
 pub fn decode_leader_hint(status: &Status) -> Option<LeaderHint> {
     match tsoracle_proto::v1::decode_leader_hint(status) {
         LeaderHintLookup::Decoded(hint) => Some(hint),

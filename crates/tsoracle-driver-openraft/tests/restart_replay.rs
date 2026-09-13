@@ -91,7 +91,7 @@ async fn restart_replays_high_water_from_rocksdb_log() {
     let sm = reopened.sm.clone();
     eventually_eq(700u64, Duration::from_secs(10), || {
         let sm = sm.clone();
-        async move { sm.current_value().await }
+        async move { sm.current_value() }
     })
     .await;
 

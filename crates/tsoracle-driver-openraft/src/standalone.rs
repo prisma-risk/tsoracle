@@ -352,7 +352,7 @@ impl OpenraftHighWaterHost for StandaloneHost {
         if let Err(e) = self.raft.ensure_linearizable(ReadPolicy::ReadIndex).await {
             return Err(classify_read_error(e));
         }
-        Ok(self.state_machine.current_value().await)
+        Ok(self.state_machine.current_value())
     }
 
     async fn submit_advance(&self, at_least: u64) -> Result<u64, ConsensusError> {

@@ -169,7 +169,7 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
         let sm = node.sm.clone();
         eventually_eq(10u64, Duration::from_secs(5), move || {
             let sm = sm.clone();
-            async move { sm.current_value().await }
+            async move { sm.current_value() }
         })
         .await;
     }
@@ -244,7 +244,7 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     let follower_sm = nodes[follower_idx].sm.clone();
     eventually_eq(final_target, Duration::from_secs(15), move || {
         let sm = follower_sm.clone();
-        async move { sm.current_value().await }
+        async move { sm.current_value() }
     })
     .await;
 

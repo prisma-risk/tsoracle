@@ -150,7 +150,7 @@ async fn snapshot_persists_across_restart_when_log_is_purged() {
     let prior = nodes.remove(0);
     let reopened = reopen_node_with_config(prior, aggressive_snapshot_config()).await;
 
-    let value = reopened.sm.current_value().await;
+    let value = reopened.sm.current_value();
     assert_eq!(
         value, 800,
         "state machine must recover from persisted snapshot after log purge \
