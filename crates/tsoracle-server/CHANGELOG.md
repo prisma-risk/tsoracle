@@ -4,6 +4,13 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [3.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.2.2...tsoracle-server-v3.2.3) - 2026-09-13
+
+### Other
+
+- clean up stale abstractions ([#704](https://github.com/prisma-risk/tsoracle/pull/704))
+- bump toolchain to 1.96.1 and MSRV to 1.96 ([#690](https://github.com/prisma-risk/tsoracle/pull/690))
+
 ## [3.2.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.2.1...tsoracle-server-v3.2.2) - 2026-07-18
 
 ### Fixed
