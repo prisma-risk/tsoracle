@@ -14,7 +14,7 @@ on:
 
 # Default to read-only. Only the jobs that push to ghcr.io
 # (build-image, manifest, chart) opt into `packages: write`.
-# version/pr-smoke never push, so they stay read-only.
+# build-image also writes release assets on tags.
 permissions:
   contents: read
 
@@ -44,30 +44,104 @@ jobs:
             echo "v=0.0.0-pr${PR_NUM}" >> "$GITHUB_OUTPUT"
           fi
 
-  pr-smoke:
+  # Compile each release variant natively, then pass the stripped binary and symbols to the image job as workflow artifacts.
+  build-binary:
     needs: version
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [file, openraft, umbrella]
+        arch: [amd64, arm64]
+        include:
+          - variant: file
+            features: file,metrics
+            no_default_features: "true"
+          - variant: openraft
+            features: openraft,metrics
+            no_default_features: "true"
+          - variant: umbrella
+            features: metrics
+            no_default_features: "false"
+          - arch: amd64
+            machine: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            machine: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
+      - name: Verify native build architecture
+        env:
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: test "$(uname -m)" = "$EXPECTED_MACHINE"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
-      - name: Build file + openraft + umbrella and smoke
+      - name: Install native build dependencies
         run: |
-          docker build -f deploy/Dockerfile --build-arg FEATURES=file,metrics -t tsoracle-file:pr .
-          docker run --rm --entrypoint tsoracle tsoracle-file:pr serve file --help | grep -q -- --metrics-listen
-          docker build -f deploy/Dockerfile --build-arg FEATURES=openraft,metrics -t tsoracle-openraft:pr .
-          docker run --rm --entrypoint tsoracle tsoracle-openraft:pr serve openraft --help | grep -q -- --metrics-listen
-          docker build -f deploy/Dockerfile --build-arg FEATURES=file,openraft,paxos,metrics -t tsoracle:pr .
-          docker run --rm --entrypoint tsoracle tsoracle:pr serve paxos --help | grep -q -- --metrics-listen
-          curl -fsSL https://get.helm.sh/helm-v3.15.0-linux-amd64.tar.gz | tar xz
-          ./linux-amd64/helm lint deploy/charts/tsoracle
-          PATH="$PWD/linux-amd64:$PATH" sh deploy/charts/tsoracle/tests/render.sh
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang cmake libclang-dev protobuf-compiler
+      - name: Install repository Rust toolchain and llvm-strip
+        run: |
+          rustup component add llvm-tools-preview
+          rustup show active-toolchain
+      - name: Build and harden tsoracle binary (${{ matrix.variant }})
+        env:
+          FEATURES: ${{ matrix.features }}
+          NO_DEFAULT_FEATURES: ${{ matrix.no_default_features }}
+          VARIANT: ${{ matrix.variant }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+          export RUSTFLAGS="--remap-path-prefix=$rustup_home=/rustup --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$GITHUB_WORKSPACE=/build"
+          build_args=(--release --locked -p tsoracle --bin tsoracle)
+          if [ "$NO_DEFAULT_FEATURES" = "true" ]; then
+            build_args+=(--no-default-features)
+          fi
+          build_args+=(--features "$FEATURES")
+          cargo build "${build_args[@]}"
+
+          binary=target/release/tsoracle
+          home_hits="$(grep -aF -c "$HOME" "$binary" || true)"
+          workspace_hits="$(grep -aF -c "$GITHUB_WORKSPACE" "$binary" || true)"
+          printf 'runner home matches: %s\nworkspace matches: %s\n' "$home_hits" "$workspace_hits"
+          test "$home_hits" -eq 0
+          test "$workspace_hits" -eq 0
+
+          mkdir -p dist
+          symbols="tsoracle-${VARIANT}-${ARCH}-symbols.tar.gz"
+          tar -C target/release -czf "dist/$symbols" tsoracle
+          (cd dist && sha256sum "$symbols" > "$symbols.sha256")
+          cp "$binary" dist/tsoracle
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          llvm_strip="$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-strip"
+          test -x "$llvm_strip"
+          "$llvm_strip" dist/tsoracle
+      - name: Chart render smoke
+        if: matrix.variant == 'umbrella' && matrix.arch == 'amd64'
+        run: |
+          helm lint deploy/charts/tsoracle
+          sh deploy/charts/tsoracle/tests/render.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tsoracle-binary-${{ matrix.variant }}-${{ matrix.arch }}
+          path: dist/tsoracle
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tsoracle-symbols-${{ matrix.variant }}-${{ matrix.arch }}
+          path: |
+            dist/tsoracle-${{ matrix.variant }}-${{ matrix.arch }}-symbols.tar.gz
+            dist/tsoracle-${{ matrix.variant }}-${{ matrix.arch }}-symbols.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 1
 
   build-image:
-    needs: version
+    needs: [version, build-binary]
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     permissions:
-      contents: read
+      contents: write
       packages: write
     strategy:
       fail-fast: false
@@ -80,15 +154,12 @@ jobs:
         include:
           - variant: file
             image: tsoracle-file
-            features: file,metrics
             description: 'tsoracle with the file driver — single-node timestamp & sequence oracle'
           - variant: openraft
             image: tsoracle-openraft
-            features: openraft,metrics
             description: 'tsoracle with the openraft driver — distributed, fault-tolerant timestamp & sequence oracle'
           - variant: umbrella
             image: tsoracle
-            features: file,openraft,paxos,metrics
             description: 'tsoracle with all drivers bundled (file, openraft & OmniPaxos) — distributed timestamp & sequence oracle'
           - arch: amd64
             runner: ubuntu-latest
@@ -97,26 +168,82 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push per-arch image
+          name: tsoracle-binary-${{ matrix.variant }}-${{ matrix.arch }}
+          path: artifacts
+      # Symbols stay outside artifacts/, the only directory copied into the image.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: tsoracle-symbols-${{ matrix.variant }}-${{ matrix.arch }}
+          path: symbols
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+      - name: Build per-arch image
         env:
           V: ${{ needs.version.outputs.v }}
           IMAGE: ${{ matrix.image }}
           DESC: ${{ matrix.description }}
         run: |
-          docker buildx build \
+          test -f artifacts/tsoracle || { echo "artifacts/tsoracle missing" >&2; exit 1; }
+          docker build \
             --platform linux/${{ matrix.arch }} \
-            -f deploy/Dockerfile \
-            --build-arg FEATURES=${{ matrix.features }} \
+            -f deploy/Dockerfile.release \
             --build-arg IMAGE_TITLE="$IMAGE" \
             --build-arg IMAGE_DESCRIPTION="$DESC" \
-            -t "ghcr.io/prisma-risk/$IMAGE:${V}-${{ matrix.arch }}" \
-            --push .
+            -t "ghcr.io/prisma-risk/$IMAGE:${V}-${{ matrix.arch }}" .
+      - name: Smoke stripped binary on the runtime base
+        env:
+          V: ${{ needs.version.outputs.v }}
+          IMAGE: ${{ matrix.image }}
+        run: docker run --rm --entrypoint tsoracle "ghcr.io/prisma-risk/$IMAGE:${V}-${{ matrix.arch }}" --help >/dev/null
+      - name: Verify image architecture
+        env:
+          V: ${{ needs.version.outputs.v }}
+          IMAGE: ${{ matrix.image }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: test "$(docker image inspect "ghcr.io/prisma-risk/$IMAGE:${V}-${{ matrix.arch }}" --format '{{.Architecture}}')" = "$EXPECTED_ARCH"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push per-arch image and record its digest
+        env:
+          V: ${{ needs.version.outputs.v }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/prisma-risk/$IMAGE:${V}-${{ matrix.arch }}"
+          docker push "$ref"
+          digest="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          if ! printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "Invalid image digest: $digest" >&2
+            exit 1
+          fi
+          mkdir -p release-metadata
+          printf '%s@%s\n' "ghcr.io/prisma-risk/$IMAGE" "$digest" > "release-metadata/image-digest-${{ matrix.variant }}-${{ matrix.arch }}.txt"
+      - name: Attach image digest and symbols to the GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              echo "GitHub release $TAG was not created" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          gh release upload "$TAG" \
+            "release-metadata/image-digest-${{ matrix.variant }}-${{ matrix.arch }}.txt" \
+            "symbols/tsoracle-${{ matrix.variant }}-${{ matrix.arch }}-symbols.tar.gz" \
+            "symbols/tsoracle-${{ matrix.variant }}-${{ matrix.arch }}-symbols.tar.gz.sha256" \
+            --clobber
 
   manifest:
     needs: [version, build-image]

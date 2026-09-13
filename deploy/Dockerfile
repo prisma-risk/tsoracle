@@ -16,7 +16,9 @@ RUN apt-get update \
 COPY . .
 RUN cargo build --release -p tsoracle --bin tsoracle ${FEATURES:+--no-default-features --features $FEATURES}
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+# This runtime stage must stay in sync with deploy/Dockerfile.release. The only intentional difference is where the tsoracle binary is copied from.
+# the release runners ship a newer glibc than bookworm provides, so release binaries use trixie-slim at runtime.
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
 # OCI image metadata. IMAGE_TITLE/IMAGE_DESCRIPTION are passed per-variant by the
 # release-images workflow so each driver image (tsoracle-file, tsoracle-openraft,
 # tsoracle) carries its own description; defaults cover a bare `docker build`. This
@@ -43,7 +45,7 @@ COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 # and the no-volume case has a writable dir. Kubernetes is unaffected: the chart's
 # podSecurityContext.fsGroup still re-owns the PVC on top (OnRootMismatch skips the
 # re-chown since this already matches).
-RUN chmod +x /usr/local/bin/entrypoint.sh \
+RUN chmod +x /usr/local/bin/tsoracle /usr/local/bin/entrypoint.sh \
     && mkdir -p /data \
     && chown tsoracle:tsoracle /data
 USER tsoracle
