@@ -1,0 +1,25 @@
+# Runtime-only tsoracle image for the release pipeline (.github/workflows/release-images.yml).
+#
+# The hardened `tsoracle` binary is compiled natively on the release runner for its architecture and downloaded into the build context at `artifacts/tsoracle`. This Dockerfile only assembles that prebuilt binary into the production runtime image.
+#
+# The runtime stanza below must stay in sync with deploy/Dockerfile's runtime stage: base digest, labels, ca-certificates, uid 10001, /data ownership and entrypoint. The binary COPY source is the only intentional difference.
+# the release runners ship a newer glibc than bookworm provides, so release binaries use trixie-slim at runtime.
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
+
+ARG IMAGE_TITLE="tsoracle"
+ARG IMAGE_DESCRIPTION="A distributed timestamp and sequence oracle"
+LABEL org.opencontainers.image.title="${IMAGE_TITLE}" \
+      org.opencontainers.image.description="${IMAGE_DESCRIPTION}" \
+      org.opencontainers.image.source="https://github.com/prisma-risk/tsoracle" \
+      org.opencontainers.image.licenses="Apache-2.0"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home tsoracle
+COPY artifacts/tsoracle /usr/local/bin/tsoracle
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/tsoracle /usr/local/bin/entrypoint.sh \
+    && mkdir -p /data \
+    && chown tsoracle:tsoracle /data
+USER tsoracle
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
