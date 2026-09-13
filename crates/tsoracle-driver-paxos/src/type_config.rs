@@ -55,7 +55,9 @@ pub fn encode_epoch(ballot: Ballot) -> Epoch {
     )
 }
 
-/// Exact inverse of [`encode_epoch`]; returns `(config_id, n, pid)`.
+/// Exact inverse of [`encode_epoch`]; kept public so external diagnostics can
+/// inspect an epoch without depending on this crate's private bit layout.
+/// Returns `(config_id, n, pid)`.
 #[must_use]
 pub fn decode_epoch(epoch: Epoch) -> (u32, u32, u64) {
     let raw = epoch.0;

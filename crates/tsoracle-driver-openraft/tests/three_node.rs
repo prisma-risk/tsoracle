@@ -81,7 +81,7 @@ async fn three_node_leader_persists_and_followers_converge() {
         let sm = cluster.nodes[i].sm.clone();
         eventually_eq(100u64, Duration::from_secs(5), || {
             let sm = sm.clone();
-            async move { sm.current_value().await }
+            async move { sm.current_value() }
         })
         .await;
     }

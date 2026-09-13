@@ -96,7 +96,7 @@ async fn partition_then_heal_converges_monotonically() {
         let sm = cluster.nodes[i].sm.clone();
         eventually_eq(100u64, Duration::from_secs(5), || {
             let sm = sm.clone();
-            async move { sm.current_value().await }
+            async move { sm.current_value() }
         })
         .await;
     }
@@ -137,7 +137,7 @@ async fn partition_then_heal_converges_monotonically() {
     let sm = cluster.nodes[l_idx].sm.clone();
     eventually_eq(200u64, Duration::from_secs(10), || {
         let sm = sm.clone();
-        async move { sm.current_value().await }
+        async move { sm.current_value() }
     })
     .await;
 }

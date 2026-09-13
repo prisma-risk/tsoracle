@@ -179,6 +179,8 @@ pub(crate) fn is_transport_failure(error: &crate::error::ClientError) -> bool {
 /// failures where pausing before retrying de-correlates a thundering herd.
 /// Other failures are deterministic — the next endpoint is tried
 /// immediately without sleep.
+/// Kept as the policy seam for future divergence from channel eviction.
+#[inline]
 pub(crate) fn should_backoff(error: &crate::error::ClientError) -> bool {
     is_transport_failure(error)
 }

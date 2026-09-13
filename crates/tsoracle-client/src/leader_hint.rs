@@ -41,12 +41,9 @@ use crate::channel_pool::{ChannelPool, LeaderHintLookup, decode_leader_hint};
 /// the integration and unit tests exercise the same code.
 pub(crate) fn classify_not_leader_hint(
     pool: &ChannelPool,
-    endpoint: &str,
+    #[cfg_attr(not(feature = "tracing"), allow(unused_variables))] endpoint: &str,
     status: tonic::Status,
 ) -> AttemptOutcome {
-    // Silence the unused-variable warning when `tracing` is off; the
-    // parameter only flows into log fields below.
-    let _ = endpoint;
     let (hinted_endpoint, hint_epoch) = match decode_leader_hint(&status) {
         LeaderHintLookup::Decoded(hint) => {
             // `leader_epoch` is present in full or absent — the nested

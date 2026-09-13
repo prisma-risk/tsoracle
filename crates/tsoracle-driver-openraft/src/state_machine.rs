@@ -462,7 +462,7 @@ impl HighWaterStateMachine {
     /// `install_snapshot`. This is a state-machine-local read; callers that
     /// need linearizability must coordinate a read barrier through `Raft`
     /// before calling.
-    pub async fn current_value(&self) -> u64 {
+    pub fn current_value(&self) -> u64 {
         self.core.lock().current_value
     }
 
@@ -1013,7 +1013,7 @@ mod tests {
     async fn apply_blank_updates_only_log_id() {
         let mut sm = HighWaterStateMachine::new();
         apply_one(&mut sm, 1, EntryPayload::Blank).await;
-        assert_eq!(sm.current_value().await, 0);
+        assert_eq!(sm.current_value(), 0);
         let (last, _) = sm.applied_state().await.unwrap();
         assert_eq!(last.map(|l| l.index), Some(1));
     }
@@ -1027,7 +1027,7 @@ mod tests {
             EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 100 })),
         )
         .await;
-        assert_eq!(sm.current_value().await, 100);
+        assert_eq!(sm.current_value(), 100);
     }
 
     #[tokio::test]
@@ -1045,7 +1045,7 @@ mod tests {
             EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 50 })),
         )
         .await;
-        assert_eq!(sm.current_value().await, 100);
+        assert_eq!(sm.current_value(), 100);
     }
 
     #[tokio::test]
@@ -1063,7 +1063,7 @@ mod tests {
             EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 100 })),
         )
         .await;
-        assert_eq!(sm.current_value().await, 100);
+        assert_eq!(sm.current_value(), 100);
     }
 
     #[tokio::test]
@@ -1077,7 +1077,7 @@ mod tests {
         .await;
         let mem = openraft::Membership::new_with_defaults(vec![BTreeSet::from([1u64])], [1u64]);
         apply_one(&mut sm, 2, EntryPayload::Membership(mem)).await;
-        assert_eq!(sm.current_value().await, 42);
+        assert_eq!(sm.current_value(), 42);
         let (last, _) = sm.applied_state().await.unwrap();
         assert_eq!(last.map(|l| l.index), Some(2));
     }
@@ -1651,11 +1651,7 @@ mod tests {
         // Reopen: the recovery path decodes across the readable range and
         // restores state.
         let mut sm = HighWaterStateMachine::with_store(store.clone()).expect("reopened SM");
-        assert_eq!(
-            sm.current_value().await,
-            777,
-            "recovered value across reopen"
-        );
+        assert_eq!(sm.current_value(), 777, "recovered value across reopen");
 
         // The next build re-emits at the active write version.
         let active = sm.active_write_version();
@@ -1842,7 +1838,7 @@ mod tests {
             .await
             .expect("install_snapshot");
 
-        assert_eq!(sm.current_value().await, 999);
+        assert_eq!(sm.current_value(), 999);
         let (last, _) = sm.applied_state().await.unwrap();
         assert_eq!(last.map(|l| l.index), Some(5));
 
@@ -1881,7 +1877,7 @@ mod tests {
     #[tokio::test]
     async fn install_snapshot_rejects_empty_dense_key() {
         let mut sm = HighWaterStateMachine::new();
-        let before = sm.current_value().await;
+        let before = sm.current_value();
         let (meta, bytes) = dense_snapshot_with_key("");
 
         let err = sm
@@ -1893,14 +1889,14 @@ mod tests {
         // Rejected before any mutation: the wholesale state replacement (which
         // would have set current_value to 999) did not happen, and the invalid
         // key is absent from the dense map.
-        assert_eq!(sm.current_value().await, before);
+        assert_eq!(sm.current_value(), before);
         assert_eq!(sm.dense_value(""), 0);
     }
 
     #[tokio::test]
     async fn install_snapshot_rejects_oversized_dense_key() {
         let mut sm = HighWaterStateMachine::new();
-        let before = sm.current_value().await;
+        let before = sm.current_value();
         let oversized = "a".repeat(tsoracle_core::MAX_SEQ_KEY_LEN + 1);
         let (meta, bytes) = dense_snapshot_with_key(&oversized);
 
@@ -1910,7 +1906,7 @@ mod tests {
             .expect_err("install of a snapshot with an oversized dense key must be rejected");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 
-        assert_eq!(sm.current_value().await, before);
+        assert_eq!(sm.current_value(), before);
         assert_eq!(sm.dense_value(&oversized), 0);
     }
 
@@ -1925,7 +1921,7 @@ mod tests {
             .await
             .expect("install of a snapshot with a valid dense key must succeed");
 
-        assert_eq!(sm.current_value().await, 999);
+        assert_eq!(sm.current_value(), 999);
         assert_eq!(sm.dense_value("orders"), 7);
     }
 
@@ -1974,7 +1970,7 @@ mod tests {
             sm.build_snapshot().await.expect("build_snapshot");
         }
         let mut sm = HighWaterStateMachine::with_store(store).expect("reopened SM");
-        assert_eq!(sm.current_value().await, 99);
+        assert_eq!(sm.current_value(), 99);
         // `applied_state` must report the snapshot's last_log_id after reopen —
         // without this, openraft re-applies from index 0 and panics on missing
         // log entries that the snapshot already covered.
@@ -1994,7 +1990,7 @@ mod tests {
         // build the SM via `..Default::default()`; pinning behavior here keeps
         // the in-memory snapshot store as the unsurprising default.
         let mut sm = HighWaterStateMachine::default();
-        assert_eq!(sm.current_value().await, 0);
+        assert_eq!(sm.current_value(), 0);
         let snap = sm
             .get_current_snapshot()
             .await
@@ -2105,7 +2101,7 @@ mod tests {
             .expect("install_snapshot");
         // Reopen with the same store: install must have written through.
         let mut sm2 = HighWaterStateMachine::with_store(store).expect("reopened SM");
-        assert_eq!(sm2.current_value().await, 700);
+        assert_eq!(sm2.current_value(), 700);
         let (last, _) = sm2.applied_state().await.unwrap();
         assert_eq!(last.map(|l| l.index), Some(10));
     }
@@ -2166,7 +2162,7 @@ mod tests {
             .expect("stale install must be an accepted no-op, not an error");
 
         assert_eq!(
-            sm.current_value().await,
+            sm.current_value(),
             80,
             "value must not regress to the stale snapshot"
         );
@@ -2192,7 +2188,7 @@ mod tests {
         // state.
         let mut reopened = HighWaterStateMachine::with_store(store).expect("reopen");
         assert_eq!(
-            reopened.current_value().await,
+            reopened.current_value(),
             80,
             "durable store must not have been rolled back to the stale snapshot"
         );
@@ -2334,7 +2330,7 @@ mod tests {
             "error should name the mismatched field: {msg}"
         );
 
-        assert_eq!(sm.current_value().await, 0);
+        assert_eq!(sm.current_value(), 0);
         let (last, _) = sm.applied_state().await.unwrap();
         assert_eq!(last, None);
         assert!(
@@ -2378,12 +2374,12 @@ mod tests {
                         EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: *t })),
                     )
                     .await;
-                    let now = sm.current_value().await;
+                    let now = sm.current_value();
                     prop_assert!(now >= prev, "value went backwards: prev={prev} now={now}");
                     prev = now;
                 }
                 let expected = targets.iter().copied().max().unwrap_or(0);
-                prop_assert_eq!(sm.current_value().await, expected);
+                prop_assert_eq!(sm.current_value(), expected);
                 Ok(())
             })?;
         }
@@ -2417,7 +2413,7 @@ mod tests {
                     .await
                     .expect("install_snapshot");
 
-                prop_assert_eq!(sm2.current_value().await, sm.current_value().await);
+                prop_assert_eq!(sm2.current_value(), sm.current_value());
                 let (a_last, a_mem) = sm.applied_state().await.unwrap();
                 let (b_last, b_mem) = sm2.applied_state().await.unwrap();
                 prop_assert_eq!(a_last, b_last);
@@ -2586,7 +2582,7 @@ mod tests {
             .expect_err("must reject foreign version");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 
-        assert_eq!(sm.current_value().await, 0);
+        assert_eq!(sm.current_value(), 0);
         let (last, _) = sm.applied_state().await.unwrap();
         assert_eq!(last, None);
         assert!(
@@ -2814,7 +2810,7 @@ mod tests {
         );
         // High-water must be untouched.
         assert_eq!(
-            sm.current_value().await,
+            sm.current_value(),
             0,
             "AdvanceDense must not touch the high-water"
         );
@@ -3009,7 +3005,7 @@ mod tests {
         );
         // High-water must be untouched.
         assert_eq!(
-            sm.current_value().await,
+            sm.current_value(),
             0,
             "AdvanceDenseBatch must not touch the high-water"
         );
