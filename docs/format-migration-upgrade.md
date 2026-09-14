@@ -8,6 +8,17 @@ Each node tracks four separate version values. `min_readable_version` and `max_r
 
 A node decodes any version in `[min_readable_version, max_readable_version]` and fails loud (refuses to boot or rejects the RPC) on a version outside that range. The core safety invariant the rollout preserves is: a node must never write or send a format that any current peer — voter or learner — cannot already read.
 
+## Format versions
+
+Each version gates what a leader may append or snapshot. A feature's version is activated through the rollout below before its first use, and activating a version enables every feature below it.
+
+| Version | Constant | Adds |
+|---|---|---|
+| 4 | `BASELINE_WRITE_VERSION` | The baseline layout every node writes before any activation. |
+| 5 | `DENSE_WRITE_VERSION` | The `AdvanceDense` command and dense counters in the snapshot (`GetSeq`). |
+| 6 | `BATCH_WRITE_VERSION` | The `AdvanceDenseBatch` command (`GetSeqBatch`); snapshot layout unchanged. |
+| 7 | `LEASE_WRITE_VERSION` | The term-fenced `SetLeases` command and the durable lease set in the snapshot (`AcquireLease`, `RenewLease`, `ReleaseLease`). Until it is active, lease RPCs return `FAILED_PRECONDITION`. |
+
 ## The four-stage rollout (v_n to v_n+1)
 
 ### Stage 1 — Deploy read-capability (rolling restart, safe)

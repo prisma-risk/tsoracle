@@ -39,6 +39,8 @@
 //! result is either dropped by `client_write`'s `ForwardToLeader` path or
 //! absorbed by the apply-time `max`. Both outcomes preserve correctness
 //! without a term-based pre-check.
+//!
+//! `persist_leases(_, epoch)` is the exception. It replaces the durable lease set wholesale, so there is no monotone merge to absorb a stale write. The epoch travels in the `SetLeases` entry as the expected raft term, and the state machine applies the set only when the entry's log id carries that term.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -50,6 +52,7 @@ use tsoracle_consensus::{ConsensusDriver, ConsensusError, LeaderState};
 use tsoracle_core::Epoch;
 use tsoracle_openraft_toolkit::BATCH_WRITE_VERSION;
 use tsoracle_openraft_toolkit::DENSE_WRITE_VERSION;
+use tsoracle_openraft_toolkit::LEASE_WRITE_VERSION;
 use tsoracle_openraft_toolkit::LeadershipState;
 use tsoracle_openraft_toolkit::leadership_events_from_metrics;
 
@@ -172,6 +175,36 @@ where
     /// Read a key's committed dense counter (0 if absent), linearized.
     async fn load_dense_seq(&self, key: &tsoracle_core::SeqKey) -> Result<u64, ConsensusError> {
         self.host.current_dense_seq(key).await
+    }
+
+    /// Read the durable lease set via the host, linearized. Not gated on activation: before it, the committed set is simply empty.
+    async fn load_leases(&self) -> Result<Vec<tsoracle_core::LeaseRecord>, ConsensusError> {
+        self.host.current_leases().await
+    }
+
+    /// Replace the durable lease set, fenced by `epoch`.
+    ///
+    /// Gated on lease activation like the dense paths. Unlike `persist_high_water`, `epoch` is load-bearing: it is the raft term the server's leadership was established in, and the state machine applies the set only if the entry commits in that same term. A node that lost leadership and won it back appends in a later term, so a set it projected before the flap is refused instead of overwriting leases granted since.
+    async fn persist_leases(
+        &self,
+        live: &[tsoracle_core::LeaseRecord],
+        epoch: Epoch,
+    ) -> Result<(), ConsensusError> {
+        // Rollout gate: refuse until the lease format is active cluster-wide, so no un-upgraded follower is handed a SetLeases entry or a lease-bearing snapshot it cannot decode.
+        let active = self.host.active_write_version();
+        if active < LEASE_WRITE_VERSION {
+            return Err(ConsensusError::LeasesNotActivated {
+                required: LEASE_WRITE_VERSION,
+                active,
+            });
+        }
+        // Epochs this driver publishes are raft terms widened from u64, so anything wider was never issued by it.
+        let expected_term = u64::try_from(epoch.0).map_err(|_| {
+            ConsensusError::PermanentDriver(
+                format!("lease epoch {epoch:?} is not a raft term issued by this driver").into(),
+            )
+        })?;
+        self.host.submit_set_leases(expected_term, live).await
     }
 }
 
@@ -639,5 +672,82 @@ mod tests {
                 .expect("the maximum in-range value must persist"),
             PHYSICAL_MS_MAX
         );
+    }
+
+    fn a_lease() -> tsoracle_core::LeaseRecord {
+        tsoracle_core::LeaseRecord {
+            lease_id: 100,
+            holder: b"g1".to_vec(),
+            holder_epoch: 1,
+            ttl_ms: 20_000,
+            ts_upper_bound: 100,
+            expires_at_ms: 20_100,
+            superseded: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn persist_leases_returns_leases_not_activated_below_lease_write_version() {
+        use tsoracle_consensus::ConsensusDriver;
+        use tsoracle_openraft_toolkit::{BATCH_WRITE_VERSION, LEASE_WRITE_VERSION};
+
+        // One below the threshold, not only the baseline: v6 clusters have dense and batch but must still refuse leases.
+        let driver = versioned_echo_driver(BATCH_WRITE_VERSION);
+        let err = driver
+            .persist_leases(&[a_lease()], Epoch(1))
+            .await
+            .expect_err("persist_leases must be rejected before lease activation");
+        assert!(
+            matches!(
+                err,
+                tsoracle_consensus::ConsensusError::LeasesNotActivated { required, active }
+                if required == LEASE_WRITE_VERSION && active == BATCH_WRITE_VERSION
+            ),
+            "expected LeasesNotActivated, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_leases_at_lease_write_version_reaches_the_host_with_the_term() {
+        use tsoracle_consensus::ConsensusDriver;
+        use tsoracle_openraft_toolkit::LEASE_WRITE_VERSION;
+
+        // The versioned echo host keeps the trait's default `submit_set_leases`, so reaching it proves the gate let the call through.
+        let driver = versioned_echo_driver(LEASE_WRITE_VERSION);
+        let err = driver
+            .persist_leases(&[a_lease()], Epoch(4))
+            .await
+            .expect_err("the default host method is unsupported");
+        assert!(matches!(
+            err,
+            tsoracle_consensus::ConsensusError::LeasesUnsupported
+        ));
+    }
+
+    #[tokio::test]
+    async fn persist_leases_refuses_an_epoch_wider_than_a_raft_term() {
+        use tsoracle_consensus::ConsensusDriver;
+        use tsoracle_openraft_toolkit::LEASE_WRITE_VERSION;
+
+        let driver = versioned_echo_driver(LEASE_WRITE_VERSION);
+        let err = driver
+            .persist_leases(&[a_lease()], Epoch(u128::from(u64::MAX) + 1))
+            .await
+            .expect_err("an epoch this driver never issued must be refused");
+        assert!(matches!(
+            err,
+            tsoracle_consensus::ConsensusError::PermanentDriver(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn load_leases_on_a_host_without_lease_support_is_unsupported() {
+        // The server's fence maps this to an empty set, so a piggyback host that does not replicate leases keeps serving timestamps.
+        use tsoracle_consensus::ConsensusDriver;
+        let driver = echo_driver();
+        assert!(matches!(
+            driver.load_leases().await,
+            Err(tsoracle_consensus::ConsensusError::LeasesUnsupported)
+        ));
     }
 }

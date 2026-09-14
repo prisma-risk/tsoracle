@@ -46,7 +46,7 @@ use crate::capabilities::{
     target_in_local_readable_range,
 };
 use crate::host::OpenraftHighWaterHost;
-use crate::log_entry::{HighWaterCommand, SetFormatVersionPayload};
+use crate::log_entry::{HighWaterCommand, LeaseSet, SetFormatVersionPayload, SetLeasesPayload};
 use crate::state_machine::HighWaterStateMachine;
 use crate::type_config::{ApplyOutcome, OpenraftPeer, TypeConfig};
 use tsoracle_consensus::AdvancePayload;
@@ -331,6 +331,10 @@ fn classify_activation_outcome(
         | ApplyOutcome::DenseBatchOverflow) => {
             unreachable!("dense ApplyOutcome {other:?} returned from a SetFormatVersion entry")
         }
+        // Same reasoning for lease outcomes: only a SetLeases entry produces them.
+        other @ (ApplyOutcome::LeasesReplaced | ApplyOutcome::LeasesFenced { .. }) => {
+            unreachable!("lease ApplyOutcome {other:?} returned from a SetFormatVersion entry")
+        }
     }
 }
 
@@ -439,6 +443,52 @@ impl OpenraftHighWaterHost for StandaloneHost {
             return Err(classify_read_error(e));
         }
         Ok(self.state_machine.dense_value(key.as_str()))
+    }
+
+    async fn current_leases(&self) -> Result<Vec<tsoracle_core::LeaseRecord>, ConsensusError> {
+        // The fence seeds its lease table from this read, so it must reflect every lease write committed by any prior leader, exactly like `current_high_water`.
+        if let Err(e) = self.raft.ensure_linearizable(ReadPolicy::ReadIndex).await {
+            return Err(classify_read_error(e));
+        }
+        Ok(self.state_machine.leases())
+    }
+
+    async fn submit_set_leases(
+        &self,
+        expected_term: u64,
+        leases: &[tsoracle_core::LeaseRecord],
+    ) -> Result<(), ConsensusError> {
+        // Validate and canonicalize before proposing: a record the log refuses to decode must never reach it.
+        let leases = LeaseSet::from_records(leases)
+            .map_err(|e| ConsensusError::PermanentDriver(Box::new(e)))?;
+        match self
+            .raft
+            .client_write(HighWaterCommand::SetLeases(SetLeasesPayload {
+                expected_term,
+                leases,
+            }))
+            .await
+        {
+            Ok(resp) => classify_set_leases_outcome(resp.data.outcome),
+            Err(e) => Err(classify_client_write_error(e)),
+        }
+    }
+}
+
+/// Map a `SetLeases` apply outcome to the `persist_leases` result. A fenced apply means this node's leadership changed after the server projected the set; `Fenced` steps the server down so its fence reloads the durable set at the new epoch.
+fn classify_set_leases_outcome(outcome: ApplyOutcome) -> Result<(), ConsensusError> {
+    match outcome {
+        ApplyOutcome::LeasesReplaced => Ok(()),
+        ApplyOutcome::LeasesFenced {
+            expected_term,
+            entry_term,
+        } => Err(ConsensusError::Fenced {
+            expected: tsoracle_core::Epoch(u128::from(expected_term)),
+            current: tsoracle_core::Epoch(u128::from(entry_term)),
+        }),
+        other => Err(ConsensusError::PermanentDriver(
+            format!("unexpected ApplyOutcome for SetLeases: {other:?}").into(),
+        )),
     }
 }
 
@@ -637,5 +687,40 @@ mod tests {
             }
             other => panic!("expected TargetOutOfRange, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_set_leases_outcome_maps_replaced_to_ok() {
+        assert!(classify_set_leases_outcome(ApplyOutcome::LeasesReplaced).is_ok());
+    }
+
+    #[test]
+    fn classify_set_leases_outcome_maps_fenced_to_consensus_fenced() {
+        // The server classifies Fenced as a step-down and threads `current` into its leader hint, so both terms must survive the mapping.
+        let result = classify_set_leases_outcome(ApplyOutcome::LeasesFenced {
+            expected_term: 3,
+            entry_term: 5,
+        });
+        assert!(matches!(
+            result,
+            Err(ConsensusError::Fenced {
+                expected: tsoracle_core::Epoch(3),
+                current: tsoracle_core::Epoch(5),
+            })
+        ));
+    }
+
+    #[test]
+    fn classify_set_leases_outcome_refuses_a_foreign_outcome() {
+        assert!(matches!(
+            classify_set_leases_outcome(ApplyOutcome::Advanced),
+            Err(ConsensusError::PermanentDriver(_))
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "lease ApplyOutcome")]
+    fn classify_activation_outcome_lease_outcome_is_unreachable() {
+        classify_activation_outcome(ApplyOutcome::LeasesReplaced, 7).ok();
     }
 }

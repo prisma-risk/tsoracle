@@ -291,6 +291,12 @@ async fn persist_lease_set(
         Err(ConsensusError::LeasesUnsupported) => Err(Status::unimplemented(
             "leases are not supported by this consensus driver",
         )),
+        // The driver persists leases but the cluster has not activated the format that carries them. Bare FAILED_PRECONDITION with no leader hint, matching the dense activation path, so a client raises it rather than riding out an election.
+        Err(ConsensusError::LeasesNotActivated { required, active }) => {
+            Err(Status::failed_precondition(format!(
+                "lease format not yet activated (cluster at write version {active}, requires {required})"
+            )))
+        }
         Err(error) => Err(persist_error_status(server, "persist leases", error)),
     }
 }

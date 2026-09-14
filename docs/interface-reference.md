@@ -144,7 +144,7 @@ Acquire or idempotently re-acquire a stamping lease for an opaque holder group. 
 
 | `tonic::Code` | When | Trailer |
 |---|---|---|
-| `FAILED_PRECONDITION` | This node is not the leader, or the requested holder epoch is stale. | Leader hint on not-leader only |
+| `FAILED_PRECONDITION` | This node is not the leader, the requested holder epoch is stale, or the driver persists leases only after a format activation the cluster has not run yet (openraft: write version 7). | Leader hint on not-leader only |
 | `INVALID_ARGUMENT` | Empty/oversized holder or TTL outside server bounds. | — |
 | `UNIMPLEMENTED` | The consensus driver does not support durable leases. | — |
 | `UNAVAILABLE` | A transient high-water or lease-set persist failure occurred before the grant committed in memory. | — |
@@ -162,7 +162,7 @@ Advance a live lease's bound and expiry, re-arming its acquire-time TTL.
 
 | `tonic::Code` | When | Trailer |
 |---|---|---|
-| `FAILED_PRECONDITION` | Not leader, expired lease, or superseded lease. | Leader hint on not-leader only |
+| `FAILED_PRECONDITION` | Not leader, expired lease, superseded lease, or lease format not yet activated. | Leader hint on not-leader only |
 | `NOT_FOUND` | Unknown lease id. | — |
 | `UNIMPLEMENTED` | The consensus driver does not support durable leases. | — |
 | `UNAVAILABLE` | Transient persist failure before the renewal committed in memory. | — |
@@ -180,7 +180,7 @@ Surrender a lease immediately. Release is idempotent: unknown, expired, or alrea
 
 | `tonic::Code` | When | Trailer |
 |---|---|---|
-| `FAILED_PRECONDITION` | This node is not the leader. | Leader hint |
+| `FAILED_PRECONDITION` | This node is not the leader (carries the hint), or the lease format is not yet activated (no hint). | Leader hint on not-leader only |
 | `UNIMPLEMENTED` | The consensus driver does not support durable leases. | — |
 | `UNAVAILABLE` | Transient lease-set persist failure. | — |
 | `INTERNAL` | Permanent driver fault or invariant violation. | — |

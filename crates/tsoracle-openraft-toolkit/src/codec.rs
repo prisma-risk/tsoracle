@@ -51,11 +51,12 @@ pub const MIN_READABLE_VERSION: u8 = 4;
 /// Newest on-disk/wire format version this binary has a parser for. Only ever
 /// grows. Decode accepts `[MIN_READABLE_VERSION, MAX_READABLE_VERSION]`.
 ///
-/// Today this is 6 (`BATCH_WRITE_VERSION`): a v6-capable binary can read the
-/// v4 baseline layout, the v5 dense layout, and the v6 batch layout. A node
-/// writes `BASELINE_WRITE_VERSION` (4) until a committed `SetFormatVersion`
-/// activation advances the active write version through the all-members gate.
-pub const MAX_READABLE_VERSION: u8 = 6;
+/// Today this is 7 (`LEASE_WRITE_VERSION`): a v7-capable binary can read the
+/// v4 baseline layout, the v5 dense layout, the v6 batch layout, and the v7
+/// lease layout. A node writes `BASELINE_WRITE_VERSION` (4) until a committed
+/// `SetFormatVersion` activation advances the active write version through the
+/// all-members gate.
+pub const MAX_READABLE_VERSION: u8 = 7;
 
 // Compile-time guard: the readable range must be non-empty (`MIN <= MAX`) or
 // every decode rejects every record. Catches a future inverted-constants edit
@@ -82,6 +83,9 @@ pub const DENSE_WRITE_VERSION: u8 = 5;
 /// version gates which *commands* may be appended, not the snapshot layout, so
 /// a v6 snapshot is byte-identical to a v5 one.
 pub const BATCH_WRITE_VERSION: u8 = 6;
+
+/// The write version that introduces the `SetLeases` log command and the durable lease set in the state-machine snapshot. A leader must not append a `SetLeases` entry, and the driver refuses `persist_leases`, until the active write version has been activated to at least this value through the all-members gate. An older member could otherwise receive an entry or a snapshot it cannot decode.
+pub const LEASE_WRITE_VERSION: u8 = 7;
 
 /// Process-shared, runtime-mutable active write version.
 ///
@@ -193,11 +197,12 @@ mod tests {
     #[test]
     fn version_constants_are_at_expected_values() {
         assert_eq!(MIN_READABLE_VERSION, 4);
-        // MAX is 6 to cover the batch write version (BATCH_WRITE_VERSION).
-        assert_eq!(MAX_READABLE_VERSION, 6);
+        // MAX is 7 to cover the lease write version (LEASE_WRITE_VERSION).
+        assert_eq!(MAX_READABLE_VERSION, 7);
         assert_eq!(BASELINE_WRITE_VERSION, 4);
         assert_eq!(DENSE_WRITE_VERSION, 5);
         assert_eq!(BATCH_WRITE_VERSION, 6);
+        assert_eq!(LEASE_WRITE_VERSION, 7);
     }
 
     #[test]
@@ -231,8 +236,8 @@ mod tests {
 
     #[test]
     fn recover_takes_the_max_of_present_lower_bounds() {
-        // MAX_READABLE_VERSION (6) > BASELINE_WRITE_VERSION (4), so these
-        // assertions exercise the genuine multi-version max (4 vs 6).
+        // MAX_READABLE_VERSION (7) > BASELINE_WRITE_VERSION (4), so these
+        // assertions exercise the genuine multi-version max (4 vs 7).
         assert_eq!(
             recover_active_write_version(Some(MAX_READABLE_VERSION), None).unwrap(),
             MAX_READABLE_VERSION

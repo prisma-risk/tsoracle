@@ -35,6 +35,8 @@ Return the durably-persisted high-water. The read MUST be linearized — the ret
 
 This is intentionally unlike `advance_dense`: dense sequence advances are fetch-add operations that must commit exactly once, while lease persistence is full-set replacement. Superseding an older lease and inserting the newer lease happens in one persisted set.
 
+Full-set replacement also means a replicated driver cannot fence a stale lease write with an apply-time merge, the way `max(prev, at_least)` fences a stale high-water advance. A set projected before a leadership change may lack leases granted after it. Apply a lease write only when it commits under the `epoch` it was projected in, and return `ConsensusError::Fenced` otherwise. A driver that enables leases through a format activation returns `ConsensusError::LeasesNotActivated` until then.
+
 ## Single-leader is intrinsic, not a consensus choice
 
 Any correct TSO has at most one writer to the durable high-water at any moment. This is irreducible — concurrent writers can issue duplicate timestamps. So the `ConsensusDriver` contract implicitly requires single-writer-at-a-time. Multi-writer "consensus" implementations (CRDT, last-write-wins) are not compatible with tsoracle.
