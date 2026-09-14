@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.4.3...tsoracle-standalone-v1.5.0) - 2026-09-14
+
+### Added
+
+- *(openraft)* upgrade to alpha.33 ([#711](https://github.com/prisma-risk/tsoracle/pull/711))
+
 ## [1.4.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.4.2...tsoracle-standalone-v1.4.3) - 2026-09-13
 
 ### Other

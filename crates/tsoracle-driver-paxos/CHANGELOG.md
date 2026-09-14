@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.5](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v2.0.4...tsoracle-driver-paxos-v2.0.5) - 2026-09-14
+
+### Other
+
+- updated the following local packages: tsoracle-consensus, tsoracle-paxos-toolkit, tsoracle-paxos-toolkit
+
 ## [2.0.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-paxos-v2.0.3...tsoracle-driver-paxos-v2.0.4) - 2026-09-13
 
 ### Other
