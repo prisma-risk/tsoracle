@@ -51,7 +51,10 @@ pub use capabilities::{
 pub use driver::OpenraftDriver;
 pub use host::OpenraftHighWaterHost;
 pub use log_codec::OpenraftLogCodec;
-pub use log_entry::{DenseAdvance, HighWaterCommand, SetFormatVersionPayload};
+pub use log_entry::{
+    DenseAdvance, DurableLease, HighWaterCommand, LeaseSet, LeaseSetError, SetFormatVersionPayload,
+    SetLeasesPayload,
+};
 #[cfg(feature = "rocksdb-snapshot-store")]
 pub use snapshot_store::RocksdbSnapshotStore;
 pub use snapshot_store::{InMemorySnapshotStore, SnapshotStore};

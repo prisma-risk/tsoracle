@@ -80,6 +80,11 @@ pub enum ConsensusError {
     DenseBatchNotActivated { required: u8, active: u8 },
     #[error("leases are not supported by this driver")]
     LeasesUnsupported,
+    /// The driver persists leases, but the cluster has not yet activated the write version that carries them. Like the dense activation variants, this is an operator action (activate the format), not a transient fault.
+    #[error(
+        "leases require write version {required} but the cluster is at {active}; activate the format first"
+    )]
+    LeasesNotActivated { required: u8, active: u8 },
 }
 
 #[cfg(test)]

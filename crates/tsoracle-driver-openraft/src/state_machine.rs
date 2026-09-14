@@ -62,10 +62,10 @@ use tsoracle_codec::{
 };
 use tsoracle_openraft_toolkit::{
     ActiveWriteVersion, BASELINE_WRITE_VERSION, BATCH_WRITE_VERSION, DENSE_WRITE_VERSION,
-    MAX_READABLE_VERSION, MIN_READABLE_VERSION, codec_io_error,
+    LEASE_WRITE_VERSION, MAX_READABLE_VERSION, MIN_READABLE_VERSION, codec_io_error,
 };
 
-use crate::log_entry::{HighWaterCommand, SetFormatVersionPayload};
+use crate::log_entry::{HighWaterCommand, LeaseSet, SetFormatVersionPayload, SetLeasesPayload};
 use crate::snapshot_store::{InMemorySnapshotStore, SnapshotStore};
 use crate::type_config::{ApplyOutcome, HighWaterApplied, TypeConfig};
 
@@ -95,6 +95,18 @@ pub struct HighWaterStateMachineSnapshot {
     /// Genesis cardinality cap (v5+). Zero in a v4 snapshot ("absent
     /// sentinel"); the restore path keeps the cap seeded from the constructor.
     pub dense_cap: u64,
+    /// The durable lease set (v7+). Empty in a v4 to v6 snapshot, which predates lease persistence.
+    pub leases: LeaseSet,
+}
+
+/// The v5 and v6 on-disk snapshot layout, frozen. Used to decode `DENSE_WRITE_VERSION` and `BATCH_WRITE_VERSION` bytes written before the lease set existed, and to encode at those versions while leases are not yet activated. Do not edit its field set; it must remain byte-identical to the pre-lease layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HighWaterStateMachineSnapshotV5 {
+    current_value: u64,
+    last_applied: Option<LogId>,
+    last_membership: StoredMem,
+    dense: std::collections::BTreeMap<String, u64>,
+    dense_cap: u64,
 }
 
 /// The v4 on-disk snapshot layout, frozen. Used only to decode
@@ -136,16 +148,23 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
                     last_membership: old.last_membership,
                     dense: std::collections::BTreeMap::new(),
                     dense_cap: 0,
+                    leases: LeaseSet::default(),
                 })
             }
-            // v5 (DENSE_WRITE_VERSION): the current layout decodes directly.
-            // Ungated — production reads dense snapshots from v5-activated
-            // clusters without any feature flag.
-            v if v == DENSE_WRITE_VERSION => decode_postcard_exact(body),
-            // v6 (BATCH_WRITE_VERSION): snapshot layout is byte-identical to v5;
-            // batch adds a log command, not snapshot state, so the same decoder
-            // applies.
-            v if v == BATCH_WRITE_VERSION => decode_postcard_exact(body),
+            // v5 (DENSE_WRITE_VERSION) and v6 (BATCH_WRITE_VERSION): decode the frozen pre-lease layout (v6 added a log command, not snapshot state) and lift it with an empty lease set. Ungated: production reads these from v5- and v6-activated clusters.
+            v if v == DENSE_WRITE_VERSION || v == BATCH_WRITE_VERSION => {
+                let old: HighWaterStateMachineSnapshotV5 = decode_postcard_exact(body)?;
+                Ok(HighWaterStateMachineSnapshot {
+                    current_value: old.current_value,
+                    last_applied: old.last_applied,
+                    last_membership: old.last_membership,
+                    dense: old.dense,
+                    dense_cap: old.dense_cap,
+                    leases: LeaseSet::default(),
+                })
+            }
+            // v7 (LEASE_WRITE_VERSION): the current layout decodes directly; each lease record and the set ordering re-validate during decode.
+            v if v == LEASE_WRITE_VERSION => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -167,7 +186,7 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
                 // write version to 5) is maintained by the rollout gate, so
                 // reaching here with a non-empty map indicates a protocol
                 // violation that must be surfaced rather than silently lost.
-                if !self.dense.is_empty() {
+                if !self.dense.is_empty() || !self.leases.is_empty() {
                     return Err(tsoracle_codec::CodecError::NotRepresentable { version });
                 }
                 encode_postcard(&HighWaterStateMachineSnapshotV4 {
@@ -176,12 +195,21 @@ impl VersionedCodec for HighWaterStateMachineSnapshot {
                     last_membership: self.last_membership.clone(),
                 })
             }
-            // v5: the current (dense) layout encodes directly. Ungated.
-            v if v == DENSE_WRITE_VERSION => encode_postcard(self),
-            // v6 (BATCH_WRITE_VERSION): snapshot layout is byte-identical to v5;
-            // batch adds a log command, not snapshot state, so the same encoder
-            // applies.
-            v if v == BATCH_WRITE_VERSION => encode_postcard(self),
+            // v5 and v6: project to the frozen pre-lease layout. Fail loud in every build profile if leases are present: that is v7 state being encoded into a snapshot a pre-v7 member would read without it, which only a broken activation gate can reach.
+            v if v == DENSE_WRITE_VERSION || v == BATCH_WRITE_VERSION => {
+                if !self.leases.is_empty() {
+                    return Err(tsoracle_codec::CodecError::NotRepresentable { version });
+                }
+                encode_postcard(&HighWaterStateMachineSnapshotV5 {
+                    current_value: self.current_value,
+                    last_applied: self.last_applied,
+                    last_membership: self.last_membership.clone(),
+                    dense: self.dense.clone(),
+                    dense_cap: self.dense_cap,
+                })
+            }
+            // v7: the current (lease) layout encodes directly.
+            v if v == LEASE_WRITE_VERSION => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -205,6 +233,8 @@ impl VersionedCodec for PersistedSnapshot {
             // batch adds a log command, not snapshot state, so the same decoder
             // applies.
             v if v == BATCH_WRITE_VERSION => decode_postcard_exact(body),
+            // v7 (LEASE_WRITE_VERSION): envelope layout unchanged; only the payload blob inside gains the lease set.
+            v if v == LEASE_WRITE_VERSION => decode_postcard_exact(body),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -222,6 +252,8 @@ impl VersionedCodec for PersistedSnapshot {
             // batch adds a log command, not snapshot state, so the same encoder
             // applies.
             v if v == BATCH_WRITE_VERSION => encode_postcard(self),
+            // v7 (LEASE_WRITE_VERSION): envelope layout unchanged.
+            v if v == LEASE_WRITE_VERSION => encode_postcard(self),
             other => Err(tsoracle_codec::CodecError::VersionUnsupported {
                 min: MIN_READABLE_VERSION,
                 max: MAX_READABLE_VERSION,
@@ -244,6 +276,8 @@ struct Core {
     /// snapshot; never mutated at runtime. Stored in the replicated snapshot so
     /// replay/restore reproduces the same accept/reject decisions (spec §6.2).
     dense_cap: u64,
+    /// The durable lease set, replaced wholesale by each applied `SetLeases`. Already canonical (ordered by lease id), so snapshots are byte-identical across replicas.
+    leases: LeaseSet,
     last_applied: Option<LogId>,
     last_membership: StoredMem,
     /// The most-recently built or installed snapshot, retained in memory so
@@ -389,6 +423,7 @@ impl HighWaterStateMachine {
             current_value: 0,
             dense: std::collections::BTreeMap::new(),
             dense_cap: crate::DEFAULT_DENSE_CARDINALITY_CAP,
+            leases: LeaseSet::default(),
             last_applied: None,
             last_membership: StoredMembership::default(),
             current_snapshot: None,
@@ -409,6 +444,7 @@ impl HighWaterStateMachine {
             if payload.dense_cap != 0 {
                 core.dense_cap = payload.dense_cap;
             }
+            core.leases = payload.leases;
             core.current_snapshot = Some(StoredSnapshot {
                 meta: persisted.meta,
                 data: persisted.data,
@@ -466,6 +502,11 @@ impl HighWaterStateMachine {
     /// read; callers needing linearizability must issue a read barrier first.
     pub fn dense_value(&self, key: &str) -> u64 {
         self.core.lock().dense.get(key).copied().unwrap_or(0)
+    }
+
+    /// Read the durable lease set, ordered by lease id. State-machine-local read; callers needing linearizability must issue a read barrier first.
+    pub fn leases(&self) -> Vec<tsoracle_core::LeaseRecord> {
+        self.core.lock().leases.to_records()
     }
 
     /// Durably persist `envelope`, then publish `(meta, data)` as the current
@@ -540,6 +581,7 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
                 last_membership: core.last_membership.clone(),
                 dense: core.dense.clone(),
                 dense_cap: core.dense_cap,
+                leases: core.leases.clone(),
             };
             let meta = SnapMeta {
                 last_log_id: core.last_applied,
@@ -808,6 +850,35 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
                         outcome,
                     }
                 }
+                EntryPayload::Normal(HighWaterCommand::SetLeases(SetLeasesPayload {
+                    expected_term,
+                    leases,
+                })) => {
+                    // The set replaces the durable one wholesale, so apply-time monotonicity cannot fence a stale proposer the way it does for `Advance`. The proposer names the term its leader epoch projected the set in; the entry's own log id names the term it committed in. They differ exactly when leadership changed between projection and append, including a node that lost leadership and won it back, and then the set may be missing leases granted in between. Apply is deterministic in the log id, so every replica and every replay reaches the same outcome.
+                    let expected_term = *expected_term;
+                    let entry_term = log_id.leader_id.term;
+                    let mut core = self.core.lock();
+                    let outcome = if entry_term == expected_term {
+                        core.leases = leases.clone();
+                        ApplyOutcome::LeasesReplaced
+                    } else {
+                        // `debug!`, not `warn!`: per-entry apply hot path. A fenced write is an expected consequence of a leadership change; the proposer surfaces it as `Fenced`.
+                        tracing::debug!(
+                            expected_term = expected_term,
+                            entry_term = entry_term,
+                            "SetLeases no-op: entry committed in a different term than the set was projected in"
+                        );
+                        ApplyOutcome::LeasesFenced {
+                            expected_term,
+                            entry_term,
+                        }
+                    };
+                    core.last_applied = Some(log_id);
+                    HighWaterApplied {
+                        value: core.current_value,
+                        outcome,
+                    }
+                }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
                     core.last_membership = StoredMembership::new(Some(log_id), membership.clone());
@@ -920,6 +991,7 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
             if payload.dense_cap != 0 {
                 core.dense_cap = payload.dense_cap;
             }
+            core.leases = payload.leases;
         })?;
         Ok(())
     }
@@ -1144,7 +1216,7 @@ mod tests {
             2,
             EntryPayload::Normal(HighWaterCommand::SetFormatVersion(
                 SetFormatVersionPayload {
-                    target: 7, // out of range under default features.
+                    target: MAX_READABLE_VERSION + 1, // one past the local readable range.
                     gated_members: BTreeSet::from([1u64, 2u64, 3u64]),
                 },
             )),
@@ -1419,7 +1491,7 @@ mod tests {
             (
                 2u64,
                 ReplayEntry::Bump {
-                    target: 7, // out of range under default features.
+                    target: MAX_READABLE_VERSION + 1, // one past the local readable range.
                     gated: vec![1, 2, 3],
                 },
             ),
@@ -1526,7 +1598,7 @@ mod tests {
             (
                 2u64,
                 ReplayEntry::Bump {
-                    target: 7,
+                    target: MAX_READABLE_VERSION + 1,
                     gated: vec![1, 2, 3],
                 },
             ),
@@ -1534,7 +1606,7 @@ mod tests {
             (
                 4u64,
                 ReplayEntry::Bump {
-                    target: 8,
+                    target: MAX_READABLE_VERSION + 2,
                     gated: vec![1, 2],
                 },
             ),
@@ -1680,6 +1752,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: std::collections::BTreeMap::new(),
             dense_cap: 0,
+            leases: LeaseSet::default(),
         };
         for version in tsoracle_openraft_toolkit::MIN_READABLE_VERSION
             ..=tsoracle_openraft_toolkit::MAX_READABLE_VERSION
@@ -1787,6 +1860,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: std::collections::BTreeMap::new(),
             dense_cap: 0,
+            leases: LeaseSet::default(),
         };
         let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
@@ -1826,6 +1900,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: std::collections::BTreeMap::from([(key.to_string(), 7u64)]),
             dense_cap: 64,
+            leases: LeaseSet::default(),
         };
         let bytes =
             tsoracle_codec::encode_framed(tsoracle_openraft_toolkit::DENSE_WRITE_VERSION, &payload)
@@ -1997,6 +2072,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: std::collections::BTreeMap::new(),
             dense_cap: 0,
+            leases: LeaseSet::default(),
         };
         let data =
             tsoracle_codec::encode_framed(BASELINE_WRITE_VERSION, &payload).expect("payload");
@@ -2092,6 +2168,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: std::collections::BTreeMap::new(),
             dense_cap: 0,
+            leases: LeaseSet::default(),
         };
         let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
@@ -2123,6 +2200,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: std::collections::BTreeMap::new(),
             dense_cap: 0,
+            leases: LeaseSet::default(),
         };
         let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
@@ -2310,6 +2388,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: std::collections::BTreeMap::new(),
             dense_cap: 0,
+            leases: LeaseSet::default(),
         };
         let bytes = tsoracle_codec::encode_framed(
             tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION,
@@ -2445,6 +2524,7 @@ mod tests {
             last_membership: StoredMembership::default(),
             dense: std::collections::BTreeMap::new(),
             dense_cap: 0,
+            leases: LeaseSet::default(),
         };
         let via_seam = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
             .expect("encode_framed");
@@ -2513,6 +2593,7 @@ mod tests {
             last_membership: StoredMembership::default(),
             dense: std::collections::BTreeMap::new(),
             dense_cap: 0,
+            leases: LeaseSet::default(),
         };
         let framed = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
             .expect("encode");
@@ -2621,6 +2702,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: dense.clone(),
             dense_cap: 500,
+            leases: LeaseSet::default(),
         };
 
         let framed = encode_framed(DENSE_WRITE_VERSION, &payload).expect("v5 encode");
@@ -2654,6 +2736,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: dense.clone(),
             dense_cap: 32,
+            leases: LeaseSet::default(),
         };
 
         let framed = encode_framed(BATCH_WRITE_VERSION, &payload).expect("v6 encode");
@@ -2684,6 +2767,7 @@ mod tests {
             last_membership: StoredMem::default(),
             dense: std::collections::BTreeMap::new(),
             dense_cap: 0,
+            leases: LeaseSet::default(),
         };
 
         let framed = encode_framed(tsoracle_openraft_toolkit::BASELINE_WRITE_VERSION, &payload)
@@ -3324,5 +3408,275 @@ mod tests {
             .build_snapshot()
             .await
             .expect("build_snapshot after reopen must NOT return NotRepresentable");
+    }
+
+    // ---- Durable lease set (write version 7) ----
+    //
+    // `ApplyOutcome` only reaches a caller through openraft's responder, which these unit tests do not wire, so each test observes the lease set itself. The outcome mapping is covered in `standalone.rs` and end to end by `tests/lease_persist.rs`.
+
+    use crate::log_entry::SetLeasesPayload;
+    use tsoracle_openraft_toolkit::LEASE_WRITE_VERSION;
+
+    fn lease(lease_id: u64, holder: &[u8]) -> tsoracle_core::LeaseRecord {
+        tsoracle_core::LeaseRecord {
+            lease_id,
+            holder: holder.to_vec(),
+            holder_epoch: 1,
+            ttl_ms: 20_000,
+            ts_upper_bound: lease_id,
+            expires_at_ms: lease_id + 20_000,
+            superseded: false,
+        }
+    }
+
+    fn lease_set(records: &[tsoracle_core::LeaseRecord]) -> LeaseSet {
+        LeaseSet::from_records(records).expect("valid lease set")
+    }
+
+    /// Apply one `SetLeases` entry whose log id commits in `entry_term`.
+    async fn apply_set_leases(
+        sm: &mut HighWaterStateMachine,
+        index: u64,
+        entry_term: u64,
+        expected_term: u64,
+        records: &[tsoracle_core::LeaseRecord],
+    ) {
+        let e: EntryOf<TypeConfig> = EntryOf::<TypeConfig>::new_normal(
+            openraft::testing::log_id::<TypeConfig>(entry_term, 1, index),
+            HighWaterCommand::SetLeases(SetLeasesPayload {
+                expected_term,
+                leases: lease_set(records),
+            }),
+        );
+        sm.apply(stream::iter([Ok((e, None))]))
+            .await
+            .expect("apply");
+    }
+
+    #[tokio::test]
+    async fn set_leases_in_the_projected_term_replaces_the_set() {
+        let mut sm = HighWaterStateMachine::new();
+        apply_set_leases(&mut sm, 1, 3, 3, &[lease(200, b"g2"), lease(100, b"g1")]).await;
+
+        // Stored canonically, ordered by lease id, whatever order the proposer supplied.
+        assert_eq!(sm.leases(), vec![lease(100, b"g1"), lease(200, b"g2")]);
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(last.map(|l| l.index), Some(1));
+    }
+
+    #[tokio::test]
+    async fn set_leases_replaces_the_set_wholesale() {
+        let mut sm = HighWaterStateMachine::new();
+        apply_set_leases(&mut sm, 1, 3, 3, &[lease(100, b"g1"), lease(200, b"g2")]).await;
+        apply_set_leases(&mut sm, 2, 3, 3, &[lease(300, b"g3")]).await;
+        assert_eq!(sm.leases(), vec![lease(300, b"g3")]);
+
+        // An empty set is a valid replacement: the last release.
+        apply_set_leases(&mut sm, 3, 3, 3, &[]).await;
+        assert!(sm.leases().is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_leases_committed_in_a_later_term_leaves_the_set_untouched() {
+        // The hazard the term fence exists for: a node projects a set at term 3, loses leadership, wins it back at term 5, and only then appends. The set it projected may lack leases granted in between, so it must not replace them.
+        let mut sm = HighWaterStateMachine::new();
+        apply_set_leases(&mut sm, 1, 3, 3, &[lease(100, b"g1"), lease(200, b"g2")]).await;
+
+        apply_set_leases(&mut sm, 2, 5, 3, &[lease(300, b"g3")]).await;
+
+        assert_eq!(sm.leases(), vec![lease(100, b"g1"), lease(200, b"g2")]);
+        // The fenced entry still advances the applied position, like every other no-op outcome.
+        let (last, _) = sm.applied_state().await.unwrap();
+        assert_eq!(last.map(|l| l.index), Some(2));
+    }
+
+    #[tokio::test]
+    async fn set_leases_fence_replays_identically() {
+        // Apply decides from the entry's own log id, so replaying the same log reaches the same set on every replica and every restart.
+        async fn run() -> Vec<tsoracle_core::LeaseRecord> {
+            let mut sm = HighWaterStateMachine::new();
+            apply_set_leases(&mut sm, 1, 2, 2, &[lease(100, b"g1")]).await;
+            apply_set_leases(&mut sm, 2, 4, 2, &[]).await;
+            apply_set_leases(&mut sm, 3, 4, 4, &[lease(100, b"g1"), lease(400, b"g4")]).await;
+            apply_set_leases(&mut sm, 4, 6, 4, &[]).await;
+            sm.leases()
+        }
+        let first = run().await;
+        assert_eq!(first, vec![lease(100, b"g1"), lease(400, b"g4")]);
+        assert_eq!(run().await, first);
+    }
+
+    #[test]
+    fn snapshot_codec_v7_round_trips_the_lease_set() {
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 42,
+            last_applied: Some(log_id(9)),
+            last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::from([("orders".to_string(), 7u64)]),
+            dense_cap: 10,
+            leases: lease_set(&[lease(100, b"g1"), lease(200, b"g2")]),
+        };
+        let bytes =
+            tsoracle_codec::encode_framed(LEASE_WRITE_VERSION, &payload).expect("encode v7");
+        assert_eq!(bytes[0], LEASE_WRITE_VERSION);
+        let back: HighWaterStateMachineSnapshot =
+            decode_framed(MIN_READABLE_VERSION, MAX_READABLE_VERSION, &bytes).expect("decode v7");
+        assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn snapshot_codec_pre_lease_versions_refuse_a_non_empty_lease_set() {
+        // Encoding leases into a v4, v5 or v6 snapshot would hand a pre-v7 member a snapshot silently missing them. Only a broken activation gate reaches this, so it must fail loud in every build profile.
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 1,
+            last_applied: None,
+            last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
+            leases: lease_set(&[lease(100, b"g1")]),
+        };
+        for version in [
+            BASELINE_WRITE_VERSION,
+            DENSE_WRITE_VERSION,
+            BATCH_WRITE_VERSION,
+        ] {
+            assert!(
+                matches!(
+                    tsoracle_codec::encode_framed(version, &payload),
+                    Err(tsoracle_codec::CodecError::NotRepresentable { .. })
+                ),
+                "a non-empty lease set must not encode at write version {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_codec_v5_and_v6_layout_is_unchanged_by_the_lease_field() {
+        // A v5 or v6 snapshot written by a pre-lease binary must decode on this binary, and this binary must still write the exact pre-lease bytes at those versions while leases are empty.
+        let frozen = HighWaterStateMachineSnapshotV5 {
+            current_value: 9,
+            last_applied: Some(log_id(4)),
+            last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::from([("users".to_string(), 3u64)]),
+            dense_cap: 50,
+        };
+        let current = HighWaterStateMachineSnapshot {
+            current_value: 9,
+            last_applied: Some(log_id(4)),
+            last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::from([("users".to_string(), 3u64)]),
+            dense_cap: 50,
+            leases: LeaseSet::default(),
+        };
+        for version in [DENSE_WRITE_VERSION, BATCH_WRITE_VERSION] {
+            // The frozen layout has no codec of its own; frame it by hand exactly as a pre-lease binary did: the version byte, then the postcard body.
+            let mut old_bytes = vec![version];
+            old_bytes.extend(postcard::to_stdvec(&frozen).expect("encode frozen"));
+            let decoded: HighWaterStateMachineSnapshot =
+                decode_framed(MIN_READABLE_VERSION, MAX_READABLE_VERSION, &old_bytes)
+                    .expect("pre-lease bytes decode");
+            assert_eq!(decoded, current);
+            assert_eq!(
+                tsoracle_codec::encode_framed(version, &current).expect("encode current"),
+                old_bytes,
+                "write version {version} must emit the pre-lease layout byte for byte"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_decode_rejects_an_invalid_lease_record() {
+        // The lease set is re-validated on decode, so a crafted or corrupted v7 snapshot cannot install an empty holder or an unordered set.
+        let valid = HighWaterStateMachineSnapshot {
+            current_value: 0,
+            last_applied: None,
+            last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
+            leases: lease_set(&[lease(100, b"g")]),
+        };
+        let mut bytes = tsoracle_codec::encode_framed(LEASE_WRITE_VERSION, &valid).expect("encode");
+        // The payload ends with the single lease: holder length prefix, one holder byte, then holder_epoch, ttl_ms, ts_upper_bound, expires_at_ms varints and the superseded flag. Zero the holder length and drop the holder byte to make the holder empty.
+        let holder_at = bytes
+            .iter()
+            .rposition(|byte| *byte == b'g')
+            .expect("holder byte");
+        assert_eq!(bytes[holder_at - 1], 1, "holder length prefix");
+        bytes[holder_at - 1] = 0;
+        bytes.remove(holder_at);
+        let decoded = decode_framed::<HighWaterStateMachineSnapshot>(
+            MIN_READABLE_VERSION,
+            MAX_READABLE_VERSION,
+            &bytes,
+        );
+        assert!(
+            decoded.is_err(),
+            "an empty holder must fail to decode, got {decoded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_and_install_snapshot_carry_the_lease_set() {
+        let cell = ActiveWriteVersion::new(LEASE_WRITE_VERSION);
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let mut source =
+            HighWaterStateMachine::with_store_and_active_version(store, cell).expect("source");
+        apply_set_leases(
+            &mut source,
+            1,
+            2,
+            2,
+            &[lease(100, b"g1"), lease(200, b"g2")],
+        )
+        .await;
+        let snapshot = source.build_snapshot().await.expect("build v7 snapshot");
+        let data = snapshot.snapshot.into_inner();
+        assert_eq!(data[0], LEASE_WRITE_VERSION);
+
+        // A follower still at an older active version installs it, adopts the leases, and moves its cell up to the snapshot's version so its own next snapshot can carry them.
+        let mut target = HighWaterStateMachine::new();
+        target
+            .install_snapshot(&snapshot.meta, Cursor::new(data))
+            .await
+            .expect("install v7 snapshot");
+        assert_eq!(target.leases(), vec![lease(100, b"g1"), lease(200, b"g2")]);
+        assert_eq!(target.active_write_version(), LEASE_WRITE_VERSION);
+        target
+            .build_snapshot()
+            .await
+            .expect("the installed leases must re-encode");
+    }
+
+    #[tokio::test]
+    async fn with_store_recovers_the_lease_set_and_its_write_version() {
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        {
+            let mut source = HighWaterStateMachine::with_store_and_active_version(
+                store.clone(),
+                ActiveWriteVersion::new(LEASE_WRITE_VERSION),
+            )
+            .expect("source");
+            apply_set_leases(&mut source, 1, 2, 2, &[lease(100, b"g1")]).await;
+            source.build_snapshot().await.expect("build v7 snapshot");
+        }
+        let mut reopened = HighWaterStateMachine::with_store(store).expect("reopen");
+        assert_eq!(reopened.leases(), vec![lease(100, b"g1")]);
+        assert_eq!(reopened.active_write_version(), LEASE_WRITE_VERSION);
+        reopened
+            .build_snapshot()
+            .await
+            .expect("a reopened lease-bearing state machine must snapshot at v7");
+    }
+
+    #[tokio::test]
+    async fn build_snapshot_refuses_leases_below_the_lease_version() {
+        // Leases can only be applied after activation, so a state machine holding them at a pre-v7 active version is a protocol violation. The snapshot must fail rather than drop them.
+        let mut sm = HighWaterStateMachine::with_store_and_active_version(
+            Arc::new(InMemorySnapshotStore::new()),
+            ActiveWriteVersion::new(BATCH_WRITE_VERSION),
+        )
+        .expect("state machine");
+        apply_set_leases(&mut sm, 1, 2, 2, &[lease(100, b"g1")]).await;
+        assert!(sm.build_snapshot().await.is_err());
     }
 }

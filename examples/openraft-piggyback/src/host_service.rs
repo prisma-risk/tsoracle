@@ -304,6 +304,15 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
                         tso: Some(core.high_water),
                     }
                 }
+                EntryPayload::Normal(HostCommand::Tso(HighWaterCommand::SetLeases(_))) => {
+                    // The piggyback example does not replicate leases: it keeps the host trait's default `current_leases` and `submit_set_leases`, so the driver never proposes this command here. The arm satisfies exhaustiveness; a real piggyback host that persists leases would forward this entry to its embedded `HighWaterStateMachine`, whose apply fences it by term.
+                    let mut core = self.core.lock();
+                    core.last_applied = Some(log_id);
+                    HostApplied {
+                        kv: None,
+                        tso: Some(core.high_water),
+                    }
+                }
                 EntryPayload::Membership(membership) => {
                     let mut core = self.core.lock();
                     core.last_membership = StoredMembership::new(Some(log_id), membership.clone());

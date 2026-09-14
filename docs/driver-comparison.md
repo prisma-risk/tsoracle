@@ -21,6 +21,7 @@ Legend used in the matrices below: ✅ supported · ❌ not supported · ➖ not
 | Tolerates `f` failures with `2f+1` nodes | ➖ | ✅ | ✅ |
 | Strictly monotonic timestamps (`GetTs`) | ✅ | ✅ | ✅ |
 | Dense gapless sequences (`GetSeq`) | ✅ | ✅ ([#585](https://github.com/prisma-risk/tsoracle/pull/585)) | ❌ — roadmap (returns `UNIMPLEMENTED`) |
+| Durable leases (`AcquireLease` / `RenewLease` / `ReleaseLease`) | ✅ | ✅ — after activating write version 7; term-fenced `SetLeases` command | ❌ — returns `UNIMPLEMENTED` |
 | Persistence backend | local filesystem (atomic rename + fsync) | RocksDB (log + pluggable snapshot store) | RocksDB (via `tsoracle-paxos-toolkit`) |
 | Peer transport | ➖ | tonic gRPC, unary + client-streaming snapshots | tonic gRPC, unary |
 | Peer mTLS | ➖ | ✅ (`PeerTlsConfig`) | ✅ (`PeerTlsConfig`) |
@@ -123,7 +124,7 @@ Paxos has no equivalent. There is no `drivers/paxos/handoff.rs`, no `transfer_le
 Openraft only. The version contract is four constants in `crates/tsoracle-openraft-toolkit/src/codec.rs:41-80`:
 
 - `MIN_READABLE_VERSION` — read-floor (today: 4).
-- `MAX_READABLE_VERSION` — read-ceiling (today: 5; covers the v5 dense layout, `DENSE_WRITE_VERSION`).
+- `MAX_READABLE_VERSION` — read-ceiling (today: 7; covers the v5 dense layout `DENSE_WRITE_VERSION`, the v6 batch command `BATCH_WRITE_VERSION`, and the v7 lease command and snapshot lease set `LEASE_WRITE_VERSION`).
 - `BASELINE_WRITE_VERSION` — fallback write version (today: 4).
 - `ActiveWriteVersion(Arc<AtomicU8>)` — the runtime-mutable active write version, seeded from the log at recovery and *only* mutated by a committed `SetFormatVersion` raft entry.
 

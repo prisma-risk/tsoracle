@@ -19,6 +19,8 @@ failpoints = ["tsoracle-server/failpoints", "tsoracle-failpoint/failpoints"]
 # can drive the recorder-fake test that asserts the documented client signals.
 metrics = ["tsoracle-client/metrics", "dep:metrics", "dep:metrics-util", "dep:tokio-stream"]
 dst = ["dep:turmoil", "dep:tsoracle-server-testkit", "dep:tsoracle-consensus", "dep:async-trait", "tsoracle-server/test-fakes"]
+# End-to-end tests that run the real server on an in-process openraft node. Off by default because it builds rocksdb; `--all-features` in CI turns it on.
+openraft = ["dep:tsoracle-standalone", "dep:tsoracle-consensus", "dep:tempfile", "dep:tokio-stream"]
 
 [dependencies]
 futures         = { workspace = true }
@@ -37,6 +39,8 @@ tsoracle-server = { path = "../tsoracle-server", features = ["test-support"] }
 tsoracle-server-testkit = { path = "../tsoracle-server-testkit", optional = true }
 tsoracle-consensus      = { path = "../tsoracle-consensus", optional = true }
 async-trait             = { workspace = true, optional = true }
+tsoracle-standalone     = { path = "../tsoracle-standalone", default-features = false, features = ["openraft", "test-support"], optional = true }
+tempfile                = { workspace = true, optional = true }
 
 [[test]]
 name = "client_backpressure"
@@ -77,3 +81,7 @@ required-features = ["dst"]
 [[test]]
 name              = "leadership_churn_dst"
 required-features = ["dst"]
+
+[[test]]
+name              = "openraft_lease_rpc"
+required-features = ["openraft"]

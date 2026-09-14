@@ -3247,6 +3247,7 @@ dependencies = [
  "metrics",
  "metrics-util 0.19.1",
  "rcgen",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3257,6 +3258,7 @@ dependencies = [
  "tsoracle-proto",
  "tsoracle-server",
  "tsoracle-server-testkit",
+ "tsoracle-standalone",
  "turmoil",
 ]
 
