@@ -97,6 +97,11 @@ impl StandaloneHost {
     /// members)`, where `members` is every node in
     /// `membership_config.nodes()` — voters and learners both, because the
     /// all-members gate covers learners too.
+    /// Whether this node's raft metrics currently report it as leader.
+    fn is_local_leader(&self) -> bool {
+        self.raft.metrics().borrow_watched().state == ServerState::Leader
+    }
+
     fn membership_snapshot(&self) -> (u64, bool, Vec<(u64, OpenraftPeer)>) {
         let metrics = self.raft.metrics();
         let snapshot = metrics.borrow_watched();
@@ -362,7 +367,7 @@ impl OpenraftHighWaterHost for StandaloneHost {
             .await
         {
             Ok(resp) => Ok(resp.data.value),
-            Err(e) => Err(classify_client_write_error(e)),
+            Err(e) => Err(classify_client_write_error(e, self.is_local_leader())),
         }
     }
 
@@ -395,7 +400,7 @@ impl OpenraftHighWaterHost for StandaloneHost {
                     format!("unexpected ApplyOutcome for AdvanceDense: {other:?}").into(),
                 )),
             },
-            Err(e) => Err(classify_client_write_error(e)),
+            Err(e) => Err(classify_client_write_error(e, self.is_local_leader())),
         }
     }
 
@@ -427,7 +432,7 @@ impl OpenraftHighWaterHost for StandaloneHost {
                     format!("unexpected ApplyOutcome for AdvanceDenseBatch: {other:?}").into(),
                 )),
             },
-            Err(e) => Err(classify_client_write_error(e)),
+            Err(e) => Err(classify_client_write_error(e, self.is_local_leader())),
         }
     }
 
@@ -460,10 +465,19 @@ fn classify_read_error(
     }
 }
 
+/// Classify a failed `client_write`. `local_is_leader` is this node's own view from its raft metrics, read after the write failed.
+///
+/// A leader refuses writes until a quorum has acknowledged one of its RPCs within the leader lease, and says so with a `ForwardToLeader` that names no leader. A freshly elected leader in a multi-node cluster hits this until its first heartbeat round completes, and a leader cut off from its quorum hits it once the lease runs out. Neither is a leadership change: the node's metrics still say it leads, so no new leadership event will arrive. Reporting `NotLeader` would make the server's fence step down and wait for an event that never comes, leaving a healthy leader not serving. The refusal is therefore transient, and a real loss of leadership still reaches the server through the leadership stream.
 fn classify_client_write_error(
     err: RaftError<TypeConfig, ClientWriteError<TypeConfig>>,
+    local_is_leader: bool,
 ) -> ConsensusError {
     match err {
+        RaftError::APIError(ClientWriteError::ForwardToLeader(ref forward))
+            if forward.leader_id.is_none() && local_is_leader =>
+        {
+            ConsensusError::TransientDriver(Box::new(err))
+        }
         RaftError::APIError(ClientWriteError::ForwardToLeader(_)) => {
             ConsensusError::NotLeader { observed: None }
         }
@@ -496,7 +510,7 @@ mod tests {
     fn fatal_client_write_error_classifies_as_permanent_driver() {
         let err = RaftError::<TypeConfig, ClientWriteError<TypeConfig>>::Fatal(Fatal::Stopped);
         assert!(matches!(
-            classify_client_write_error(err),
+            classify_client_write_error(err, true),
             ConsensusError::PermanentDriver(_)
         ));
     }
@@ -534,8 +548,45 @@ mod tests {
             )),
         );
         assert!(matches!(
-            classify_client_write_error(err),
+            classify_client_write_error(err, true),
             ConsensusError::TransientDriver(_)
+        ));
+    }
+
+    #[test]
+    fn leaderless_forward_on_a_local_leader_is_transient() {
+        // The leader-lease refusal: this node still leads, so no leadership event will follow and the server must retry rather than step down.
+        let err = RaftError::<TypeConfig, ClientWriteError<TypeConfig>>::APIError(
+            ClientWriteError::ForwardToLeader(ForwardToLeader::empty()),
+        );
+        assert!(matches!(
+            classify_client_write_error(err, true),
+            ConsensusError::TransientDriver(_)
+        ));
+    }
+
+    #[test]
+    fn leaderless_forward_on_a_non_leader_is_not_leader() {
+        let err = RaftError::<TypeConfig, ClientWriteError<TypeConfig>>::APIError(
+            ClientWriteError::ForwardToLeader(ForwardToLeader::empty()),
+        );
+        assert!(matches!(
+            classify_client_write_error(err, false),
+            ConsensusError::NotLeader { observed: None }
+        ));
+    }
+
+    #[test]
+    fn forward_to_a_named_leader_is_not_leader_even_on_a_local_leader() {
+        // A leader transferring leadership forwards to the named target; that is a real hand-off.
+        let mut forward = ForwardToLeader::<TypeConfig>::empty();
+        forward.leader_id = Some(2);
+        let err = RaftError::<TypeConfig, ClientWriteError<TypeConfig>>::APIError(
+            ClientWriteError::ForwardToLeader(forward),
+        );
+        assert!(matches!(
+            classify_client_write_error(err, true),
+            ConsensusError::NotLeader { observed: None }
         ));
     }
 

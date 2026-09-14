@@ -261,6 +261,23 @@ pub fn highest_log_record_version(node: &TestNode) -> Option<u8> {
 // - build_three_node: cluster constructor
 // - reopen_node: restart-replay primitive
 
+/// Wait until `raft` is a leader that accepts writes.
+///
+/// openraft refuses a write until a quorum has acknowledged one of the leader's RPCs within the leader lease, so a freshly elected leader in a multi-node cluster answers its first writes with a leaderless `ForwardToLeader`. A linearizable read confirms leadership through exactly such a quorum round, so once one succeeds the lease is established and writes go through. Single-node clusters are writable as soon as they elect, because a lone voter is its own quorum.
+pub async fn wait_until_writable(raft: &Raft<TypeConfig, HighWaterStateMachine>) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while raft
+            .ensure_linearizable(openraft::ReadPolicy::ReadIndex)
+            .await
+            .is_err()
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("leader became writable within 10s");
+}
+
 pub async fn build_single_node() -> TestCluster {
     build_single_node_with_config(test_raft_config()).await
 }

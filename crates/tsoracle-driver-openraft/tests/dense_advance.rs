@@ -275,6 +275,7 @@ async fn three_node_follower_converges_on_dense_seq() {
     let cluster = build_three_node().await;
 
     let leader_idx = find_leader_idx(&cluster).await;
+    common::wait_until_writable(&cluster.nodes[leader_idx].raft).await;
     let follower_idx = (0..3)
         .find(|i| *i != leader_idx)
         .expect("at least one follower");

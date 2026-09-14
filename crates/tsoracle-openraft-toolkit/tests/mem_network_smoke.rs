@@ -109,7 +109,6 @@ impl RaftSnapshotBuilder<SmokeConfig> for SmokeStateMachine {
         let meta = SnapMeta {
             last_log_id: core.last_applied,
             last_membership: core.last_membership.clone(),
-            snapshot_id: format!("smoke-{}", core.last_applied.map(|l| l.index).unwrap_or(0)),
         };
         let bytes = postcard::to_stdvec(&core.value)
             .map_err(|e| io::Error::other(format!("smoke build_snapshot: {e}")))?;
@@ -166,10 +165,6 @@ impl RaftStateMachine<SmokeConfig> for SmokeStateMachine {
         self.clone()
     }
 
-    async fn begin_receiving_snapshot(&mut self) -> Result<std::io::Cursor<Vec<u8>>, io::Error> {
-        Ok(std::io::Cursor::new(Vec::new()))
-    }
-
     async fn install_snapshot(
         &mut self,
         _meta: &SnapMeta,
@@ -184,6 +179,21 @@ impl RaftStateMachine<SmokeConfig> for SmokeStateMachine {
     async fn get_current_snapshot(&mut self) -> Result<Option<SnapOf>, io::Error> {
         Ok(None)
     }
+}
+
+/// openraft refuses writes until a quorum has acknowledged one of the leader's RPCs within the leader lease, so a freshly elected leader of a multi-node cluster answers its first writes with a leaderless `ForwardToLeader`. A linearizable read confirms leadership through exactly such a quorum round, after which writes go through.
+async fn wait_until_writable(raft: &Raft<SmokeConfig, SmokeStateMachine>) {
+    timeout(Duration::from_secs(10), async {
+        while raft
+            .ensure_linearizable(openraft::ReadPolicy::ReadIndex)
+            .await
+            .is_err()
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("leader became writable within 10s");
 }
 
 #[tokio::test(start_paused = true)]
@@ -258,6 +268,7 @@ async fn three_node_mem_network_elects_and_replicates() {
         .position(|(id, _, _, _)| *id == leader_id)
         .expect("leader is one of our nodes");
 
+    wait_until_writable(&nodes[leader_idx].1).await;
     nodes[leader_idx]
         .1
         .client_write(SmokeCmd(42))
@@ -356,6 +367,7 @@ async fn transfer_leader_moves_leadership_to_target() {
         .iter()
         .position(|(id, _, _, _)| *id == current_leader)
         .unwrap();
+    wait_until_writable(&nodes[leader_idx].1).await;
     nodes[leader_idx]
         .1
         .client_write(SmokeCmd(7))

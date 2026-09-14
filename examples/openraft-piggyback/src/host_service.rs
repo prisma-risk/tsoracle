@@ -35,6 +35,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use openraft::async_runtime::watch::WatchReceiver;
 use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
 use openraft::storage::{EntryResponder, RaftStateMachine, Snapshot};
 use openraft::type_config::alias::{
@@ -130,7 +131,6 @@ struct Core {
     high_water: u64,
     last_applied: Option<LogId>,
     last_membership: StoredMem,
-    snapshot_idx: u64,
     current_snapshot: Option<(SnapMeta, Vec<u8>)>,
 }
 
@@ -160,7 +160,6 @@ impl HostStateMachine {
                 high_water: 0,
                 last_applied: None,
                 last_membership: StoredMembership::default(),
-                snapshot_idx: 0,
                 current_snapshot: None,
             })),
         }
@@ -187,19 +186,15 @@ impl RaftSnapshotBuilder<HostTypeConfig> for HostStateMachine {
     ) -> Result<SnapshotOf<HostTypeConfig, Self::SnapshotData>, io::Error> {
         let (bytes, meta) = {
             let mut core = self.core.lock();
-            core.snapshot_idx += 1;
             let payload = HostSnapshot {
                 kv: core.kv.clone(),
                 high_water: core.high_water,
                 last_applied: core.last_applied,
                 last_membership: core.last_membership.clone(),
             };
-            let log_index = core.last_applied.map(|l| l.index).unwrap_or(0);
-            let snapshot_id = format!("{log_index}-{}", core.snapshot_idx);
             let meta = SnapMeta {
                 last_log_id: core.last_applied,
                 last_membership: core.last_membership.clone(),
-                snapshot_id,
             };
             let bytes = postcard::to_stdvec(&payload)
                 .map_err(|e| io::Error::other(format!("snapshot serialize: {e}")))?;
@@ -331,10 +326,6 @@ impl RaftStateMachine<HostTypeConfig> for HostStateMachine {
         self.clone()
     }
 
-    async fn begin_receiving_snapshot(&mut self) -> Result<Cursor<Vec<u8>>, io::Error> {
-        Ok(Cursor::new(Vec::new()))
-    }
-
     async fn install_snapshot(
         &mut self,
         meta: &SnapMeta,
@@ -418,6 +409,19 @@ impl OpenraftHighWaterHost for PiggybackHost {
                 .data
                 .tso
                 .expect("Tso apply branch always fills HostApplied.tso")),
+            // openraft refuses writes on a leader whose lease has not been confirmed by a quorum yet (just elected, or cut off), with a `ForwardToLeader` naming no leader. The node still leads, so no leadership event will follow: report it as retryable, or the server's fence would step down and never re-fence.
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward)))
+                if forward.leader_id.is_none()
+                    && self.raft.metrics().borrow_watched().state
+                        == openraft::ServerState::Leader =>
+            {
+                Err(ConsensusError::TransientDriver(Box::new(RaftError::<
+                    HostTypeConfig,
+                    ClientWriteError<HostTypeConfig>,
+                >::APIError(
+                    ClientWriteError::ForwardToLeader(forward),
+                ))))
+            }
             Err(RaftError::APIError(ClientWriteError::ForwardToLeader(_))) => {
                 Err(ConsensusError::NotLeader { observed: None })
             }
