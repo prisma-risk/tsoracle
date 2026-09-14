@@ -47,7 +47,7 @@
 
 use std::time::Duration;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use tokio::sync::{
     Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
     watch,
@@ -273,16 +273,22 @@ impl ServingCore {
         self.lease_table.lock().prepare_release(lease_id)
     }
 
+    /// The full live lease set a mutation would leave behind, projected from the table as `epoch` established it. This is the set handed to `persist_leases`, which replaces the durable set wholesale.
+    ///
+    /// Refuses with `NotLeader` once the allocator no longer serves `epoch`. Without the check, a projection racing a step-down reads the table the step-down just cleared and yields a set holding only this mutation's record. Persisting that set drops every other live lease from durable state, the next fence seeds from it, and the safe frontier can pass a bound its holder is still stamping under. `lease_commit` refusing afterwards does not undo the persist.
+    ///
+    /// The caller must hold the extension drain barrier. That keeps the fence from re-seeding the table at a new epoch mid-mutation, so observing `epoch` here means no clear has happened since it was seeded.
     pub(crate) fn lease_projected_live_set(
         &self,
         upsert: Option<&LeaseRecord>,
         supersede: Option<u64>,
         remove: Option<u64>,
+        epoch: Epoch,
         now_ms: u64,
-    ) -> Vec<LeaseRecord> {
-        self.lease_table
-            .lock()
-            .projected_live_set(upsert, supersede, remove, now_ms)
+    ) -> Result<Vec<LeaseRecord>, CoreError> {
+        Ok(self
+            .lease_table_at(epoch)?
+            .projected_live_set(upsert, supersede, remove, now_ms))
     }
 
     pub(crate) fn lease_commit(
@@ -293,20 +299,7 @@ impl ServingCore {
         epoch: Epoch,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        // The epoch check MUST run under the table lock. Checked before the
-        // lock, a step-down interleaving between check and mutation would
-        // re-insert records into the just-cleared follower table. Under the
-        // lock the guard is airtight because `step_down` clears the
-        // allocator's epoch BEFORE it takes this lock to clear the table:
-        // either the check observes the cleared epoch and refuses, or the
-        // mutation lands first and the step-down's clear wipes it. The
-        // nested order (table, then allocator) is unique to this function —
-        // every other path takes the two locks sequentially, never nested —
-        // so it cannot invert against anything.
-        let mut table = self.lease_table.lock();
-        if self.allocator.lock().epoch() != Some(epoch) {
-            return Err(CoreError::NotLeader);
-        }
+        let mut table = self.lease_table_at(epoch)?;
         if let Some(id) = remove {
             table.commit_release(id, now_ms);
         }
@@ -318,6 +311,17 @@ impl ServingCore {
             }
         }
         Ok(())
+    }
+
+    /// Lock the lease table for a read or mutation that is only valid at `epoch`, refusing with `NotLeader` once the allocator has moved on.
+    ///
+    /// The epoch check MUST run under the table lock. Checked before the lock, a step-down interleaving between check and use would let a commit re-insert records into the just-cleared follower table, or a projection read that cleared table. Under the lock the guard is airtight because `step_down` clears the allocator's epoch BEFORE it takes this lock to clear the table: either the check observes the cleared epoch and refuses, or the caller's work completes first and the step-down's clear follows it. The nested order (table, then allocator) is unique to this function. Every other path takes the two locks sequentially, never nested, so it cannot invert against anything.
+    fn lease_table_at(&self, epoch: Epoch) -> Result<MutexGuard<'_, LeaseTable>, CoreError> {
+        let table = self.lease_table.lock();
+        if self.allocator.lock().epoch() != Some(epoch) {
+            return Err(CoreError::NotLeader);
+        }
+        Ok(table)
     }
 
     /// Validate a dense-sequence request through the leadership/epoch gate.
@@ -684,5 +688,66 @@ mod tests {
                 "a lease committed against a raced step-down must not survive it"
             );
         }
+    }
+
+    fn other_lease_record(now_ms: u64) -> LeaseRecord {
+        LeaseRecord {
+            lease_id: 2,
+            holder: b"g2".to_vec(),
+            ..lease_record(now_ms)
+        }
+    }
+
+    #[test]
+    fn lease_projection_at_the_current_epoch_keeps_every_live_lease() {
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
+        core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
+            .expect("seed must succeed (ceiling >= floor)");
+        core.lease_commit(Some(lease_record(1_000)), None, None, Epoch(3), 1_000)
+            .expect("commit at the current epoch must apply");
+
+        let set = core
+            .lease_projected_live_set(
+                Some(&other_lease_record(1_000)),
+                None,
+                None,
+                Epoch(3),
+                1_000,
+            )
+            .expect("projection at the current epoch must succeed");
+
+        let mut ids: Vec<u64> = set.iter().map(|record| record.lease_id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn lease_projection_refuses_a_stale_epoch() {
+        // After a step-down the table is empty. A projection allowed to read it would hand `persist_leases` a set holding only the new record, wiping every other durable lease.
+        let core = ServingCore::new(
+            Duration::from_secs(3),
+            tsoracle_core::DEFAULT_MAX_SEQ_COUNT,
+            tsoracle_core::DEFAULT_MAX_SEQ_BATCH_KEYS,
+        );
+        core.seed_on_leadership_gained(1_000, 5_000, Epoch(3))
+            .expect("seed must succeed (ceiling >= floor)");
+        core.lease_commit(Some(lease_record(1_000)), None, None, Epoch(3), 1_000)
+            .expect("commit at the current epoch must apply");
+        core.step_down(None, None);
+
+        assert!(matches!(
+            core.lease_projected_live_set(
+                Some(&other_lease_record(1_000)),
+                None,
+                None,
+                Epoch(3),
+                1_000
+            ),
+            Err(CoreError::NotLeader)
+        ));
     }
 }

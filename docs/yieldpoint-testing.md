@@ -60,11 +60,12 @@ The string is matched verbatim against the registry — typos at the call site o
 | `standalone_host::current_high_water::after_append_before_await` | In `PaxosHighWaterHost::current_high_water`, after the `Barrier` append and before the first `Notified::enable()` registers as an `apply_notifier` waiter. | `current_high_water_returns_when_apply_drained_before_register` |
 | `standalone_host::submit_advance::after_append_before_await` | In `PaxosHighWaterHost::submit_advance`, after the `Advance` append and before the first `Notified::enable()` registers as an `apply_notifier` waiter. | `submit_advance_returns_when_apply_drained_before_register` |
 
-### `tsoracle-server` — 1 site in `crates/tsoracle-server/src/fence.rs`
+### `tsoracle-server` — 2 sites in `crates/tsoracle-server/src/fence.rs` and `crates/tsoracle-server/src/lease_flow.rs`
 
 | Site name | Position | Test |
 |---|---|---|
 | `server::fence::after_load_before_persist` | Inside `run_leader_watch`'s Leader branch, between `consensus.load_high_water().await` and the `persist_high_water(requested, epoch)` call. Co-located with the sync failpoint of the same name — the sync variant injects typed-error returns / panics; the async variant parks the fence so a test can deliver a concurrent driver event before releasing. | `fence_parks_at_after_load_yieldpoint_until_released` |
+| `server::lease_flow::before_projection` | In `persist_lease_mutation`, before the lease-set projection, with the drain barrier held. Acquire and renew reach it after their window extension has committed; release reaches it directly. Lets a test step the node down and re-elect it while the mutation is parked, so the fence waits behind the barrier and the projection runs against a cleared lease table. | `lease_projection_after_a_leadership_flap_keeps_other_live_leases` |
 
 ## Writing a yield-point test
 
