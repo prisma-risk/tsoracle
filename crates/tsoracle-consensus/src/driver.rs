@@ -178,6 +178,8 @@ pub trait ConsensusDriver: Send + Sync + 'static {
     /// supplies `epoch` for stale-proposer fencing under the same mechanisms
     /// documented on [`persist_high_water`](Self::persist_high_water).
     /// Default: unsupported.
+    ///
+    /// Because the set replaces the durable one wholesale, the apply-time `max` that fences a stale high-water advance does not fence a stale lease write: a write carrying a set projected at an old epoch would overwrite a newer set. A replicated driver must refuse a write whose `epoch` is not the one its log commits the write under, returning [`ConsensusError::Fenced`]. A driver that persists leases only after a format activation returns [`ConsensusError::LeasesNotActivated`] until then.
     async fn persist_leases(
         &self,
         live: &[tsoracle_core::LeaseRecord],

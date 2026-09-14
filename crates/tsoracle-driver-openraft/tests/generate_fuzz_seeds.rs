@@ -44,7 +44,9 @@ use std::path::PathBuf;
 
 use openraft::type_config::alias::StoredMembershipOf;
 use tsoracle_driver_openraft::AdvancePayload;
-use tsoracle_driver_openraft::{HighWaterCommand, HighWaterStateMachineSnapshot, TypeConfig};
+use tsoracle_driver_openraft::{
+    HighWaterCommand, HighWaterStateMachineSnapshot, LeaseSet, TypeConfig,
+};
 
 fn fuzz_corpus_dir(target: &str) -> PathBuf {
     PathBuf::from("../..").join("fuzz/corpus").join(target)
@@ -92,6 +94,7 @@ fn generate_snapshot_payload_decode_seeds() {
         last_membership: StoredMembershipOf::<TypeConfig>::default(),
         dense: std::collections::BTreeMap::new(),
         dense_cap: 0,
+        leases: LeaseSet::default(),
     };
     write_seed(
         target,
@@ -106,10 +109,34 @@ fn generate_snapshot_payload_decode_seeds() {
         last_membership: StoredMembershipOf::<TypeConfig>::default(),
         dense: std::collections::BTreeMap::new(),
         dense_cap: 0,
+        leases: LeaseSet::default(),
     };
     write_seed(
         target,
         "seed_value_max",
         &postcard::to_stdvec(&max_value).expect("serialize max-value snapshot"),
+    );
+    // One live lease with a maximum-length holder: seeds the nested lease-record decode and its holder-length validation at the boundary.
+    let lease = tsoracle_core::LeaseRecord {
+        lease_id: 1_000,
+        holder: vec![b'h'; tsoracle_core::MAX_LEASE_HOLDER_LEN],
+        holder_epoch: 1,
+        ttl_ms: 20_000,
+        ts_upper_bound: 1_000,
+        expires_at_ms: 21_000,
+        superseded: false,
+    };
+    let with_lease = HighWaterStateMachineSnapshot {
+        current_value: 1_000,
+        last_applied: None,
+        last_membership: StoredMembershipOf::<TypeConfig>::default(),
+        dense: std::collections::BTreeMap::new(),
+        dense_cap: 0,
+        leases: LeaseSet::from_records(&[lease]).expect("valid lease set"),
+    };
+    write_seed(
+        target,
+        "seed_one_lease",
+        &postcard::to_stdvec(&with_lease).expect("serialize lease snapshot"),
     );
 }

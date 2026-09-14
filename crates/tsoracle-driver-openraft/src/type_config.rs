@@ -140,6 +140,10 @@ pub enum ApplyOutcome {
     /// An `AdvanceDenseBatch` applied as a deterministic rejection: some key's
     /// accumulated advance would exceed u64::MAX. No counter moved.
     DenseBatchOverflow,
+    /// A `SetLeases` applied: the entry committed in the term its proposer projected the set in, and the durable lease set is now exactly that set. `value` on the enclosing `HighWaterApplied` is the high-water, untouched.
+    LeasesReplaced,
+    /// A `SetLeases` applied as a no-op: the entry committed in `entry_term`, not the `expected_term` its proposer projected the set in, so leadership changed in between and the durable lease set was left untouched. The proposer surfaces this as `ConsensusError::Fenced`.
+    LeasesFenced { expected_term: u64, entry_term: u64 },
 }
 
 /// Per-entry apply result.

@@ -95,6 +95,27 @@ pub trait OpenraftHighWaterHost: Send + Sync + 'static {
     /// linearized. Implementations issue the same read barrier as
     /// `current_high_water` before reading the local state machine.
     async fn current_dense_seq(&self, key: &tsoracle_core::SeqKey) -> Result<u64, ConsensusError>;
+
+    /// Read the durably-committed lease set, linearized: issue the same read barrier as `current_high_water` before reading local state. Return an empty set, not an error, while nothing has been persisted, including before lease activation.
+    ///
+    /// Defaults to `LeasesUnsupported`, which the server's fence treats as an empty set, so a host that does not replicate leases keeps compiling and keeps serving timestamps.
+    async fn current_leases(&self) -> Result<Vec<tsoracle_core::LeaseRecord>, ConsensusError> {
+        Err(ConsensusError::LeasesUnsupported)
+    }
+
+    /// Replace the durable lease set with `leases` through the host's raft log, only if the entry commits in `expected_term`.
+    ///
+    /// The whole-set replacement cannot be fenced by apply-time monotonicity, so the host must compare `expected_term` with the term of the entry's own log id at apply and leave the set untouched on a mismatch, returning `ConsensusError::Fenced`. The driver has already checked lease activation before calling this.
+    ///
+    /// Defaults to `LeasesUnsupported`, which the server maps to `UNIMPLEMENTED` for the lease RPCs.
+    async fn submit_set_leases(
+        &self,
+        expected_term: u64,
+        leases: &[tsoracle_core::LeaseRecord],
+    ) -> Result<(), ConsensusError> {
+        let (_, _) = (expected_term, leases);
+        Err(ConsensusError::LeasesUnsupported)
+    }
 }
 
 #[cfg(test)]

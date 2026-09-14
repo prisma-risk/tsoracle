@@ -61,6 +61,13 @@ impl LogStoreCodec<TypeConfig> for OpenraftLogCodec {
         {
             return Err(CodecError::NotRepresentable { version });
         }
+        // Same second line of defense for SetLeases: the driver refuses `persist_leases` before lease activation, and a gate regression must fail here rather than commit an entry a pre-v7 follower cannot decode.
+        if version < tsoracle_openraft_toolkit::LEASE_WRITE_VERSION
+            && let openraft::EntryPayload::Normal(crate::log_entry::HighWaterCommand::SetLeases(_)) =
+                &entry.payload
+        {
+            return Err(CodecError::NotRepresentable { version });
+        }
         encode_postcard(entry)
     }
 
@@ -162,6 +169,44 @@ mod tests {
         assert!(
             <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_entry(
                 BATCH_WRITE_VERSION,
+                &entry
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn encode_entry_rejects_set_leases_below_lease_version() {
+        use crate::log_entry::{HighWaterCommand, LeaseSet, SetLeasesPayload};
+        use tsoracle_openraft_toolkit::{
+            BASELINE_WRITE_VERSION, BATCH_WRITE_VERSION, DENSE_WRITE_VERSION, LEASE_WRITE_VERSION,
+        };
+        let lid = openraft::testing::log_id::<TypeConfig>(1, 1, 1);
+        let entry: <TypeConfig as openraft::RaftTypeConfig>::Entry =
+            openraft::entry::RaftEntry::new_normal(
+                lid,
+                HighWaterCommand::SetLeases(SetLeasesPayload {
+                    expected_term: 1,
+                    leases: LeaseSet::default(),
+                }),
+            );
+        // Every pre-v7 write version refuses the command, not only the one just below the threshold.
+        for below in [
+            BASELINE_WRITE_VERSION,
+            DENSE_WRITE_VERSION,
+            BATCH_WRITE_VERSION,
+        ] {
+            assert!(
+                matches!(
+                    <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_entry(below, &entry),
+                    Err(CodecError::NotRepresentable { .. })
+                ),
+                "SetLeases must be refused at write version {below}",
+            );
+        }
+        assert!(
+            <OpenraftLogCodec as LogStoreCodec<TypeConfig>>::encode_entry(
+                LEASE_WRITE_VERSION,
                 &entry
             )
             .is_ok()
