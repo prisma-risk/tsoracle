@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-consensus"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1715,7 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-file"
-version = "2.2.1"
+version = "2.2.2"
 dependencies = [
  "async-trait",
  "crc32c",
@@ -1732,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-openraft"
-version = "2.3.1"
+version = "2.4.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1751,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-driver-paxos"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-openraft-toolkit"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "tsoracle-paxos-toolkit"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "async-trait",
  "futures",

@@ -4,6 +4,16 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [3.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.2.3...tsoracle-server-v3.3.0) - 2026-09-14
+
+### Added
+
+- *(driver-openraft)* persist stamping leases behind write version 7 ([#708](https://github.com/prisma-risk/tsoracle/pull/708))
+
+### Fixed
+
+- *(server)* guard the lease-set projection with the leader epoch ([#707](https://github.com/prisma-risk/tsoracle/pull/707))
+
 ## [3.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.2.2...tsoracle-server-v3.2.3) - 2026-09-13
 
 ### Other

@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v2.2.0...tsoracle-consensus-v2.3.0) - 2026-09-14
+
+### Added
+
+- *(driver-openraft)* persist stamping leases behind write version 7 ([#708](https://github.com/prisma-risk/tsoracle/pull/708))
+
 ## [2.2.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-consensus-v2.1.0...tsoracle-consensus-v2.2.0) - 2026-07-07
 
 ### Added
