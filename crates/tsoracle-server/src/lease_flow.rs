@@ -255,12 +255,19 @@ async fn persist_lease_mutation(
     epoch: Epoch,
     now_ms: u64,
 ) -> Result<(), Status> {
-    let set = server.core.lease_projected_live_set(
+    tsoracle_yieldpoint::yieldpoint!("server::lease_flow::before_projection");
+    // The projection is epoch-guarded like the commit below. A set projected after a step-down cleared the table would durably drop every other live lease, and a refused commit cannot take that persist back.
+    let set = match server.core.lease_projected_live_set(
         mutation.upsert.as_ref(),
         mutation.supersede,
         mutation.remove,
+        epoch,
         now_ms,
-    );
+    ) {
+        Ok(set) => set,
+        Err(CoreError::NotLeader) => return Err(not_leader(server)),
+        Err(other) => return Err(core_status(other)),
+    };
     persist_lease_set(server, &set, epoch).await?;
     server
         .core
