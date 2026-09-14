@@ -33,7 +33,7 @@ mod common;
 use std::time::Duration;
 
 use tokio::time::timeout;
-use tsoracle_consensus::ConsensusDriver;
+use tsoracle_consensus::{ConsensusDriver, ConsensusError};
 use tsoracle_core::Epoch;
 
 use common::{TestCluster, build_three_node, eventually_eq};
@@ -87,6 +87,17 @@ async fn partition_then_heal_converges_monotonically() {
     // Baseline: bump to 100 via the current leader; all nodes converge.
     let l_idx = find_leader_idx(&cluster).await;
     let l_id = cluster.nodes[l_idx].id;
+    // A write straight after election may meet openraft's leader-lease refusal. It must surface as a retryable fault and never as NotLeader: the node still leads, so the server would step down and wait for a leadership event that never comes.
+    match cluster.drivers[l_idx]
+        .persist_high_water(50, Epoch(1))
+        .await
+    {
+        Ok(_) | Err(ConsensusError::TransientDriver(_)) => {}
+        Err(other) => {
+            panic!("a fresh leader's first write must succeed or be transient, got {other:?}")
+        }
+    }
+    common::wait_until_writable(&cluster.nodes[l_idx].raft).await;
     let v = cluster.drivers[l_idx]
         .persist_high_water(100, Epoch(1))
         .await
@@ -107,6 +118,7 @@ async fn partition_then_heal_converges_monotonically() {
 
     let l_prime_idx = find_leader_excluding(&cluster, l_idx).await;
     assert_ne!(l_prime_idx, l_idx, "new leader must differ from old");
+    common::wait_until_writable(&cluster.nodes[l_prime_idx].raft).await;
 
     // Majority-side write via L'. L' + remaining follower = quorum.
     let v = cluster.drivers[l_prime_idx]
@@ -115,18 +127,18 @@ async fn partition_then_heal_converges_monotonically() {
         .expect("L_prime persists 200");
     assert_eq!(v, 200);
 
-    // Diagnostic: an attempt on the isolated leader should stall, not
-    // succeed silently with a stale read or return NotLeader. (openraft
-    // doesn't preemptively step down; the leader keeps trying to replicate
-    // and hits no quorum.)
+    // Diagnostic: an attempt on the isolated leader must never succeed, and must not return NotLeader while the node still believes it leads. openraft does not step the isolated leader down; once its lease has lapsed it refuses the write outright, which the host reports as a retryable fault. Inside a still-valid lease the write instead stalls waiting for a quorum it cannot reach.
     let attempt = timeout(
         Duration::from_secs(2),
         cluster.drivers[l_idx].persist_high_water(300, Epoch(3)),
     )
     .await;
     assert!(
-        attempt.is_err(),
-        "isolated leader should stall, not return; got {attempt:?}",
+        matches!(
+            attempt,
+            Err(_) | Ok(Err(ConsensusError::TransientDriver(_)))
+        ),
+        "isolated leader must stall or refuse transiently; got {attempt:?}",
     );
 
     // Heal the partition.

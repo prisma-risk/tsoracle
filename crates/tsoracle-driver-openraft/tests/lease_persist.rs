@@ -395,6 +395,8 @@ async fn a_new_leader_loads_the_committed_set_and_fences_the_old_term() {
         .clone();
 
     let old_idx = find_leader_idx(&cluster, None).await;
+    // openraft accepts writes only once a quorum has confirmed the new leader's lease.
+    common::wait_until_writable(&cluster.nodes[old_idx].raft).await;
     let old_id = cluster.nodes[old_idx].id;
     let old_epoch = leader_epoch(&cluster.drivers[old_idx]).await;
 
@@ -432,6 +434,7 @@ async fn a_new_leader_loads_the_committed_set_and_fences_the_old_term() {
     partitions.isolate(old_id);
     tokio::time::sleep(Duration::from_millis(500)).await;
     let new_idx = find_leader_idx(&cluster, Some(old_idx)).await;
+    common::wait_until_writable(&cluster.nodes[new_idx].raft).await;
     let new_epoch = leader_epoch(&cluster.drivers[new_idx]).await;
     assert!(new_epoch > old_epoch, "the new leader serves a later term");
 

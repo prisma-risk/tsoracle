@@ -1079,7 +1079,6 @@ mod tests {
         let meta = SnapshotMetaOf::<TypeConfig> {
             last_log_id: None,
             last_membership: Default::default(),
-            snapshot_id: "test-snap".to_string(),
         };
         SnapshotChunk {
             kind: Some(ChunkKind::Header(SnapshotHeader {
@@ -1367,7 +1366,6 @@ mod tests {
         let meta = SnapshotMetaOf::<TypeConfig> {
             last_log_id: None,
             last_membership: Default::default(),
-            snapshot_id: "bad".to_string(),
         };
         let bad_header = SnapshotChunk {
             kind: Some(ChunkKind::Header(SnapshotHeader {
@@ -1388,11 +1386,12 @@ mod tests {
         // default 0). Reassembly must treat it as BASELINE and assemble
         // normally.
         let vote: VoteOf<TypeConfig> = Vote::new(1, 1);
-        let meta = SnapshotMetaOf::<TypeConfig> {
-            last_log_id: None,
-            last_membership: Default::default(),
-            snapshot_id: "legacy".to_string(),
-        };
+        // A sender on an openraft release before 0.10.0-alpha.33 serialized a non-empty `snapshot_id` as the meta's third field. The current `SnapshotMeta` reserves that slot and ignores it on read, so a rolling upgrade still reassembles a header from a not-yet-upgraded peer. Postcard encodes a tuple exactly like a struct, so the old three-field layout is built as one, since the current type can no longer carry an id.
+        let meta = (
+            None::<openraft::type_config::alias::LogIdOf<TypeConfig>>,
+            openraft::type_config::alias::StoredMembershipOf::<TypeConfig>::default(),
+            "legacy",
+        );
         let legacy_header = SnapshotChunk {
             kind: Some(ChunkKind::Header(SnapshotHeader {
                 vote: postcard::to_stdvec(&vote).unwrap(),

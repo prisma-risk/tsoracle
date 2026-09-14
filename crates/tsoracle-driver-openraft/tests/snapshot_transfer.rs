@@ -32,8 +32,7 @@
 //!
 //! This is the only place in the suite that exercises the snapshot RPC path:
 //! `MemNetworkPeer::full_snapshot` → `RaftHandle::install_full_snapshot` →
-//! `HighWaterStateMachine::{begin_receiving_snapshot, get_snapshot_builder,
-//! install_snapshot}`.
+//! `HighWaterStateMachine::{get_snapshot_builder, install_snapshot}`.
 
 mod common;
 
@@ -155,6 +154,7 @@ async fn isolated_follower_catches_up_via_snapshot_transfer() {
     nodes[0].raft.initialize(mem).await.expect("initialize");
 
     let leader_idx = find_leader_idx(&nodes).await;
+    common::wait_until_writable(&nodes[leader_idx].raft).await;
     let follower_idx = (0..3).find(|i| *i != leader_idx).unwrap();
     let follower_id = nodes[follower_idx].id;
 

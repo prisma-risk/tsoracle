@@ -86,7 +86,6 @@ struct StubStateMachine {
 struct StubState {
     last_applied: Option<TestLogId>,
     last_membership: TestStoredMembership,
-    snapshot_counter: u64,
     current_snapshot: Option<StoredSnapshot>,
 }
 
@@ -140,10 +139,6 @@ impl RaftStateMachine<TestTypeConfig> for StubStateMachine {
         self.clone()
     }
 
-    async fn begin_receiving_snapshot(&mut self) -> Result<Cursor<Vec<u8>>, io::Error> {
-        Ok(Cursor::new(Vec::new()))
-    }
-
     async fn install_snapshot(
         &mut self,
         meta: &TestSnapshotMeta,
@@ -178,8 +173,6 @@ impl RaftSnapshotBuilder<TestTypeConfig> for StubStateMachine {
 
     async fn build_snapshot(&mut self) -> Result<TestSnapshot, io::Error> {
         let mut s = self.state.lock().unwrap();
-        s.snapshot_counter += 1;
-        let snapshot_id = format!("test-snapshot-{}", s.snapshot_counter);
         let payload = SnapshotPayload {
             last_applied: s.last_applied,
             last_membership: s.last_membership.clone(),
@@ -188,7 +181,6 @@ impl RaftSnapshotBuilder<TestTypeConfig> for StubStateMachine {
         let meta = TestSnapshotMeta {
             last_log_id: s.last_applied,
             last_membership: s.last_membership.clone(),
-            snapshot_id,
         };
         s.current_snapshot = Some(StoredSnapshot {
             meta: meta.clone(),

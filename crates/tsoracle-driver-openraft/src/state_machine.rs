@@ -280,9 +280,6 @@ struct Core {
     leases: LeaseSet,
     last_applied: Option<LogId>,
     last_membership: StoredMem,
-    /// Snapshot index counter, used to make snapshot ids unique even when two
-    /// snapshots are produced at the same `last_applied` log id.
-    snapshot_idx: u64,
     /// The most-recently built or installed snapshot, retained in memory so
     /// `get_current_snapshot` does not need to rebuild on every call.
     current_snapshot: Option<StoredSnapshot>,
@@ -298,7 +295,7 @@ struct StoredSnapshot {
 /// `published` without regressing the applied log id.
 ///
 /// Equal ids may replace (a fresh rebuild at the same `last_applied` carries
-/// the same state, only a new `snapshot_id`). `None` — no prior snapshot, or a
+/// the same state). `None` — no prior snapshot, or a
 /// pre-genesis snapshot — is the minimum, so a `None` incoming never displaces
 /// a `Some` published. This is the monotone guard that closes the
 /// `build_snapshot`/`install_snapshot` publish TOCTOU.
@@ -429,7 +426,6 @@ impl HighWaterStateMachine {
             leases: LeaseSet::default(),
             last_applied: None,
             last_membership: StoredMembership::default(),
-            snapshot_idx: 0,
             current_snapshot: None,
         };
         if let Some(bytes) = store.load()? {
@@ -513,11 +509,6 @@ impl HighWaterStateMachine {
         self.core.lock().leases.to_records()
     }
 
-    fn snapshot_id_for(last_applied: Option<&LogId>, idx: u64) -> String {
-        let log_index = last_applied.map(|l| l.index).unwrap_or(0);
-        format!("{log_index}-{idx}")
-    }
-
     /// Durably persist `envelope`, then publish `(meta, data)` as the current
     /// in-memory snapshot, running `on_adopt` against the core under the same
     /// publish lock — but only if `meta.last_log_id` does not regress the
@@ -559,7 +550,6 @@ impl HighWaterStateMachine {
             tracing::debug!(
                 incoming.last_log_id = ?meta.last_log_id,
                 published.last_log_id = ?published,
-                snapshot_id = %meta.snapshot_id,
                 "discarding stale snapshot publish: a newer snapshot is \
                  already durable and published",
             );
@@ -584,8 +574,7 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
         // sync write), and holding a `parking_lot::Mutex` across that would
         // serialize `apply` against snapshot persistence unnecessarily.
         let (snapshot_payload, meta) = {
-            let mut core = self.core.lock();
-            core.snapshot_idx += 1;
+            let core = self.core.lock();
             let payload = HighWaterStateMachineSnapshot {
                 current_value: core.current_value,
                 last_applied: core.last_applied,
@@ -594,11 +583,9 @@ impl RaftSnapshotBuilder<TypeConfig> for HighWaterStateMachine {
                 dense_cap: core.dense_cap,
                 leases: core.leases.clone(),
             };
-            let snapshot_id = Self::snapshot_id_for(core.last_applied.as_ref(), core.snapshot_idx);
             let meta = SnapMeta {
                 last_log_id: core.last_applied,
                 last_membership: core.last_membership.clone(),
-                snapshot_id,
             };
             let bytes = encode_framed(self.active_write_version.get(), &payload)
                 .map_err(|e| codec_io_error("snapshot payload serialize", e))?;
@@ -912,10 +899,6 @@ impl RaftStateMachine<TypeConfig> for HighWaterStateMachine {
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
         self.clone()
-    }
-
-    async fn begin_receiving_snapshot(&mut self) -> Result<SnapData, io::Error> {
-        Ok(Cursor::new(Vec::new()))
     }
 
     async fn install_snapshot(
@@ -1869,24 +1852,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_snapshot_uses_fresh_id_each_time() {
-        let mut sm = HighWaterStateMachine::new();
-        apply_one(
-            &mut sm,
-            1,
-            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 7 })),
-        )
-        .await;
-
-        let a = sm.build_snapshot().await.expect("build_snapshot a");
-        let b = sm.build_snapshot().await.expect("build_snapshot b");
-        assert_ne!(
-            a.meta.snapshot_id, b.meta.snapshot_id,
-            "two snapshots at same last_applied must have distinct ids"
-        );
-    }
-
-    #[tokio::test]
     async fn install_snapshot_replaces_state() {
         let mut sm = HighWaterStateMachine::new();
         let payload = HighWaterStateMachineSnapshot {
@@ -1906,7 +1871,6 @@ mod tests {
         let meta = SnapMeta {
             last_log_id: payload.last_applied,
             last_membership: payload.last_membership.clone(),
-            snapshot_id: "test-install-1".to_string(),
         };
         sm.install_snapshot(&meta, std::io::Cursor::new(bytes))
             .await
@@ -1921,7 +1885,7 @@ mod tests {
             .await
             .expect("get_current_snapshot")
             .expect("snapshot present");
-        assert_eq!(current.meta.snapshot_id, "test-install-1");
+        assert_eq!(current.meta.last_log_id.map(|l| l.index), Some(5));
     }
 
     /// Build a v5 (dense) snapshot whose `dense` map carries one raw-`String`
@@ -1944,7 +1908,6 @@ mod tests {
         let meta = SnapMeta {
             last_log_id: last_applied,
             last_membership: StoredMem::default(),
-            snapshot_id: "test-invalid-dense-key".to_string(),
         };
         (meta, bytes)
     }
@@ -2101,16 +2064,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn begin_receiving_snapshot_returns_empty_cursor() {
-        // openraft hands the returned cursor to the snapshot-receiving network
-        // path; the contract is "empty, writable buffer." Anything non-empty
-        // would corrupt the install on the receiving side.
-        let mut sm = HighWaterStateMachine::new();
-        let cursor = sm
-            .begin_receiving_snapshot()
+    async fn with_store_loads_an_envelope_persisted_before_openraft_dropped_snapshot_id() {
+        // Binaries on openraft before 0.10.0-alpha.33 persisted `SnapshotMeta` with a non-empty `snapshot_id` as its third field. openraft now reserves that slot, writes it empty and ignores it on read, so a node upgraded in place must still boot from the snapshot already on disk. Build the old envelope by hand: postcard encodes a tuple exactly like a struct.
+        let payload = HighWaterStateMachineSnapshot {
+            current_value: 321,
+            last_applied: Some(log_id(12)),
+            last_membership: StoredMem::default(),
+            dense: std::collections::BTreeMap::new(),
+            dense_cap: 0,
+            leases: LeaseSet::default(),
+        };
+        let data =
+            tsoracle_codec::encode_framed(BASELINE_WRITE_VERSION, &payload).expect("payload");
+        let legacy_meta = (
+            payload.last_applied,
+            payload.last_membership.clone(),
+            "12-3",
+        );
+        let mut envelope = vec![BASELINE_WRITE_VERSION];
+        envelope
+            .extend(postcard::to_stdvec(&(legacy_meta, data.clone())).expect("legacy envelope"));
+
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        store.save(&envelope).expect("seed the store");
+        let mut sm = HighWaterStateMachine::with_store(store).expect("legacy envelope loads");
+
+        assert_eq!(sm.current_value(), 321);
+        let current = sm
+            .get_current_snapshot()
             .await
-            .expect("begin_receiving_snapshot");
-        assert!(cursor.into_inner().is_empty());
+            .expect("get_current_snapshot")
+            .expect("snapshot present");
+        assert_eq!(current.meta.last_log_id.map(|l| l.index), Some(12));
+        assert_eq!(current.snapshot.into_inner(), data);
+    }
+
+    #[tokio::test]
+    async fn persisted_envelope_keeps_the_three_field_meta_layout() {
+        // The reverse direction: an envelope this binary writes must stay readable by the previous binary during a rolling downgrade before any format activation. That holds only while `SnapshotMeta` still occupies its old third slot, now always empty.
+        let store: Arc<dyn SnapshotStore> = Arc::new(InMemorySnapshotStore::new());
+        let mut sm = HighWaterStateMachine::with_store(store.clone()).expect("with_store");
+        apply_one(
+            &mut sm,
+            1,
+            EntryPayload::Normal(HighWaterCommand::Advance(AdvancePayload { at_least: 5 })),
+        )
+        .await;
+        sm.build_snapshot().await.expect("build_snapshot");
+
+        let envelope = store.load().expect("load").expect("snapshot persisted");
+        assert_eq!(envelope[0], BASELINE_WRITE_VERSION);
+        let ((_last_log_id, _membership, snapshot_id), _data): (
+            (Option<LogId>, StoredMem, String),
+            Vec<u8>,
+        ) = postcard::from_bytes(&envelope[1..]).expect("three-field meta layout");
+        assert_eq!(snapshot_id, "");
     }
 
     #[tokio::test]
@@ -2170,7 +2178,6 @@ mod tests {
         let meta = SnapMeta {
             last_log_id: payload.last_applied,
             last_membership: payload.last_membership.clone(),
-            snapshot_id: "install-1".into(),
         };
         sm.install_snapshot(&meta, std::io::Cursor::new(bytes))
             .await
@@ -2203,7 +2210,6 @@ mod tests {
         let meta = SnapMeta {
             last_log_id: payload.last_applied,
             last_membership: payload.last_membership.clone(),
-            snapshot_id: format!("snap-{}", last_applied.index),
         };
         (meta, bytes)
     }
@@ -2293,7 +2299,7 @@ mod tests {
         );
         assert!(
             supersedes_published(Some(log_id(5)), Some(log_id(5))),
-            "equal index may republish (same state, fresh snapshot_id)"
+            "equal index may republish (same state, fresh rebuild)"
         );
         assert!(
             !supersedes_published(Some(log_id(5)), Some(log_id(8))),
@@ -2393,7 +2399,6 @@ mod tests {
         let meta = SnapMeta {
             last_log_id: Some(log_id(6)),
             last_membership: payload.last_membership.clone(),
-            snapshot_id: "mismatch-1".into(),
         };
 
         let Err(err) = sm
@@ -2653,7 +2658,6 @@ mod tests {
         let meta = SnapMeta {
             last_log_id: None,
             last_membership: StoredMembership::default(),
-            snapshot_id: "test".to_string(),
         };
         let foreign = vec![0xFF, 7, 0, 0, 0, 0];
         let err = sm
@@ -3260,8 +3264,7 @@ mod tests {
         assert_eq!(src.dense_value("orders"), 42, "source dense populated");
 
         // Build the v5 snapshot: the bytes handed back by openraft are what
-        // gets streamed to the follower via `begin_receiving_snapshot` +
-        // `install_snapshot`.
+        // gets streamed to the follower and handed to `install_snapshot`.
         let snap = src
             .build_snapshot()
             .await
