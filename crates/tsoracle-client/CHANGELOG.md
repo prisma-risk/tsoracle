@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [1.3.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v1.3.2...tsoracle-client-v1.3.3) - 2026-09-15
+
+### Fixed
+
+- *(client)* seat the leader hint from NOT_LEADER on control-plane RPCs ([#713](https://github.com/prisma-risk/tsoracle/pull/713))
+
 ## [1.3.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v1.3.1...tsoracle-client-v1.3.2) - 2026-09-13
 
 ### Other
