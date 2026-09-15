@@ -320,7 +320,22 @@ impl Client {
         let rpc_budget = pair.remaining();
         let err = match tokio::time::timeout(rpc_budget, rpc(svc)).await {
             Ok(Ok(response)) => return map(response.into_inner()),
-            Ok(Err(status)) => ClientError::Rpc(status),
+            Ok(Err(status)) => {
+                // A NOT_LEADER reply with a leader hint is a redirect over a healthy channel. The call stays single-attempt, but the hint is seated under the same epoch-monotone rule `get_ts` uses, so the caller's retry targets the leader. Without it every retry returns to the first configured endpoint, and behind a load-balanced address to whichever member that channel first reached. Lease precondition refusals share the status code but carry no hint trailer, so they leave the cache alone.
+                if status.code() == tonic::Code::FailedPrecondition
+                    && matches!(
+                        crate::channel_pool::decode_leader_hint(&status),
+                        crate::channel_pool::LeaderHintLookup::Decoded(_)
+                    )
+                {
+                    let _ = crate::leader_hint::classify_not_leader_hint(
+                        &self.pool,
+                        &endpoint,
+                        status.clone(),
+                    );
+                }
+                ClientError::Rpc(status)
+            }
             // A timed-out RPC surfaces as `DeadlineExceeded` (transport-class
             // per `is_transport_failure`), so the eviction tail below drops the
             // possibly-half-open channel — matching the `get_ts` attempt path.
@@ -369,6 +384,7 @@ impl Client {
     /// Acquire a stamping lease for an opaque holder group.
     ///
     /// Single-attempt control-plane call: callers own retry and re-route policy.
+    /// A NOT_LEADER refusal seats its leader hint, so the next control-plane call targets the hinted leader.
     /// Retrying an ambiguous acquire is safe for the same `(holder,
     /// holder_epoch)` because the server treats that pair idempotently while
     /// the lease is live.
