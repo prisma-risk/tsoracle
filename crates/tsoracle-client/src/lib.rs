@@ -314,12 +314,19 @@ impl Client {
     where
         Rpc: FnOnce(TsoServiceClient<Channel>) -> RpcFuture,
         RpcFuture: Future<Output = Result<tonic::Response<ProtoResponse>, tonic::Status>>,
-        Map: FnOnce(ProtoResponse) -> Result<Output, ClientError>,
+        Map: FnOnce(ProtoResponse) -> Result<ControlPlaneReply<Output>, ClientError>,
     {
         let (endpoint, budget, pair, svc, cell) = self.control_plane_client().await?;
         let rpc_budget = pair.remaining();
         let err = match tokio::time::timeout(rpc_budget, rpc(svc)).await {
-            Ok(Ok(response)) => return map(response.into_inner()),
+            Ok(Ok(response)) => {
+                let reply = map(response.into_inner())?;
+                // A reply only the serving leader can produce refreshes the cached leader under the same monotone-forward rule a successful `get_ts` uses. Without it a caller that only issues lease RPCs keeps a seated hint for exactly `leader_ttl`, then falls back to the first configured endpoint and is redirected again, once per TTL.
+                if let Some(epoch) = reply.leader_epoch {
+                    self.pool.record_success(&endpoint, epoch.0);
+                }
+                return Ok(reply.output);
+            }
             Ok(Err(status)) => {
                 // A NOT_LEADER reply with a leader hint is a redirect over a healthy channel. The call stays single-attempt, but the hint is seated under the same epoch-monotone rule `get_ts` uses, so the caller's retry targets the leader. Without it every retry returns to the first configured endpoint, and behind a load-balanced address to whichever member that channel first reached. Lease precondition refusals share the status code but carry no hint trailer, so they leave the cache alone.
                 if status.code() == tonic::Code::FailedPrecondition
@@ -371,11 +378,12 @@ impl Client {
                 svc.get_current_max_safe(tsoracle_proto::v1::GetCurrentMaxSafeRequest {})
                     .await
             },
+            // Followers answer with zero rather than NOT_LEADER, so a success is not leadership proof.
             |inner| {
-                Ok(MaxSafe {
+                Ok(ControlPlaneReply::unproven(MaxSafe {
                     max_safe_physical_ms: inner.max_safe_physical_ms,
                     epoch: Epoch::from_wire(inner.epoch_hi, inner.epoch_lo),
-                })
+                }))
             },
         )
         .await
@@ -385,6 +393,7 @@ impl Client {
     ///
     /// Single-attempt control-plane call: callers own retry and re-route policy.
     /// A NOT_LEADER refusal seats its leader hint, so the next control-plane call targets the hinted leader.
+    /// A success refreshes the cached leader at the granting epoch, as a successful `get_ts` does.
     /// Retrying an ambiguous acquire is safe for the same `(holder,
     /// holder_epoch)` because the server treats that pair idempotently while
     /// the lease is live.
@@ -406,12 +415,16 @@ impl Client {
                 .await
             },
             |inner| {
-                Ok(Lease {
-                    lease_id: inner.lease_id,
-                    ts_upper_bound: inner.ts_upper_bound,
-                    expires_at_ms: inner.expires_at_ms,
-                    epoch: required_epoch(inner.epoch, "lease response missing epoch")?,
-                })
+                let epoch = required_epoch(inner.epoch, "lease response missing epoch")?;
+                Ok(ControlPlaneReply::from_leader(
+                    Lease {
+                        lease_id: inner.lease_id,
+                        ts_upper_bound: inner.ts_upper_bound,
+                        expires_at_ms: inner.expires_at_ms,
+                        epoch,
+                    },
+                    epoch,
+                ))
             },
         )
         .await
@@ -420,6 +433,7 @@ impl Client {
     /// Renew a live lease, re-arming its acquire-time TTL.
     ///
     /// Single-attempt control-plane call; callers own retry and re-route policy.
+    /// A success refreshes the cached leader at the renewing epoch, as a successful `get_ts` does.
     pub async fn renew_lease(&self, lease_id: u64) -> Result<LeaseRenewal, ClientError> {
         self.control_plane_rpc(
             |mut svc| async move {
@@ -427,11 +441,15 @@ impl Client {
                     .await
             },
             |inner| {
-                Ok(LeaseRenewal {
-                    ts_upper_bound: inner.ts_upper_bound,
-                    expires_at_ms: inner.expires_at_ms,
-                    epoch: required_epoch(inner.epoch, "lease renewal missing epoch")?,
-                })
+                let epoch = required_epoch(inner.epoch, "lease renewal missing epoch")?;
+                Ok(ControlPlaneReply::from_leader(
+                    LeaseRenewal {
+                        ts_upper_bound: inner.ts_upper_bound,
+                        expires_at_ms: inner.expires_at_ms,
+                        epoch,
+                    },
+                    epoch,
+                ))
             },
         )
         .await
@@ -445,7 +463,8 @@ impl Client {
                 svc.release_lease(tsoracle_proto::v1::ReleaseLeaseRequest { lease_id })
                     .await
             },
-            |_inner| Ok(()),
+            // Only the serving leader answers a release, but the reply carries no epoch. An epoch-less confirmed success cannot rank itself against a cached entry, and on an empty or expired cache it would seat an entry with no monotone floor that a later confirmed success from the real leader could not displace. So a release leaves the cache alone. A lease holder's acquire and renewals already keep the leader fresh.
+            |_inner| Ok(ControlPlaneReply::unproven(())),
         )
         .await
     }
@@ -457,11 +476,12 @@ impl Client {
                 svc.get_safe_frontier(tsoracle_proto::v1::GetSafeFrontierRequest {})
                     .await
             },
+            // Followers answer this RPC too, with a zero frontier and `Epoch::ZERO`, and a single-node leader also runs at `Epoch::ZERO`. A success therefore proves nothing about leadership and must not seat or refresh the cached leader.
             |inner| {
-                Ok(SafeFrontier {
+                Ok(ControlPlaneReply::unproven(SafeFrontier {
                     frontier_physical_ms: inner.frontier_physical_ms,
                     epoch: Epoch::from_wire(inner.epoch_hi, inner.epoch_lo),
-                })
+                }))
             },
         )
         .await
@@ -501,6 +521,31 @@ pub struct LeaseRenewal {
 pub struct SafeFrontier {
     pub frontier_physical_ms: u64,
     pub epoch: Epoch,
+}
+
+/// A decoded control-plane success plus what it proves about the endpoint that served it.
+struct ControlPlaneReply<Output> {
+    output: Output,
+    /// The epoch the endpoint led at when it produced this reply, or `None` when a follower could have produced it too.
+    leader_epoch: Option<Epoch>,
+}
+
+impl<Output> ControlPlaneReply<Output> {
+    /// A reply only the serving leader produces, at `epoch`.
+    fn from_leader(output: Output, epoch: Epoch) -> Self {
+        ControlPlaneReply {
+            output,
+            leader_epoch: Some(epoch),
+        }
+    }
+
+    /// A reply that proves nothing about leadership, so it leaves the leader cache alone.
+    fn unproven(output: Output) -> Self {
+        ControlPlaneReply {
+            output,
+            leader_epoch: None,
+        }
+    }
 }
 
 fn required_epoch(
@@ -1565,5 +1610,110 @@ mod tests {
             1,
             "post-send INTERNAL must NOT be retried (possible committed advance)"
         );
+    }
+
+    fn epoch_wire(epoch: u128) -> Option<tsoracle_proto::v1::EpochWire> {
+        let (hi, lo) = Epoch(epoch).to_wire();
+        Some(tsoracle_proto::v1::EpochWire { hi, lo })
+    }
+
+    async fn control_plane_test_client(addr: std::net::SocketAddr) -> Client {
+        ClientBuilder::endpoints(vec![format!("http://{addr}")])
+            .retry_policy(RetryPolicy {
+                max_attempts: 3,
+                per_attempt_deadline: Duration::from_secs(2),
+                overall_deadline: Duration::from_secs(5),
+                base_backoff: Duration::ZERO,
+                leader_ttl: Duration::from_secs(30),
+            })
+            .build()
+            .await
+            .expect("client must build")
+    }
+
+    /// Only the serving leader renews a lease, so a successful renewal seats the endpoint that served it at the epoch the reply carries, exactly as a successful `get_ts` does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn renew_lease_success_seats_the_serving_endpoint_at_its_epoch() {
+        let addr = crate::test_support::FakeTso::new()
+            .on_renew_lease(|_req| async move {
+                Ok(tsoracle_proto::v1::RenewLeaseResponse {
+                    ts_upper_bound: 10,
+                    expires_at_ms: 20,
+                    epoch: epoch_wire(7),
+                })
+            })
+            .spawn()
+            .await;
+        let client = control_plane_test_client(addr).await;
+        assert_eq!(client.cached_leader(), None);
+
+        client.renew_lease(1).await.expect("renewal succeeds");
+        let cached = client
+            .pool
+            .fresh_leader()
+            .expect("the renewal seats the cache");
+        assert_eq!(cached.endpoint, format!("http://{addr}"));
+        assert_eq!(cached.epoch, Some(7));
+    }
+
+    /// A control-plane success refreshes the cache under the monotone-forward rule, never around it. A renewal that completes late against a peer that led at an older epoch must not unseat the fresher leader that was seated while it was in flight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_renewal_success_does_not_unseat_a_fresher_leader() {
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (server_entered, server_release) = (entered.clone(), release.clone());
+        let addr = crate::test_support::FakeTso::new()
+            .on_renew_lease(move |_req| {
+                let (entered, release) = (server_entered.clone(), server_release.clone());
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(tsoracle_proto::v1::RenewLeaseResponse {
+                        ts_upper_bound: 10,
+                        expires_at_ms: 20,
+                        epoch: epoch_wire(4),
+                    })
+                }
+            })
+            .spawn()
+            .await;
+        let client = control_plane_test_client(addr).await;
+        let fresher_leader = "http://127.0.0.1:1";
+
+        let (renewal, ()) = tokio::join!(client.renew_lease(1), async {
+            // The renewal is parked on the stale peer. Seat a higher-epoch leader elsewhere, then let the stale reply land.
+            entered.notified().await;
+            client.pool.record_success(fresher_leader, 9);
+            release.notify_one();
+        });
+        renewal.expect("the stale peer still answers the renewal");
+
+        let cached = client.pool.fresh_leader().expect("the cache stays seated");
+        assert_eq!(cached.endpoint, fresher_leader);
+        assert_eq!(cached.epoch, Some(9));
+    }
+
+    /// Followers answer the safe-frontier and max-safe reads, and a release reply carries no epoch. None of those successes proves which endpoint leads, so none of them may seat the leader cache.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unproven_control_plane_successes_leave_the_leader_cache_alone() {
+        let addr = crate::test_support::FakeTso::new()
+            .on_release_lease(|_req| async move { Ok(tsoracle_proto::v1::ReleaseLeaseResponse {}) })
+            .spawn()
+            .await;
+        let client = control_plane_test_client(addr).await;
+
+        client.release_lease(1).await.expect("release succeeds");
+        client
+            .get_safe_frontier()
+            .await
+            .expect("safe frontier succeeds");
+        client
+            .get_current_max_safe()
+            .await
+            .expect("max safe succeeds");
+        assert_eq!(client.cached_leader(), None);
     }
 }

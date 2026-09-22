@@ -25,11 +25,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tonic::Code;
-use tsoracle_client::{Client, ClientError};
+use tsoracle_client::{Client, ClientBuilder, ClientError, RetryPolicy};
 use tsoracle_core::{Epoch, PeerEndpoint};
 use tsoracle_server::test_fakes::{InMemoryDriver, MockClock};
 use tsoracle_server::test_support::{
-    boot_leader_server, boot_server, wait_for_grpc_handshake, wait_until, wait_until_serving,
+    BootedServer, boot_leader_server, boot_server, wait_for_grpc_handshake, wait_until,
+    wait_until_serving,
 };
 use tsoracle_server::{Server, ServingState};
 
@@ -100,6 +101,114 @@ async fn client_lease_ttl_rejection_surfaces_invalid_argument() {
 /// A lease client configured with one load-balanced address keeps its channel on whichever member it first reached. When that member follows, its NOT_LEADER hint must steer the next call to the leader; otherwise every retry lands on the follower again and the lease is never acquired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lease_not_leader_hint_steers_the_next_call_to_the_leader() {
+    let pair = boot_follower_and_leader().await;
+    let (follower, leader) = (&pair.follower, &pair.leader);
+    let (follower_driver, leader_driver) = (&pair.follower_driver, &pair.leader_driver);
+
+    let client = Client::connect(vec![format!("http://{}", follower.addr)])
+        .await
+        .unwrap();
+    match client
+        .acquire_lease(b"group-a", 1, Duration::from_secs(10))
+        .await
+    {
+        Err(ClientError::Rpc(status)) => assert_eq!(status.code(), Code::FailedPrecondition),
+        other => panic!("the follower must refuse the acquire, got {other:?}"),
+    }
+    let cached = client
+        .cached_leader()
+        .expect("the refusal's leader hint is seated");
+    assert!(
+        cached.ends_with(&leader.addr.to_string()),
+        "cached leader {cached} names the hinted leader"
+    );
+
+    let lease = client
+        .acquire_lease(b"group-a", 1, Duration::from_secs(10))
+        .await
+        .expect("the retry reaches the leader");
+    assert_eq!(lease.epoch, Epoch(1));
+    assert_eq!(leader_driver.current_leases().len(), 1);
+    assert!(follower_driver.current_leases().is_empty());
+
+    pair.shutdown().await;
+}
+
+/// A caller that only issues lease RPCs must keep the leader it was redirected to. Every successful renewal proves the endpoint still leads, so it refreshes the cached leader the way a successful `get_ts` does. Otherwise the hint ages out one `leader_ttl` after it was seated, the next call falls back to the first configured endpoint, and the follower there refuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lease_successes_keep_the_redirected_leader_cached_past_leader_ttl() {
+    let pair = boot_follower_and_leader().await;
+    let leader_ttl = Duration::from_millis(300);
+    let client = ClientBuilder::endpoints(vec![format!("http://{}", pair.follower.addr)])
+        .retry_policy(RetryPolicy {
+            leader_ttl,
+            ..RetryPolicy::default()
+        })
+        .build()
+        .await
+        .unwrap();
+    match client
+        .acquire_lease(b"group-a", 1, Duration::from_secs(10))
+        .await
+    {
+        Err(ClientError::Rpc(status)) => assert_eq!(status.code(), Code::FailedPrecondition),
+        other => panic!("the follower must refuse the acquire, got {other:?}"),
+    }
+    let seated_at = tokio::time::Instant::now();
+    let lease = client
+        .acquire_lease(b"group-a", 1, Duration::from_secs(10))
+        .await
+        .expect("the retry reaches the leader");
+
+    // Renew at a quarter of `leader_ttl` until three full TTLs have passed since the hint was seated. Each renewal lands well inside the TTL left by the previous success, so only a success that fails to refresh the cache can send one back to the follower.
+    let mut renewals = 0;
+    while seated_at.elapsed() < leader_ttl * 3 {
+        tokio::time::sleep(leader_ttl / 4).await;
+        let renewal = client
+            .renew_lease(lease.lease_id)
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "renewal {renewals} at {:?} after seating must reach the leader, got {err:?}",
+                    seated_at.elapsed()
+                )
+            });
+        assert_eq!(renewal.epoch, Epoch(1));
+        renewals += 1;
+        let cached = client
+            .cached_leader()
+            .expect("a successful renewal keeps the leader cached");
+        assert!(
+            cached.ends_with(&pair.leader.addr.to_string()),
+            "cached leader {cached} names the leader"
+        );
+    }
+    assert!(
+        renewals >= 8,
+        "the loop outlived three TTLs: {renewals} renewals"
+    );
+    assert_eq!(pair.leader_driver.current_leases().len(), 1);
+    assert!(pair.follower_driver.current_leases().is_empty());
+
+    pair.shutdown().await;
+}
+
+/// Two servers sharing one term: a leader at `Epoch(1)` and a follower whose NOT_LEADER replies hint at it.
+struct FollowerAndLeader {
+    follower: BootedServer,
+    leader: BootedServer,
+    follower_driver: Arc<InMemoryDriver>,
+    leader_driver: Arc<InMemoryDriver>,
+}
+
+impl FollowerAndLeader {
+    async fn shutdown(self) {
+        self.follower.shutdown().await.unwrap();
+        self.leader.shutdown().await.unwrap();
+    }
+}
+
+async fn boot_follower_and_leader() -> FollowerAndLeader {
     let follower_driver = Arc::new(InMemoryDriver::new());
     let leader_driver = Arc::new(InMemoryDriver::new());
     let build = |driver: Arc<InMemoryDriver>| {
@@ -133,35 +242,12 @@ async fn lease_not_leader_hint_steers_the_next_call_to_the_leader() {
             .await
             .expect("server handshake");
     }
-
-    let client = Client::connect(vec![format!("http://{}", follower.addr)])
-        .await
-        .unwrap();
-    match client
-        .acquire_lease(b"group-a", 1, Duration::from_secs(10))
-        .await
-    {
-        Err(ClientError::Rpc(status)) => assert_eq!(status.code(), Code::FailedPrecondition),
-        other => panic!("the follower must refuse the acquire, got {other:?}"),
+    FollowerAndLeader {
+        follower,
+        leader,
+        follower_driver,
+        leader_driver,
     }
-    let cached = client
-        .cached_leader()
-        .expect("the refusal's leader hint is seated");
-    assert!(
-        cached.ends_with(&leader.addr.to_string()),
-        "cached leader {cached} names the hinted leader"
-    );
-
-    let lease = client
-        .acquire_lease(b"group-a", 1, Duration::from_secs(10))
-        .await
-        .expect("the retry reaches the leader");
-    assert_eq!(lease.epoch, Epoch(1));
-    assert_eq!(leader_driver.current_leases().len(), 1);
-    assert!(follower_driver.current_leases().is_empty());
-
-    follower.shutdown().await.unwrap();
-    leader.shutdown().await.unwrap();
 }
 
 /// A lease precondition refusal on the leader shares NOT_LEADER's status code but carries no hint, so it must not disturb the leader cache.
