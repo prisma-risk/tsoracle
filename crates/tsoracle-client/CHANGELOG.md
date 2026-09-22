@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [1.3.4](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v1.3.3...tsoracle-client-v1.3.4) - 2026-09-22
+
+### Fixed
+
+- *(client)* refresh the cached leader after a successful lease RPC ([#717](https://github.com/prisma-risk/tsoracle/pull/717))
+
 ## [1.3.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-client-v1.3.2...tsoracle-client-v1.3.3) - 2026-09-15
 
 ### Fixed
