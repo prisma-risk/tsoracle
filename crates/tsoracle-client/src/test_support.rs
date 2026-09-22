@@ -84,6 +84,9 @@ type BoxFut<T> = Pin<Box<dyn Future<Output = Result<T, tonic::Status>> + Send>>;
 type TsHandler = Arc<dyn Fn(GetTsRequest) -> BoxFut<GetTsResponse> + Send + Sync>;
 type SeqHandler = Arc<dyn Fn(GetSeqRequest) -> BoxFut<GetSeqResponse> + Send + Sync>;
 type SeqBatchHandler = Arc<dyn Fn(GetSeqBatchRequest) -> BoxFut<GetSeqBatchResponse> + Send + Sync>;
+type RenewLeaseHandler = Arc<dyn Fn(RenewLeaseRequest) -> BoxFut<RenewLeaseResponse> + Send + Sync>;
+type ReleaseLeaseHandler =
+    Arc<dyn Fn(ReleaseLeaseRequest) -> BoxFut<ReleaseLeaseResponse> + Send + Sync>;
 
 /// A configurable fake [`TsoService`] for client tests. Per-call behavior is
 /// injected as closures, so this single trait impl — one `get_ts`, one
@@ -94,13 +97,16 @@ type SeqBatchHandler = Arc<dyn Fn(GetSeqBatchRequest) -> BoxFut<GetSeqBatchRespo
 ///
 /// All handlers default to returning `UNIMPLEMENTED`; a test overrides only the
 /// RPC it exercises via [`on_get_ts`](Self::on_get_ts) /
-/// [`on_get_seq`](Self::on_get_seq) / [`on_get_seq_batch`](Self::on_get_seq_batch).
-/// `get_current_max_safe` returns the default response (every test that touches
-/// it wants exactly that).
+/// [`on_get_seq`](Self::on_get_seq) / [`on_get_seq_batch`](Self::on_get_seq_batch) /
+/// [`on_renew_lease`](Self::on_renew_lease) / [`on_release_lease`](Self::on_release_lease).
+/// `get_current_max_safe` and `get_safe_frontier` return the default response
+/// (every test that touches them wants exactly that).
 pub(crate) struct FakeTso {
     get_ts: TsHandler,
     get_seq: SeqHandler,
     get_seq_batch: SeqBatchHandler,
+    renew_lease: RenewLeaseHandler,
+    release_lease: ReleaseLeaseHandler,
 }
 
 impl FakeTso {
@@ -115,6 +121,14 @@ impl FakeTso {
             get_seq_batch: Arc::new(|_| {
                 Box::pin(async {
                     Err(tonic::Status::unimplemented("get_seq_batch not configured"))
+                })
+            }),
+            renew_lease: Arc::new(|_| {
+                Box::pin(async { Err(tonic::Status::unimplemented("renew_lease not configured")) })
+            }),
+            release_lease: Arc::new(|_| {
+                Box::pin(async {
+                    Err(tonic::Status::unimplemented("release_lease not configured"))
                 })
             }),
         }
@@ -147,6 +161,26 @@ impl FakeTso {
         Fut: Future<Output = Result<GetSeqBatchResponse, tonic::Status>> + Send + 'static,
     {
         self.get_seq_batch = Arc::new(move |req| Box::pin(f(req)));
+        self
+    }
+
+    /// Override the `renew_lease` behavior with an async closure of the request.
+    pub(crate) fn on_renew_lease<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(RenewLeaseRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<RenewLeaseResponse, tonic::Status>> + Send + 'static,
+    {
+        self.renew_lease = Arc::new(move |req| Box::pin(f(req)));
+        self
+    }
+
+    /// Override the `release_lease` behavior with an async closure of the request.
+    pub(crate) fn on_release_lease<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(ReleaseLeaseRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<ReleaseLeaseResponse, tonic::Status>> + Send + 'static,
+    {
+        self.release_lease = Arc::new(move |req| Box::pin(f(req)));
         self
     }
 
@@ -217,20 +251,20 @@ impl TsoService for FakeTso {
 
     async fn renew_lease(
         &self,
-        _request: tonic::Request<RenewLeaseRequest>,
+        request: tonic::Request<RenewLeaseRequest>,
     ) -> Result<tonic::Response<RenewLeaseResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "renew_lease not implemented in test stub",
-        ))
+        (self.renew_lease)(request.into_inner())
+            .await
+            .map(tonic::Response::new)
     }
 
     async fn release_lease(
         &self,
-        _request: tonic::Request<ReleaseLeaseRequest>,
+        request: tonic::Request<ReleaseLeaseRequest>,
     ) -> Result<tonic::Response<ReleaseLeaseResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "release_lease not implemented in test stub",
-        ))
+        (self.release_lease)(request.into_inner())
+            .await
+            .map(tonic::Response::new)
     }
 
     async fn get_safe_frontier(
