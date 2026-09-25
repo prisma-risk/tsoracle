@@ -4,7 +4,7 @@
 #
 # The runtime stanza below must stay in sync with deploy/Dockerfile's runtime stage: base digest, labels, ca-certificates, uid 10001, /data ownership and entrypoint. The binary COPY source is the only intentional difference.
 # the release runners ship a newer glibc than bookworm provides, so release binaries use trixie-slim at runtime.
-FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS runtime
 
 ARG IMAGE_TITLE="tsoracle"
 ARG IMAGE_DESCRIPTION="A distributed timestamp and sequence oracle"
