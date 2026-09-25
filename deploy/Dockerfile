@@ -5,7 +5,7 @@
 # stage for RUN to see it.
 ARG FEATURES=""
 
-FROM rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS build
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 ARG FEATURES
 WORKDIR /src
 # RocksDB (openraft/paxos toolkits) needs clang+cmake for bindgen; tsoracle-proto
@@ -18,7 +18,7 @@ RUN cargo build --release -p tsoracle --bin tsoracle ${FEATURES:+--no-default-fe
 
 # This runtime stage must stay in sync with deploy/Dockerfile.release. The only intentional difference is where the tsoracle binary is copied from.
 # the release runners ship a newer glibc than bookworm provides, so release binaries use trixie-slim at runtime.
-FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS runtime
 # OCI image metadata. IMAGE_TITLE/IMAGE_DESCRIPTION are passed per-variant by the
 # release-images workflow so each driver image (tsoracle-file, tsoracle-openraft,
 # tsoracle) carries its own description; defaults cover a bare `docker build`. This
