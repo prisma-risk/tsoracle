@@ -18,7 +18,7 @@ jobs:
       BASELINE_REF: 2d7ba937b98fdfdc4edc4d3c90e6a8e2f7ddd60a  # tsoracle-v2.0.2
     steps:
       - name: free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6  # v2.0.0
         with:
           tool-cache: false
           android: true
