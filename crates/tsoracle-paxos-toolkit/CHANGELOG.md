@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v1.0.6...tsoracle-paxos-toolkit-v1.0.7) - 2026-10-01
+
+### Other
+
+- updated the following local packages: tsoracle-core, tsoracle-consensus
+
 ## [1.0.6](https://github.com/prisma-risk/tsoracle/compare/tsoracle-paxos-toolkit-v1.0.5...tsoracle-paxos-toolkit-v1.0.6) - 2026-09-14
 
 ### Other
