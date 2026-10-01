@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [3.3.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.3.0...tsoracle-server-v3.3.1) - 2026-10-01
+
+### Fixed
+
+- *(server)* cap lease renewal issuance bounds ([#723](https://github.com/prisma-risk/tsoracle/pull/723))
+
 ## [3.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-server-v3.2.3...tsoracle-server-v3.3.0) - 2026-09-14
 
 ### Added
