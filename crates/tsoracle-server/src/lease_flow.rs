@@ -132,7 +132,7 @@ pub(crate) async fn renew_lease(
         .map_err(lease_status)?;
 
     let _gate = slot.drain_barrier().await;
-    let (actual, epoch) = persist_extension_bound(server, &slot, now_ms, record.ttl_ms).await?;
+    let (actual, epoch) = persist_renewal_bound(server, &slot, now_ms, record.ttl_ms).await?;
     record.ts_upper_bound = actual;
     record.expires_at_ms = now_ms.saturating_add(record.ttl_ms);
     persist_lease_mutation(
@@ -238,6 +238,31 @@ async fn persist_extension_bound(
         Err(CoreError::NotLeader) => return Err(not_leader(server)),
         Err(other) => return Err(core_status(other)),
     };
+    let actual = persist_bound(server, requested, epoch).await?;
+    if let CommitOutcome::Ignored(_) = server
+        .core
+        .commit_extension(actual, epoch)
+        .map_err(core_status)?
+    {
+        return Err(not_leader(server));
+    }
+    Ok((actual, epoch))
+}
+
+async fn persist_renewal_bound(
+    server: &Arc<Server>,
+    slot: &ExtensionSlot<'_>,
+    now_ms: u64,
+    ttl_ms: u64,
+) -> Result<(u64, Epoch), Status> {
+    let (committed, requested, epoch) = match slot.prepare_lease_renewal(now_ms, ttl_ms) {
+        Ok(prepared) => prepared,
+        Err(CoreError::NotLeader) => return Err(not_leader(server)),
+        Err(other) => return Err(core_status(other)),
+    };
+    if requested == committed {
+        return Ok((committed, epoch));
+    }
     let actual = persist_bound(server, requested, epoch).await?;
     if let CommitOutcome::Ignored(_) = server
         .core

@@ -407,6 +407,23 @@ impl<'a> ExtensionSlot<'a> {
         Ok((requested, epoch))
     }
 
+    /// Return the existing high-water when a renewal only extends validity.
+    pub(crate) fn prepare_lease_renewal(
+        &self,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<(u64, u64, Epoch), CoreError> {
+        let allocator = self.core.allocator.lock();
+        let epoch = allocator.epoch().ok_or(CoreError::NotLeader)?;
+        let committed = allocator
+            .committed_high_water()
+            .ok_or(CoreError::NotLeader)?;
+        let requested = allocator
+            .try_prepare_lease_renewal(PhysicalMs::try_new(now_ms)?, ttl_ms)?
+            .get();
+        Ok((committed, requested, epoch))
+    }
+
     /// The extension drain barrier (read side). Reachable only through the slot,
     /// so the `extension_lock → extension_gate` order cannot be inverted. The
     /// returned guard's lifetime is the slot's `'a` (not the `&self` borrow), so

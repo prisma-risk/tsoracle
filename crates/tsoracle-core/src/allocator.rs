@@ -563,6 +563,25 @@ impl Allocator {
         }
     }
 
+    /// Prepare a lease renewal with `max(committed_high_water, now_ms + ttl_ms)`. The current bound remains valid while the holder renews. Acquisition and batch windows use `try_prepare_window_extension` so a new issuer starts strictly above the previous inclusive bound.
+    pub fn try_prepare_lease_renewal(
+        &self,
+        now_ms: PhysicalMs,
+        ttl_ms: u64,
+    ) -> Result<PhysicalMs, CoreError> {
+        let committed = self.committed_high_water().ok_or(CoreError::NotLeader)?;
+        let requested =
+            now_ms
+                .get()
+                .checked_add(ttl_ms)
+                .ok_or(CoreError::WindowExtensionOverflow {
+                    floor: committed,
+                    now_ms: now_ms.get(),
+                    ahead_ms: ttl_ms,
+                })?;
+        PhysicalMs::try_new(core::cmp::max(committed, requested))
+    }
+
     /// Apply a durably-persisted window extension. `persisted_high_water` is
     /// the value returned by `ConsensusDriver::persist_high_water`, which is
     /// monotonic — it may equal or exceed the value passed to prepare.

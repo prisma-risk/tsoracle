@@ -126,6 +126,72 @@ async fn lease_bound_and_direct_windows_share_one_authority() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_renewals_keep_the_issuance_bound_within_one_ttl() {
+    let driver = Arc::new(InMemoryDriver::new());
+    let clock = Arc::new(MockClock::new(START_MS));
+    let (booted, mut client) = boot_leader(driver.clone(), clock.clone(), Epoch(1)).await;
+    let lease = client
+        .acquire_lease(acquire_req(b"group-a", 1, TTL_MS))
+        .await
+        .unwrap()
+        .into_inner();
+    for step in 1..=20 {
+        let now_ms = START_MS + step * 1_000;
+        clock.set(now_ms);
+        let renewed = client
+            .renew_lease(RenewLeaseRequest {
+                lease_id: lease.lease_id,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(renewed.ts_upper_bound, now_ms + TTL_MS);
+        assert_eq!(driver.current_high_water(), renewed.ts_upper_bound);
+    }
+    let old_bound = driver.current_high_water();
+    let next = client
+        .acquire_lease(acquire_req(b"group-a", 2, TTL_MS))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(next.lease_id > old_bound);
+    assert!(old_bound <= START_MS + 20_000 + TTL_MS);
+    booted.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clock_step_back_and_lost_renewal_reply_keep_the_bound() {
+    let driver = Arc::new(InMemoryDriver::new());
+    let clock = Arc::new(MockClock::new(START_MS));
+    let (booted, mut client) = boot_leader(driver.clone(), clock.clone(), Epoch(1)).await;
+    let lease = client
+        .acquire_lease(acquire_req(b"group-a", 1, TTL_MS))
+        .await
+        .unwrap()
+        .into_inner();
+    clock.advance(1_000);
+    let _lost_reply = client
+        .renew_lease(RenewLeaseRequest {
+            lease_id: lease.lease_id,
+        })
+        .await
+        .unwrap();
+    let bound = driver.current_high_water();
+    clock.set(START_MS - 1_000);
+    let retry = client
+        .renew_lease(RenewLeaseRequest {
+            lease_id: lease.lease_id,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retry.ts_upper_bound, bound);
+    assert_eq!(driver.current_high_water(), bound);
+    assert_eq!(retry.expires_at_ms, START_MS - 1_000 + TTL_MS);
+    booted.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotent_supersede_renew_release_and_ttl_errors() {
     let driver = Arc::new(InMemoryDriver::new());
     let clock = Arc::new(MockClock::new(START_MS));
@@ -183,7 +249,7 @@ async fn idempotent_supersede_renew_release_and_ttl_errors() {
         .await
         .unwrap()
         .into_inner();
-    assert!(renewed.ts_upper_bound > second.ts_upper_bound);
+    assert!(renewed.ts_upper_bound >= second.ts_upper_bound);
     assert_eq!(renewed.expires_at_ms, START_MS + 3_000 + TTL_MS);
     assert_eq!(
         client
@@ -317,14 +383,24 @@ async fn lease_rpcs_are_leader_only_with_hint() {
 async fn leases_survive_failover() {
     let driver = Arc::new(InMemoryDriver::new());
     let clock = Arc::new(MockClock::new(START_MS));
-    let (mut booted, mut client) = boot_leader(driver.clone(), clock, Epoch(1)).await;
+    let (mut booted, mut client) = boot_leader(driver.clone(), clock.clone(), Epoch(1)).await;
 
     let lease = client
         .acquire_lease(acquire_req(b"group-a", 1, TTL_MS))
         .await
         .unwrap()
         .into_inner();
+    for _ in 0..5 {
+        clock.advance(1_000);
+        client
+            .renew_lease(RenewLeaseRequest {
+                lease_id: lease.lease_id,
+            })
+            .await
+            .unwrap();
+    }
     let pre_failover_high_water = driver.current_high_water();
+    assert!(pre_failover_high_water <= START_MS + 5_000 + TTL_MS);
 
     driver.become_follower(None);
     wait_until_not_serving(&mut booted.state_rx).await;
@@ -339,6 +415,7 @@ async fn leases_survive_failover() {
         .unwrap()
         .into_inner();
     assert!(renewed.ts_upper_bound > pre_failover_high_water);
+    assert!(renewed.ts_upper_bound <= START_MS + 5_000 + TTL_MS + 201);
 
     booted.shutdown().await.unwrap();
 }
@@ -347,6 +424,7 @@ async fn leases_survive_failover() {
 struct FailingLeaseDriver {
     inner: InMemoryDriver,
     fail_leases: Arc<AtomicBool>,
+    fail_high_water: Arc<AtomicBool>,
 }
 
 impl FailingLeaseDriver {
@@ -354,6 +432,7 @@ impl FailingLeaseDriver {
         Self {
             inner: InMemoryDriver::new(),
             fail_leases: Arc::new(AtomicBool::new(false)),
+            fail_high_water: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -363,6 +442,10 @@ impl FailingLeaseDriver {
 
     fn fail_leases(&self, fail: bool) {
         self.fail_leases.store(fail, Ordering::SeqCst);
+    }
+
+    fn fail_high_water(&self, fail: bool) {
+        self.fail_high_water.store(fail, Ordering::SeqCst);
     }
 }
 
@@ -377,6 +460,11 @@ impl ConsensusDriver for FailingLeaseDriver {
     }
 
     async fn persist_high_water(&self, at_least: u64, epoch: Epoch) -> Result<u64, ConsensusError> {
+        if self.fail_high_water.load(Ordering::SeqCst) {
+            return Err(ConsensusError::TransientDriver(Box::new(
+                std::io::Error::other("injected high-water persist failure"),
+            )));
+        }
         self.inner.persist_high_water(at_least, epoch).await
     }
 
@@ -396,6 +484,35 @@ impl ConsensusDriver for FailingLeaseDriver {
         }
         self.inner.persist_leases(live, epoch).await
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renewal_inside_the_existing_bound_skips_high_water_persistence() {
+    let driver = Arc::new(FailingLeaseDriver::new());
+    let clock = Arc::new(MockClock::new(START_MS));
+    let server = Server::builder()
+        .consensus_driver(driver.clone())
+        .clock(clock)
+        .window_ahead(Duration::from_millis(500))
+        .failover_advance(Duration::from_millis(200))
+        .build()
+        .unwrap();
+    let (booted, mut client) = boot_leader_server(server, || driver.become_leader(Epoch(1))).await;
+    let lease = client
+        .acquire_lease(acquire_req(b"group-a", 1, TTL_MS))
+        .await
+        .unwrap()
+        .into_inner();
+    driver.fail_high_water(true);
+    let renewed = client
+        .renew_lease(RenewLeaseRequest {
+            lease_id: lease.lease_id,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(renewed.ts_upper_bound, lease.ts_upper_bound);
+    booted.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

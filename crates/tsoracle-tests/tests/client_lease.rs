@@ -74,8 +74,16 @@ async fn client_lease_roundtrip() {
     assert_eq!(frontier.epoch, Epoch(1));
 
     let renewal = client.renew_lease(lease.lease_id).await.unwrap();
-    assert!(renewal.ts_upper_bound > lease.ts_upper_bound);
+    assert_eq!(renewal.ts_upper_bound, lease.ts_upper_bound);
     assert_eq!(renewal.epoch, Epoch(1));
+    assert_eq!(
+        client
+            .get_safe_frontier()
+            .await
+            .unwrap()
+            .frontier_physical_ms,
+        lease.ts_upper_bound
+    );
 
     client.release_lease(lease.lease_id).await.unwrap();
     client.release_lease(lease.lease_id).await.unwrap();
