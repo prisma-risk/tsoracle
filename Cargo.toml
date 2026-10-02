@@ -79,7 +79,8 @@ metrics            = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 metrics-util       = "0.19"
 nix                = { version = "0.30", default-features = false, features = ["signal", "process"] }
-omnipaxos          = "0.2"
+# Exact pin: omnipaxos does not keep its API stable across 0.2.x patch releases. 0.2.3 changed the `Storage` trait's index types and renamed `outgoing_messages`, so a caret requirement lets a fresh resolve pick a version the paxos crates cannot build against. Moving the pin is a deliberate migration of the paxos toolkit, not a lockfile bump.
+omnipaxos          = "=0.2.2"
 omnipaxos_storage  = "0.2"
 parking_lot        = "0.12"
 proptest           = "1"
