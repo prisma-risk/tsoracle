@@ -18,7 +18,7 @@ For the **reference documentation of the external interface** — the gRPC wire 
 - **[Consensus Integration](consensus-integration.md)** — the `ConsensusDriver` trait, per-method recipes, worked openraft example, single-leader requirement.
 - **[Driver Comparison](driver-comparison.md)** — capability matrix and per-feature deep dive across `file`, `openraft`, and `paxos`; operator decision guidance and contributor-facing internals.
 - **[Operations](operations.md)** — sizing `window_ahead`/`failover_advance`, monitoring hooks, deployment topologies, client retry behavior.
-- **[Deployment](deployment.md)** — ARM64 container images (fat vs lean), Helm chart quick start, values reference, TLS/mTLS setup, and topology notes (file vs openraft vs paxos).
+- **[Deployment](deployment.md)** — container images (fat vs lean, multi-arch), Helm chart quick start, values reference, TLS/mTLS setup, and topology notes (file vs openraft vs paxos).
 - **[Testing and Examples](testing-and-examples.md)** — walkthroughs of the runnable example crates plus the workspace testing strategy.
 - **[Failpoint Testing](failpoint-testing.md)** — fault-injection points for crash-recovery, fence, and service-path tests; the feature-gating model and contributor guidance.
 - **[Yield-point Testing](yieldpoint-testing.md)** — async counterpart of failpoints, for tests that need to park production code in an async path without blocking a tokio worker.
