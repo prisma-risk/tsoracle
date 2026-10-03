@@ -10,7 +10,7 @@ Two image families are published to GHCR on every release.
 
 **Lean images** — `ghcr.io/prisma-risk/tsoracle-file:<version>`, `ghcr.io/prisma-risk/tsoracle-openraft:<version>`, `ghcr.io/prisma-risk/tsoracle-paxos:<version>` — each carries only one driver binary. Smaller footprint; useful when you know the driver ahead of time or want a tighter supply-chain attestation surface. Switch to a lean image by overriding `image.repository` in the Helm values (see the values table below).
 
-All images are multi-arch: `linux/amd64` and `linux/arm64`.
+Release images are published for `linux/arm64`. AMD64 release builds are paused.
 
 ## Quick start (Helm)
 
