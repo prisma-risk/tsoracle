@@ -24,7 +24,7 @@ FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee
 # tsoracle) carries its own description; defaults cover a bare `docker build`. This
 # description LABEL is the per-arch-config copy that `docker inspect` reads; the
 # release workflow ALSO re-emits the same value as an index-level annotation on the
-# multi-arch manifest, which is the layer GHCR's package page actually surfaces.
+# published image index, which is the layer GHCR's package page actually surfaces.
 ARG IMAGE_TITLE="tsoracle"
 ARG IMAGE_DESCRIPTION="A distributed timestamp and sequence oracle"
 LABEL org.opencontainers.image.title="${IMAGE_TITLE}" \
