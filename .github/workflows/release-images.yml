@@ -51,7 +51,7 @@ jobs:
       fail-fast: false
       matrix:
         variant: [file, openraft, umbrella]
-        arch: [arm64]
+        arch: [amd64, arm64]
         include:
           - variant: file
             features: file,metrics
@@ -62,6 +62,9 @@ jobs:
           - variant: umbrella
             features: metrics
             no_default_features: "false"
+          - arch: amd64
+            machine: x86_64
+            runner: ubuntu-24.04
           - arch: arm64
             machine: aarch64
             runner: ubuntu-24.04-arm
@@ -115,7 +118,7 @@ jobs:
           test -x "$llvm_strip"
           "$llvm_strip" dist/tsoracle
       - name: Chart render smoke
-        if: matrix.variant == 'umbrella' && matrix.arch == 'arm64'
+        if: matrix.variant == 'umbrella' && matrix.arch == 'amd64'
         run: |
           helm lint deploy/charts/tsoracle
           sh deploy/charts/tsoracle/tests/render.sh
@@ -147,7 +150,7 @@ jobs:
         # Every published image includes the `metrics` feature so the stock
         # binary emits and exports the documented Prometheus signals.
         variant: [file, openraft, umbrella]
-        arch: [arm64]
+        arch: [amd64, arm64]
         include:
           - variant: file
             image: tsoracle-file
@@ -158,6 +161,8 @@ jobs:
           - variant: umbrella
             image: tsoracle
             description: 'tsoracle with all drivers bundled (file, openraft & OmniPaxos) — distributed timestamp & sequence oracle'
+          - arch: amd64
+            runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
@@ -267,7 +272,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish version tags for the ARM64 image
+      - name: Create multi-arch manifest list
         env:
           V: ${{ needs.version.outputs.v }}
           IMAGE: ${{ matrix.image }}
@@ -287,11 +292,11 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             docker buildx imagetools create "${ANNOTATIONS[@]}" \
               -t "$IMG:$V" -t "$IMG:latest" \
-              "$IMG:$V-arm64"
+              "$IMG:$V-amd64" "$IMG:$V-arm64"
           else
             docker buildx imagetools create "${ANNOTATIONS[@]}" \
               -t "$IMG:$V" \
-              "$IMG:$V-arm64"
+              "$IMG:$V-amd64" "$IMG:$V-arm64"
           fi
 
   chart:
