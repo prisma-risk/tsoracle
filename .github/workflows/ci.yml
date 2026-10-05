@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  # Daily main health check; PRs retain their normal validation.
+  schedule:
+    - cron: '22 10 * * *'
   push:
     branches: [main]
   pull_request:
@@ -12,6 +15,73 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Keep an inexpensive main-push receipt for exact-release consumers.
+  # Only a green merged-PR run skips validation; missing evidence runs it.
+  ci-policy:
+    name: CI execution policy
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || 'prisma-risk-arm64-tiny' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      validate: ${{ steps.policy.outputs.validate }}
+    steps:
+      - id: policy
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            // A main-push receipt preserves release consumers without repeating green PR CI.
+            // Missing, pending, failed or unreadable evidence requests normal validation.
+            const ciExecutionPolicy = async function ciExecutionPolicy({ github, context, core }) {
+              let validate = true;
+              let evidence;
+              if (context.eventName === 'push' && context.ref === 'refs/heads/main') {
+                try {
+                  const prs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+                    ...context.repo, commit_sha: context.sha, per_page: 100,
+                  });
+                  const pr = prs.find(pr => pr.merged_at && pr.merge_commit_sha === context.sha &&
+                    pr.base.ref === 'main' && pr.base.repo.full_name === `${context.repo.owner}/${context.repo.repo}`);
+                  if (pr) {
+                    const { data: current } = await github.rest.actions.getWorkflowRun({
+                      ...context.repo, run_id: context.runId,
+                    });
+                    const { data } = await github.rest.actions.listWorkflowRuns({
+                      ...context.repo, workflow_id: current.workflow_id,
+                      head_sha: pr.head.sha, event: 'pull_request', per_page: 100,
+                    });
+                    // Use the latest matching run, not an older green run hidden by a
+                    // newer failed/pending rerun. Bind it to this PR and exact source SHA.
+                    const run = data.workflow_runs.find(run => run.event === 'pull_request' &&
+                      run.head_sha === pr.head.sha && run.head_branch === pr.head.ref &&
+                      (!run.pull_requests?.length || run.pull_requests.some(item => item.number === pr.number)));
+                    // GitHub clears pull_requests on many completed merged-PR runs. The
+                    // exact source SHA and branch remain bound to the merged PR above.
+                    if (run?.status === 'completed' && run.conclusion === 'success') {
+                      validate = false;
+                      evidence = { pr: pr.number, sha: pr.head.sha, url: run.html_url };
+                    }
+                  }
+                } catch (error) {
+                  core.warning(`PR validation evidence unavailable (${error.status || 'API error'}); running normal validation`);
+                }
+              }
+              core.setOutput('validate', String(validate));
+              if (evidence) {
+                core.info(`Reuse PR #${evidence.pr} validation at ${evidence.sha}: ${evidence.url}`);
+                await core.summary.addHeading('PR validation reused').addRaw(
+                  `PR #${evidence.pr} passed this workflow at ${evidence.sha}: ${evidence.url}. ` +
+                  'Repeated main-push validation is skipped; the daily main run tests the merged branch.\n',
+                ).write();
+              } else {
+                core.info('Run normal validation (PR, daily health check, manual run, or missing green merged-PR evidence)');
+              }
+            };
+
+            await ciExecutionPolicy({ github, context, core });
+
   # fmt + clippy run as their own job so lint failures surface without waiting
   # behind the full workspace build and test suite. clippy stops at analysis
   # (no final link), but `--all-targets --all-features` still compiles a large
@@ -19,6 +89,8 @@ jobs:
   # headroom. rust-cache uses default per-job keying, so this job keeps a cache
   # independent of build/test.
   lint:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - name: free disk space
@@ -53,6 +125,8 @@ jobs:
   # the test job, so the disk reclaim below runs first. rust-cache uses default
   # per-job keying, so this job keeps a cache independent of lint/test.
   build:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - name: free disk space
@@ -80,6 +154,8 @@ jobs:
         run: cargo build --workspace --all-features --locked
 
   test:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       # The workspace's debug+test binaries for the openraft + rocksdb crates
@@ -120,6 +196,8 @@ jobs:
   # and so a failure here clearly indicates a driver-level cross-platform bug
   # rather than an unrelated workspace dependency.
   cross-platform-driver-file:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     name: cross-platform / driver-file (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -143,6 +221,8 @@ jobs:
         run: cargo test -p tsoracle-driver-file --all-features --locked
 
   buf:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -165,6 +245,8 @@ jobs:
             --against ".git#branch=${BASE_REF},subdir=crates/tsoracle-proto/proto"
 
   deny:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -173,6 +255,8 @@ jobs:
           rust-version: "1.96"
 
   critical-path:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -180,6 +264,8 @@ jobs:
         run: CRITICAL_PATH_STRICT=1 ./scripts/check-critical-path.sh
 
   header-check:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -187,6 +273,8 @@ jobs:
         run: python3 scripts/check-ts-header.py
 
   fuzz-lockfile:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     name: fuzz lockfile
     runs-on: ubuntu-latest
     steps:
@@ -204,6 +292,8 @@ jobs:
           fi
 
   coverage:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       # Coverage links every test binary with `-C instrument-coverage` and full
@@ -247,6 +337,8 @@ jobs:
           format: lcov
 
   stress-smoke:
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') && (true) }}
+    needs: [ci-policy]
     name: stress smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
