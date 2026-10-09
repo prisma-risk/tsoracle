@@ -17,6 +17,9 @@ updates:
       interval: weekly
     ignore:
       - dependency-name: "openraft*"
+      # Patch releases can break the Paxos APIs. Keep the workspace's exact
+      # pin until a deliberate toolkit migration updates it (see PR #725).
+      - dependency-name: "omnipaxos"
     groups:
       fuzz:
         patterns:
