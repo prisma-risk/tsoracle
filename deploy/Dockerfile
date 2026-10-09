@@ -18,7 +18,7 @@ RUN cargo build --release -p tsoracle --bin tsoracle ${FEATURES:+--no-default-fe
 
 # This runtime stage must stay in sync with deploy/Dockerfile.release. The only intentional difference is where the tsoracle binary is copied from.
 # the release runners ship a newer glibc than bookworm provides, so release binaries use trixie-slim at runtime.
-FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS runtime
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS runtime
 # OCI image metadata. IMAGE_TITLE/IMAGE_DESCRIPTION are passed per-variant by the
 # release-images workflow so each driver image (tsoracle-file, tsoracle-openraft,
 # tsoracle) carries its own description; defaults cover a bare `docker build`. This
