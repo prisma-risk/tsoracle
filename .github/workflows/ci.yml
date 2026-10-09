@@ -1,6 +1,10 @@
 name: CI
 
 on:
+  workflow_dispatch:
+  # Full merged-source validation, independent of reusable PR evidence.
+  schedule:
+    - cron: '19 10 * * *'
   push:
     branches: [main]
   pull_request:
@@ -12,6 +16,53 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  ci-policy-tests:
+    name: CI execution policy regressions
+    needs: [ci-policy]
+    if: ${{ !cancelled() && !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6.1.0
+        with:
+          node-version: "24"
+      - run: node --test .github/scripts/ci-execution-policy.test.cjs .github/scripts/ci-execution-policy.workflow.test.cjs
+
+  ci-policy:
+    name: CI execution policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      validate: ${{ steps.policy.outputs.validate }}
+    steps:
+      - name: Check out trusted policy source
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: policy
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            // Only a main push loads repository policy; PRs always validate.
+            if (context.eventName !== 'push' || context.ref !== 'refs/heads/main') {
+              core.setOutput('validate', 'true');
+              core.info('Run normal validation (PR, daily health check, manual run, or non-main push)');
+              return;
+            }
+            const ciExecutionPolicy = require(process.env.GITHUB_WORKSPACE + '/.github/scripts/ci-execution-policy.cjs');
+            await ciExecutionPolicy({ github, context, core });
+
   # fmt + clippy run as their own job so lint failures surface without waiting
   # behind the full workspace build and test suite. clippy stops at analysis
   # (no final link), but `--all-targets --all-features` still compiles a large
@@ -19,6 +70,10 @@ jobs:
   # headroom. rust-cache uses default per-job keying, so this job keeps a cache
   # independent of build/test.
   lint:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - name: free disk space
@@ -53,6 +108,10 @@ jobs:
   # the test job, so the disk reclaim below runs first. rust-cache uses default
   # per-job keying, so this job keeps a cache independent of lint/test.
   build:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - name: free disk space
@@ -80,6 +139,10 @@ jobs:
         run: cargo build --workspace --all-features --locked
 
   test:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       # The workspace's debug+test binaries for the openraft + rocksdb crates
@@ -120,6 +183,10 @@ jobs:
   # and so a failure here clearly indicates a driver-level cross-platform bug
   # rather than an unrelated workspace dependency.
   cross-platform-driver-file:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     name: cross-platform / driver-file (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -143,6 +210,10 @@ jobs:
         run: cargo test -p tsoracle-driver-file --all-features --locked
 
   buf:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -165,6 +236,10 @@ jobs:
             --against ".git#branch=${BASE_REF},subdir=crates/tsoracle-proto/proto"
 
   deny:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -173,6 +248,10 @@ jobs:
           rust-version: "1.96"
 
   critical-path:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -180,6 +259,10 @@ jobs:
         run: CRITICAL_PATH_STRICT=1 ./scripts/check-critical-path.sh
 
   header-check:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -187,6 +270,10 @@ jobs:
         run: python3 scripts/check-ts-header.py
 
   fuzz-lockfile:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     name: fuzz lockfile
     runs-on: ubuntu-latest
     steps:
@@ -204,6 +291,10 @@ jobs:
           fi
 
   coverage:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     runs-on: ubuntu-latest
     steps:
       # Coverage links every test binary with `-C instrument-coverage` and full
@@ -247,6 +338,10 @@ jobs:
           format: lcov
 
   stress-smoke:
+    if: >-
+      !cancelled() &&
+      !(needs.ci-policy.result == 'success' && needs.ci-policy.outputs.validate == 'false')
+    needs: [ci-policy]
     name: stress smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
