@@ -11,6 +11,10 @@ If you don't need HA — local demo, embedded use, "downtime is acceptable" — 
 - `FileDriver::init_seeded(dir, seed)` — one-shot migration entry point for callers seeding from a prior sequence.
 - `FileDriverError` — the driver-specific error type. `AlreadyLocked` surfaces the concurrent-open guard; the rest covers I/O, codec, and integrity-check failures.
 
+## Stopped-state export
+
+`StoppedFileState::open(dir)` takes the existing native lock without initialization. `guard.receipt()` validates and exports reservation, complete retained leases and dense counters with a versioned SHA-256 inventory. Keep the guard alive through complete-directory copying and hash verification. Missing record files, unknown or temporary entries, corruption and lock contention refuse. Lazy directories without all three record files also refuse. The CLI exposes `tsoracle export file --state-dir <dir> --json`. See the [capture and recovery contract](https://github.com/prisma-risk/tsoracle/blob/main/docs/stopped-file-export.md).
+
 ## When to use this vs HA drivers
 
 This driver is the right choice when:

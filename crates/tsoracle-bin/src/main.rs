@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Some(Cmd::Init(args)) => run_init(args.state_dir, args.seed_physical_ms),
+        Some(Cmd::Export(cli::ExportCmd::File(args))) => run_export_file(args),
         Some(Cmd::Serve(serve)) => dispatch_serve(*serve).await,
         #[cfg(feature = "openraft")]
         Some(Cmd::Admin(cmd)) => dispatch_admin(cmd).await,
@@ -182,6 +183,31 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
             }
         }
     }
+}
+
+#[cfg(feature = "file")]
+fn run_export_file(args: cli::ExportFileArgs) -> Result<()> {
+    use std::io::Write;
+    let guard = tsoracle_driver_file::StoppedFileState::open(&args.state_dir)
+        .context("acquire stopped file state")?;
+    let receipt = guard.receipt().context("validate stopped file state")?;
+    let json = if args.json {
+        serde_json::to_vec(&receipt)
+    } else {
+        serde_json::to_vec_pretty(&receipt)
+    }
+    .context("serialize stopped file state")?;
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&json)?;
+    stdout.write_all(b"\n")?;
+    stdout.flush()?;
+    drop(guard);
+    Ok(())
+}
+
+#[cfg(not(feature = "file"))]
+fn run_export_file(_args: cli::ExportFileArgs) -> Result<()> {
+    Err(not_compiled_in("file"))
 }
 
 #[cfg(feature = "file")]

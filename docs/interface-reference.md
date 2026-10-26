@@ -311,6 +311,7 @@ tsoracle serve file     [SERVE-FILE-FLAGS]
 tsoracle serve openraft [SERVE-COMMON-FLAGS] [OPENRAFT-FLAGS]
 tsoracle serve paxos    [SERVE-COMMON-FLAGS] [PAXOS-FLAGS]
 tsoracle init           --seed-physical-ms <N> [--state-dir <PATH>]
+tsoracle export file    --state-dir <PATH> [--json]
 tsoracle admin <SUBCOMMAND> ...      # openraft feature only
 ```
 
@@ -387,6 +388,10 @@ Common flags (above), plus:
 | `--peer-tls-key` | path | — | PEM private key paired with `--peer-tls-cert`. |
 | `--peer-tls-ca` | path | — | PEM CA used to verify connecting peers. |
 | `--allow-insecure-peer` | bool | `false` | Opt out of the peer-listener secure-by-default guard. Allows routable bind without `--peer-tls-*`. Matches the helm chart's `tls.allowInsecurePeer`. Intended for single-host dev or service-mesh-terminated mTLS only. |
+
+### `tsoracle export file`
+
+Requires the `file` feature and an explicit existing state directory. Exports schema `tsoracle.stopped-file-state` version 1 with reservation, all retained leases, dense counters, units, producer version, formats and SHA-256 file digests. `--json` selects compact JSON; the default is indented JSON. The command holds native ownership through output flush, creates and truncates nothing, and refuses missing files, corruption, unexpected files and a held lock. Keep a library `StoppedFileState` guard through backup copying when exclusion must span capture. See [Stopped File Export](stopped-file-export.md) for schema, lazy-file restrictions, ownership and anti-reuse prerequisites.
 
 ### `tsoracle init`
 

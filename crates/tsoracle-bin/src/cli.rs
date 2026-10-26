@@ -44,10 +44,27 @@ pub enum Cmd {
     Serve(Box<ServeCmd>),
     /// Initialize a fresh file-driver state directory at a seeded high-water.
     Init(InitArgs),
+    /// Capture validated state while the file driver is stopped.
+    #[command(subcommand)]
+    Export(ExportCmd),
     /// Administer cluster membership over the admin gRPC port.
     #[cfg(feature = "openraft")]
     #[command(subcommand)]
     Admin(AdminCmd),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ExportCmd {
+    File(ExportFileArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct ExportFileArgs {
+    #[arg(long)]
+    pub state_dir: PathBuf,
+    /// Emit compact JSON. The default is indented JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[cfg(feature = "openraft")]
@@ -521,5 +538,30 @@ mod no_metrics_flag_without_feature_tests {
             panic!("expected file args");
         };
         assert!(args.common.no_metrics);
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::{Cli, Cmd, ExportCmd};
+    use clap::Parser;
+
+    #[test]
+    fn export_requires_explicit_state_directory_and_parses_json() {
+        assert!(Cli::try_parse_from(["tsoracle", "export", "file"]).is_err());
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "export",
+            "file",
+            "--state-dir",
+            "/existing/oracle",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Cmd::Export(ExportCmd::File(args))) = cli.cmd else {
+            panic!("expected file export");
+        };
+        assert_eq!(args.state_dir, std::path::PathBuf::from("/existing/oracle"));
+        assert!(args.json);
     }
 }

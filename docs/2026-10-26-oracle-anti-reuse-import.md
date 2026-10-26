@@ -1,0 +1,34 @@
+# Oracle anti-reuse import and fencing
+
+Date: 2026-10-26
+
+Status: Proposed
+
+## Context
+
+A stopped file-state receipt proves persisted reservations and retained grants at one captured cut. It cannot prove that an older backup bounds later grants. The file driver uses epoch zero. Changing an application namespace, choosing a later wall clock or waiting for lease expiry cannot reclaim issued timestamp ranges. Dense reservations require independent per-key protection. A destination import spans these domains and their durable publication, so a timestamp-only seed is insufficient.
+
+## Decision
+
+Require an explicit maintenance operation before restored or grown nodes admit mutations. The operation must bind authenticated source receipts, the complete allocation history they bound, source and destination deployment identities, the unchanged namespace and permanent source/holder fencing. It must fail closed when any of these proofs is missing. This record specifies a destination import contract. The current exporter does not implement that operation.
+
+1. Stop and fence the old deployment, every oracle replica and all surviving lease and dense-sequence holders. Revoke their ability to restart or reach mutation sinks. Locking the source directory excludes only owners of that directory. A second copied directory remains an independent owner. If physical destruction or isolation prevents a final source export, require independent trusted reservation evidence covering every allocation since the backup. An old receipt by itself is insufficient. Use hard holder fencing for this first procedure; waiting against a consumer wall clock cannot prove lease termination across clock rollback.
+2. Verify the complete recovery set and each trusted receipt's schema, producer compatibility, digests, namespace and deployment binding. Compute `T = max(all trusted committed reservation high-waters, all trusted lease upper bounds, destination's existing reservation)`. For every dense key compute `D[key] = max(all trusted next-unallocated values, destination's existing value)`. Include post-backup receipts or an independently certified complete upper bound. Absence of evidence for a key or period is unknown. Do not replace it with zero. Preserve every key and reject a cardinality cap that cannot hold the union.
+3. Before exposing any listener, publish a destination state whose committed timestamp reservation is at least T and whose dense counters are at least D. Apply checked unsigned arithmetic. T at the physical limit or an exhausted dense key must refuse further allocation in that domain. Existing records must never be lowered. For a cluster destination, this state must enter through its supported consensus bootstrap/import with durable quorum acknowledgement and compatible dense and lease storage formats. File record bytes cannot be installed as a cluster snapshot by reinterpretation.
+4. Invalidate old grant reuse through the completed source and holder fence. A fresh destination may begin with an empty lease table only after that fence. An exact restored table may retain the captured leases. New lease IDs must be greater than T; old IDs must never become fresh grants. A consumer cannot fabricate a file-driver epoch or infer holder fencing from a changed epoch. If a future migration permits surviving holders, it needs a separate producer-supported lease and clock contract before use.
+5. Publish all imported files and a durable import-completion record under destination ownership, using an atomic installation of a prepared complete state set. Sync every file and required parent directory before completion. Keep mutation readiness closed throughout preparation and publication. Interrupted or partially installed imports must refuse startup until the complete import is verified or resumed under ownership. Repeating an import must be idempotent and monotone. Unknown files and incomplete imports continue to refuse ordinary stopped export; a later supported format revision must define the import-completion record and its inventory explicitly.
+6. Start the destination server with ingress still closed. Existing server fencing computes `serving_floor = max(prior_high_water + 1, now)` and persists its new reservation before serving. Verify that the first timestamp and all later grants have physical milliseconds strictly above T, including the full logical range at T. A new lease must have upper bound and ID above T. For each dense key, verify the first new block starts at or above D[key] and subsequent blocks cannot overlap the reserved prefix. Dense comparison is inclusive at the next-unallocated value. Probes consume real allocations and their results belong in the new receipt. Require restart with a backward clock, lease renewal and supersession, overflow refusal and competing-owner controls before reopening ingress.
+
+An exact full-directory restore using current file-driver startup can prove timestamp allocation above its captured reservation because startup applies the inclusive high-water fence. Its dense next-unallocated counters also survive restart. This proof applies only if that captured state bounds every allocation ever issued in the protected identity and all old holders are fenced. Restoring an older set after later grants requires the import operation above and stays unavailable until it is implemented and qualified. Growth to a cluster has the same import prerequisite.
+
+## Alternatives
+
+A floor-only `init --seed-physical-ms` omits dense reservations and holder fencing. Per-file writes under a lock lack an explicit durable completion boundary for a multi-file import. Clock-based waiting depends on clock and holder assumptions the consumer cannot establish. A changed namespace or invented epoch does not change the already issued values. These alternatives do not meet the anti-reuse proof.
+
+## Consequences
+
+The stopped export can support verified backup capture immediately after validation, while rollback and growth retain a separate destination gate. Destination import needs owner review, crash-consistent publication and end-to-end allocation tests across both drivers. No current CLI flag is represented as implementing this proposal. An operator with incomplete bounds must keep mutation readiness closed.
+
+## Required validation
+
+Qualify exact-copy restart, allocations made after backup followed by attempted rollback, hard holder fencing, union of multiple receipts, lease supersession and renewal, independent dense keys, destination counters ahead of source, physical and dense exhaustion, corrupt/missing receipt data, unknown schema, interrupted import at each sync/publication boundary, repeat import and cluster failover after import. Prove post-start allocations against trusted floors with a backward wall clock. No successful export alone discharges these gates.

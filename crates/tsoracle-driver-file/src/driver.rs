@@ -209,7 +209,10 @@ impl FileDriver {
 /// not necessarily map to `WouldBlock`. `fs2::lock_contended_error()`
 /// returns the exact `io::Error` shape the platform uses, so we match on
 /// `raw_os_error()` for a portable check.
-fn acquire_exclusive_lock(lock_file: &fs::File, lock_path: &Path) -> Result<(), FileDriverError> {
+pub(crate) fn acquire_exclusive_lock(
+    lock_file: &fs::File,
+    lock_path: &Path,
+) -> Result<(), FileDriverError> {
     use fs2::FileExt;
     match lock_file.try_lock_exclusive() {
         Ok(()) => Ok(()),
