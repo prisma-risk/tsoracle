@@ -39,6 +39,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
+    /// Print the file server compatibility manifest as JSON.
+    FamilyCompat,
     /// Run the timestamp oracle server with a selected driver.
     #[command(subcommand)]
     Serve(Box<ServeCmd>),

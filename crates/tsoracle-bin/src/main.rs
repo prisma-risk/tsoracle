@@ -25,6 +25,8 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod cli;
+#[cfg(feature = "file")]
+mod family_compat;
 
 #[cfg(feature = "openraft")]
 use std::collections::BTreeMap;
@@ -73,6 +75,7 @@ fn not_compiled_in(driver: &str) -> anyhow::Error {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        Some(Cmd::FamilyCompat) => run_family_compat(),
         Some(Cmd::Init(args)) => run_init(args.state_dir, args.seed_physical_ms),
         Some(Cmd::Export(cli::ExportCmd::File(args))) => run_export_file(args),
         Some(Cmd::Serve(serve)) => dispatch_serve(*serve).await,
@@ -97,6 +100,23 @@ async fn main() -> Result<()> {
                 );
             }
         }
+    }
+}
+
+fn run_family_compat() -> Result<()> {
+    #[cfg(feature = "file")]
+    {
+        use std::io::Write;
+
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        serde_json::to_writer_pretty(&mut output, &family_compat::manifest())?;
+        writeln!(output)?;
+        Ok(())
+    }
+    #[cfg(not(feature = "file"))]
+    {
+        Err(not_compiled_in("file"))
     }
 }
 

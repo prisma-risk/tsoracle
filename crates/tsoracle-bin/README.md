@@ -36,6 +36,7 @@ let batch = client.get_ts_batch(64).await?;  // amortize RPC cost across many ID
 - `tsoracle serve file` *(default)* — single-node, fsync-durable [file driver](https://crates.io/crates/tsoracle-driver-file). Window state is fsync'd before any timestamp in that window is issued, so a restart never rewinds. `--state-dir` defaults to `./tsoracle-data`.
 - `tsoracle serve openraft` — highly available via [openraft](https://crates.io/crates/tsoracle-driver-openraft) (3+ node cluster). Takes `--id`, `--raft-addr`, `--raft-dir`, and `--bootstrap`/`--members` on first boot.
 - `tsoracle serve paxos` — highly available via [OmniPaxos](https://crates.io/crates/tsoracle-driver-paxos) (3+ node cluster). Takes `--node-id`, `--peer-listen`, `--peers`, `--tso-peers`, and `--data-dir`.
+- `tsoracle family-compat` prints the file server's format-3 compatibility manifest without reading state or starting a listener. Requires the `file` feature.
 - `tsoracle init --seed-physical-ms <ms>` — initialize a fresh file-driver state directory seeded at a given high-water, without serving.
 
 Every `serve` subcommand shares the common knobs `--listen` (default `127.0.0.1:50551`), `--window-ahead`, `--failover-advance`, `--log`, and TLS/mTLS for the client API (`--tls-cert`, `--tls-key`, `--tls-client-ca`). The HA drivers add their own peer-transport mTLS flags (`--peer-tls-*`). Run `tsoracle serve <driver> --help` for the full list.
@@ -57,3 +58,9 @@ A driver that isn't compiled in produces a friendly "not included; rebuild with 
 - [`docs/operations.md`](https://github.com/prisma-risk/tsoracle/blob/main/docs/operations.md) — deployment, TLS, and metrics.
 - [`docs/consensus-integration.md`](https://github.com/prisma-risk/tsoracle/blob/main/docs/consensus-integration.md) — choosing between the file, openraft, and paxos drivers.
 - The repository [README](https://github.com/prisma-risk/tsoracle) — architecture overview and the full crate map.
+
+## File-server compatibility evidence
+
+`tsoracle family-compat` declares service `tsoracle`, the binary crate version, wire protocol `tsoracle.v1.TsoService` version 1 and receipt schema `tsoracle.stopped-file-state` version 1. The manifest has no graph commands or graph-family dependency. Builds without the `file` feature refuse this command. Extra arguments are rejected.
+
+The file-image release workflow extracts this JSON from the published digest-pinned image for each Linux architecture, then signs and verifies a family-compatibility attestation over the complete manifest, `default` variant and architecture. Here `default` is the attestation vocabulary for the `tsoracle-file` image. Release assets include the JSON, its SHA-256 checksum, the attestation bundle, the signing public key and the image digest. A checksum alone does not authenticate the image binding. See [release verification](https://github.com/prisma-risk/tsoracle/blob/main/docs/release-signatures.md#file-server-compatibility-attestations).

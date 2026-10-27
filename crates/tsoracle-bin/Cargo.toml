@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [features]
 default    = ["file", "openraft", "paxos"]
-file       = ["tsoracle-standalone/file", "dep:tsoracle-driver-file"]
+file       = ["tsoracle-standalone/file", "dep:tsoracle-driver-file", "dep:cg-family-compat"]
 openraft   = ["tsoracle-standalone/openraft"]
 paxos      = ["tsoracle-standalone/paxos"]
 metrics    = [
@@ -27,6 +27,7 @@ reflection = ["tsoracle-server/reflection"]
 bt         = ["tsoracle-server/bt"]
 
 [dependencies]
+cg-family-compat      = { version = "=11.0.0", default-features = false, optional = true }
 anyhow                = "1"
 humantime             = "2"
 clap                  = { workspace = true }
