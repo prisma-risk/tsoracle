@@ -3,7 +3,7 @@ on:
   push:
     tags: ['tsoracle-v*']     # the BINARY crate's release-plz tag ONLY (not per-crate library tags)
   pull_request:
-    paths: ['deploy/**', 'crates/**', 'Cargo.*', 'scripts/test_family_compat_release.py', '.github/workflows/release-images.yml']
+    paths: ['deploy/**', 'crates/**', 'Cargo.*', '.github/workflows/release-images.yml']
   workflow_dispatch:
     inputs:
       tag_suffix:
@@ -75,8 +75,6 @@ jobs:
           EXPECTED_MACHINE: ${{ matrix.machine }}
         run: test "$(uname -m)" = "$EXPECTED_MACHINE"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - name: Check family compatibility release wiring
-        run: python3 -B scripts/test_family_compat_release.py
       - name: Install native build dependencies
         run: |
           sudo apt-get update
@@ -145,7 +143,6 @@ jobs:
     permissions:
       contents: write
       packages: write
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -181,11 +178,6 @@ jobs:
           name: tsoracle-symbols-${{ matrix.variant }}-${{ matrix.arch }}
           path: symbols
       - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003  # v4.4.0
-      - name: Require file-server signing configuration
-        if: matrix.variant == 'file'
-        env:
-          RELEASE_ROLE: ${{ vars.TSORACLE_RELEASE_ROLE_ARN }}
-        run: test -n "$RELEASE_ROLE"
       - name: Build per-arch image
         env:
           V: ${{ needs.version.outputs.v }}
@@ -215,24 +207,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Read file-server manifest version
-        if: matrix.variant == 'file'
-        id: family-version
-        env:
-          IMAGE_VERSION: ${{ needs.version.outputs.v }}
-        run: |
-          python3 - <<'PYTHON'
-          import os
-          import tomllib
-          from pathlib import Path
-          version = tomllib.loads(Path("crates/tsoracle-bin/Cargo.toml").read_text())["package"]["version"]
-          if os.environ["GITHUB_REF_TYPE"] == "tag" and version != os.environ["IMAGE_VERSION"]:
-              raise SystemExit("file-server version differs from the release tag")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"version={version}\n")
-          PYTHON
       - name: Push per-arch image and record its digest
-        id: image
         env:
           V: ${{ needs.version.outputs.v }}
           IMAGE: ${{ matrix.image }}
@@ -245,98 +220,8 @@ jobs:
             echo "Invalid image digest: $digest" >&2
             exit 1
           fi
-          echo "subject=ghcr.io/prisma-risk/$IMAGE@$digest" >> "$GITHUB_OUTPUT"
           mkdir -p release-metadata
           printf '%s@%s\n' "ghcr.io/prisma-risk/$IMAGE" "$digest" > "release-metadata/image-digest-${{ matrix.variant }}-${{ matrix.arch }}.txt"
-      - name: Pull immutable file-server image
-        if: matrix.variant == 'file'
-        env:
-          SUBJECT: ${{ steps.image.outputs.subject }}
-        run: docker pull "$SUBJECT"
-      - name: Extract file-server family compatibility
-        if: matrix.variant == 'file'
-        id: family-compat
-        uses: prisma-risk/rust-workflows/.github/actions/attest-family-compat@48fcd0dd391c421e0b1f6937b3b873ce86075162
-        with:
-          mode: extract
-          subject: ${{ steps.image.outputs.subject }}
-          binary: tsoracle
-          service: tsoracle
-          version: ${{ steps.family-version.outputs.version }}
-          variant: default
-          architecture: ${{ matrix.arch }}
-          asset-suffix: -${{ matrix.arch }}
-          output-dir: release-metadata
-      - name: Configure file-server release signing credentials
-        if: matrix.variant == 'file'
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.TSORACLE_RELEASE_ROLE_ARN }}
-          aws-region: us-east-1
-      - name: Attest file-server family compatibility
-        if: matrix.variant == 'file'
-        id: family-attestation
-        uses: prisma-risk/rust-workflows/.github/actions/attest-family-compat@48fcd0dd391c421e0b1f6937b3b873ce86075162
-        with:
-          mode: attest
-          subject: ${{ steps.image.outputs.subject }}
-          manifest-path: ${{ steps.family-compat.outputs.manifest-path }}
-          variant: default
-          architecture: ${{ matrix.arch }}
-          key: awskms:///alias/calcgraph-release-signing
-          output-dir: release-metadata
-      - name: Export file-server release public key
-        if: matrix.variant == 'file'
-        uses: prisma-risk/rust-workflows/.github/actions/sign-release-artifact@48fcd0dd391c421e0b1f6937b3b873ce86075162
-        with:
-          mode: public-key
-          key: awskms:///alias/calcgraph-release-signing
-          output-dir: release-metadata
-      - name: Verify file-server family compatibility
-        if: matrix.variant == 'file'
-        uses: prisma-risk/rust-workflows/.github/actions/attest-family-compat@48fcd0dd391c421e0b1f6937b3b873ce86075162
-        with:
-          mode: verify
-          subject: ${{ steps.image.outputs.subject }}
-          manifest-path: ${{ steps.family-compat.outputs.manifest-path }}
-          variant: default
-          architecture: ${{ matrix.arch }}
-          public-key-path: release-metadata/cosign.pub
-      - name: Name file-server family attestation
-        if: matrix.variant == 'file'
-        env:
-          BUNDLE: ${{ steps.family-attestation.outputs.artifact-path }}
-        run: mv "$BUNDLE" "release-metadata/tsoracle-file-${{ matrix.arch }}.family-compat.bundle.json"
-      - name: Upload file-server family evidence
-        if: matrix.variant == 'file'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: tsoracle-file-family-compat-${{ matrix.arch }}
-          path: release-metadata/
-          if-no-files-found: error
-      - name: Attach file-server family evidence to the GitHub release
-        if: matrix.variant == 'file' && github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 30); do
-            if gh release view "$TAG" >/dev/null 2>&1; then break; fi
-            if [ "$attempt" = 30 ]; then
-              echo "GitHub release $TAG was not created" >&2
-              exit 1
-            fi
-            sleep 2
-          done
-          gh release upload "$TAG" \
-            "release-metadata/family-compat-${{ matrix.arch }}.json" \
-            "release-metadata/family-compat-${{ matrix.arch }}.json.sha256" \
-            "release-metadata/tsoracle-file-${{ matrix.arch }}.family-compat.bundle.json" \
-            --clobber
-          if [ "${{ matrix.arch }}" = arm64 ]; then
-            gh release upload "$TAG" release-metadata/cosign.pub --clobber
-          fi
       - name: Attach image digest and symbols to the GitHub release
         if: github.ref_type == 'tag'
         env:

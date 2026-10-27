@@ -15,7 +15,8 @@ path = "src/main.rs"
 
 [features]
 default    = ["file", "openraft", "paxos"]
-file       = ["tsoracle-standalone/file", "dep:tsoracle-driver-file", "dep:cg-family-compat"]
+file       = ["tsoracle-standalone/file", "dep:tsoracle-driver-file"]
+single-node = ["tsoracle-driver-file?/single-node"]
 openraft   = ["tsoracle-standalone/openraft"]
 paxos      = ["tsoracle-standalone/paxos"]
 metrics    = [
@@ -27,7 +28,6 @@ reflection = ["tsoracle-server/reflection"]
 bt         = ["tsoracle-server/bt"]
 
 [dependencies]
-cg-family-compat      = { version = "=11.0.0", default-features = false, optional = true }
 anyhow                = "1"
 humantime             = "2"
 clap                  = { workspace = true }
@@ -38,7 +38,7 @@ tokio                 = { workspace = true, features = ["signal"] }
 tracing               = { workspace = true }
 tracing-subscriber    = { workspace = true }
 tonic                 = { workspace = true, features = ["tls-aws-lc"] }
-tsoracle-driver-file  = { path = "../tsoracle-driver-file", version = "2.2.3", optional = true }
+tsoracle-driver-file  = { path = "../tsoracle-driver-file", version = "2.3.0", optional = true }
 tsoracle-core         = { path = "../tsoracle-core", version = "2.3.1" }
 tsoracle-server       = { path = "../tsoracle-server", version = "3.3.1" }
 tsoracle-standalone   = { path = "../tsoracle-standalone", version = "1.5.1", default-features = false }

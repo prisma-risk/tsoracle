@@ -43,6 +43,11 @@ use crate::{dense_record, lease_record, record};
 /// Immutable once written (Plan 1 has no reconfiguration path).
 pub const DEFAULT_DENSE_CARDINALITY_CAP: u64 = 10_000;
 
+pub(crate) const LOCK_FILE: &str = "LOCK";
+pub(crate) const STATE_FILE: &str = "state";
+pub(crate) const DENSE_FILE: &str = "dense";
+pub(crate) const LEASES_FILE: &str = "leases";
+
 #[derive(Debug)]
 struct DenseState {
     map: std::collections::BTreeMap<String, u64>,
@@ -57,6 +62,12 @@ pub enum FileDriverError {
     Decode(#[from] record::RecordError),
     #[error("physical_ms {0} exceeds 46-bit maximum")]
     PhysicalMsOutOfRange(u64),
+    #[error("invalid stored state in {path}: {source}")]
+    InvalidState {
+        path: PathBuf,
+        #[source]
+        source: crate::StoredStateError,
+    },
     #[error("state directory {path} is already locked by another FileDriver: {source}")]
     AlreadyLocked {
         path: PathBuf,
@@ -116,7 +127,7 @@ impl FileDriver {
         // concurrent writer in another process. The sentinel is a stable
         // inode — `write_record` replaces `state` via atomic rename, so a
         // lock held on `state` itself would not cover the post-rename file.
-        let lock_path = dir.join("LOCK");
+        let lock_path = dir.join(LOCK_FILE);
         let lock_file = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -125,7 +136,7 @@ impl FileDriver {
             .open(&lock_path)?;
         acquire_exclusive_lock(&lock_file, &lock_path)?;
 
-        let state_path = dir.join("state");
+        let state_path = dir.join(STATE_FILE);
         let current = if state_path.exists() {
             let bytes = fs::read(&state_path)?;
             let high_water = record::decode(&bytes)?;
@@ -136,7 +147,7 @@ impl FileDriver {
         } else {
             0
         };
-        let dense_path = dir.join("dense");
+        let dense_path = dir.join(DENSE_FILE);
         let dense_state = if dense_path.exists() {
             let bytes = fs::read(&dense_path)?;
             let (map, cap) = dense_record::decode(&bytes)
@@ -148,7 +159,7 @@ impl FileDriver {
                 cap: DEFAULT_DENSE_CARDINALITY_CAP,
             }
         };
-        let leases_path = dir.join("leases");
+        let leases_path = dir.join(LEASES_FILE);
         let leases = if leases_path.exists() {
             let bytes = fs::read(&leases_path)?;
             lease_record::decode(&bytes)
@@ -156,6 +167,14 @@ impl FileDriver {
         } else {
             Vec::new()
         };
+
+        #[cfg(feature = "single-node")]
+        crate::validation::validate(current, &dense_state.map, dense_state.cap, &leases).map_err(
+            |source| FileDriverError::InvalidState {
+                path: dir.clone(),
+                source,
+            },
+        )?;
 
         let (tx, rx) = watch::channel(LeaderState::Leader { epoch: Epoch::ZERO });
         Ok(Arc::new(FileDriver {
@@ -186,7 +205,19 @@ impl FileDriver {
         }
         let dir = dir.as_ref();
         fs::create_dir_all(dir)?;
-        let state_path = dir.join("state");
+        #[cfg(feature = "single-node")]
+        let _lock = {
+            let path = dir.join(LOCK_FILE);
+            let lock = fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&path)?;
+            acquire_exclusive_lock(&lock, &path)?;
+            lock
+        };
+        let state_path = dir.join(STATE_FILE);
         if state_path.exists() {
             return Err(FileDriverError::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -237,8 +268,8 @@ fn write_record(dir: &Path, high_water: u64) -> Result<(), FileDriverError> {
         }
     );
 
-    let tmp = dir.join("state.tmp");
-    let final_path = dir.join("state");
+    let tmp = dir.join(format!("{STATE_FILE}.tmp"));
+    let final_path = dir.join(STATE_FILE);
     let bytes = record::encode(high_water);
 
     let mut file = fs::OpenOptions::new()
@@ -309,14 +340,14 @@ struct FramedFileWrite {
 }
 
 const DENSE_FILE_WRITE: FramedFileWrite = FramedFileWrite {
-    name: "dense",
+    name: DENSE_FILE,
     before_write: "file_driver::dense::before_write",
     after_tmp_fsync_before_rename: "file_driver::dense::after_tmp_fsync_before_rename",
     after_rename_before_dir_fsync: "file_driver::dense::after_rename_before_dir_fsync",
 };
 
 const LEASES_FILE_WRITE: FramedFileWrite = FramedFileWrite {
-    name: "leases",
+    name: LEASES_FILE,
     before_write: "file_driver::leases::before_write",
     after_tmp_fsync_before_rename: "file_driver::leases::after_tmp_fsync_before_rename",
     after_rename_before_dir_fsync: "file_driver::leases::after_rename_before_dir_fsync",
@@ -788,6 +819,7 @@ mod lease_tests {
         let dir = tempdir().unwrap();
         let driver = FileDriver::open_or_init(dir.path()).unwrap();
         let records = vec![rec(1), rec(2)];
+        driver.persist_high_water(200, Epoch(1)).await.unwrap();
         driver.persist_leases(&records, Epoch(1)).await.unwrap();
         assert_eq!(driver.load_leases().await.unwrap(), records);
     }
@@ -798,6 +830,7 @@ mod lease_tests {
         let records = vec![rec(1), rec(2)];
         {
             let driver = FileDriver::open_or_init(dir.path()).unwrap();
+            driver.persist_high_water(200, Epoch(1)).await.unwrap();
             driver.persist_leases(&records, Epoch(1)).await.unwrap();
         }
         let reopened = FileDriver::open_or_init(dir.path()).unwrap();
@@ -919,5 +952,110 @@ mod tests {
             .expect("stream emits initial state within the timeout")
             .expect("stream is not closed");
         assert_eq!(first, LeaderState::Leader { epoch: Epoch::ZERO });
+    }
+}
+
+#[cfg(test)]
+mod stored_state_validation_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn invalid_fixture(dir: &Path, case: u8) {
+        fs::write(dir.join(STATE_FILE), record::encode(500)).unwrap();
+        let mut dense = BTreeMap::new();
+        let mut cap = DEFAULT_DENSE_CARDINALITY_CAP;
+        let mut lease = LeaseRecord {
+            lease_id: 100,
+            holder: vec![1],
+            holder_epoch: 1,
+            ttl_ms: 5,
+            ts_upper_bound: 200,
+            expires_at_ms: 1000,
+            superseded: false,
+        };
+        match case {
+            0 => {
+                dense.insert("a".to_string(), 1);
+                cap = 0;
+            }
+            1 => {
+                dense.insert(String::new(), 1);
+            }
+            2 => lease.lease_id = 201,
+            3 => lease.ts_upper_bound = 501,
+            4 => lease.holder.clear(),
+            5 => lease.holder = vec![1; tsoracle_core::MAX_LEASE_HOLDER_LEN + 1],
+            _ => lease.ttl_ms = 0,
+        }
+        fs::write(dir.join(DENSE_FILE), dense_record::encode(&dense, cap)).unwrap();
+        fs::write(dir.join(LEASES_FILE), lease_record::encode(&[lease])).unwrap();
+    }
+
+    #[cfg(feature = "single-node")]
+    #[test]
+    fn startup_and_export_reject_the_same_invalid_records() {
+        for case in 0..7 {
+            let dir = tempfile::tempdir().unwrap();
+            invalid_fixture(dir.path(), case);
+            let driver_error = FileDriver::open_or_init(dir.path()).unwrap_err();
+            let FileDriverError::InvalidState {
+                source: driver_source,
+                ..
+            } = driver_error
+            else {
+                panic!("expected typed stored-state validation");
+            };
+            let export_error = crate::StoppedFileState::open(dir.path())
+                .unwrap()
+                .receipt()
+                .unwrap_err();
+            let crate::ExportError::Validation {
+                source: export_source,
+                ..
+            } = export_error
+            else {
+                panic!("expected typed export validation");
+            };
+            assert_eq!(export_source, driver_source, "case {case}");
+        }
+    }
+
+    #[cfg(not(feature = "single-node"))]
+    #[test]
+    fn default_startup_preserves_main_semantic_record_acceptance() {
+        for case in 0..7 {
+            let dir = tempfile::tempdir().unwrap();
+            invalid_fixture(dir.path(), case);
+            assert!(FileDriver::open_or_init(dir.path()).is_ok(), "case {case}");
+        }
+    }
+
+    #[cfg(not(feature = "single-node"))]
+    #[test]
+    fn default_seed_preserves_main_without_creating_a_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        FileDriver::init_seeded(dir.path(), 500).unwrap();
+        assert!(dir.path().join(STATE_FILE).exists());
+        assert!(!dir.path().join(LOCK_FILE).exists());
+    }
+
+    #[cfg(not(feature = "single-node"))]
+    #[test]
+    fn default_seed_preserves_main_acceptance_with_a_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let _owner = FileDriver::open_or_init(dir.path()).unwrap();
+        FileDriver::init_seeded(dir.path(), 500).unwrap();
+    }
+
+    #[cfg(feature = "single-node")]
+    #[test]
+    fn seeded_state_refuses_a_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let _owner = FileDriver::open_or_init(dir.path()).unwrap();
+        assert!(matches!(
+            FileDriver::init_seeded(dir.path(), 500),
+            Err(FileDriverError::AlreadyLocked { .. })
+        ));
+        assert!(!dir.path().join(STATE_FILE).exists());
     }
 }

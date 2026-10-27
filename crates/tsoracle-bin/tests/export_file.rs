@@ -21,33 +21,25 @@
 //  limitations under the License.
 //
 
-#![cfg(feature = "file")]
+#![cfg(all(feature = "file", feature = "single-node"))]
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use tsoracle_consensus::ConsensusDriver;
-use tsoracle_core::{Epoch, SeqKey};
+use tsoracle_core::Epoch;
 use tsoracle_driver_file::FileDriver;
 
-fn snapshot(dir: &Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
-    fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            (entry.file_name(), fs::read(entry.path()).unwrap())
-        })
-        .collect()
-}
+mod support;
+use support::{populate, snapshot};
 
 fn command(dir: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tsoracle"));
     command
         .args(["export", "file", "--state-dir"])
         .arg(dir)
-        .arg("--json");
+        .arg("--compact");
     command
 }
 
@@ -55,12 +47,7 @@ fn command(dir: &Path) -> Command {
 async fn exports_json_without_mutating_state_and_refuses_native_owner() {
     let dir = tempfile::tempdir().unwrap();
     let driver = FileDriver::open_or_init(dir.path()).unwrap();
-    driver.persist_high_water(500, Epoch::ZERO).await.unwrap();
-    driver
-        .advance_dense(&SeqKey::try_new("orders").unwrap(), 7, Epoch::ZERO)
-        .await
-        .unwrap();
-    driver.persist_leases(&[], Epoch::ZERO).await.unwrap();
+    populate(driver.as_ref()).await;
     let before = snapshot(dir.path());
     let locked = command(dir.path()).output().unwrap();
     assert!(!locked.status.success());
@@ -111,17 +98,14 @@ async fn incomplete_and_corrupt_state_produce_no_receipt_or_mutation() {
     let driver = FileDriver::open_or_init(dir.path()).unwrap();
     driver.persist_high_water(500, Epoch::ZERO).await.unwrap();
     drop(driver);
+    fs::remove_file(dir.path().join("state")).unwrap();
     let before = snapshot(dir.path());
     let output = command(dir.path()).output().unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert_eq!(snapshot(dir.path()), before);
     let driver = FileDriver::open_or_init(dir.path()).unwrap();
-    driver
-        .advance_dense(&SeqKey::try_new("orders").unwrap(), 7, Epoch::ZERO)
-        .await
-        .unwrap();
-    driver.persist_leases(&[], Epoch::ZERO).await.unwrap();
+    populate(driver.as_ref()).await;
     drop(driver);
     fs::write(dir.path().join("leases"), b"corrupt").unwrap();
     let before = snapshot(dir.path());
@@ -129,4 +113,61 @@ async fn incomplete_and_corrupt_state_produce_no_receipt_or_mutation() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert_eq!(snapshot(dir.path()), before);
+}
+
+#[tokio::test]
+async fn timestamp_only_and_seeded_exports_record_absent_files() {
+    for seeded in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        if seeded {
+            FileDriver::init_seeded(dir.path(), 500).unwrap();
+        } else {
+            let driver = FileDriver::open_or_init(dir.path()).unwrap();
+            driver.persist_high_water(500, Epoch::ZERO).await.unwrap();
+        }
+        let before = snapshot(dir.path());
+        let output = command(dir.path()).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            receipt["dense_next_unallocated"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(receipt["leases"].as_array().unwrap().is_empty());
+        for entry in receipt["files"].as_array().unwrap() {
+            if entry["path"] == "dense" || entry["path"] == "leases" {
+                assert_eq!(entry["present"], false);
+                assert!(entry["sha256"].is_null());
+                assert!(entry["size_bytes"].is_null());
+            }
+        }
+        assert_eq!(snapshot(dir.path()), before);
+    }
+}
+
+#[test]
+fn export_help_explains_json_and_compact_output() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tsoracle"))
+        .args(["export", "file", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--compact"));
+    assert!(help.contains("indented JSON"));
+    let output = Command::new(env!("CARGO_BIN_EXE_tsoracle"))
+        .args(["export", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("stopped file driver's state as JSON")
+    );
 }

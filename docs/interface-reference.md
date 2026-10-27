@@ -311,8 +311,7 @@ tsoracle serve file     [SERVE-FILE-FLAGS]
 tsoracle serve openraft [SERVE-COMMON-FLAGS] [OPENRAFT-FLAGS]
 tsoracle serve paxos    [SERVE-COMMON-FLAGS] [PAXOS-FLAGS]
 tsoracle init           --seed-physical-ms <N> [--state-dir <PATH>]
-tsoracle export file    --state-dir <PATH> [--json]
-tsoracle family-compat
+tsoracle export file    --state-dir <PATH> [--compact]  # single-node feature
 tsoracle admin <SUBCOMMAND> ...      # openraft feature only
 ```
 
@@ -392,15 +391,11 @@ Common flags (above), plus:
 
 ### `tsoracle export file`
 
-Requires the `file` feature and an explicit existing state directory. Exports schema `tsoracle.stopped-file-state` version 1 with reservation, all retained leases, dense counters, units, producer version, formats and SHA-256 file digests. `--json` selects compact JSON; the default is indented JSON. The command holds native ownership through output flush, creates and truncates nothing, and refuses missing files, corruption, unexpected files and a held lock. Keep a library `StoppedFileState` guard through backup copying when exclusion must span capture. See [Stopped File Export](stopped-file-export.md) for schema, lazy-file restrictions, ownership and anti-reuse prerequisites.
-
-### `tsoracle family-compat`
-
-Requires the `file` feature. Prints one format-3 JSON manifest with service `tsoracle`, the binary package version, `tsoracle.v1.TsoService` wire version 1 and `tsoracle.stopped-file-state` receipt version 1. No configuration, state directory or running server is required. Extra arguments refuse. No graph commands are declared. Release consumers must verify the digest-bound [compatibility attestation](release-signatures.md#file-server-compatibility-attestations) before using these declarations as admission evidence.
+Requires `single-node`, `file` and an explicit existing state directory. The command is absent from default builds. Exports schema `tsoracle.stopped-file-state` version 1 with reservation, all retained leases, dense counters, units, producer version, formats and SHA-256 file digests. `--compact` selects compact JSON (`--json` is a hidden alias); the default is indented JSON. The command holds native ownership through output flush, creates and truncates nothing, and refuses missing required files, corruption, unexpected files and a held lock. Absent lazy dense and lease files are recorded explicitly and decoded as empty sets. Keep a library `StoppedFileState` guard through backup copying when exclusion must span capture. See [Stopped File Export](stopped-file-export.md) for schema, lazy-file semantics, ownership and anti-reuse prerequisites.
 
 ### `tsoracle init`
 
-Initialize a fresh `file`-driver state directory at a seeded high-water. Useful when migrating from a prior timestamp source — see [Migration](getting-started.md#migrating-from-an-existing-timestamp-source).
+Initialize a fresh `file`-driver state directory at a seeded high-water. With `single-node`, initialization holds and retains an empty native lock sentinel for immediate stopped export. Default builds retain the existing seeding behavior. For migration from a prior timestamp source, see [Migration](getting-started.md#migrating-from-an-existing-timestamp-source).
 
 | Flag | Type | Default | Meaning |
 |---|---|---|---|

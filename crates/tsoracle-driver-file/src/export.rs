@@ -28,20 +28,50 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tsoracle_core::{MAX_LEASE_HOLDER_LEN, PHYSICAL_MS_MAX, SeqKey};
 
-use crate::driver::acquire_exclusive_lock;
+use crate::driver::{
+    DEFAULT_DENSE_CARDINALITY_CAP, DENSE_FILE, LEASES_FILE, LOCK_FILE, STATE_FILE,
+    acquire_exclusive_lock,
+};
 use crate::{FileDriverError, dense_record, lease_record, record};
 
-const FILES: [&str; 4] = ["LOCK", "dense", "leases", "state"];
+const FILES: [&str; 4] = [LOCK_FILE, DENSE_FILE, LEASES_FILE, STATE_FILE];
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
     #[error(transparent)]
     Driver(#[from] FileDriverError),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("I/O at {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("state decode at {path}: {source}")]
+    StateDecode {
+        path: PathBuf,
+        #[source]
+        source: record::RecordError,
+    },
+    #[error("dense decode at {path}: {source}")]
+    DenseDecode {
+        path: PathBuf,
+        #[source]
+        source: dense_record::DenseRecordError,
+    },
+    #[error("lease decode at {path}: {source}")]
+    LeaseDecode {
+        path: PathBuf,
+        #[source]
+        source: lease_record::LeaseRecordError,
+    },
+    #[error("stored state at {path}: {source}")]
+    Validation {
+        path: PathBuf,
+        #[source]
+        source: crate::StoredStateError,
+    },
     #[error("invalid stopped file state: {0}")]
     Invalid(String),
 }
@@ -64,8 +94,9 @@ pub struct Units {
 #[derive(Debug, Clone, Serialize)]
 pub struct FileInventoryEntry {
     pub path: String,
-    pub size_bytes: u64,
-    pub sha256: String,
+    pub present: bool,
+    pub size_bytes: Option<u64>,
+    pub sha256: Option<String>,
     pub format: &'static str,
     pub format_version: Option<u8>,
 }
@@ -102,90 +133,118 @@ pub struct StoppedFileReceipt {
 #[derive(Debug)]
 pub struct StoppedFileState {
     dir: PathBuf,
-    _lock: File,
+    lock: File,
 }
 
 impl StoppedFileState {
     /// The caller must stop the owner and disable restarts before capture.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, ExportError> {
         let dir = dir.as_ref();
-        if !fs::symlink_metadata(dir)?.file_type().is_dir() {
+        if !fs::symlink_metadata(dir)
+            .map_err(|source| io_error(dir, source))?
+            .file_type()
+            .is_dir()
+        {
             return invalid("state directory must be an existing directory without a symlink");
         }
-        let lock_path = dir.join("LOCK");
-        let lock = open_regular(&lock_path, true)?;
-        acquire_exclusive_lock(&lock, &lock_path)?;
+        let lock_path = dir.join(LOCK_FILE);
+        let lock = open_regular(&lock_path)?;
+        acquire_exclusive_lock(&lock, &lock_path).map_err(|error| match error {
+            FileDriverError::Io(source) => io_error(&lock_path, source),
+            other => ExportError::Driver(other),
+        })?;
         Ok(Self {
             dir: dir.to_path_buf(),
-            _lock: lock,
+            lock,
         })
     }
 
     /// Retain this guard through complete-directory capture and hash verification.
     pub fn receipt(&self) -> Result<StoppedFileReceipt, ExportError> {
-        let mut names = Vec::new();
-        for entry in fs::read_dir(&self.dir)? {
-            let entry = entry?;
-            if names.len() == FILES.len() {
+        self.verify_lock_identity()?;
+        for entry in fs::read_dir(&self.dir).map_err(|source| io_error(&self.dir, source))? {
+            let entry = entry.map_err(|source| io_error(&self.dir, source))?;
+            if !FILES
+                .iter()
+                .any(|name| entry.file_name() == std::ffi::OsStr::new(name))
+            {
                 return invalid("unexpected file in state directory, including temporary files");
             }
-            names.push(entry.file_name());
-        }
-        names.sort();
-        if names != FILES.map(std::ffi::OsString::from) {
-            return invalid(
-                "expected exactly LOCK, dense, leases and state; no missing or temporary files",
-            );
         }
 
-        let mut contents = BTreeMap::new();
-        let mut files = Vec::new();
-        for name in FILES {
-            let bytes = read_bounded(&self.dir.join(name))?;
-            if name == "LOCK" && !bytes.is_empty() {
-                return invalid("LOCK sentinel must be empty");
+        let lock_path = self.dir.join(LOCK_FILE);
+        if self
+            .lock
+            .metadata()
+            .map_err(|source| io_error(&lock_path, source))?
+            .len()
+            != 0
+        {
+            return invalid("LOCK sentinel must be empty");
+        }
+        let mut lock_bytes = Vec::new();
+        (&self.lock)
+            .take(1)
+            .read_to_end(&mut lock_bytes)
+            .map_err(|source| io_error(&lock_path, source))?;
+        if !lock_bytes.is_empty() {
+            return invalid("LOCK sentinel must be empty");
+        }
+        let state = read_bounded(&self.dir.join(STATE_FILE))?;
+        let dense_bytes = read_optional(&self.dir.join(DENSE_FILE))?;
+        let lease_bytes = read_optional(&self.dir.join(LEASES_FILE))?;
+        let high_water = record::decode(&state).map_err(|source| ExportError::StateDecode {
+            path: self.dir.join(STATE_FILE),
+            source,
+        })?;
+        let (dense, cap) = match &dense_bytes {
+            Some(bytes) => {
+                dense_record::decode(bytes).map_err(|source| ExportError::DenseDecode {
+                    path: self.dir.join(DENSE_FILE),
+                    source,
+                })?
             }
-            let (format, version) = match name {
-                "state" => ("TSOR", Some(record::VERSION)),
-                "dense" => ("TSOD", Some(dense_record::VERSION)),
-                "leases" => ("TSOO", Some(lease_record::VERSION)),
-                _ => ("native-lock-sentinel", None),
-            };
-            files.push(FileInventoryEntry {
-                path: name.to_string(),
-                size_bytes: bytes.len() as u64,
-                sha256: hex(&Sha256::digest(&bytes)),
-                format,
-                format_version: version,
-            });
-            contents.insert(name, bytes);
-        }
-        let high_water = record::decode(&contents["state"]).map_err(FileDriverError::from)?;
-        if high_water > PHYSICAL_MS_MAX {
-            return invalid("reservation high-water exceeds physical milliseconds range");
-        }
-        let (dense, cap) = dense_record::decode(&contents["dense"])
-            .map_err(|e| ExportError::Invalid(format!("dense: {e}")))?;
-        if dense.len() as u64 > cap {
-            return invalid("dense key count exceeds its cardinality cap");
-        }
-        for key in dense.keys() {
-            SeqKey::try_new(key.clone())
-                .map_err(|e| ExportError::Invalid(format!("dense key: {e}")))?;
-        }
-        let records = lease_record::decode(&contents["leases"])
-            .map_err(|e| ExportError::Invalid(format!("leases: {e}")))?;
-        let mut leases = Vec::with_capacity(records.len());
-        for record in records {
-            if record.ts_upper_bound > high_water
-                || record.lease_id != record.ts_upper_bound
-                || record.holder.is_empty()
-                || record.holder.len() > MAX_LEASE_HOLDER_LEN
-                || record.ttl_ms == 0
-            {
-                return invalid("lease identity, holder, TTL or reservation bound is inconsistent");
+            None => (BTreeMap::new(), DEFAULT_DENSE_CARDINALITY_CAP),
+        };
+        let records = match &lease_bytes {
+            Some(bytes) => {
+                lease_record::decode(bytes).map_err(|source| ExportError::LeaseDecode {
+                    path: self.dir.join(LEASES_FILE),
+                    source,
+                })?
             }
-            leases.push(LeaseExport {
+            None => Vec::new(),
+        };
+        crate::validation::validate(high_water, &dense, cap, &records).map_err(|source| {
+            ExportError::Validation {
+                path: self.dir.clone(),
+                source,
+            }
+        })?;
+        let files = vec![
+            inventory(LOCK_FILE, Some(&lock_bytes), "native-lock-sentinel", None),
+            inventory(
+                DENSE_FILE,
+                dense_bytes.as_deref(),
+                magic(dense_record::MAGIC)?,
+                Some(dense_record::VERSION),
+            ),
+            inventory(
+                LEASES_FILE,
+                lease_bytes.as_deref(),
+                magic(lease_record::MAGIC)?,
+                Some(lease_record::VERSION),
+            ),
+            inventory(
+                STATE_FILE,
+                Some(&state),
+                magic(record::MAGIC)?,
+                Some(record::VERSION),
+            ),
+        ];
+        let leases: Vec<_> = records
+            .into_iter()
+            .map(|record| LeaseExport {
                 lease_id: record.lease_id,
                 holder_hex: hex(&record.holder),
                 holder_epoch: record.holder_epoch,
@@ -193,8 +252,9 @@ impl StoppedFileState {
                 ts_upper_bound_physical_ms: record.ts_upper_bound,
                 expires_at_unix_ms: record.expires_at_ms,
                 superseded: record.superseded,
-            });
-        }
+            })
+            .collect();
+        self.verify_lock_identity()?;
         Ok(StoppedFileReceipt {
             schema: "tsoracle.stopped-file-state",
             schema_version: 1,
@@ -223,25 +283,104 @@ impl StoppedFileState {
             dense_cardinality_cap: cap,
         })
     }
+
+    fn verify_lock_identity(&self) -> Result<(), ExportError> {
+        let path = self.dir.join(LOCK_FILE);
+        let entry = fs::symlink_metadata(&path).map_err(|source| io_error(&path, source))?;
+        let held = self
+            .lock
+            .metadata()
+            .map_err(|source| io_error(&path, source))?;
+        if !entry.is_file() || !held.is_file() {
+            return invalid("LOCK must remain a regular file");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if held.nlink() != 1
+                || entry.nlink() != 1
+                || held.dev() != entry.dev()
+                || held.ino() != entry.ino()
+            {
+                return invalid("LOCK identity changed while ownership was held");
+            }
+        }
+        #[cfg(windows)]
+        {
+            let current = open_regular(&path)?;
+            if windows_identity(&self.lock).map_err(|source| io_error(&path, source))?
+                != windows_identity(&current).map_err(|source| io_error(&path, source))?
+            {
+                return invalid("LOCK identity changed while ownership was held");
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        return invalid("native file identity is unavailable on this platform");
+        Ok(())
+    }
+}
+
+fn io_error(path: &Path, source: std::io::Error) -> ExportError {
+    ExportError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+fn magic(bytes: &'static [u8; 4]) -> Result<&'static str, ExportError> {
+    std::str::from_utf8(bytes)
+        .map_err(|_| ExportError::Invalid("record magic must be UTF-8".into()))
+}
+
+fn inventory(
+    name: &str,
+    bytes: Option<&[u8]>,
+    format: &'static str,
+    format_version: Option<u8>,
+) -> FileInventoryEntry {
+    FileInventoryEntry {
+        path: name.to_string(),
+        present: bytes.is_some(),
+        size_bytes: bytes.map(|bytes| bytes.len() as u64),
+        sha256: bytes.map(|bytes| hex(&Sha256::digest(bytes))),
+        format,
+        format_version,
+    }
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, ExportError> {
+    match read_bounded(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(ExportError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn invalid<T>(message: &str) -> Result<T, ExportError> {
     Err(ExportError::Invalid(message.to_string()))
 }
 
-fn open_regular(path: &Path, write: bool) -> Result<File, ExportError> {
-    if !fs::symlink_metadata(path)?.file_type().is_file() {
+fn open_regular(path: &Path) -> Result<File, ExportError> {
+    if !fs::symlink_metadata(path)
+        .map_err(|source| io_error(path, source))?
+        .file_type()
+        .is_file()
+    {
         return invalid("state entries must be regular files without symlinks");
     }
     let mut options = OpenOptions::new();
-    options.read(true).write(write);
+    options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let file = options.open(path)?;
-    let metadata = file.metadata()?;
+    let file = options
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    let metadata = file.metadata().map_err(|source| io_error(path, source))?;
     if !metadata.is_file() {
         return invalid("state entries must be regular files");
     }
@@ -256,16 +395,64 @@ fn open_regular(path: &Path, write: bool) -> Result<File, ExportError> {
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, ExportError> {
-    let file = open_regular(path, false)?;
-    if file.metadata()?.len() > MAX_FILE_BYTES {
+    let file = open_regular(path)?;
+    if file
+        .metadata()
+        .map_err(|source| io_error(path, source))?
+        .len()
+        > MAX_FILE_BYTES
+    {
         return invalid("state file exceeds the 64 MiB export limit");
     }
     let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| io_error(path, source))?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return invalid("state file exceeds the 64 MiB export limit");
     }
     Ok(bytes)
+}
+
+#[cfg(windows)]
+fn windows_identity(file: &File) -> std::io::Result<(u32, [u32; 2])> {
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct FileInformation {
+        _attributes: u32,
+        _times: [u32; 6],
+        volume: u32,
+        _size: [u32; 2],
+        links: u32,
+        index: [u32; 2],
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "GetFileInformationByHandle"]
+        fn get_file_information_by_handle(
+            handle: *mut std::ffi::c_void,
+            information: *mut FileInformation,
+        ) -> i32;
+    }
+    let mut information = FileInformation {
+        _attributes: 0,
+        _times: [0; 6],
+        volume: 0,
+        _size: [0; 2],
+        links: 0,
+        index: [0; 2],
+    };
+    // SAFETY: the live handle and writable buffer match BY_HANDLE_FILE_INFORMATION's C layout.
+    if unsafe { get_file_information_by_handle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if information.links != 1 {
+        return Err(std::io::Error::other(
+            "LOCK must have exactly one hard link",
+        ));
+    }
+    Ok((information.volume, information.index))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -278,12 +465,13 @@ fn hex(bytes: &[u8]) -> String {
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "single-node"))]
 mod tests {
     use super::*;
     use crate::FileDriver;
+    use crate::test_support::{populate, snapshot};
     use tsoracle_consensus::ConsensusDriver;
-    use tsoracle_core::{Epoch, LeaseRecord};
+    use tsoracle_core::{Epoch, LeaseRecord, PHYSICAL_MS_MAX, SeqKey};
 
     fn fixture(dir: &Path) {
         File::create(dir.join("LOCK")).unwrap();
@@ -294,16 +482,6 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("leases"), lease_record::encode(&[])).unwrap();
-    }
-
-    fn snapshot(dir: &Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
-        fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                (entry.file_name(), fs::read(entry.path()).unwrap())
-            })
-            .collect()
     }
 
     fn export(dir: &Path) -> Result<StoppedFileReceipt, ExportError> {
@@ -326,11 +504,7 @@ mod tests {
     async fn exports_producer_state_and_all_retained_leases_without_clock_filtering() {
         let dir = tempfile::tempdir().unwrap();
         let driver = FileDriver::open_or_init(dir.path()).unwrap();
-        driver.persist_high_water(500, Epoch::ZERO).await.unwrap();
-        driver
-            .advance_dense(&SeqKey::try_new("orders").unwrap(), 7, Epoch::ZERO)
-            .await
-            .unwrap();
+        populate(driver.as_ref()).await;
         driver
             .persist_leases(&[lease(100, true), lease(200, false)], Epoch::ZERO)
             .await
@@ -358,15 +532,19 @@ mod tests {
         assert_eq!(receipt.files.len(), 4);
         for file in &receipt.files {
             let bytes = &before[std::ffi::OsStr::new(&file.path)];
-            assert_eq!(file.size_bytes, bytes.len() as u64);
-            assert_eq!(file.sha256, hex(&Sha256::digest(bytes)));
+            assert!(file.present);
+            assert_eq!(file.size_bytes, Some(bytes.len() as u64));
+            assert_eq!(file.sha256, Some(hex(&Sha256::digest(bytes))));
             match file.path.as_str() {
                 "state" => assert_eq!((file.format, file.format_version), ("TSOR", Some(1))),
                 "dense" => assert_eq!((file.format, file.format_version), ("TSOD", Some(1))),
                 "leases" => assert_eq!((file.format, file.format_version), ("TSOO", Some(1))),
                 "LOCK" => assert_eq!(
                     file.sha256,
-                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    Some(
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                            .to_string()
+                    )
                 ),
                 _ => panic!("unexpected file"),
             }
@@ -404,8 +582,8 @@ mod tests {
     }
 
     #[test]
-    fn refuses_every_missing_file_without_mutation() {
-        for name in FILES {
+    fn refuses_missing_required_files_without_mutation() {
+        for name in [LOCK_FILE, STATE_FILE] {
             let dir = tempfile::tempdir().unwrap();
             fixture(dir.path());
             fs::remove_file(dir.path().join(name)).unwrap();
@@ -487,7 +665,7 @@ mod tests {
                 2..=4 => {
                     let mut record = lease(100, false);
                     match case {
-                        2 => record.lease_id = 99,
+                        2 => record.lease_id = 101,
                         3 => record.holder.clear(),
                         _ => record.ttl_ms = 0,
                     }
@@ -530,8 +708,8 @@ mod tests {
             Err(ExportError::Driver(FileDriverError::AlreadyLocked { .. }))
         ));
         drop(driver);
-        let guard = StoppedFileState::open(dir.path()).unwrap();
         let before = snapshot(dir.path());
+        let guard = StoppedFileState::open(dir.path()).unwrap();
         guard.receipt().unwrap();
         guard.receipt().unwrap();
         assert!(matches!(
@@ -613,6 +791,13 @@ mod tests {
         let receipt = guard.receipt().unwrap();
         let destination = tempfile::tempdir().unwrap();
         for file in &receipt.files {
+            if !file.present {
+                continue;
+            }
+            if file.path == LOCK_FILE {
+                File::create(destination.path().join(LOCK_FILE)).unwrap();
+                continue;
+            }
             fs::copy(
                 source.path().join(&file.path),
                 destination.path().join(&file.path),
@@ -638,5 +823,150 @@ mod tests {
             7
         );
         drop(guard);
+    }
+
+    #[tokio::test]
+    async fn exports_renewed_lease_and_reloads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = FileDriver::open_or_init(dir.path()).unwrap();
+        driver.persist_high_water(6000, Epoch::ZERO).await.unwrap();
+        let mut renewed = lease(1000, false);
+        renewed.ts_upper_bound = 6000;
+        driver
+            .persist_leases(&[renewed], Epoch::ZERO)
+            .await
+            .unwrap();
+        drop(driver);
+        let receipt = export(dir.path()).unwrap();
+        assert_eq!(receipt.leases[0].lease_id, 1000);
+        assert_eq!(receipt.leases[0].ts_upper_bound_physical_ms, 6000);
+        assert!(FileDriver::open_or_init(dir.path()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn exports_timestamp_only_and_seeded_directories_without_creating_lazy_files() {
+        for seeded in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            if seeded {
+                FileDriver::init_seeded(dir.path(), 500).unwrap();
+            } else {
+                let driver = FileDriver::open_or_init(dir.path()).unwrap();
+                driver.persist_high_water(500, Epoch::ZERO).await.unwrap();
+            }
+            let before = snapshot(dir.path());
+            let receipt = export(dir.path()).unwrap();
+            assert!(receipt.leases.is_empty());
+            assert!(receipt.dense_next_unallocated.is_empty());
+            assert_eq!(receipt.dense_cardinality_cap, DEFAULT_DENSE_CARDINALITY_CAP);
+            for name in [DENSE_FILE, LEASES_FILE] {
+                let entry = receipt
+                    .files
+                    .iter()
+                    .find(|entry| entry.path == name)
+                    .unwrap();
+                assert!(!entry.present);
+                assert_eq!(entry.size_bytes, None);
+                assert_eq!(entry.sha256, None);
+            }
+            assert_eq!(snapshot(dir.path()), before);
+        }
+    }
+
+    #[test]
+    fn exports_each_independently_absent_lazy_record() {
+        for name in [DENSE_FILE, LEASES_FILE] {
+            let dir = tempfile::tempdir().unwrap();
+            fixture(dir.path());
+            fs::remove_file(dir.path().join(name)).unwrap();
+            let before = snapshot(dir.path());
+            let receipt = export(dir.path()).unwrap();
+            assert!(
+                !receipt
+                    .files
+                    .iter()
+                    .find(|entry| entry.path == name)
+                    .unwrap()
+                    .present
+            );
+            assert!(receipt.leases.is_empty());
+            assert!(receipt.dense_next_unallocated.is_empty());
+            assert_eq!(snapshot(dir.path()), before);
+        }
+    }
+
+    #[test]
+    fn certifies_using_its_own_locked_descriptor_repeatedly() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        let guard = StoppedFileState::open(dir.path()).unwrap();
+        for _ in 0..2 {
+            let receipt = guard.receipt().unwrap();
+            assert_eq!(receipt.files[0].size_bytes, Some(0));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_replaced_lock_even_when_replacement_has_a_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        let guard = StoppedFileState::open(dir.path()).unwrap();
+        let old_lock = tempfile::tempdir().unwrap();
+        fs::rename(dir.path().join(LOCK_FILE), old_lock.path().join(LOCK_FILE)).unwrap();
+        File::create(dir.path().join(LOCK_FILE)).unwrap();
+        let owner = FileDriver::open_or_init(dir.path()).unwrap();
+        assert!(guard.receipt().is_err());
+        drop(owner);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opens_read_only_lock_without_write_access() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        let path = dir.path().join(LOCK_FILE);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        let guard = StoppedFileState::open(dir.path()).unwrap();
+        // SAFETY: the guard owns a live descriptor and F_GETFL takes no extra argument.
+        let flags = unsafe { libc::fcntl(guard.lock.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
+        guard.receipt().unwrap();
+    }
+
+    #[test]
+    fn decode_errors_keep_their_record_type_and_path() {
+        for name in [STATE_FILE, DENSE_FILE, LEASES_FILE] {
+            let dir = tempfile::tempdir().unwrap();
+            fixture(dir.path());
+            let path = dir.path().join(name);
+            fs::write(&path, b"bad").unwrap();
+            let error = export(dir.path()).unwrap_err();
+            match (name, error) {
+                (STATE_FILE, ExportError::StateDecode { path: found, .. })
+                | (DENSE_FILE, ExportError::DenseDecode { path: found, .. })
+                | (LEASES_FILE, ExportError::LeaseDecode { path: found, .. }) => {
+                    assert_eq!(found, path)
+                }
+                (_, other) => panic!("unexpected error: {other:?}"),
+            }
+        }
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("missing");
+        assert!(
+            matches!(StoppedFileState::open(&missing), Err(ExportError::Io { path, .. }) if path == missing)
+        );
+        fixture(parent.path());
+        fs::remove_file(parent.path().join(LOCK_FILE)).unwrap();
+        assert!(
+            matches!(StoppedFileState::open(parent.path()), Err(ExportError::Io { path, .. }) if path == parent.path().join(LOCK_FILE))
+        );
+        File::create(parent.path().join(LOCK_FILE)).unwrap();
+        fs::remove_file(parent.path().join(STATE_FILE)).unwrap();
+        assert!(
+            matches!(export(parent.path()), Err(ExportError::Io { path, .. }) if path == parent.path().join(STATE_FILE))
+        );
     }
 }

@@ -25,8 +25,6 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod cli;
-#[cfg(feature = "file")]
-mod family_compat;
 
 #[cfg(feature = "openraft")]
 use std::collections::BTreeMap;
@@ -75,8 +73,8 @@ fn not_compiled_in(driver: &str) -> anyhow::Error {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Some(Cmd::FamilyCompat) => run_family_compat(),
         Some(Cmd::Init(args)) => run_init(args.state_dir, args.seed_physical_ms),
+        #[cfg(feature = "single-node")]
         Some(Cmd::Export(cli::ExportCmd::File(args))) => run_export_file(args),
         Some(Cmd::Serve(serve)) => dispatch_serve(*serve).await,
         #[cfg(feature = "openraft")]
@@ -100,23 +98,6 @@ async fn main() -> Result<()> {
                 );
             }
         }
-    }
-}
-
-fn run_family_compat() -> Result<()> {
-    #[cfg(feature = "file")]
-    {
-        use std::io::Write;
-
-        let stdout = std::io::stdout();
-        let mut output = stdout.lock();
-        serde_json::to_writer_pretty(&mut output, &family_compat::manifest())?;
-        writeln!(output)?;
-        Ok(())
-    }
-    #[cfg(not(feature = "file"))]
-    {
-        Err(not_compiled_in("file"))
     }
 }
 
@@ -205,13 +186,13 @@ async fn dispatch_serve(serve: ServeCmd) -> Result<()> {
     }
 }
 
-#[cfg(feature = "file")]
+#[cfg(all(feature = "file", feature = "single-node"))]
 fn run_export_file(args: cli::ExportFileArgs) -> Result<()> {
     use std::io::Write;
     let guard = tsoracle_driver_file::StoppedFileState::open(&args.state_dir)
         .context("acquire stopped file state")?;
     let receipt = guard.receipt().context("validate stopped file state")?;
-    let json = if args.json {
+    let json = if args.compact {
         serde_json::to_vec(&receipt)
     } else {
         serde_json::to_vec_pretty(&receipt)
@@ -225,7 +206,7 @@ fn run_export_file(args: cli::ExportFileArgs) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "file"))]
+#[cfg(all(not(feature = "file"), feature = "single-node"))]
 fn run_export_file(_args: cli::ExportFileArgs) -> Result<()> {
     Err(not_compiled_in("file"))
 }
