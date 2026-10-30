@@ -113,7 +113,7 @@ jobs:
           # agnostic and round-trips for tags. (gitsign upstream is migrating
           # its default to offline for this reason.)
           git config --global gitsign.rekorMode offline
-      - uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf  # v0.5
+      - uses: release-plz/action@f67a7e724bdad4a0f6875f186060a0ca2770d76c  # v0.5
         id: release-plz
         with:
           command: release
@@ -321,7 +321,7 @@ jobs:
         with:
           packages: protobuf-compiler clang libclang-dev
           version: 1
-      - uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf  # v0.5
+      - uses: release-plz/action@f67a7e724bdad4a0f6875f186060a0ca2770d76c  # v0.5
         id: release-plz
         with:
           command: release-pr
