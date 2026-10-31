@@ -36,6 +36,7 @@ let batch = client.get_ts_batch(64).await?;  // amortize RPC cost across many ID
 - `tsoracle serve file` *(default)* — single-node, fsync-durable [file driver](https://crates.io/crates/tsoracle-driver-file). Window state is fsync'd before any timestamp in that window is issued, so a restart never rewinds. `--state-dir` defaults to `./tsoracle-data`.
 - `tsoracle serve openraft` — highly available via [openraft](https://crates.io/crates/tsoracle-driver-openraft) (3+ node cluster). Takes `--id`, `--raft-addr`, `--raft-dir`, and `--bootstrap`/`--members` on first boot.
 - `tsoracle serve paxos` — highly available via [OmniPaxos](https://crates.io/crates/tsoracle-driver-paxos) (3+ node cluster). Takes `--node-id`, `--peer-listen`, `--peers`, `--tso-peers`, and `--data-dir`.
+- `tsoracle export file --state-dir <dir> [--compact]` emits the stopped-state receipt as JSON. Requires `stopped-state-export` and `file`. See the [capture contract](https://github.com/prisma-risk/tsoracle/blob/main/docs/stopped-file-export.md).
 - `tsoracle init --seed-physical-ms <ms>` — initialize a fresh file-driver state directory seeded at a given high-water, without serving.
 
 Every `serve` subcommand shares the common knobs `--listen` (default `127.0.0.1:50551`), `--window-ahead`, `--failover-advance`, `--log`, and TLS/mTLS for the client API (`--tls-cert`, `--tls-key`, `--tls-client-ca`). The HA drivers add their own peer-transport mTLS flags (`--peer-tls-*`). Run `tsoracle serve <driver> --help` for the full list.
@@ -47,6 +48,7 @@ The three drivers are compiled in by default; trim the binary by disabling the o
 - `file` (default) — the single-node file driver and the bare/`serve file` command.
 - `openraft` (default) — the openraft HA driver and `serve openraft`.
 - `paxos` (default) — the OmniPaxos HA driver and `serve paxos`.
+- `stopped-state-export` enables stopped-state export and the file driver's shared startup validation and seeded-initialization lock. Off by default.
 - `reflection` — enable gRPC server reflection on the client API.
 - `bt` — backtrace capture in error variants.
 

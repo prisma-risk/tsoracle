@@ -311,6 +311,7 @@ tsoracle serve file     [SERVE-FILE-FLAGS]
 tsoracle serve openraft [SERVE-COMMON-FLAGS] [OPENRAFT-FLAGS]
 tsoracle serve paxos    [SERVE-COMMON-FLAGS] [PAXOS-FLAGS]
 tsoracle init           --seed-physical-ms <N> [--state-dir <PATH>]
+tsoracle export file    --state-dir <PATH> [--compact]  # stopped-state-export feature
 tsoracle admin <SUBCOMMAND> ...      # openraft feature only
 ```
 
@@ -388,9 +389,13 @@ Common flags (above), plus:
 | `--peer-tls-ca` | path | — | PEM CA used to verify connecting peers. |
 | `--allow-insecure-peer` | bool | `false` | Opt out of the peer-listener secure-by-default guard. Allows routable bind without `--peer-tls-*`. Matches the helm chart's `tls.allowInsecurePeer`. Intended for single-host dev or service-mesh-terminated mTLS only. |
 
+### `tsoracle export file`
+
+Requires `stopped-state-export`, `file` and an explicit existing state directory. The command is absent from default builds. Exports schema `tsoracle.stopped-file-state` version 1 with reservation, all retained leases, dense counters, units, producer version, formats and SHA-256 file digests. `--compact` selects compact JSON; the default is indented JSON. The command holds native ownership through output flush, creates and truncates nothing, and refuses missing required files, corruption, unexpected files and a held lock. Absent lazy dense and lease files are recorded explicitly and decoded as empty sets. Keep a library `StoppedFileState` guard through backup copying when exclusion must span capture. See [Stopped File Export](stopped-file-export.md) for schema, lazy-file semantics, ownership and anti-reuse prerequisites.
+
 ### `tsoracle init`
 
-Initialize a fresh `file`-driver state directory at a seeded high-water. Useful when migrating from a prior timestamp source — see [Migration](getting-started.md#migrating-from-an-existing-timestamp-source).
+Initialize a fresh `file`-driver state directory at a seeded high-water. With `stopped-state-export`, initialization holds and retains an empty native lock sentinel for immediate stopped export. Default builds retain the existing seeding behavior. For migration from a prior timestamp source, see [Migration](getting-started.md#migrating-from-an-existing-timestamp-source).
 
 | Flag | Type | Default | Meaning |
 |---|---|---|---|

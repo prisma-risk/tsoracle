@@ -44,10 +44,31 @@ pub enum Cmd {
     Serve(Box<ServeCmd>),
     /// Initialize a fresh file-driver state directory at a seeded high-water.
     Init(InitArgs),
+    /// Capture validated state while the file driver is stopped.
+    #[cfg(feature = "stopped-state-export")]
+    #[command(subcommand)]
+    Export(ExportCmd),
     /// Administer cluster membership over the admin gRPC port.
     #[cfg(feature = "openraft")]
     #[command(subcommand)]
     Admin(AdminCmd),
+}
+
+#[cfg(feature = "stopped-state-export")]
+#[derive(Subcommand, Debug)]
+pub enum ExportCmd {
+    /// Export a stopped file driver's state as JSON.
+    File(ExportFileArgs),
+}
+
+#[cfg(feature = "stopped-state-export")]
+#[derive(Parser, Debug)]
+pub struct ExportFileArgs {
+    #[arg(long)]
+    pub state_dir: PathBuf,
+    /// Emit compact JSON. The default is indented JSON.
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[cfg(feature = "openraft")]
@@ -521,5 +542,71 @@ mod no_metrics_flag_without_feature_tests {
             panic!("expected file args");
         };
         assert!(args.common.no_metrics);
+    }
+}
+
+#[cfg(all(test, feature = "stopped-state-export"))]
+mod export_tests {
+    use super::{Cli, Cmd, ExportCmd};
+    use clap::Parser;
+
+    #[test]
+    fn export_requires_explicit_state_directory_and_parses_compact() {
+        assert!(Cli::try_parse_from(["tsoracle", "export", "file"]).is_err());
+        let cli = Cli::try_parse_from([
+            "tsoracle",
+            "export",
+            "file",
+            "--state-dir",
+            "/existing/oracle",
+            "--compact",
+        ])
+        .unwrap();
+        let Some(Cmd::Export(ExportCmd::File(args))) = cli.cmd else {
+            panic!("expected file export");
+        };
+        assert_eq!(args.state_dir, std::path::PathBuf::from("/existing/oracle"));
+        assert!(args.compact);
+        assert!(
+            Cli::try_parse_from([
+                "tsoracle",
+                "export",
+                "file",
+                "--state-dir",
+                "/existing/oracle",
+                "--json"
+            ])
+            .is_err()
+        );
+    }
+}
+
+#[cfg(all(test, not(feature = "stopped-state-export")))]
+mod default_cli_tests {
+    use super::Cli;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn default_cli_has_no_export_command() {
+        assert!(
+            Cli::try_parse_from(["tsoracle", "export", "file", "--state-dir", "/unused"]).is_err()
+        );
+        assert!(Cli::command().find_subcommand("export").is_none());
+    }
+
+    #[test]
+    fn default_cli_preserves_existing_commands() {
+        let command = Cli::command();
+        let actual: Vec<_> = command
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name())
+            .collect();
+        let expected = [
+            "serve",
+            "init",
+            #[cfg(feature = "openraft")]
+            "admin",
+        ];
+        assert_eq!(actual.as_slice(), expected.as_slice());
     }
 }
