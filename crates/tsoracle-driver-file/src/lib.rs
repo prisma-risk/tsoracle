@@ -28,8 +28,21 @@
 
 pub mod dense_record;
 mod driver;
+mod export;
 mod framed_record;
 mod lease_record;
 pub mod record;
+mod validation;
+
+pub use lease_record::LeaseRecordError;
+pub use validation::StoredStateError;
 
 pub use driver::{FileDriver, FileDriverError};
+pub use export::{
+    ExportError, FileInventoryEntry, LeaseExport, Producer, StoppedFileReceipt, StoppedFileState,
+    Units,
+};
+
+#[cfg(all(test, feature = "stopped-state-export"))]
+#[path = "../tests/support/mod.rs"]
+mod test_support;

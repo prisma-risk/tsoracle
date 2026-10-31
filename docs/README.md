@@ -24,6 +24,8 @@ For the **reference documentation of the external interface** — the gRPC wire 
 - **[Yield-point Testing](yieldpoint-testing.md)** — async counterpart of failpoints, for tests that need to park production code in an async path without blocking a tokio worker.
 - **[Interface Reference](interface-reference.md)** — reference documentation for the project's external interfaces: the `tsoracle.v1.TsoService` gRPC wire surface, the `tsoracle.admin.v1.MembershipAdmin` admin surface, the `tsoracle` CLI, and the published Rust crates.
 
+- **[Stopped File Export](stopped-file-export.md)**: receipt schema, maintenance ownership, backup capture and restore prerequisites.
+
 ## Where to start
 
 - New to TSOs or to tsoracle — [Overview](overview.md), then [Getting Started](getting-started.md).

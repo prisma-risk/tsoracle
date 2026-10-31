@@ -106,6 +106,10 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<LeaseRecord>, LeaseRecordError> {
             .try_into()
             .map_err(|_| LeaseRecordError::Malformed)?,
     );
+    // A count must fit the body before it can control an allocation.
+    if record_count as usize > (body.len() - 4) / 43 {
+        return Err(LeaseRecordError::Malformed);
+    }
     let mut pos = 4;
     let mut records = Vec::with_capacity(record_count as usize);
     let mut prev_id = None;
@@ -198,6 +202,16 @@ mod tests {
             expires_at_ms,
             superseded,
         }
+    }
+
+    #[test]
+    fn refuses_impossible_count_before_allocation() {
+        let mut bytes = encode(&[]);
+        bytes[5..9].copy_from_slice(&u32::MAX.to_le_bytes());
+        let end = bytes.len() - 4;
+        let crc = crc32c::crc32c(&bytes[..end]);
+        bytes[end..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(decode(&bytes), Err(LeaseRecordError::Malformed));
     }
 
     #[test]

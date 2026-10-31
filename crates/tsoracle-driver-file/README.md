@@ -11,6 +11,10 @@ If you don't need HA — local demo, embedded use, "downtime is acceptable" — 
 - `FileDriver::init_seeded(dir, seed)` — one-shot migration entry point for callers seeding from a prior sequence.
 - `FileDriverError` — the driver-specific error type. `AlreadyLocked` surfaces the concurrent-open guard; the rest covers I/O, codec, and integrity-check failures.
 
+## Stopped-state export
+
+`StoppedFileState::open(dir)` takes the existing native lock read-only without initialization. `guard.receipt()` validates and exports reservation, complete retained leases and dense counters with a versioned SHA-256 inventory. Keep the guard alive through copying and hash verification. Missing required files, unknown or temporary entries, corruption, replacement of the lock and lock contention refuse. Absent lazy dense and lease files mean empty sets and are explicitly recorded in the inventory. The additive library API is unconditional. The CLI exposes `tsoracle export file --state-dir <dir> --compact` only with `stopped-state-export` and `file`. See the [capture and recovery contract](https://github.com/prisma-risk/tsoracle/blob/main/docs/stopped-file-export.md).
+
 ## When to use this vs HA drivers
 
 This driver is the right choice when:
@@ -22,6 +26,7 @@ For HA, see [`tsoracle-driver-openraft`](https://crates.io/crates/tsoracle-drive
 
 ## Feature flags
 
+- `stopped-state-export` enables shared semantic validation at startup and locks seeded initialization. Off by default. Public types and the additive receipt API remain unconditional.
 - `failpoints` — enables `fail` crate injection for chaos-test coverage of the storage path. Off by default.
 - `bt` — enables backtrace capture in error variants.
 
