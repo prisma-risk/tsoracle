@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.5.1...tsoracle-standalone-v1.5.2) - 2026-10-31
+
+### Other
+
+- updated the following local packages: tsoracle-driver-file
+
 ## [1.5.1](https://github.com/prisma-risk/tsoracle/compare/tsoracle-standalone-v1.5.0...tsoracle-standalone-v1.5.1) - 2026-10-01
 
 ### Other
