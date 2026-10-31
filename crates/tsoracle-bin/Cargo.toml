@@ -1,6 +1,6 @@
 [package]
 name         = "tsoracle"
-version      = "2.3.7"
+version      = "2.4.0"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -38,10 +38,10 @@ tokio                 = { workspace = true, features = ["signal"] }
 tracing               = { workspace = true }
 tracing-subscriber    = { workspace = true }
 tonic                 = { workspace = true, features = ["tls-aws-lc"] }
-tsoracle-driver-file  = { path = "../tsoracle-driver-file", version = "2.2.3", optional = true }
+tsoracle-driver-file  = { path = "../tsoracle-driver-file", version = "2.3.0", optional = true }
 tsoracle-core         = { path = "../tsoracle-core", version = "2.3.1" }
 tsoracle-server       = { path = "../tsoracle-server", version = "3.3.1" }
-tsoracle-standalone   = { path = "../tsoracle-standalone", version = "1.5.1", default-features = false }
+tsoracle-standalone   = { path = "../tsoracle-standalone", version = "1.5.2", default-features = false }
 
 [dev-dependencies]
 tsoracle-client    = { path = "../tsoracle-client" }

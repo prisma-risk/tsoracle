@@ -4,6 +4,12 @@ All notable changes to this crate are documented in this file. The format is bas
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v2.2.3...tsoracle-driver-file-v2.3.0) - 2026-10-31
+
+### Added
+
+- *(file)* export a versioned stopped-state receipt ([#745](https://github.com/prisma-risk/tsoracle/pull/745))
+
 ## [2.2.3](https://github.com/prisma-risk/tsoracle/compare/tsoracle-driver-file-v2.2.2...tsoracle-driver-file-v2.2.3) - 2026-10-01
 
 ### Other
