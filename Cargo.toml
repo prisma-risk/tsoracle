@@ -82,7 +82,7 @@ nix                = { version = "0.30", default-features = false, features = ["
 # Exact pin: omnipaxos does not keep its API stable across 0.2.x patch releases. 0.2.3 changed the `Storage` trait's index types and renamed `outgoing_messages`, so a caret requirement lets a fresh resolve pick a version the paxos crates cannot build against. Moving the pin is a deliberate migration of the paxos toolkit, not a lockfile bump.
 omnipaxos          = "=0.2.2"
 omnipaxos_storage  = "0.2"
-parking_lot        = "0.12"
+parking_lot        = "0.13"
 proptest           = "1"
 prost              = "0.14"
 rand               = { version = "0.9", default-features = false, features = ["std", "std_rng"] }
