@@ -3,7 +3,7 @@
 # The driver only depends on tsoracle-client (no rocksdb), so the build stage
 # needs protobuf-compiler for the proto codegen but not clang/cmake.
 
-FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
+FROM rust:1-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS build
 WORKDIR /src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler \
