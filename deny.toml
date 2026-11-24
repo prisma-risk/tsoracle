@@ -33,4 +33,11 @@ skip = [
 ]
 
 [advisories]
-ignore = []
+ignore = [
+    # openraft (through display-more) and console-subscriber pull in these crates. The org tracks
+    # their removal in cg-dgupm.35, with the same entries as calcgraph and cg-constellation.
+    { id = "RUSTSEC-2026-0542", reason = "humantime: unmaintained advisory, not a vulnerability; no fixed version; remove with cg-dgupm.35; review by 2027-02-17" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained advisory, not a vulnerability; no fixed version; remove with cg-dgupm.35; review by 2027-02-17" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz: unmaintained advisory, not a vulnerability; no fixed version; remove with cg-dgupm.35; review by 2027-02-17" },
+    { id = "RUSTSEC-2026-0559", reason = "chrono-tz-build: unmaintained advisory, not a vulnerability; no fixed version; remove with cg-dgupm.35; review by 2027-02-17" },
+]
