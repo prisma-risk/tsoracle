@@ -67,7 +67,7 @@ jobs:
         # matching channel so the rustup proxy picks it up automatically.
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
-          toolchain: nightly-2026-03-31
+          toolchain: nightly-2026-11-12
           components: rust-src, llvm-tools-preview
 
       - name: Install protoc

@@ -119,7 +119,7 @@ pub fn decode<T: DeserializeOwned>(expected_version: u8, bytes: &[u8]) -> Result
 /// foreign on-disk/wire format is a structured, distinguishable condition — a
 /// caller can react to "this record is from another schema version" specifically
 /// rather than treating it as a generic decode failure. Every other variant maps
-/// through [`io::Error::other`].
+/// through `io::Error::other`.
 ///
 /// Consumers whose trait surface speaks `io::Error` — the openraft
 /// `RaftLogStorage` / `RaftStateMachine` implementations — share this one mapping

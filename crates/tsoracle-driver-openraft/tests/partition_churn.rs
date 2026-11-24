@@ -103,8 +103,8 @@ async fn partition_then_heal_converges_monotonically() {
         .await
         .expect("baseline bump");
     assert_eq!(v, 100);
-    for i in 0..3 {
-        let sm = cluster.nodes[i].sm.clone();
+    for node in &cluster.nodes {
+        let sm = node.sm.clone();
         eventually_eq(100u64, Duration::from_secs(5), || {
             let sm = sm.clone();
             async move { sm.current_value() }
