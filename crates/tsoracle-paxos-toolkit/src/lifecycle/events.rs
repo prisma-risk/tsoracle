@@ -149,7 +149,6 @@ impl LeaderEventStream {
     /// would otherwise write `Box::pin(stream)` themselves. The stream
     /// does NOT require pinning before first poll — this is purely an
     /// ergonomic shortcut.
-    #[must_use]
     pub fn into_pin(self) -> Pin<Box<dyn Stream<Item = LeaderState> + Send>> {
         Box::pin(self)
     }

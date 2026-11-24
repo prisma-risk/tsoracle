@@ -77,8 +77,8 @@ async fn three_node_leader_persists_and_followers_converge() {
     // All three SMs should converge on 100 within 5 seconds. Read each
     // node's SM directly: `load_high_water` requires a linearizable barrier
     // that followers cannot satisfy locally.
-    for i in 0..3 {
-        let sm = cluster.nodes[i].sm.clone();
+    for node in &cluster.nodes {
+        let sm = node.sm.clone();
         eventually_eq(100u64, Duration::from_secs(5), || {
             let sm = sm.clone();
             async move { sm.current_value() }

@@ -1,0 +1,13 @@
+# Cargo 1.100 does not select a registry version that was published less than this age ago,
+# unless Cargo.lock already has it. This gives the community time to find a compromised release
+# before `cargo update` puts it in Cargo.lock. The check uses the `pubtime` field of the registry
+# index. crates.io sets it, and CI reads crates.io directly.
+#
+# To take an urgent security fix that is newer than the age, update only that crate:
+#   CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate> --precise <version>
+# The override also lets in new transitive dependencies of that crate, so read the Cargo.lock diff.
+#
+# A full `cargo update` resolves every package again. It can move a locked crate back to an older
+# version that is past the age, so use `cargo update -p <crate>` for a narrow update.
+[registry]
+global-min-publish-age = "7 days"
